@@ -8,8 +8,8 @@ module (`.kiro/specs/service-colocation/`). `KYTHIRA_SERVICES` names them;
 its own.
 
 This page covers resource isolation (task 9), IAM's group in both
-layouts (task 8) and the container image (task 10). Moving a service
-between layouts follows with task 11.
+layouts (task 8), the container image (task 10), how to move a service
+between layouts and how the layouts are tested (task 11).
 
 ## What each module has to itself
 
@@ -96,6 +96,57 @@ PutItem, PutRecord and CreateUser workload
 (`docker/kythira_node_clients/mixed_workload.py`) while it kills the node
 holding IAM's leader, restarts it, and cuts another node off the network
 and back. Every write a node acknowledged must read back afterwards.
+
+## Moving a service between layouts
+
+Except for IAM, a service keeps different group ids and key prefixes in
+the two layouts (each module has its own group space in `kythira_node`),
+so its data does not move in place: moving a service, in either
+direction, is a copy from a running cluster in the old layout to a new
+cluster in the other, and then a switch of clients. Conversion in place is
+out of scope (Requirement 3.3). Per service:
+
+- **IAM** is the exception: its group has the same id and files in both
+  layouts (above). Stop the whole cluster, move each member's
+  `iam_node --data-dir` to `KYTHIRA_NODE_DATA_DIR/iam/` on the same node
+  id (or back), and start the members in the new layout.
+- **DynamoDB**: `ExportTableToPointInTime` on the old cluster into a
+  bucket, then `ImportTable` from it on the new one (both clusters must
+  reach the bucket: the same `KYTHIRA_DYNAMODB_BUCKET_DIR` or S3). When
+  both share a backup store, `CreateBackup` and `RestoreTableFromBackup`
+  work too. Writes made after the export are not in the copy: stop writers
+  for the switch, or replay them from the application. Streams, Kinesis
+  destinations, TTL and tags are table settings to set again.
+- **Kinesis** has no import. Create the streams on the new cluster and
+  move producers to it; let consumers read each old stream to its end,
+  then move them (a consumer's checkpoints name the old shards, so start
+  it from the new stream's beginning). The old cluster can go once its
+  streams are read out or past retention.
+- **Redis** is a cache: point clients at the new cluster and let it fill
+  from the source of truth, or copy the keys that matter with a client
+  that reads one cluster and writes the other.
+- **Ledger** has no import, because a journal's hashes cover its history
+  and a copy would be a different journal. `ExportJournal` on the old
+  cluster keeps the full history, verifiable with `ledger_ctl verify
+  --export`; create the ledger on the new cluster and write its current
+  documents there from the application, keeping the export as the record
+  of what came before.
+
+## How the layouts are tested
+
+- Each stand-alone daemon's tests, compose files and docker-chaos
+  scenarios run unchanged against the daemons, which are now one-module
+  nodes (Requirement 3.4).
+- `kythira_node_cluster_test` (`services/iam/tests/`) starts three
+  `kythira_node` processes with every service the build compiled in and
+  runs each service's smoke test against that one cluster: an IAM account
+  and user, a Kinesis record and a DynamoDB item written on one node and
+  read on another, a Redis SET and GET, and a ledger document.
+- `.github/workflows/composite-node.yml` builds `kythira_node` with each
+  module alone and with all five, checks that `--help` lists exactly the
+  leg's modules, and runs the cluster test in the legs that have IAM; its
+  container job runs the composite cluster scenario above under Docker
+  and rootless Podman.
 
 ## What co-location does not isolate
 

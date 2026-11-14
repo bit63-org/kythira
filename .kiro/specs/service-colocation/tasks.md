@@ -165,8 +165,11 @@ is in.
     by service name; docker-chaos scenario under Docker and rootless Podman
   - _Requirements: 9.1, 9.2, 10.3_
 
-- [ ] 11. Test matrix and docs
+- [x] 11. Test matrix and docs
   - All-modules in-process cluster test; build legs per module alone and
     all together; `doc/colocation.md` covering what is and is not isolated
     and how to move a service between layouts
   - _Requirements: 3.3, 6.4, 10.1, 10.2, 10.4_
+  - Done as `kythira_node_cluster_test` (three `kythira_node` processes,
+    so it exercises the shipped binary rather than modules linked into the
+    test) and `.github/workflows/composite-node.yml`'s module legs.
