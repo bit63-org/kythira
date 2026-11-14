@@ -103,7 +103,7 @@ if(TARGET certificate_authority)
 endif()
 
 # Task 9: iam_node and kythira-iam as processes: a three-node cluster over
-# mutual-TLS Raft RPC, a read replica, leader loss, and a member with the
+# mutual-TLS Raft (Beast since service-colocation task 8), a read replica, leader loss, and a member with the
 # wrong unseal passphrase. Ports come from test_ports.hpp (the test fabric).
 if(TARGET iam_node AND TARGET kythira-iam AND TARGET certificate_authority)
     kythira_iam_test(iam_node_test iam_node_test.cpp)
@@ -117,6 +117,18 @@ if(TARGET iam_node AND TARGET kythira-iam AND TARGET certificate_authority)
         LABELS "integration;iam;iam-module" TIMEOUT 600)
 else()
     message(STATUS "iam_node_test: skipped (needs iam_node, kythira-iam and certificate_authority)")
+endif()
+
+# Service colocation task 8b: iam_node --convert-data-dir moves a member's
+# plain Raft state into the IAM group's layout on the multi-raft host.
+if(TARGET iam_node)
+    kythira_iam_test(iam_node_convert_test iam_node_convert_test.cpp)
+    target_include_directories(iam_node_convert_test PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/../cmd/iam_node")
+    target_link_libraries(iam_node_convert_test PRIVATE
+        kythira_test_support certificate_authority kythira_host_node_id)
+    set_tests_properties(iam_node_convert_test PROPERTIES
+        LABELS "unit;iam;iam-module" TIMEOUT 60)
 endif()
 
 # Task 21: the replica a front end embeds (iam_embedded_replica.hpp), in

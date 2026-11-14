@@ -15,3 +15,5 @@ cmd/kinesis_gateway_node/run_host.cpp        beast_http_transport_impl.hpp insta
 # CONFIG_KINESIS_GATEWAY_IAM build:
 # file                                   module-adapter  header                                why
 cmd/kinesis_gateway_node/iam_auth.cpp    module-adapter  kythira/iam/iam_gateway_auth.hpp      the IAM replica requests are signed against
+cmd/kinesis_gateway_node/iam_auth.cpp    multi_raft_impl.hpp           instantiates the embedded IAM replica's host
+cmd/kinesis_gateway_node/iam_auth.cpp    beast_http_transport_impl.hpp instantiates the embedded IAM replica's transport

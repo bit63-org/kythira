@@ -8,12 +8,15 @@
 # Like redis_gateway_node they are run from the build tree and from the
 # container image under ../docker/, and are in no install target.
 
-# iam_node hosts a Raft group over TLS-TCP RPC. certificate_authority is
-# what carries both halves of that, as for ca_cluster_node: the future
-# backend through network_simulator, and KYTHIRA_HAS_OPENSSL, without which
-# raft/tls_tcp_rpc.hpp and raft/ca_http_helpers.hpp compile to nothing. The
-# target exists only with OpenSSL and a future backend.
-if(TARGET certificate_authority)
+# iam_node runs the IAM module (iam_node/iam_module.hpp) alone on a
+# multi-raft host over its own Boost.Beast transport, the module kythira_node
+# runs on its shared one (.kiro/specs/service-colocation/ task 8).
+# certificate_authority carries the future backend (network_simulator) and
+# KYTHIRA_HAS_OPENSSL, without which raft/tls_tcp_rpc.hpp (the trust policy)
+# and raft/ca_http_helpers.hpp compile to nothing. The target exists only
+# with OpenSSL, a future backend and the Beast transport.
+if(TARGET certificate_authority AND KYTHIRA_BUILD_BOOST_BEAST_TRANSPORT
+   AND KYTHIRA_FUTURE_BACKEND_AVAILABLE)
     add_executable(iam_node iam_node/main.cpp)
     target_include_directories(iam_node PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/iam_node")
     target_link_libraries(iam_node PRIVATE
@@ -34,8 +37,7 @@ if(TARGET certificate_authority)
     # KYTHIRA_NODE_MODULES (cmd/kythira_node/CMakeLists.txt). It
     # instantiates the IAM group on the node's multi-raft host over the
     # node's Beast transport, so it is built where kythira_node is.
-    if(KYTHIRA_BUILD_BOOST_BEAST_TRANSPORT AND KYTHIRA_FUTURE_BACKEND_AVAILABLE
-       AND NOT ENABLE_COVERAGE)
+    if(NOT ENABLE_COVERAGE)
         add_library(kythira_iam_module STATIC iam_node/iam_module_registrar.cpp)
         target_include_directories(kythira_iam_module PRIVATE
             "${CMAKE_CURRENT_SOURCE_DIR}/iam_node")
@@ -53,7 +55,8 @@ if(TARGET certificate_authority)
         set_property(GLOBAL APPEND PROPERTY KYTHIRA_NODE_MODULE_NAMES iam)
     endif()
 else()
-    message(STATUS "iam_node: skipped (needs the certificate_authority target: OpenSSL and a future backend)")
+    message(STATUS "iam_node: skipped (needs the certificate_authority target, OpenSSL, a future "
+                   "backend and the Beast transport)")
 endif()
 
 # kythira-iam is a plain HTTPS client: Boost.Beast, Boost.JSON and OpenSSL.

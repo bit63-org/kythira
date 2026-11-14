@@ -14,6 +14,10 @@
 #include <kythira/kinesis/kinesis_actions.hpp>
 #include <kythira/kinesis/kinesis_lease_api.hpp>
 
+// The replica's Beast transport and multi-raft host are instantiated here.
+#include <raft/beast_http_transport_impl.hpp>
+#include <raft/multi_raft_impl.hpp>
+
 #include <cstdlib>
 #include <iostream>
 #include <optional>

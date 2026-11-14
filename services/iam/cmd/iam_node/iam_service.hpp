@@ -334,6 +334,15 @@ private:
         {
             const std::lock_guard lock(_replicas_mu);
             const auto known = _reachable.find(r.node_id);
+            // --max-replicas: the learners this leader admits.
+            if (known == _reachable.end() && _reachable.size() >= _cfg.max_replicas) {
+                if (throw_on_failure) {
+                    throw std::invalid_argument("this IAM group already has its " +
+                                                std::to_string(_cfg.max_replicas) +
+                                                " read replicas (--max-replicas)");
+                }
+                return;
+            }
             if (known == _reachable.end() || !(known->second == r)) {
                 _replicas.make_reachable(*id, r);
                 _reachable[r.node_id] = r;

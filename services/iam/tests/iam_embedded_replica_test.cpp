@@ -25,6 +25,10 @@
 #include <kythira/iam/iam_redis_verifier.hpp>
 #include <kythira/iam/services/elasticache_actions.hpp>
 
+// The replica's Beast transport and multi-raft host are instantiated here.
+#include <raft/beast_http_transport_impl.hpp>
+#include <raft/multi_raft_impl.hpp>
+
 using namespace iam_node_testing;  // NOLINT(google-build-using-namespace)
 using namespace std::chrono_literals;
 

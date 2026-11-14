@@ -116,7 +116,7 @@ is in.
     forms, and task 8 swaps in `iam.evaluator` when it is published.
   - _Requirements: 3.1, 3.2, 3.4, 7.3, 8.2_
 
-- [ ] 8. IAM on the multi-raft host, as a module
+- [x] 8. IAM on the multi-raft host, as a module
   - IAM state machine as a host group; `iam_node --convert-data-dir`;
     publishes `iam.evaluator`; co-located modules authorize through it,
     the Redis module's embedded replica included (task 7)
@@ -128,10 +128,19 @@ is in.
     when IAM is co-located instead of an embedded replica;
     `kythira_node_iam_test` (three processes, Kinesis authorizing
     in-process, state kept across a restart)
-  - [ ] 8b. `iam_node` on the multi-raft host with
+  - [x] 8b. `iam_node` on the multi-raft host with
     `--convert-data-dir` for an existing TCP-RPC data directory
-  - [ ] 8c. Read replicas as host learners, so stand-alone gateways'
+  - [x] 8c. Read replicas as host learners, so stand-alone gateways'
     embedded replicas join a host-based IAM group
+  - 8b and 8c shipped together (Clark chose the full move, a whole-cluster
+    stop to upgrade). `iam_node` runs `iam_module` alone on its own host
+    over Beast (`iam_raft.hpp`); the group is `(5 << 56) | 1` in both
+    layouts, so data directories and replicas need no layout setting.
+    The Beast transport gained a per-node certificate binding and
+    run-time peers, keeping iam_node's TCP-RPC guarantees.
+    `--convert-data-dir` copies the snapshot, the entries after it, the
+    term and the vote (not only the snapshot, which would drop committed
+    entries after it); the old files move to `pre-host/`.
   - _Requirements: 5.1-5.3, 7.2_
 
 - [x] 9. Resource isolation

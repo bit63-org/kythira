@@ -13,6 +13,10 @@
 #include <kythira/dynamodb/dynamodb_actions.hpp>
 #include <kythira/iam/iam_gateway_auth.hpp>
 
+// The replica's Beast transport and multi-raft host are instantiated here.
+#include <raft/beast_http_transport_impl.hpp>
+#include <raft/multi_raft_impl.hpp>
+
 #include <cstdlib>
 #include <iostream>
 #include <optional>

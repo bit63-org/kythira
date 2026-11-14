@@ -101,6 +101,9 @@ struct config {
     std::string log_name{"iam_node"};
     /// Concurrent HTTPS connections, each served on its own thread.
     std::size_t max_connections{256};
+    /// --convert-data-dir: convert a data directory from before IAM moved
+    /// onto the multi-raft host, then exit (convert_data_dir.hpp).
+    bool convert_data_dir{false};
 
     [[nodiscard]] auto rpc_tls() const -> bool { return !rpc_tls_cert_path.empty(); }
 
@@ -214,6 +217,11 @@ inline constexpr const char* k_usage =
     "                [--iam-credentials-exchange]\n"
     "                [--election-timeout-min-ms <n>] [--election-timeout-max-ms <n>]\n"
     "                [--heartbeat-interval-ms <n>] [--rpc-timeout-ms <n>]\n"
+    "                [--convert-data-dir]\n"
+    "\n"
+    "--convert-data-dir converts --data-dir from the plain Raft group of\n"
+    "earlier releases to the multi-raft host's layout and exits. Stop every\n"
+    "member first and convert each; the old files are kept in pre-host/.\n"
     "\n"
     "Environment: IAM_UNSEAL_KEY_FILE, IAM_DATA_DIR stand in for the flags.\n";
 
@@ -287,6 +295,8 @@ inline constexpr const char* k_usage =
             cfg.rpc_tls_ca_path = next();
         } else if (arg == "--allow-plaintext-rpc") {
             cfg.allow_plaintext_rpc = true;
+        } else if (arg == "--convert-data-dir") {
+            cfg.convert_data_dir = true;
         } else if (arg == "--replica") {
             cfg.replica = true;
         } else if (arg == "--max-replicas") {

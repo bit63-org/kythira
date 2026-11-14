@@ -9,6 +9,10 @@
 // the IAM module's in-process evaluator: a user's request is refused
 // until a policy allows it, with no IAM replica embedded in Kinesis.
 //
+// A read replica (task 8c): iam_node --replica joins the IAM module's
+// group as a learner once registered, and applies what the module's
+// members commit, as it joins iam_node's.
+//
 // Resource isolation (task 9, Requirement 6.3): with Kinesis's request
 // threads all busy for twenty seconds, neither IAM's group nor Kinesis's
 // own start an election on any member.
@@ -50,6 +54,8 @@ namespace {
 using namespace iam_node_testing;
 namespace sigv4 = kythira::sigv4;
 
+constexpr int k_replica_id = 4;
+
 struct node_proc {
     int n = 0;
     std::uint16_t raft = 0;
@@ -78,6 +84,7 @@ public:
         for (const auto& p : nodes) {
             o.nodes.push_back(make_id(p.n));
         }
+        o.nodes.push_back(make_id(k_replica_id));  // a read replica's certificate
         pki = kythira::iam::testing::write_test_pki(o);
     }
 
@@ -271,7 +278,123 @@ auto form_value(const std::string& xml, const std::string& tag) -> std::string {
     return xml.substr(start, xml.find("</" + tag + ">", start) - start);
 }
 
+/// Waits for `pid` to exit after SIGTERM; true when it exited by itself.
+auto stop_process(pid_t pid) -> bool {
+    ::kill(pid, SIGTERM);
+    const auto deadline = std::chrono::steady_clock::now() + 30s;
+    int status = 0;
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (::waitpid(pid, &status, WNOHANG) == pid) {
+            return WIFEXITED(status);
+        }
+        std::this_thread::sleep_for(20ms);
+    }
+    ::kill(pid, SIGKILL);
+    ::waitpid(pid, &status, 0);
+    return false;
+}
+
 }  // namespace
+
+BOOST_AUTO_TEST_CASE(a_read_replica_joins_the_iam_module, *boost::unit_test::timeout(600)) {
+    node_cluster c;
+    for (auto& p : c.nodes) {
+        c.start(p);
+    }
+    auto* leader = c.wait_leader();
+    BOOST_REQUIRE_MESSAGE(leader != nullptr, "IAM elected no leader on the shared listener");
+    auto created =
+        https_call(leader->iam, c.pki, http::verb::post, "/v1/admin/accounts",
+                   c.pki.admin_cert.string(), c.pki.admin_key.string(), {},
+                   {{"Content-Type", "application/json"}}, R"({"account_id":"111122223333"})");
+    BOOST_REQUIRE(created.has_value());
+    BOOST_REQUIRE_EQUAL(created->status, 201U);
+
+    // iam_node --replica, with kythira_node's members as its voters: their
+    // Raft listener is the node's, their IAM listener the module's.
+    const auto rpc_port = kythira::testing::free_port();
+    const auto http_port = kythira::testing::free_port();
+    std::string voters;
+    for (const auto& p : c.nodes) {
+        voters += (voters.empty() ? "" : ",") + std::to_string(p.n) +
+                  ":127.0.0.1:" + std::to_string(p.raft) +
+                  "@https://localhost:" + std::to_string(p.iam);
+    }
+    const auto dir = c.dir() / "replica";
+    fs::create_directories(dir);
+    const auto rid = make_id(k_replica_id);
+    std::vector<std::string> args{IAM_NODE_PATH,
+                                  "--node-id",
+                                  std::to_string(k_replica_id),
+                                  "--replica",
+                                  "--data-dir",
+                                  dir.string(),
+                                  "--unseal-key-file",
+                                  c.pki.unseal.string(),
+                                  "--peers",
+                                  voters,
+                                  "--rpc-address",
+                                  "127.0.0.1",
+                                  "--rpc-port",
+                                  std::to_string(rpc_port),
+                                  "--http-address",
+                                  "127.0.0.1",
+                                  "--http-port",
+                                  std::to_string(http_port),
+                                  "--tls-cert",
+                                  c.pki.node_cert(rid).string(),
+                                  "--tls-key",
+                                  c.pki.node_key(rid).string(),
+                                  "--rpc-tls-cert",
+                                  c.pki.node_cert(rid).string(),
+                                  "--rpc-tls-key",
+                                  c.pki.node_key(rid).string(),
+                                  "--rpc-tls-ca",
+                                  c.pki.ca.string()};
+    const auto log = (dir / "node.log").string();
+    const pid_t pid = ::fork();
+    BOOST_REQUIRE(pid >= 0);
+    if (pid == 0) {
+        const int fd = ::open(log.c_str(), O_WRONLY | O_CREAT | O_APPEND, 0644);
+        ::dup2(fd, 1);
+        ::dup2(fd, 2);
+        std::vector<char*> argv;
+        for (const auto& a : args) {
+            argv.push_back(const_cast<char*>(a.c_str()));
+        }
+        argv.push_back(nullptr);
+        ::execv(argv[0], argv.data());
+        ::_exit(127);
+    }
+
+    // Registered through the module's admin route; the leader admits it.
+    auto added = until_status(200U, [&] {
+        auto* l = c.wait_leader();
+        return https_call(
+            l->iam, c.pki, http::verb::post, "/v1/admin/replicas", c.pki.admin_cert.string(),
+            c.pki.admin_key.string(), {}, {{"Content-Type", "application/json"}},
+            R"({"node_id":")" + std::to_string(k_replica_id) +
+                R"(","rpc_host":"127.0.0.1","rpc_port":)" + std::to_string(rpc_port) + "}");
+    });
+    BOOST_REQUIRE(added.has_value());
+    BOOST_TEST(added->status == 200U, added->body);
+
+    // The account the members committed reaches the replica.
+    bool applied = false;
+    std::optional<boost::json::object> h;
+    const auto deadline = std::chrono::steady_clock::now() + 60s;
+    while (!applied && std::chrono::steady_clock::now() < deadline) {
+        auto r = https_call(http_port, c.pki, http::verb::get, "/healthz");
+        if (r && r->status == 200) {
+            h = json_of(r->body);
+            applied = h->at("role").as_string() == "replica" &&
+                      h->at("accounts").to_number<std::int64_t>() == 1;
+        }
+        std::this_thread::sleep_for(200ms);
+    }
+    BOOST_TEST(applied, (h ? boost::json::serialize(*h) : std::string("no health")));
+    BOOST_TEST(stop_process(pid));
+}
 
 BOOST_AUTO_TEST_CASE(iam_module_authorizes_kinesis_in_process, *boost::unit_test::timeout(600)) {
     node_cluster c;

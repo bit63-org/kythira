@@ -34,7 +34,8 @@ Built when `CONFIG_IAM=y` (`services/iam/Kconfig`, off by default).
 | `include/kythira/iam/iam_oidc_jwks.hpp` | the JWKS cache for web identity tokens, its HTTPS fetcher with the allowlist and private-address refusal, and the direct JWKS URL for a local Kythira issuer | 19-20 |
 | `tests/iam_sts_test.cpp` | those actions, cross-account trust, `ExternalId`, key rotation, expiry, forged tokens, session policies and tags, session revocation, web identity tokens, the JWKS fetch rules, the `kythira:*` claim keys, the certificate exchange, federated sessions, encoded authorization messages and the temporary-credential limits | 17-20, 26 |
 | `include/kythira/iam/iam_redis_verifier.hpp` | the Redis gateway's `credential_verifier`: ElastiCache IAM auth tokens, `elasticache:Connect` on the user and replication group, a per-access-key failure budget | 21, 22 |
-| `include/kythira/iam/iam_embedded_replica.hpp` | a front end's IAM side in one object: the replica over mutual-TLS RPC, the unsealing key, the registry and the authorizer | 21 |
+| `include/kythira/iam/iam_embedded_replica.hpp` | a front end's IAM side in one object: the replica (a learner on its own multi-raft host), the unsealing key, the registry and the authorizer | 21, colocation 8 |
+| `include/kythira/iam/iam_raft.hpp` | the IAM group on a multi-raft host, as every layout runs it: its id, types and settings, the Beast transport and the per-node certificate binding | colocation 8 |
 | `tests/iam_redis_verifier_test.cpp`, `tests/iam_redis_token_test_support.hpp`, `tests/tools/gen_redis_iam_token.py` | tokens from botocore (a fixed vector the script regenerates) and presigned in the test | 21 |
 | `tests/iam_embedded_replica_test.cpp` | three `iam_node` processes and an embedded replica in process checking tokens as policies change | 21 |
 | `tests/iam_kythira_issuer_test.cpp` | a ca_cluster_node and `iam_node` as processes: a Kythira workload token and certificate exchanged for role credentials (`--kythira-issuer`, `--kythira-issuer-local`, `POST /v1/iam/credentials`) | 20 |
@@ -43,9 +44,10 @@ Built when `CONFIG_IAM=y` (`services/iam/Kconfig`, off by default).
 | `tests/iam_state_machine_test.cpp` | their unit and property tests | 8 |
 | `include/kythira/iam/iam_admin.hpp` | the `/v1/admin/*` operations (create and list accounts, rotate the STS key, register a replica) | 9 |
 | `include/kythira/iam/iam_routing.hpp` | request routing by credential-scope service, and Query error XML | 9 |
-| `cmd/iam_node/` | the daemon: the IAM Raft group over mutual-TLS RPC and the HTTPS listener; `iam_service.hpp` is its serving side over a Raft node it does not own | 9 |
+| `cmd/iam_node/` | the daemon: the IAM module alone on its own multi-raft host and Beast transport, and the HTTPS listener; `iam_service.hpp` is its serving side over a Raft node it does not own; `convert_data_dir.hpp` is `--convert-data-dir` | 9, colocation 8 |
 | `cmd/iam_node/iam_module.hpp`, `iam_module_registrar.cpp` | IAM as a module of `kythira_node`: its group on the node's multi-raft host, and `iam.evaluator` for co-located services | colocation 8 |
-| `tests/kythira_node_iam_test.cpp` | three `kythira_node` processes running IAM and Kinesis, Kinesis authorizing in-process (registered by `cmd/kythira_node/`) | colocation 8 |
+| `tests/kythira_node_iam_test.cpp` | three `kythira_node` processes running IAM and Kinesis, Kinesis authorizing in-process, and an `iam_node --replica` joining them (registered by `cmd/kythira_node/`) | colocation 8 |
+| `tests/iam_node_convert_test.cpp` | `--convert-data-dir`: the whole Raft state moves, a log with a hole is refused | colocation 8 |
 | `cmd/kythira-iam/` | the admin CLI | 9 |
 | `docker/iam_node/` | the image the compose scenario runs | 9 |
 | `tests/iam_admin_test.cpp`, `tests/iam_node_test.cpp`, `tests/iam_node_test_support.hpp` | the admin operations, and the binaries as a three-node cluster with a replica (the helpers are shared with `iam_kythira_issuer_test`) | 9 |
@@ -71,9 +73,9 @@ verifier, the Query codec and the `aws_request_authorizer` concept.
 IAM runs as a module of the composite daemon
 (`.kiro/specs/service-colocation/` task 8, `cmd/iam_node/iam_module.hpp`),
 with `KYTHIRA_SERVICES` naming `iam`. Its Raft group is one group on the
-node's shared multi-raft host at `5 << 56`, over the node's one listener
-with mutual TLS from `KYTHIRA_NODE_TLS_*`; its log is in the node's
-`iam/raft/`. The serving side is `iam_node`'s (`iam_service.hpp`): IAM, STS
+node's shared multi-raft host at `(5 << 56) | 1`, over the node's one
+listener with mutual TLS from `KYTHIRA_NODE_TLS_*`; its log is in the node's
+`iam/raft/<group id>/`. The serving side is `iam_node`'s (`iam_service.hpp`): IAM, STS
 and `/v1/admin/*` on IAM's own HTTPS listener, the same KEK check and the
 same leader redirects.
 
@@ -88,6 +90,7 @@ The module reads `KYTHIRA_IAM_*` for what is its own and the node's
 | `KYTHIRA_IAM_CLIENT_CA` | the CA admin client certificates chain to | the node's |
 | `KYTHIRA_IAM_ADMIN_URI_SANS` | admin certificate URI SANs, comma-separated | none: admin routes refuse |
 | `KYTHIRA_IAM_MAX_CONNECTIONS` | concurrent HTTPS connections, each on its own thread | 256 |
+| `KYTHIRA_IAM_MAX_REPLICAS` | read replicas the group admits, as `--max-replicas` | 64 |
 | `KYTHIRA_IAM_PEER_URLS` | `id=https://host:port,...`, where a follower redirects to | each member's Raft host, this node's IAM port |
 | `KYTHIRA_IAM_ARN_PARTITION`, `_STS_REGIONS` | as `--arn-partition`, `--sts-regions` | `aws`, `us-east-1` |
 | `KYTHIRA_IAM_OIDC_ALLOWED_HOSTS`, `_OIDC_PROXY`, `_OIDC_CA_FILE` | as the `--oidc-*` flags | |
@@ -102,11 +105,50 @@ authorizes through it in-process, with no IAM replica of its own; IAM
 starts before them. A change reaches every member's services as soon as
 that member applies it, as it reaches an embedded replica.
 
-Not yet: an IAM group in `kythira_node` takes no read replicas
-(`/v1/admin/replicas` answers `InvalidInput`), so stand-alone gateways'
-embedded replicas still join an `iam_node` cluster, and `iam_node` still
-runs its own TCP-RPC group. Moving `iam_node` onto the host, with a data
-directory conversion, and the replicas with it, is the rest of task 8.
+Read replicas join either layout the same way: `kythira-iam replica-add`
+registers one, and the leader dials it through the node's Raft client.
+kythira_node's listener accepts any certificate its CA chains and checks a
+replica's against the RPC host it was registered with, so there the
+replica's certificate names that host as well as its reserved peer SAN.
+
+## `iam_node` on the multi-raft host
+
+`iam_node` runs the same module alone (`cmd/iam_node/main.cpp`), on a
+multi-raft host of its own over Boost.Beast with the CBOR wire, at the same
+group id. Its flags are unchanged. With `--rpc-tls-*` each member's
+certificate is bound to its node id (`iam_raft_trust`): a certificate the
+CA chains is a Raft peer only if it carries the reserved peer SAN of a
+member or a registered replica, and speaks only for that node, as it was
+under TCP RPC. The group's files are in `--data-dir/raft/<group id>/`, the
+layout the module keeps under kythira_node's `iam/`, so a member's
+directory moves between the two unchanged.
+
+Front ends' embedded replicas (`iam_embedded_replica.hpp`) are learners on
+a multi-raft host of their own and join `iam_node` or `kythira_node` alike.
+
+### Upgrading a cluster from TCP RPC
+
+Releases before this one ran a plain Raft group over TCP RPC, with its
+files directly in `--data-dir`. The new Raft wire is not the old one, so
+the upgrade stops the whole cluster:
+
+1. Stop every `iam_node` member and every front end with an embedded
+   replica. Front ends answer IAM requests `ServiceUnavailable` once past
+   their staleness bound.
+2. On each member, with the new binary and its usual flags, run
+   `iam_node ... --convert-data-dir`. It copies the snapshot, every log
+   entry after it, the term and the vote into `raft/<group id>/` and moves
+   the old files to `pre-host/`. A started `iam_node` refuses a directory
+   that still holds the old files.
+3. Start every member, then the front ends on the new build. The replicas
+   are registered in the IAM state already; each new leader dials them.
+   Convert an `iam_node --replica` member's directory like a voter's, or
+   empty it: the leader sends a replica the whole state again. A front
+   end's embedded replica starts over in `raft/` under its data directory
+   the same way, and its old files there can be deleted.
+
+To roll back before any write, stop the members, delete `raft/`, move the
+files in `pre-host/` back and start the previous binary.
 
 ## Core targets and variables used
 
@@ -120,7 +162,8 @@ package to export.
 | `Python3_EXECUTABLE` | running `tools/gen_aws_managed_policies.py` at configure time |
 | `kythira_test_pch` | the test precompiled header and its links (Boost.Test, Boost.JSON), through `add_raft_completion_test` |
 | `cmake/kythira_test_helpers.cmake` | `add_raft_completion_test` |
-| `certificate_authority` | `iam_node`: `KYTHIRA_HAS_OPENSSL` for the TLS RPC headers, and the future backend through `network_simulator` |
+| `certificate_authority` | `iam_node`: `KYTHIRA_HAS_OPENSSL` for the TLS trust policy, and the future backend through `network_simulator` |
+| `KYTHIRA_BUILD_BOOST_BEAST_TRANSPORT`, `KYTHIRA_FUTURE_BACKEND_AVAILABLE` | `iam_node`, `kythira_iam_module` and the embedded replica's Beast transport and multi-raft host |
 | `kythira_host_node_id` | `KYTHIRA_NODE_ID_KIND` for `iam_node`, `iam_test_certs` and the tests |
 | `boost_json`, `OpenSSL::SSL`, `Threads::Threads` | `iam_node` and `kythira-iam` |
 | `certificate_authority` (tests) | the test PKI (`iam_test_certs`, `iam_node_test`) |
