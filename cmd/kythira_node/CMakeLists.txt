@@ -96,6 +96,34 @@ if(TARGET kythira_iam_module AND TARGET kythira_kinesis_module AND TARGET iam_no
         LABELS "integration;iam;iam-module;node" TIMEOUT 600)
 endif()
 
+# Every compiled-in module on one three-node cluster (.kiro/specs/
+# service-colocation/ task 11, Requirement 10.1): each service's smoke test
+# against the same kythira_node processes. The test reads the module list
+# from `kythira_node --help`, so it runs in any build with the IAM module,
+# which issues its test PKI and authorizes Kinesis and DynamoDB, so its
+# source lives with IAM's tests, beside kythira_node_iam_test; a module test
+# may include no other module, so the Kinesis, DynamoDB, Redis and ledger
+# checks speak each wire directly.
+if(TARGET kythira_iam_module AND TARGET iam_node AND TARGET kythira-iam)  # module-hook
+    add_raft_completion_test(kythira_node_cluster_test
+        "${PROJECT_SOURCE_DIR}/services/iam/tests/kythira_node_cluster_test.cpp")
+    target_include_directories(kythira_node_cluster_test PRIVATE
+        "${PROJECT_SOURCE_DIR}/services/iam/tests")
+    target_link_libraries(kythira_node_cluster_test PRIVATE
+        kythira_iam kythira_test_support certificate_authority kythira_host_node_id)  # module-hook
+    target_compile_definitions(kythira_node_cluster_test PRIVATE
+        IAM_NODE_PATH="$<TARGET_FILE:iam_node>"  # module-hook
+        KYTHIRA_IAM_PATH="$<TARGET_FILE:kythira-iam>"  # module-hook
+        KYTHIRA_NODE_PATH="$<TARGET_FILE:kythira_node>")
+    add_dependencies(kythira_node_cluster_test kythira_node)
+    set_target_properties(kythira_node_cluster_test PROPERTIES
+        JOB_POOL_COMPILE heavy_tu
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests")
+    set_tests_properties(kythira_node_cluster_test PROPERTIES
+        WORKING_DIRECTORY "${CMAKE_BINARY_DIR}/tests"
+        LABELS "integration;node" TIMEOUT 900)
+endif()
+
 # The kythira_node image and the composite cluster's container scenario
 # (.kiro/specs/service-colocation/ task 10, Requirements 9 and 10.3):
 # docker/kythira_node/Dockerfile carries kythira_node with every module this

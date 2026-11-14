@@ -10,6 +10,10 @@
 # service modules, and because a change to the node, its host or any of
 # the three modules should get this answer on its own pull request.
 #
+# The module-legs job (task 11, Requirements 10.1 and 10.2) builds
+# kythira_node with each module alone and with all of them, and runs the
+# all-modules cluster test in the legs that have IAM.
+#
 # NOT a required check, for the reason the module workflows give: GitHub
 # reports nothing for a workflow its paths filter skips.
 
@@ -35,8 +39,13 @@ on:
       - "include/raft/beast_http_transport_impl.hpp"
       - "services/iam/cmd/**"
       - "services/iam/include/**"
+      - "services/iam/tests/kythira_node_cluster_test.cpp"
+      - "services/iam/tests/iam_node_test_support.hpp"
       - "services/kinesis/cmd/**"
       - "services/dynamodb/cmd/**"
+      - "services/redis/cmd/**"
+      - "services/ledger/cmd/**"
+      - "configs/ci_ion_defconfig"
       - "tests/docker_chaos/os_faults.hpp"
       - "cmake/kythira_test_helpers.cmake"
       - "configs/ci_dynamodb_defconfig"
@@ -62,8 +71,13 @@ on:
       - "include/raft/beast_http_transport_impl.hpp"
       - "services/iam/cmd/**"
       - "services/iam/include/**"
+      - "services/iam/tests/kythira_node_cluster_test.cpp"
+      - "services/iam/tests/iam_node_test_support.hpp"
       - "services/kinesis/cmd/**"
       - "services/dynamodb/cmd/**"
+      - "services/redis/cmd/**"
+      - "services/ledger/cmd/**"
+      - "configs/ci_ion_defconfig"
       - "tests/docker_chaos/os_faults.hpp"
       - "cmake/kythira_test_helpers.cmake"
       - "configs/ci_dynamodb_defconfig"
@@ -201,3 +215,145 @@ jobs:
       - name: Leftover containers
         if: always()
         run: ${{ matrix.runtime }} ps -a
+
+  # Requirement 10.2 (task 11): kythira_node built with each module alone
+  # and with all of them, so no module comes to depend on another being
+  # present. Each leg derives its configuration from configs/ci_ion_defconfig
+  # (the ledger needs ion-c, and every leg shares that job's vcpkg tree and
+  # cache key): every module switch and its sub-switches are dropped, then
+  # the leg's modules are switched back on. It builds only kythira_node and
+  # runs its `node` tests: --help lists exactly the leg's modules, and an
+  # unknown service is refused.
+  module-legs:
+    name: kythira_node with ${{ matrix.leg }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    environment: ${{ github.ref == 'refs/heads/main' && 'build-cache-write' || '' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        leg: [redis, ledger, iam, kinesis, dynamodb, all]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install system dependencies
+        run: |
+          ./scripts/drop-unused-apt-repos.sh
+          for attempt in 1 2 3; do
+            if timeout 300 sudo apt-get update -q \
+                 && timeout 600 sudo apt-get install -y --no-install-recommends \
+                 g++-14 cmake ninja-build libfiu-dev \
+                 autoconf autoconf-archive automake libtool mold; then
+              exit 0
+            fi
+            echo "::warning::apt-get install failed (attempt ${attempt}/3), retrying in 30s..."
+            sleep 30
+          done
+          echo "::error::apt-get install failed after 3 attempts" >&2
+          exit 1
+
+      - name: Install kconfiglib
+        run: pip3 install --user -r scripts/kconfig/requirements.txt
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+
+      - name: OCI build cache
+        id: buildcache
+        uses: ./.github/actions/oci-build-cache
+        with:
+          triplet: x64-linux
+          rw-access-key-id: ${{ secrets.OCI_BUILD_CACHE_RW_ACCESS_KEY_ID }}
+          rw-secret-access-key: ${{ secrets.OCI_BUILD_CACHE_RW_SECRET_ACCESS_KEY }}
+          pr-access-key-id: ${{ secrets.OCI_BUILD_CACHE_PR_ACCESS_KEY_ID }}
+          pr-secret-access-key: ${{ secrets.OCI_BUILD_CACHE_PR_SECRET_ACCESS_KEY }}
+          ro-access-key-id: ${{ secrets.OCI_BUILD_CACHE_RO_ACCESS_KEY_ID }}
+          ro-secret-access-key: ${{ secrets.OCI_BUILD_CACHE_RO_SECRET_ACCESS_KEY }}
+          bucket: ${{ vars.OCI_BUILD_CACHE_BUCKET }}
+          namespace: ${{ vars.OCI_BUILD_CACHE_NAMESPACE }}
+          region: ${{ vars.OCI_CI_REGION }}
+
+      # ci.yml's Ion job's key, so both share one tree.
+      - name: Cache vcpkg packages
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: vcpkg-cache
+        with:
+          path: vcpkg_installed
+          key: vcpkg-${{ runner.os }}-${{ runner.arch }}-edhoc-ion-rocksdb-g++-14-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json', 'vcpkg-overlays/**') }}
+
+      - name: Bootstrap vcpkg and install dependencies
+        if: steps.vcpkg-cache.outputs.cache-hit != 'true'
+        run: |
+          export CC=gcc-14 CXX=g++-14
+          git clone --filter=blob:none https://github.com/microsoft/vcpkg.git /tmp/vcpkg
+          git -C /tmp/vcpkg checkout 9a7f7340a6c5f11f24c3d59f85e07143feb84e06
+          /tmp/vcpkg/bootstrap-vcpkg.sh -disableMetrics
+          /tmp/vcpkg/vcpkg install --triplet x64-linux --no-print-usage --x-feature=edhoc --x-feature=ion --x-feature=rocksdb
+        env:
+          VCPKG_DEFAULT_TRIPLET: x64-linux
+
+      - name: Start sccache
+        id: sccache
+        if: steps.buildcache.outputs.enabled == 'true'
+        run: scripts/oci-build-cache/start-sccache.sh
+
+      - name: Write the leg's defconfig
+        env:
+          LEG: ${{ matrix.leg }}
+        run: |
+          declare -A switch=([redis]=REDIS_GATEWAY [ledger]=LEDGER [iam]=IAM
+                             [kinesis]=KINESIS [dynamodb]=DYNAMODB)
+          if [ "$LEG" = all ]; then on="${!switch[*]}"; else on="$LEG"; fi
+          grep -Ev '^(# )?CONFIG_(REDIS_GATEWAY|LEDGER|IAM|KINESIS|DYNAMODB)(_[A-Z0-9_]+)?( is not set|=.*)$' \
+            configs/ci_ion_defconfig > "$RUNNER_TEMP/leg_defconfig"
+          for m in "${!switch[@]}"; do
+            if [[ " $on " == *" $m "* ]]; then
+              echo "CONFIG_${switch[$m]}=y"
+            else
+              echo "# CONFIG_${switch[$m]} is not set"
+            fi
+          done >> "$RUNNER_TEMP/leg_defconfig"
+          echo "modules=$on" >> "$GITHUB_ENV"
+          grep -E 'CONFIG_(REDIS_GATEWAY|LEDGER|IAM|KINESIS|DYNAMODB)\b' "$RUNNER_TEMP/leg_defconfig"
+
+      - name: Configure
+        run: |
+          cmake -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CXX_COMPILER=g++-14 \
+            -DKYTHIRA_KCONFIG="$RUNNER_TEMP/leg_defconfig" \
+            -DKYTHIRA_KCONFIG_STRICT=ON \
+            -DKYTHIRA_COMPILER_LAUNCHER=${{ steps.sccache.outputs.launcher || 'none' }} \
+            -DKYTHIRA_LINKER=mold \
+            -DCMAKE_PREFIX_PATH=${{ github.workspace }}/vcpkg_installed/x64-linux
+
+      - name: Build kythira_node
+        run: cmake --build build --target kythira_node -j"$(nproc)"
+
+      # Requirement 10.1: every module the leg built, on one three-node
+      # cluster, each service's smoke test against it. It needs the IAM
+      # module, so the legs without it skip it.
+      - name: kythira_node_cluster_test
+        if: matrix.leg == 'all' || matrix.leg == 'iam'
+        run: |
+          cmake --build build --target kythira_node_cluster_test -j"$(nproc)"
+          ctest --test-dir build -R '^kythira_node_cluster_test$' --output-on-failure
+
+      # The binary's own CTest cases (--help, the offers_* checks), which
+      # need nothing but kythira_node. The integration tests are left out:
+      # this leg builds only kythira_node_cluster_test, which ran above.
+      - name: kythira_node offers exactly the leg's modules
+        run: |
+          ctest --test-dir build -L node -R '^kythira_node_' \
+            -E '^kythira_node_(iam|cluster)_test$' --output-on-failure
+          ./build/kythira_node --help | tee help.txt
+          for m in redis ledger iam kinesis dynamodb; do
+            if [[ " $modules " == *" $m "* ]]; then
+              grep -Eq "^  $m  \(" help.txt || { echo "::error::$m is not compiled in"; exit 1; }
+            elif grep -Eq "^  $m  \(" help.txt; then
+              echo "::error::$m is compiled in although this leg left it out"; exit 1
+            fi
+          done
