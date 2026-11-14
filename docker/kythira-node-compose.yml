@@ -1,0 +1,168 @@
+# Copyright (c) 2026 Clark Rawlins
+# SPDX-License-Identifier: Apache-2.0
+
+# A three-node composite cluster (.kiro/specs/service-colocation/ task 10,
+# Requirements 9.2 and 10.3): kythira_node with DynamoDB, Kinesis and IAM
+# co-located on each node, every module's Raft groups on the node's one
+# Raft listener, driven by kythira_node_scenario_test.
+#
+# CLAUDE.md's container rules, as they apply here:
+#
+#   * **No static IPs.** No `ipam`, no `ipv4_address`; rootless Podman drops
+#     them silently. Raft RPC, IAM's leader redirects, forwarded Kinesis and
+#     DynamoDB writes and every client address nodes by **service name**
+#     (kn-1 .. kn-3), and every node certificate carries its service name
+#     as a DNS SAN.
+#   * **No runtime named anywhere.** The scenario test drives this file
+#     through `container_runtime()` / `compose_prefix()`
+#     (tests/docker_chaos/os_faults.hpp), honouring
+#     $KYTHIRA_CONTAINER_RUNTIME and $KYTHIRA_COMPOSE_COMMAND.
+#   * **No capabilities, no privileged or host networking.** Partitions
+#     are made by disconnecting a node from the network, which needs none;
+#     the nodes and the network have fixed names so the scenario can name
+#     them to the runtime.
+#
+# The one-shot `certs` service writes the throwaway test PKI
+# (services/iam/tests/iam_test_pki.hpp) into the `pki` volume, as the IAM
+# scenario's does: a CA, one certificate per node with its reserved peer
+# SAN and its service name, the admin client certificate and the unseal
+# passphrase. --if-absent keeps it across restarts.
+#
+# Everything is TLS: the Raft listener (mutual TLS; kythira_node trusts
+# any certificate its CA signed, doc/colocation.md), IAM's API with client
+# certificates for the admin routes, and the Kinesis and DynamoDB APIs
+# with the node's certificate. Kinesis and DynamoDB authorize through the
+# co-located IAM module's evaluator (KINESIS_AUTH / KYTHIRA_DYNAMODB_AUTH
+# iam), so a key IAM issues is good on all three at once.
+#
+# Nothing is published on the host. The scenario runs `kythira-iam` inside
+# the nodes with `compose exec`, and the workload (docker/
+# kythira_node_clients/mixed_workload.py) as `compose --profile clients run
+# --rm workload ...`, reaching the nodes by name. Each node keeps its state
+# in its own named volume, so `kill`/`start` resumes it and `down -v` is a
+# clean slate; the workload's acknowledgement lists live in `work`.
+
+name: kythira-node-scenario
+
+x-node: &node
+  image: kythira-node:dev
+  networks:
+    - kn_net
+  depends_on:
+    certs:
+      condition: service_completed_successfully
+
+x-env: &env
+  KYTHIRA_SERVICES: iam,kinesis,dynamodb
+  KYTHIRA_NODE_DATA_DIR: /var/lib/kythira
+  KYTHIRA_NODE_PEERS: "1=kn-1:7100,2=kn-2:7100,3=kn-3:7100"
+  KYTHIRA_NODE_RAFT_BIND: 0.0.0.0
+  KYTHIRA_NODE_RAFT_PORT: "7100"
+  KYTHIRA_NODE_TLS_CA: /pki/ca.pem
+  # IAM: HTTPS on :8443, the admin routes for the test admin certificate.
+  KYTHIRA_IAM_UNSEAL_KEY_FILE: /pki/unseal.txt
+  KYTHIRA_IAM_HTTP_BIND: 0.0.0.0
+  KYTHIRA_IAM_HTTP_PORT: "8443"
+  KYTHIRA_IAM_PEER_URLS: "1=https://kn-1:8443,2=https://kn-2:8443,3=https://kn-3:8443"
+  KYTHIRA_IAM_ADMIN_URI_SANS: spiffe://kythira.test/iam-admin
+  # Kinesis on :4567; peer gateways default to kn-N:4567.
+  KINESIS_LISTEN: 0.0.0.0:4567
+  KINESIS_AUTH: iam
+  KINESIS_REGION: us-east-1
+  KINESIS_FORWARD_SECRET: kythira-node-scenario-forward-secret
+  # DynamoDB on :8000, its tables in RocksDB so a killed node keeps them;
+  # peer gateways default to kn-N:8000.
+  KYTHIRA_DYNAMODB_BIND: 0.0.0.0
+  KYTHIRA_DYNAMODB_PORT: "8000"
+  KYTHIRA_DYNAMODB_AUTH: iam
+  # The account that owns the tables; the scenario creates it in IAM.
+  KYTHIRA_DYNAMODB_ACCOUNT_ID: "111122223333"
+  KYTHIRA_DYNAMODB_FORWARD_SECRET: kythira-node-scenario-ddb-forward-secret
+  KYTHIRA_DYNAMODB_ENGINE: rocksdb
+  KYTHIRA_DYNAMODB_DISK_FLOOR_BYTES: "0"
+  KYTHIRA_DYNAMODB_COMPAT: throttling=off
+  # For `compose exec <node> kythira-iam ...`; kythira_node ignores them.
+  KYTHIRA_IAM_CERT: /pki/admin.pem
+  KYTHIRA_IAM_KEY: /pki/admin.key
+  KYTHIRA_IAM_CA: /pki/ca.pem
+
+services:
+  certs:
+    image: kythira-node:dev
+    entrypoint: ["/usr/local/bin/iam_test_certs"]
+    command:
+      - --out
+      - /pki
+      - --if-absent
+      - --node
+      - "1=kn-1"
+      - --node
+      - "2=kn-2"
+      - --node
+      - "3=kn-3"
+    volumes:
+      - pki:/pki
+    networks:
+      - kn_net
+
+  kn-1:
+    <<: *node
+    container_name: kythira-node-kn-1
+    environment:
+      <<: *env
+      KYTHIRA_NODE_ID: "1"
+      KYTHIRA_NODE_TLS_CERT: /pki/node-1.pem
+      KYTHIRA_NODE_TLS_KEY: /pki/node-1.key
+    volumes:
+      - pki:/pki:ro
+      - kn-1-data:/var/lib/kythira
+
+  kn-2:
+    <<: *node
+    container_name: kythira-node-kn-2
+    environment:
+      <<: *env
+      KYTHIRA_NODE_ID: "2"
+      KYTHIRA_NODE_TLS_CERT: /pki/node-2.pem
+      KYTHIRA_NODE_TLS_KEY: /pki/node-2.key
+    volumes:
+      - pki:/pki:ro
+      - kn-2-data:/var/lib/kythira
+
+  kn-3:
+    <<: *node
+    container_name: kythira-node-kn-3
+    environment:
+      <<: *env
+      KYTHIRA_NODE_ID: "3"
+      KYTHIRA_NODE_TLS_CERT: /pki/node-3.pem
+      KYTHIRA_NODE_TLS_KEY: /pki/node-3.key
+    volumes:
+      - pki:/pki:ro
+      - kn-3-data:/var/lib/kythira
+
+  # The mixed workload (boto3), in the `clients` profile so `up` never
+  # starts it. It trusts the test CA from the pki volume and appends what
+  # each node acknowledged to /work.
+  workload:
+    image: kythira-node-clients:dev
+    profiles: ["clients"]
+    networks:
+      - kn_net
+    environment:
+      AWS_EC2_METADATA_DISABLED: "true"
+    volumes:
+      - pki:/pki:ro
+      - work:/work
+
+networks:
+  kn_net:
+    name: kythira_node_scenario_net
+    driver: bridge
+
+volumes:
+  pki:
+  work:
+  kn-1-data:
+  kn-2-data:
+  kn-3-data:

@@ -95,3 +95,88 @@ if(TARGET kythira_iam_module AND TARGET kythira_kinesis_module AND TARGET iam_no
         WORKING_DIRECTORY "${CMAKE_BINARY_DIR}/tests"
         LABELS "integration;iam;iam-module;node" TIMEOUT 600)
 endif()
+
+# The kythira_node image and the composite cluster's container scenario
+# (.kiro/specs/service-colocation/ task 10, Requirements 9 and 10.3):
+# docker/kythira_node/Dockerfile carries kythira_node with every module this
+# build linked, plus IAM's admin CLI and test PKI tool when the IAM module
+# is built; docker/kythira-node-compose.yml runs three nodes with DynamoDB,
+# Kinesis and IAM, and kythira_node_scenario_test drives a mixed workload
+# through a node kill and a partition. Like every container scenario it is
+# not registered in CTest: it needs Docker or rootless Podman at run time
+# and runs through its custom target, docker-kythira-node-tests.
+if(httplib_FOUND)
+    include(kythira_test_helpers)
+    kythira_detect_container_runtime()
+    add_docker_chaos_scenario_test(kythira_node_scenario_test
+        "${CMAKE_CURRENT_SOURCE_DIR}/kythira_node_scenario_test.cpp")
+    set_target_properties(kythira_node_scenario_test PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests/docker_chaos")
+
+    set(_KN_DIST "${PROJECT_SOURCE_DIR}/docker/kythira_node/dist")
+    set(_KN_COMPOSE_FILE "${PROJECT_SOURCE_DIR}/docker/kythira-node-compose.yml")
+    # The IAM tools ride along when the IAM module is built; the dist
+    # directory is emptied first so the image never carries a stale one.
+    set(_KN_STAGE_DEPS kythira_node)
+    set(_KN_STAGE_COPIES)
+    foreach(_tool kythira-iam iam_test_certs)  # module-hook: IAM's tools
+        if(TARGET ${_tool})
+            list(APPEND _KN_STAGE_DEPS ${_tool})
+            list(APPEND _KN_STAGE_COPIES
+                COMMAND ${CMAKE_COMMAND} -E copy "$<TARGET_FILE:${_tool}>" "${_KN_DIST}/${_tool}")
+        endif()
+    endforeach()
+    if(_RUNTIME_EXE)
+        add_custom_target(docker-kythira-node-image
+            DEPENDS ${_KN_STAGE_DEPS}
+            COMMAND ${CMAKE_COMMAND} -E rm -rf "${_KN_DIST}"
+            COMMAND ${CMAKE_COMMAND} -E make_directory "${_KN_DIST}"
+            COMMAND ${CMAKE_COMMAND} -E copy "$<TARGET_FILE:kythira_node>"
+                    "${_KN_DIST}/kythira_node"
+            ${_KN_STAGE_COPIES}
+            COMMAND ${_RUNTIME_EXE} build ${_IMAGE_FORMAT_ARGS}
+                    --file "${PROJECT_SOURCE_DIR}/docker/kythira_node/Dockerfile"
+                    --tag kythira-node:dev
+                    "${KYTHIRA_IMAGE_CONTEXT}"
+            COMMAND ${_RUNTIME_EXE} build ${_IMAGE_FORMAT_ARGS}
+                    --file "${PROJECT_SOURCE_DIR}/docker/kythira_node_clients/Dockerfile"
+                    --tag kythira-node-clients:dev
+                    "${KYTHIRA_IMAGE_CONTEXT}"
+            COMMENT "Staging kythira_node (and IAM's tools) and building the kythira-node and kythira-node-clients :dev images"
+            WORKING_DIRECTORY "${KYTHIRA_IMAGE_CONTEXT}"
+        )
+        # The scenario needs the three modules it drives.
+        set(_KN_SCENARIO_MODULES iam kinesis dynamodb)
+        set(_KN_SCENARIO_OK TRUE)
+        foreach(_m IN LISTS _KN_SCENARIO_MODULES)
+            if(NOT _m IN_LIST _kythira_node_module_names)
+                set(_KN_SCENARIO_OK FALSE)
+            endif()
+        endforeach()
+        if(_KN_SCENARIO_OK AND TARGET iam_test_certs AND TARGET kythira-iam)  # module-hook
+            add_custom_target(docker-kythira-node-tests
+                COMMAND ${CMAKE_COMMAND} -E env
+                        ${_RT_ENV}
+                        KYTHIRA_NODE_COMPOSE_FILE=${_KN_COMPOSE_FILE}
+                        $<TARGET_FILE:kythira_node_scenario_test>
+                        --log_level=message
+                DEPENDS docker-kythira-node-image kythira_node_scenario_test
+                COMMENT "Running the composite cluster container scenario (runtime: ${CONTAINER_RUNTIME})"
+                WORKING_DIRECTORY "${KYTHIRA_IMAGE_CONTEXT}"
+            )
+        else()
+            add_custom_target(docker-kythira-node-tests
+                COMMAND ${CMAKE_COMMAND} -E echo
+                        "'docker-kythira-node-tests' requires the iam, kinesis and dynamodb modules in kythira_node (compiled in: ${_kythira_node_module_names})"
+                COMMAND ${CMAKE_COMMAND} -E false
+            )
+        endif()
+    else()
+        foreach(_t docker-kythira-node-image docker-kythira-node-tests)
+            add_custom_target(${_t}
+                COMMAND ${CMAKE_COMMAND} -E echo "'${_t}' requires docker or podman on PATH"
+                COMMAND ${CMAKE_COMMAND} -E false
+            )
+        endforeach()
+    endif()
+endif()
