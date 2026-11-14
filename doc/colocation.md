@@ -7,9 +7,9 @@ module (`.kiro/specs/service-colocation/`). `KYTHIRA_SERVICES` names them;
 `ledger_node`, `iam_node`) is still built and runs the same module code on
 its own.
 
-This page covers resource isolation (task 9) and IAM's group in both
-layouts (task 8). Packaging and moving a service between layouts follow
-with tasks 10 and 11.
+This page covers resource isolation (task 9), IAM's group in both
+layouts (task 8) and the container image (task 10). Moving a service
+between layouts follows with task 11.
 
 ## What each module has to itself
 
@@ -68,6 +68,34 @@ One difference: `iam_node` binds each Raft certificate to one node id,
 from the reserved peer SAN it carries, while `kythira_node`'s one Raft
 listener accepts every certificate its CA chains, for every module. Give
 `kythira_node` a CA that issues only node certificates.
+
+## The container image and a composite cluster
+
+`docker/kythira_node/Dockerfile` builds `kythira-node:dev`: `kythira_node`
+with every module the build linked, and IAM's `kythira-iam` and
+`iam_test_certs` when the IAM module is built. `cmake --build build
+--target docker-kythira-node-image` stages the binaries from the host
+build and builds it; the per-service images stay as they are.
+
+`docker/kythira-node-compose.yml` runs three such nodes, `kn-1` to `kn-3`,
+with DynamoDB (`:8000`), Kinesis (`:4567`) and IAM (`:8443`) on each,
+every module's Raft groups on the node's one listener (`:7100`). Nodes,
+Raft peers, forwarded writes and clients all go by service name, so it
+runs under Docker and rootless Podman alike. Everything is TLS with a
+throwaway test PKI that a one-shot `certs` service writes, and DynamoDB
+and Kinesis authorize through the co-located IAM module, so a key IAM
+issues works on all three at once. Use it as the starting point for a
+deployment: replace the test PKI, the unseal passphrase and the
+forwarding secrets with your own.
+
+`cmake --build build --target docker-kythira-node-tests` runs the
+scenario against it (`cmd/kythira_node/kythira_node_scenario_test.cpp`,
+`.github/workflows/composite-node.yml` in CI): it creates an account with
+`kythira-iam`, then a user, a table and a stream, and runs a mixed
+PutItem, PutRecord and CreateUser workload
+(`docker/kythira_node_clients/mixed_workload.py`) while it kills the node
+holding IAM's leader, restarts it, and cuts another node off the network
+and back. Every write a node acknowledged must read back afterwards.
 
 ## What co-location does not isolate
 

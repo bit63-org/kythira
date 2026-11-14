@@ -160,7 +160,7 @@ is in.
     and is not isolated.
   - _Requirements: 6.1-6.4_
 
-- [ ] 10. Packaging, compose and docker-chaos
+- [x] 10. Packaging, compose and docker-chaos
   - `kythira_node` image; three-node DynamoDB + Kinesis + IAM compose file
     by service name; docker-chaos scenario under Docker and rootless Podman
   - _Requirements: 9.1, 9.2, 10.3_
