@@ -3,14 +3,15 @@
 #pragma once
 
 /// @file iam_module.hpp
-/// @brief IAM as a service module of kythira_node
-///        (.kiro/specs/service-colocation/ task 8, Requirements 5.1-5.3
-///        and 7.2).
+/// @brief IAM as a service module (.kiro/specs/service-colocation/ task 8,
+///        Requirements 5.1-5.3 and 7.2), in kythira_node and as iam_node.
 ///
-/// The IAM Raft group is one group on the node's shared multi-raft host,
-/// in IAM's group space, over the node's one Raft listener. Its serving
-/// side is iam_node's (iam_service.hpp): IAM, STS and the admin routes on
-/// IAM's own HTTPS listener, with the same KEK check and leader redirects.
+/// The IAM Raft group is one group on a multi-raft host (iam_raft.hpp),
+/// `k_iam_group_id` in both layouts: in kythira_node on the node's shared
+/// host and Raft listener, in iam_node on a node of its own
+/// (main.cpp). Its serving side is iam_service.hpp: IAM, STS and the
+/// admin routes on IAM's own HTTPS listener, with the KEK check and the
+/// leader redirects.
 ///
 /// It publishes `iam.evaluator` (module_interfaces.hpp): IAM's authorizer
 /// over this member's state, so a co-located Kinesis, DynamoDB or Redis
@@ -18,10 +19,12 @@
 /// of IAM's state. Each adds its action tables at its start, before it
 /// serves; IAM starts before them (their `starts_after`).
 ///
-/// Not yet: read replicas. The embedded replicas of stand-alone gateways
-/// join iam_node's TCP-RPC group, and this member takes no learners
-/// (`/v1/admin/replicas` answers InvalidInput). iam_node itself still runs
-/// its own TCP-RPC group, with its data directory as before.
+/// Read replicas (iam_node --replica, and the replica a stand-alone front
+/// end embeds, iam_embedded_replica.hpp) are learners of the group. The
+/// leader dials each registered replica through the host's Raft client,
+/// which `make_reachable` tells its address; iam_node also trusts its
+/// certificate (the `on_replica` hook), while kythira_node's listener
+/// trusts every certificate its CA chains.
 ///
 /// Settings (`KYTHIRA_IAM_*`; the node's `KYTHIRA_NODE_*` give the id,
 /// the members, TLS and the data directory):
@@ -31,6 +34,7 @@
 ///   KYTHIRA_IAM_CLIENT_CA           admin client CA        [the node's]
 ///   KYTHIRA_IAM_ADMIN_URI_SANS      admin certificate URI SANs, comma-separated
 ///   KYTHIRA_IAM_MAX_CONNECTIONS     concurrent HTTPS connections, a thread each [256]
+///   KYTHIRA_IAM_MAX_REPLICAS        read replicas the group admits    [64]
 ///   KYTHIRA_IAM_PEER_URLS           id=https://host:port,... for leader
 ///                                   redirects [each member's Raft host, this
 ///                                   node's IAM port]
@@ -40,10 +44,13 @@
 ///   KYTHIRA_IAM_KYTHIRA_ISSUER / _KYTHIRA_ISSUER_LOCAL
 ///   KYTHIRA_IAM_CREDENTIALS_EXCHANGE  0 or 1                [0]
 ///
-/// Data directory: the node's iam/, with each group's Raft log in raft/.
+/// Data directory: the node's iam/, with the group's Raft log and snapshots
+/// in raft/<group id>/, as iam_node keeps them in its --data-dir.
 
 #include "config.hpp"
 #include "iam_service.hpp"
+
+#include <kythira/iam/iam_raft.hpp>
 
 #include <kythira/iam/iam_redis_verifier.hpp>
 #include <kythira/iam/iam_state_machine.hpp>
@@ -84,51 +91,12 @@ namespace iam_node {
 namespace sn = kythira::service_node;
 
 /// IAM's multi_raft types on a node whose transport is `Host`'s.
-template<typename Host> struct module_host_types {
-    using future_type = kythira::future_default<std::vector<std::byte>>;
-    using promise_type = kythira::promise_default<std::vector<std::byte>>;
-    using try_type = kythira::try_default<std::vector<std::byte>>;
+template<typename Host>
+using module_host_types =
+    kythira::iam::iam_host_types<typename Host::client_type, typename Host::view_type>;
 
-    using node_id_type = kythira::host_node_id;
-    using term_id_type = std::uint64_t;
-    using log_index_type = std::uint64_t;
-    using group_id_type = std::uint64_t;
-
-    using serialized_data_type = std::vector<std::byte>;
-    /// Not used by the host: the wire is the node's transport's.
-    using serializer_type = kythira::json_rpc_serializer<std::vector<std::byte>>;
-
-    using network_client_type =
-        kythira::transport_client_handle<typename Host::client_type, node_id_type>;
-    using network_server_type = typename Host::view_type;
-
-    using persistence_engine_type =
-        kythira::binary_file_persistence_engine<node_id_type, term_id_type, log_index_type>;
-    using logger_type = kythira::console_logger;
-    using metrics_type = kythira::noop_metrics;
-    using membership_manager_type = kythira::default_membership_manager<node_id_type>;
-    using state_machine_type = kythira::iam::iam_state_machine;
-
-    using configuration_type = kythira::raft_configuration;
-
-    using log_entry_type = kythira::log_entry<term_id_type, log_index_type>;
-    using cluster_configuration_type = kythira::cluster_configuration<node_id_type>;
-    using snapshot_type = kythira::snapshot<node_id_type, term_id_type, log_index_type>;
-
-    using request_vote_request_type =
-        kythira::request_vote_request<node_id_type, term_id_type, log_index_type, group_id_type>;
-    using request_vote_response_type = kythira::request_vote_response<term_id_type, group_id_type>;
-    using append_entries_request_type =
-        kythira::append_entries_request<node_id_type, term_id_type, log_index_type, log_entry_type,
-                                        group_id_type>;
-    using append_entries_response_type =
-        kythira::append_entries_response<term_id_type, log_index_type, group_id_type>;
-    using install_snapshot_request_type =
-        kythira::install_snapshot_request<node_id_type, term_id_type, log_index_type,
-                                          group_id_type>;
-    using install_snapshot_response_type =
-        kythira::install_snapshot_response<term_id_type, group_id_type>;
-};
+static_assert(kythira::iam::k_iam_module_number == sn::module_numbers::iam,
+              "iam_raft.hpp's group id is in IAM's composite range");
 
 namespace module_detail {
 
@@ -179,7 +147,6 @@ namespace module_detail {
     cfg.node_id = std::move(id).value();
     cfg.data_dir = (node.data_dir / "iam").string();
     cfg.insecure_plaintext = node.insecure_plaintext;
-    cfg.max_replicas = 0;
 
     cfg.unseal_key_file = get("KYTHIRA_IAM_UNSEAL_KEY_FILE");
     if (cfg.unseal_key_file.empty()) {
@@ -249,6 +216,18 @@ namespace module_detail {
         }
         cfg.max_connections = n;
     }
+    if (auto v = env("KYTHIRA_IAM_MAX_REPLICAS")) {
+        std::size_t n = 0;
+        try {
+            n = std::stoul(*v);
+        } catch (const std::exception&) {
+            n = 0;
+        }
+        if (std::to_string(n) != *v) {
+            throw std::invalid_argument("KYTHIRA_IAM_MAX_REPLICAS: not a count: '" + *v + "'");
+        }
+        cfg.max_replicas = n;
+    }
     if (auto v = env("KYTHIRA_IAM_ARN_PARTITION")) {
         cfg.arn_partition = *v;
     }
@@ -297,7 +276,22 @@ public:
     using group_node_type = typename raft_host::group_node_type;
     using service_type = iam_service<group_node_type>;
 
+    /// In kythira_node: the settings come from the environment
+    /// (`configure`).
     iam_module() = default;
+
+    /// iam_node: the settings and passphrase main() read from its flags,
+    /// and what to do when the leader is about to dial a registered
+    /// replica (trust its certificate). Its files are directly in
+    /// `cfg.data_dir`.
+    using replica_fn =
+        std::function<void(const kythira::host_node_id&, const kythira::iam::replica_record&)>;
+    iam_module(config cfg, std::string passphrase, replica_fn on_replica)
+        : _cfg(std::move(cfg)),
+          _passphrase(std::move(passphrase)),
+          _on_replica(std::move(on_replica)),
+          _preset(true) {}
+
     iam_module(const iam_module&) = delete;
     auto operator=(const iam_module&) -> iam_module& = delete;
     iam_module(iam_module&&) = delete;
@@ -307,10 +301,15 @@ public:
     [[nodiscard]] auto name() const -> std::string_view override { return "iam"; }
     [[nodiscard]] auto number() const -> std::uint8_t override { return sn::module_numbers::iam; }
     [[nodiscard]] auto env_prefix() const -> std::string_view override { return "KYTHIRA_IAM_"; }
-    [[nodiscard]] auto data_subdir() const -> std::string override { return "iam"; }
+    [[nodiscard]] auto data_subdir() const -> std::string override {
+        return _preset ? std::string{} : std::string{"iam"};
+    }
 
     /// The settings and the unseal passphrase, before any port is bound.
     [[nodiscard]] auto configure(const sn::env_lookup& env) -> std::optional<std::string> override {
+        if (_preset) {
+            return std::nullopt;
+        }
         try {
             _cfg = config_from_env(env);
             _passphrase = read_unseal_passphrase(_cfg.unseal_key_file);
@@ -320,52 +319,47 @@ public:
         return std::nullopt;
     }
 
-    /// IAM's one group, voted by every member, at the space's first id.
+    /// IAM's one group, `k_iam_group_id`, voted by every member; a
+    /// replica joins it as a learner.
     void register_groups(Host& host, const sn::group_space& space) override {
-        const auto raft_dir = std::filesystem::path(_cfg.data_dir) / "raft";
-        std::filesystem::create_directories(raft_dir);
-        raft_config rc{
-            .node_id = _cfg.node_id,
-            .network_client = typename types::network_client_type{host.client()},
-            .network_server = host.server_for(space),
-            .store_factory =
-                [raft_dir](const std::uint64_t& group) {
-                    return
-                        typename types::persistence_engine_type{raft_dir / std::to_string(group)};
-                },
-        };
-        rc.state_machine_factory = [partition = _cfg.arn_partition](const std::uint64_t&) {
-            return kythira::iam::iam_state_machine(
-                kythira::iam::iam_config{.partition = partition});
-        };
-        rc.automatic_split_merge_enabled = false;  // one group, never moved
-        rc.hibernation = kythira::hibernation_mode::off;
-        rc.logger = kythira::console_logger{kythira::log_level::info};
-        rc.logger_factory = [](const std::uint64_t&) {
-            return kythira::console_logger{kythira::log_level::info};
-        };
-        rc.config._election_timeout_min = _cfg.election_timeout_min;
-        rc.config._election_timeout_max = _cfg.election_timeout_max;
-        rc.config._heartbeat_interval = _cfg.heartbeat_interval;
-        rc.config._rpc_timeout = _cfg.rpc_timeout;
-        _raft = std::make_unique<raft_host>(std::move(rc));
-
-        _group = space.to_host(1);
-        std::vector<kythira::host_node_id> voters = _cfg.voter_ids();
+        if (!space.contains(kythira::iam::k_iam_group_id)) {
+            throw std::invalid_argument("iam: the IAM group is outside this module's group space");
+        }
+        _raft = std::make_unique<raft_host>(kythira::iam::iam_raft_config<types>(
+            _cfg.node_id, typename types::network_client_type{host.client()},
+            host.server_for(space), _cfg.data_dir, _cfg.arn_partition,
+            {.election_timeout_min = _cfg.election_timeout_min,
+             .election_timeout_max = _cfg.election_timeout_max,
+             .heartbeat_interval = _cfg.heartbeat_interval,
+             .rpc_timeout = _cfg.rpc_timeout},
+            kythira::log_level::info));
+        _group = kythira::iam::k_iam_group_id;
         if (!_raft->has_group(_group)) {
+            std::vector<kythira::host_node_id> learners;
+            if (_cfg.replica) {
+                learners.push_back(_cfg.node_id);
+            }
             _raft->create_group(
-                kythira::shard_descriptor<std::uint64_t, std::string, kythira::host_node_id>{
-                    ._group_id = _group,
-                    ._range = kythira::shard_range<std::string>{._start = std::nullopt,
-                                                                ._end = std::nullopt},
-                    ._epoch = kythira::shard_epoch{},
-                    ._voters = std::move(voters)});
+                kythira::iam::iam_group_descriptor(_cfg.voter_ids(), std::move(learners)));
         }
         auto* node = _raft->group_node(_group);
         if (node == nullptr) {
             throw std::runtime_error("iam: the IAM group did not open on this node");
         }
-        _service = std::make_unique<service_type>(_cfg, _passphrase, *node, replica_hooks{},
+        auto* client = &host.client();
+        const bool tls = _preset ? _cfg.rpc_tls() : !_cfg.insecure_plaintext;
+        replica_hooks hooks{
+            .make_reachable = [this, client, tls](const kythira::host_node_id& id,
+                                                  const kythira::iam::replica_record& r) {
+                if (_on_replica) {
+                    _on_replica(id, r);
+                }
+                client->add_peer(id, kythira::iam::iam_raft_url(tls, r.rpc_host, r.rpc_port));
+            }};
+        if (_cfg.max_replicas == 0) {
+            hooks.make_reachable = nullptr;
+        }
+        _service = std::make_unique<service_type>(_cfg, _passphrase, *node, std::move(hooks),
                                                   "group=" + std::to_string(_group));
         _evaluator = std::make_shared<evaluator>(*this);
     }
@@ -378,28 +372,14 @@ public:
     void start(sn::module_registry& /*registry*/) override {
         _raft->start();
         _raft_running = true;
-        _driving = true;
-        _driver = std::thread([this] {
-            while (_driving.load(std::memory_order_acquire)) {
-                try {
-                    (void)_raft->tick();
-                } catch (const std::exception& e) {
-                    std::cerr << "[error] " << _cfg.log_name << ": tick failed: " << e.what()
-                              << "\n";
-                }
-                std::this_thread::sleep_for(std::chrono::milliseconds(10));
-            }
-        });
+        _driver.start(*_raft, _cfg.log_name);
         _service->start();
         _started = true;
     }
 
     void stop() override {
         _started = false;
-        _driving.store(false, std::memory_order_release);
-        if (_driver.joinable()) {
-            _driver.join();
-        }
+        _driver.stop();
         // The group first: stopping it rejects every pending proposal and
         // read a handler or the maintenance loop may be blocked on.
         if (_raft && _raft_running) {
@@ -483,13 +463,14 @@ private:
 
     config _cfg;
     std::string _passphrase;
+    replica_fn _on_replica;
+    bool _preset = false;
     std::unique_ptr<raft_host> _raft;
     std::uint64_t _group = 0;
     std::unique_ptr<service_type> _service;
     std::shared_ptr<evaluator> _evaluator;
     bool _raft_running = false;
-    std::atomic<bool> _driving{false};
-    std::thread _driver;
+    kythira::iam::iam_raft_driver _driver;
     std::atomic<bool> _started{false};
 };
 

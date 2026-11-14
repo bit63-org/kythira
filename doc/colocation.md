@@ -7,8 +7,9 @@ module (`.kiro/specs/service-colocation/`). `KYTHIRA_SERVICES` names them;
 `ledger_node`, `iam_node`) is still built and runs the same module code on
 its own.
 
-This page covers resource isolation (task 9). Packaging and moving a
-service between layouts follow with tasks 10 and 11.
+This page covers resource isolation (task 9) and IAM's group in both
+layouts (task 8). Packaging and moving a service between layouts follow
+with tasks 10 and 11.
 
 ## What each module has to itself
 
@@ -51,6 +52,22 @@ rises with every election one of them starts, so an alert on its rate
 catches a module whose heartbeats stall. `kythira_node_iam_test` holds
 every Kinesis request thread busy for twenty seconds and checks that
 neither Kinesis's nor IAM's sum moves on any member (Requirement 6.3).
+
+## IAM in either layout
+
+IAM's Raft group is one group on a multi-raft host in both layouts, at
+the same group id (`(5 << 56) | 1`), so `iam_node` and the IAM module of
+`kythira_node` keep the same files: `iam_node --data-dir` holds exactly
+what `kythira_node` keeps in `KYTHIRA_NODE_DATA_DIR/iam/`. Read replicas,
+`iam_node --replica` or a stand-alone gateway's embedded one, join either.
+`iam_node` from before task 8 kept a plain Raft group's files instead;
+`iam_node --convert-data-dir` converts them, with the whole cluster
+stopped (`services/iam/README.md`).
+
+One difference: `iam_node` binds each Raft certificate to one node id,
+from the reserved peer SAN it carries, while `kythira_node`'s one Raft
+listener accepts every certificate its CA chains, for every module. Give
+`kythira_node` a CA that issues only node certificates.
 
 ## What co-location does not isolate
 

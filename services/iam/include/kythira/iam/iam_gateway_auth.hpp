@@ -133,7 +133,7 @@ public:
         };
         h.has_key = [this](std::string_view id) {
             bool found = false;
-            _replica.replica().reader()(
+            _replica.reader()(
                 [&](const iam_state_machine& sm) { found = sm.access_key(id).second != nullptr; });
             return found;
         };

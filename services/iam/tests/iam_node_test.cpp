@@ -16,7 +16,9 @@
 //    signed routes ServiceUnavailable until they resume (task 13);
 //  - the leader is stopped, a new one serves writes, and the old one
 //    catches up on restart;
-//  - a member restarted with the wrong unseal passphrase exits.
+//  - a member restarted with the wrong unseal passphrase exits;
+//  - a data directory from before the multi-raft host is refused until
+//    --convert-data-dir converts it.
 
 #define BOOST_TEST_MODULE iam_node_test
 #include <boost/test/results_collector.hpp>
@@ -318,6 +320,17 @@ BOOST_AUTO_TEST_CASE(refuses_unsafe_configurations) {
                              pki.node_key(make_id(7)).string(), "--rpc-tls-ca", pki.ca.string()});
     BOOST_TEST(rc4 == 1);
     BOOST_TEST(out4.find("reserved peer SAN") != std::string::npos);
+    // A data directory from before IAM moved onto the multi-raft host,
+    // until --convert-data-dir has converted it (service-colocation 8b).
+    const auto old_dir = dir / "old-layout";
+    fs::create_directories(old_dir);
+    raft::write_private_file(old_dir / "term", "3");
+    auto old_args = base;
+    old_args[6] = old_dir.string();
+    old_args.insert(old_args.end(), {"--insecure-plaintext", "--rpc-address", "127.0.0.1"});
+    auto [rc5, out5] = run_capture(old_args, 20s);
+    BOOST_TEST(rc5 == 1);
+    BOOST_TEST(out5.find("--convert-data-dir") != std::string::npos, out5);
     std::error_code ec;
     fs::remove_all(dir, ec);
 }

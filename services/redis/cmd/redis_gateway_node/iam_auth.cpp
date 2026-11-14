@@ -14,7 +14,9 @@
 #include <kythira/iam/iam_redis_verifier.hpp>
 #include <kythira/iam/services/elasticache_actions.hpp>
 
+#include <raft/beast_http_transport_impl.hpp>
 #include <raft/host_node_id.hpp>
+#include <raft/multi_raft_impl.hpp>
 
 #include <cstdlib>
 #include <iostream>

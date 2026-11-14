@@ -8,3 +8,7 @@
 #
 # file                                   allowed core *_impl.hpp       why
 cmd/iam_node/iam_module.hpp            multi_raft_impl.hpp           instantiates IAM's multi-raft host
+tests/iam_embedded_replica_test.cpp      multi_raft_impl.hpp           instantiates the embedded IAM replica's host
+tests/iam_embedded_replica_test.cpp      beast_http_transport_impl.hpp instantiates the embedded IAM replica's transport
+cmd/iam_node/main.cpp                  multi_raft_impl.hpp           instantiates iam_node's multi-raft host
+cmd/iam_node/main.cpp                  beast_http_transport_impl.hpp instantiates iam_node's Beast transport

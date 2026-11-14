@@ -5,39 +5,47 @@
 
 /// @file iam_embedded_replica.hpp
 /// @brief A front end's whole IAM side in one object: a read replica of the
-///        IAM Raft group over mutual-TLS RPC, the unsealing key, the action
+///        IAM Raft group over mutual TLS, the unsealing key, the action
 ///        registry and the authorizer (`.kiro/specs/iam-compatible-auth/`
-///        Requirement 7.3, task 21).
-///
-/// `iam_replica` (task 13) is the learner; this wraps it with what every
-/// front end would otherwise build again from `iam_node`'s replica mode:
+///        Requirement 7.3, task 21; on a multi-raft host since
+///        `.kiro/specs/service-colocation/` task 8).
 ///
 ///   iam::embedded_replica_config cfg;   // from the front end's own flags
 ///   iam::embedded_replica replica(std::move(cfg));
 ///   replica.start();          // then `kythira-iam replica-add` admits it
 ///   iam::iam_redis_verifier v(replica.authorizer(), {...});
 ///
-/// The replica's RPC certificate must carry its node id's reserved peer
-/// SAN (`peer_identity_name`), as an `iam_node` member's does: the voters
-/// bind each registered replica's certificate to its id. Plaintext RPC is
-/// not offered: a front end's replica holds the unsealing passphrase.
+/// The replica is a learner of the IAM group (`iam_raft.hpp`) on its own
+/// multi-raft host and Raft listener, so it joins iam_node and the IAM
+/// module of kythira_node alike: the group id is the same in both. The
+/// voters' leader dials it at the address `replica-add` registered.
+///
+/// The replica's certificate must carry its node id's reserved peer SAN
+/// (`peer_identity_name`), as a member's does: the voters bind each
+/// registered replica's certificate to its id, and the replica accepts
+/// AppendEntries only from a certificate naming a voter. A kythira_node
+/// voter dials it as any peer, so there the certificate must also name the
+/// registered RPC host. Plaintext is not offered: a front end's replica
+/// holds the unsealing passphrase.
+///
+/// The translation unit that builds one includes
+/// raft/beast_http_transport_impl.hpp and raft/multi_raft_impl.hpp (a
+/// composition root, boundary-allow.txt).
 
 #include <kythira/iam/iam_admin.hpp>
 #include <kythira/iam/iam_authorizer.hpp>
+#include <kythira/iam/iam_raft.hpp>
 #include <kythira/iam/iam_replica.hpp>
 #include <kythira/iam/iam_service_registry.hpp>
 #include <kythira/iam/iam_state_machine.hpp>
 
 #include <raft/ca_http_helpers.hpp>
 #include <raft/console_logger.hpp>
-#include <raft/file_persistence.hpp>
 #include <raft/host_node_id.hpp>
-#include <raft/membership.hpp>
-#include <raft/metrics.hpp>
-#include <raft/quorum_management.hpp>
-#include <raft/raft.hpp>
-#include <raft/tcp_raft_types.hpp>
-#include <raft/tls_tcp_rpc.hpp>
+#include <raft/multi_raft.hpp>
+#include <raft/node_core.hpp>
+#include <raft/node_host.hpp>
+#include <raft/service_module.hpp>
 
 #include <chrono>
 #include <cstdint>
@@ -50,6 +58,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -145,16 +154,14 @@ struct embedded_replica_config {
     return line;
 }
 
-/// The Raft types of the embedded replica: TLS TCP RPC and file persistence,
-/// as an `iam_node` member with RPC TLS.
-struct embedded_replica_types : basic_tcp_raft_types<host_node_id> {
-    using state_machine_type = iam_state_machine;
-    using network_client_type = basic_tls_tcp_rpc_client<host_node_id>;
-    using network_server_type = basic_tls_tcp_rpc_server<host_node_id>;
-};
-
 class embedded_replica {
 public:
+    using stack_type = iam_raft_stack;
+    using host_type =
+        service_node::node_host<stack_type::client_type, stack_type::server_type, host_node_id>;
+    using types = iam_host_types<stack_type::client_type, typename host_type::view_type>;
+    using raft_host = multi_raft<types, std::string, std::uint64_t>;
+
     /// Throws std::invalid_argument or std::runtime_error on a bad
     /// configuration; nothing is listening until `start()`.
     explicit embedded_replica(embedded_replica_config cfg,
@@ -178,13 +185,40 @@ public:
             register_actions(_registry);
         }
         std::filesystem::create_directories(_cfg.data_dir);
-        _replica = std::make_unique<iam_replica<embedded_replica_types>>(
-            make_node_config(), voter_ids(), _cfg.max_staleness);
+
+        std::vector<host_node_id> trusted = voter_ids();
+        trusted.push_back(_cfg.node_id);
+        _trust = std::make_shared<iam_raft_trust>(iam_read_file(_cfg.rpc_tls_ca), trusted);
+        std::unordered_map<host_node_id, std::string> urls;
+        for (const auto& v : _cfg.voters) {
+            urls.emplace(v.id, iam_raft_url(true, v.rpc_host, v.rpc_port));
+        }
+        _stack = std::make_unique<stack_type>(
+            _cfg.rpc_address, _cfg.rpc_port, std::move(urls),
+            iam_raft_tls{_cfg.rpc_tls_cert, _cfg.rpc_tls_key, _cfg.rpc_tls_ca}, _trust);
+        service_node::node_config node;
+        node.node_id = host_node_id_text(_cfg.node_id);
+        node.data_dir = _cfg.data_dir;
+        node.raft_bind = _cfg.rpc_address;
+        node.raft_port = _cfg.rpc_port;
+        _host = std::make_unique<host_type>(node, _cfg.node_id, _stack->client(), _stack->server());
+        const auto space = service_node::group_space::standalone(k_iam_module_number);
+        _raft = std::make_unique<raft_host>(iam_raft_config<types>(
+            _cfg.node_id, typename types::network_client_type{_host->client()},
+            _host->server_for(space), _cfg.data_dir, _cfg.partition, {}, _cfg.log));
+        if (!_raft->has_group(k_iam_group_id)) {
+            _raft->create_group(iam_group_descriptor(voter_ids(), {_cfg.node_id}));
+        }
+        _node = _raft->group_node(k_iam_group_id);
+        if (_node == nullptr) {
+            throw std::runtime_error("the IAM replica's group did not open");
+        }
+        _freshness = std::make_unique<replica_freshness>(
+            [n = _node] { return n->last_caught_up(); }, _cfg.max_staleness);
         _authz = std::make_unique<iam_authorizer>(
-            _replica->reader(),
-            [this](std::string_view salt) -> const seal_key& { return _keks.get(salt); },
+            reader(), [this](std::string_view salt) -> const seal_key& { return _keks.get(salt); },
             _registry);
-        _authz->set_freshness([r = _replica.get()] { return r->freshness().fresh(); });
+        _authz->set_freshness([f = _freshness.get()] { return f->fresh(); });
     }
 
     embedded_replica(const embedded_replica&) = delete;
@@ -193,18 +227,39 @@ public:
     auto operator=(embedded_replica&&) -> embedded_replica& = delete;
     ~embedded_replica() { stop(); }
 
-    void start() { _replica->start(); }
-    void stop() {
-        if (_replica) {
-            _replica->stop();
+    /// Joins as a learner: it never campaigns, and applies what the
+    /// leader sends once `replica-add` has registered it.
+    void start() {
+        if (_running) {
+            return;
         }
+        _raft->start();
+        _driver.start(*_raft, "iam replica");
+        _running = true;
+    }
+
+    void stop() {
+        if (!_running) {
+            if (_stack) {
+                _stack->shutdown();
+            }
+            return;
+        }
+        _running = false;
+        _driver.stop();
+        _raft->stop();
+        _stack->shutdown();
     }
 
     [[nodiscard]] auto authorizer() -> iam_authorizer& { return *_authz; }
-    [[nodiscard]] auto freshness() const -> const replica_freshness& {
-        return _replica->freshness();
+    [[nodiscard]] auto freshness() const -> const replica_freshness& { return *_freshness; }
+
+    /// Runs `f` on the applied IAM state, under the group's lock.
+    [[nodiscard]] auto reader() -> state_reader {
+        return [n = _node](const std::function<void(const iam_state_machine&)>& f) {
+            n->with_state_machine([&](iam_state_machine& sm) { f(sm); });
+        };
     }
-    [[nodiscard]] auto replica() -> iam_replica<embedded_replica_types>& { return *_replica; }
 
 private:
     [[nodiscard]] auto voter_ids() const -> std::vector<host_node_id> {
@@ -216,56 +271,18 @@ private:
         return ids;
     }
 
-    [[nodiscard]] static auto read_file(const std::string& path) -> std::string {
-        std::ifstream f(path, std::ios::binary);
-        if (!f) {
-            throw std::runtime_error("cannot read " + path);
-        }
-        return {std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>()};
-    }
-
-    [[nodiscard]] auto make_node_config() -> node_config<embedded_replica_types> {
-        basic_tls_tcp_rpc_config<host_node_id> tls;
-        tls.cert_path = _cfg.rpc_tls_cert;
-        tls.key_path = _cfg.rpc_tls_key;
-        std::map<std::string, host_node_id> ids;
-        ids[raft::testing::peer_identity_name(_cfg.node_id)] = _cfg.node_id;
-        for (const auto& v : _cfg.voters) {
-            ids[raft::testing::peer_identity_name(v.id)] = v.id;
-        }
-        tls.trust_policy = ca_root_only<host_node_id>(read_file(_cfg.rpc_tls_ca))
-                               .binding_peer_node_ids(std::move(ids));
-        embedded_replica_types::network_client_type client(tls);
-        for (const auto& v : _cfg.voters) {
-            client.add_peer(v.id, v.rpc_host, v.rpc_port);
-        }
-        embedded_replica_types::network_server_type server(_cfg.rpc_port, tls, _cfg.rpc_address);
-        // A learner never campaigns; these only matter if it is ever
-        // promoted, which the IAM leader never does.
-        raft_configuration rc;
-        desired_topology<std::string> topology;
-        topology.groups.push_back(
-            {.group_id = std::string{}, .target_count = _cfg.voters.size(), .learner_capacity = 1});
-        return node_config<embedded_replica_types>{
-            .node_id = _cfg.node_id,
-            .network_client = std::move(client),
-            .network_server = std::move(server),
-            .persistence = file_persistence_engine<host_node_id>(_cfg.data_dir),
-            .logger = console_logger{_cfg.log},
-            .metrics = noop_metrics{},
-            .membership = default_membership_manager<host_node_id>{},
-            .state_machine = iam_state_machine(iam_config{.partition = _cfg.partition}),
-            .config = rc,
-            .quorum_manager =
-                no_op_quorum_manager<host_node_id, std::string, std::string>(std::move(topology)),
-        };
-    }
-
     embedded_replica_config _cfg;
     admin::kek_cache _keks;
     iam_service_registry _registry;
-    std::unique_ptr<iam_replica<embedded_replica_types>> _replica;
+    std::shared_ptr<iam_raft_trust> _trust;
+    std::unique_ptr<stack_type> _stack;
+    std::unique_ptr<host_type> _host;
+    std::unique_ptr<raft_host> _raft;
+    typename raft_host::group_node_type* _node = nullptr;
+    std::unique_ptr<replica_freshness> _freshness;
     std::unique_ptr<iam_authorizer> _authz;
+    iam_raft_driver _driver;
+    bool _running = false;
 };
 
 }  // namespace kythira::iam

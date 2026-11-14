@@ -16,3 +16,5 @@ cmd/dynamodb_gateway_node/run_cluster.hpp  beast_http_transport_impl.hpp instant
 # CONFIG_DYNAMODB_GATEWAY_IAM build:
 # file                                   module-adapter  header                                why
 cmd/dynamodb_gateway_node/iam_auth.cpp   module-adapter  kythira/iam/iam_gateway_auth.hpp      the IAM replica requests are signed against
+cmd/dynamodb_gateway_node/iam_auth.cpp   multi_raft_impl.hpp           instantiates the embedded IAM replica's host
+cmd/dynamodb_gateway_node/iam_auth.cpp   beast_http_transport_impl.hpp instantiates the embedded IAM replica's transport
