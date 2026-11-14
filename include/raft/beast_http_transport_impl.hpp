@@ -517,11 +517,13 @@ inline auto plain_beast_connection::close() -> void {
 }
 
 inline tls_beast_connection::tls_beast_connection(beast::ssl_stream<beast::tcp_stream> stream,
-                                                  std::shared_ptr<void> context_keeper)
+                                                  std::shared_ptr<void> context_keeper,
+                                                  std::function<bool(X509*)> peer_check)
     : _context_keeper(std::move(context_keeper)),
       _stream(std::move(stream)),
       _executor(std::make_shared<asio_strand_executor>(
-          beast::get_lowest_layer(_stream).get_executor(), _context_keeper)) {}
+          beast::get_lowest_layer(_stream).get_executor(), _context_keeper)),
+      _peer_check(std::move(peer_check)) {}
 
 inline auto tls_beast_connection::is_open() const -> bool {
     return beast::get_lowest_layer(_stream).socket().is_open();
@@ -535,14 +537,25 @@ inline auto tls_beast_connection::set_timeout(std::chrono::milliseconds timeout)
 inline auto tls_beast_connection::connect(const std::vector<net::ip::tcp::endpoint>& eps,
                                           const std::string& host)
     -> kythira::future_default<kythira::unit> {
-    if (auto error = beast_bind_peer_identity(_stream.native_handle(), host)) {
-        return beast_exceptional_future<kythira::unit>(
-            std::make_exception_ptr(kythira::ssl_configuration_error(*error)));
+    if (!_peer_check) {
+        if (auto error = beast_bind_peer_identity(_stream.native_handle(), host)) {
+            return beast_exceptional_future<kythira::unit>(
+                std::make_exception_ptr(kythira::ssl_configuration_error(*error)));
+        }
     }
     // Keeps this connection alive across connect and handshake; see send().
     return async_connect_kf(beast::get_lowest_layer(_stream), eps, _executor.get())
         .thenValue([self = shared_from_this(), this](kythira::unit) {
             return async_client_handshake_kf(_stream, _executor.get());
+        })
+        .thenValue([self = shared_from_this(), this](kythira::unit) -> kythira::unit {
+            // After the handshake, so the chain has been verified: the check
+            // only decides which node the verified certificate is.
+            if (_peer_check && !_peer_check(SSL_get0_peer_certificate(_stream.native_handle()))) {
+                throw kythira::certificate_validation_error(
+                    "the server's certificate does not name the node dialled");
+            }
+            return kythira::unit{};
         });
 }
 
@@ -592,14 +605,26 @@ boost_beast_client<Types, NodeId>::boost_beast_client(
     boost_beast_client_config config, metrics_type metrics, std::shared_ptr<void> context_keeper)
     : _context_keeper(std::move(context_keeper)),
       _ioc(ioc),
-      _node_id_to_url(std::move(node_id_to_url_map)),
+      _node_id_to_url(
+          std::make_shared<beast_detail::url_table<NodeId>>(std::move(node_id_to_url_map))),
       _config(std::move(config)),
       _metrics(std::move(metrics)) {
     validate_certificate_files();
-    bool any_https = std::ranges::any_of(
-        _node_id_to_url, [](const auto& entry) { return entry.second.starts_with("https://"); });
-    if (any_https) {
+    if (_node_id_to_url->any_https()) {
         _ssl_ctx.emplace(build_ssl_context());
+    }
+}
+
+template<typename Types, typename NodeId>
+requires kythira::future_default_transport_types<Types>
+auto boost_beast_client<Types, NodeId>::add_peer(const NodeId& id, std::string url) -> void {
+    const bool https = url.starts_with("https://");
+    _node_id_to_url->set(id, std::move(url));
+    if (https) {
+        std::lock_guard<std::mutex> lock(_mutex);
+        if (!_ssl_ctx.has_value()) {
+            _ssl_ctx.emplace(build_ssl_context());
+        }
     }
 }
 
@@ -770,13 +795,13 @@ inline auto authority_of(const std::string& url) -> url_authority {
 // What note_peer_seen() does, on a URL table of its own so the server's
 // handler can outlive the client.
 template<typename NodeId>
-auto learn_url_address(const std::unordered_map<NodeId, std::string>& urls, const NodeId& id,
+auto learn_url_address(const url_table<NodeId>& urls, const NodeId& id,
                        const sockaddr_storage& from, socklen_t len) -> void {
-    auto url_it = urls.find(id);
-    if (url_it == urls.end()) {
+    auto url = urls.find(id);
+    if (!url) {
         return;
     }
-    auto where = authority_of(url_it->second);
+    auto where = authority_of(*url);
     unsigned long port = 0;
     try {
         port = std::stoul(where.port);
@@ -799,8 +824,7 @@ requires kythira::future_default_transport_types<Types>
 auto boost_beast_client<Types, NodeId>::note_peer_seen(const NodeId& id,
                                                        const sockaddr_storage& from, socklen_t len)
     -> void {
-    // _node_id_to_url is immutable after construction, so read without the lock.
-    beast_detail::learn_url_address(_node_id_to_url, id, from, len);
+    beast_detail::learn_url_address(*_node_id_to_url, id, from, len);
 }
 
 template<typename Types, typename NodeId>
@@ -808,7 +832,7 @@ requires kythira::future_default_transport_types<Types>
 auto boost_beast_client<Types, NodeId>::peer_seen_handler() const
     -> std::function<void(const NodeId&, const sockaddr_storage&, socklen_t)> {
     return [urls = _node_id_to_url](const NodeId& id, const sockaddr_storage& from, socklen_t len) {
-        beast_detail::learn_url_address(urls, id, from, len);
+        beast_detail::learn_url_address(*urls, id, from, len);
     };
 }
 
@@ -817,13 +841,13 @@ requires kythira::future_default_transport_types<Types>
 auto boost_beast_client<Types, NodeId>::resolve_target(const NodeId& target,
                                                        std::chrono::milliseconds timeout)
     -> resolved_target {
-    // Immutable after construction, so read without the lock.
-    auto url_it = _node_id_to_url.find(target);
-    if (url_it == _node_id_to_url.end()) {
+    // The table has its own lock; _mutex is not held here.
+    const auto found = _node_id_to_url->find(target);
+    if (!found) {
         throw std::runtime_error(std::format("No URL mapping found for node {}",
                                              node_id_traits<NodeId>::to_text(target)));
     }
-    const std::string& url = url_it->second;
+    const std::string& url = *found;
     auto [host, port_str] = beast_detail::authority_of(url);
 
     // Synchronous, on the calling thread, but outside _mutex and bounded by
@@ -852,7 +876,7 @@ auto boost_beast_client<Types, NodeId>::make_connection(const NodeId& target,
                                                         std::chrono::milliseconds timeout)
     -> pooled_connection {
     auto where = resolve_target(target, timeout);
-    const bool is_https = _node_id_to_url.at(target).starts_with("https://");
+    const bool is_https = _node_id_to_url->find(target).value_or("").starts_with("https://");
 
     std::lock_guard<std::mutex> lock(_mutex);
     std::shared_ptr<beast_detail::beast_connection> connection;
@@ -862,9 +886,15 @@ auto boost_beast_client<Types, NodeId>::make_connection(const NodeId& target,
                 std::format("Node {} uses https:// but no TLS material is configured",
                             node_id_traits<NodeId>::to_text(target)));
         }
+        std::function<bool(X509*)> check;
+        if (_peer_check) {
+            check = [peer_check = _peer_check, target](X509* presented) {
+                return peer_check(presented, target);
+            };
+        }
         connection = std::make_shared<beast_detail::tls_beast_connection>(
             beast::ssl_stream<beast::tcp_stream>(net::make_strand(_ioc), *_ssl_ctx),
-            _context_keeper);
+            _context_keeper, std::move(check));
     } else {
         connection = std::make_shared<beast_detail::plain_beast_connection>(
             beast::tcp_stream(net::make_strand(_ioc)), _context_keeper);
@@ -1588,8 +1618,15 @@ private:
         if (!ep_ec) {
             from = remote;
         }
+        // The client certificate the handshake verified, which the
+        // server's peer binding checks against the sender; none over plain
+        // HTTP. Owned by the SSL object, which outlives this call.
+        X509* presented = nullptr;
+        if constexpr (std::is_same_v<Stream, beast::ssl_stream<beast::tcp_stream>>) {
+            presented = SSL_get0_peer_certificate(_stream.native_handle());
+        }
         _server->dispatch(target, body, request_media_type, accepted, response_body, status_code,
-                          response_media_type, from);
+                          response_media_type, from, presented);
 
         // Heap-allocated and kept alive via the thenValue continuation's
         // capture, not a stack local: beast_http::async_write (inside
@@ -2004,14 +2041,11 @@ auto boost_beast_server<Types, NodeId>::session_finished(std::size_t session_id)
 
 template<typename Types, typename NodeId>
 requires kythira::future_default_transport_types<Types>
-auto boost_beast_server<Types, NodeId>::dispatch(std::string_view target,
-                                                 const std::vector<std::byte>& body,
-                                                 const std::string& request_media_type,
-                                                 const std::vector<std::string>& accepted,
-                                                 std::string& response_body, unsigned& status_code,
-                                                 std::string& response_media_type,
-                                                 const std::optional<net::ip::tcp::endpoint>& from)
-    -> void {
+auto boost_beast_server<Types, NodeId>::dispatch(
+    std::string_view target, const std::vector<std::byte>& body,
+    const std::string& request_media_type, const std::vector<std::string>& accepted,
+    std::string& response_body, unsigned& status_code, std::string& response_media_type,
+    const std::optional<net::ip::tcp::endpoint>& from, X509* presented) -> void {
     // Error bodies are plain text on every path below; the success path
     // overwrites this with whatever was negotiated.
     response_media_type = "text/plain";
@@ -2075,6 +2109,18 @@ auto boost_beast_server<Types, NodeId>::dispatch(std::string_view target,
         } catch (const std::exception& e) {
             status_code = 400;
             response_body = std::format("Bad Request: {}", e.what());
+            return;
+        }
+        // Before the peer-seen handler too: a certificate that is not the
+        // sender must not teach the client where the sender is.
+        if (_peer_binding && !_peer_binding(presented, sender(request))) {
+            status_code = 403;
+            response_body = "Forbidden: the client certificate does not name the sender";
+            auto error_metric = _metrics;
+            error_metric.set_metric_name("beast_http.server.error");
+            error_metric.add_dimension("error_type", "peer_not_bound");
+            error_metric.add_one();
+            error_metric.emit();
             return;
         }
         if (_peer_seen && from) {

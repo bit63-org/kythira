@@ -81,6 +81,9 @@
 #include <boost/beast/http.hpp>
 #include <boost/beast/ssl.hpp>
 
+#include <openssl/x509.h>
+
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -91,6 +94,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <shared_mutex>
 #include <stop_token>
 #include <string>
 #include <string_view>
@@ -631,8 +635,13 @@ private:
 class tls_beast_connection final : public beast_connection {
 public:
     /// @param context_keeper  see `plain_beast_connection`'s -- same reason.
+    /// @param peer_check  when set, decides whether the server's
+    ///     certificate is the peer this connection was dialled for, in place
+    ///     of matching it to the URL's host (`beast_bind_peer_identity`); the
+    ///     chain is still verified against the CA either way.
     explicit tls_beast_connection(beast::ssl_stream<beast::tcp_stream> stream,
-                                  std::shared_ptr<void> context_keeper = {});
+                                  std::shared_ptr<void> context_keeper = {},
+                                  std::function<bool(X509*)> peer_check = {});
 
     [[nodiscard]] auto is_open() const -> bool override;
     auto set_timeout(std::chrono::milliseconds timeout) -> void override;
@@ -650,6 +659,39 @@ private:
     std::shared_ptr<asio_strand_executor> _executor;
     // See plain_beast_connection::_timeout above -- same reason.
     std::chrono::milliseconds _timeout{};
+    std::function<bool(X509*)> _peer_check;
+};
+
+/// The client's URL per node: fixed at construction, plus any
+/// `add_peer()` adds later. Shared with the peer-seen handler, which can
+/// outlive the client.
+template<typename NodeId> class url_table {
+public:
+    explicit url_table(std::unordered_map<NodeId, std::string> urls) : _urls(std::move(urls)) {}
+
+    [[nodiscard]] auto find(const NodeId& id) const -> std::optional<std::string> {
+        const std::shared_lock lock(_mutex);
+        const auto it = _urls.find(id);
+        if (it == _urls.end()) {
+            return std::nullopt;
+        }
+        return it->second;
+    }
+
+    void set(const NodeId& id, std::string url) {
+        const std::unique_lock lock(_mutex);
+        _urls.insert_or_assign(id, std::move(url));
+    }
+
+    [[nodiscard]] auto any_https() const -> bool {
+        const std::shared_lock lock(_mutex);
+        return std::ranges::any_of(
+            _urls, [](const auto& entry) { return entry.second.starts_with("https://"); });
+    }
+
+private:
+    mutable std::shared_mutex _mutex;
+    std::unordered_map<NodeId, std::string> _urls;
 };
 
 }  // namespace beast_detail
@@ -768,11 +810,25 @@ public:
     auto note_peer_seen(const NodeId& id, const sockaddr_storage& from, socklen_t len) -> void;
 
     /// @brief `note_peer_seen()` packaged for
-    ///     `boost_beast_server::set_peer_seen_handler()`. It carries its own
-    ///     copy of the URL table rather than referring to this client, so it
-    ///     outlives any move or destruction of the client.
+    ///     `boost_beast_server::set_peer_seen_handler()`. It shares the URL
+    ///     table (peers `add_peer()` adds included) rather than referring to
+    ///     this client, so it outlives any move or destruction of the client.
     [[nodiscard]] auto peer_seen_handler() const
         -> std::function<void(const NodeId&, const sockaddr_storage&, socklen_t)>;
+
+    /// @brief Names (or renames) where node `id` is dialled, e.g. a learner
+    ///     registered after the client was built. An https:// URL on a client
+    ///     built with none builds the TLS context then.
+    auto add_peer(const NodeId& id, std::string url) -> void;
+
+    /// @brief Decides, after each TLS handshake, whether the server's
+    ///     certificate is the node it was dialled as (`target`), in place of
+    ///     matching the certificate to the URL's host. The chain is still
+    ///     verified against `ca_cert_path`. A refused server fails the RPC
+    ///     with `certificate_validation_error`. Set it before the first RPC;
+    ///     whatever it reads can change later under its own lock.
+    using peer_check_fn = std::function<bool(X509* presented, const NodeId& target)>;
+    auto set_peer_check(peer_check_fn check) -> void { _peer_check = std::move(check); }
 
     /// @brief Validates the configured TLS material, then drops every pooled
     ///     connection so subsequent RPCs build fresh ones using the reloaded
@@ -924,7 +980,8 @@ private:
     /// What each peer last answered in. Advisory only — the full `Accept` list
     /// still rides on every request.
     peer_capability_cache<NodeId> _capability_cache;
-    std::unordered_map<NodeId, std::string> _node_id_to_url;
+    std::shared_ptr<beast_detail::url_table<NodeId>> _node_id_to_url;
+    peer_check_fn _peer_check;
     boost_beast_client_config _config;
     metrics_type _metrics;
     std::optional<net::ssl::context> _ssl_ctx;
@@ -1127,7 +1184,8 @@ public:
                   const std::string& request_media_type, const std::vector<std::string>& accepted,
                   std::string& response_body, unsigned& status_code,
                   std::string& response_media_type,
-                  const std::optional<net::ip::tcp::endpoint>& from = std::nullopt) -> void;
+                  const std::optional<net::ip::tcp::endpoint>& from = std::nullopt,
+                  X509* presented = nullptr) -> void;
 
     using peer_seen_fn = std::function<void(const NodeId&, const sockaddr_storage&, socklen_t)>;
 
@@ -1138,6 +1196,17 @@ public:
     ///     the intended handler: it records where a peer can be dialled
     ///     while its name does not resolve. Set it before `start()`.
     auto set_peer_seen_handler(peer_seen_fn handler) -> void { _peer_seen = std::move(handler); }
+
+    using peer_binding_fn = std::function<bool(X509* presented, const NodeId& sender)>;
+
+    /// @brief Decides whether the client certificate a request came with
+    ///     (`nullptr` over plain HTTP) may speak for the node the request
+    ///     names as its sender, the same node the peer-seen handler gets.
+    ///     A refused request is answered 403 before its handler or the
+    ///     peer-seen handler runs. Without it any certificate the CA chains
+    ///     is every node. Set it before `start()`; whatever it reads can
+    ///     change later under its own lock.
+    auto set_peer_binding(peer_binding_fn binding) -> void { _peer_binding = std::move(binding); }
 
     /// @brief The media type used when a peer declares none.
     ///
@@ -1197,6 +1266,7 @@ private:
     std::function<kythira::timeout_now_response<>(const kythira::timeout_now_request<NodeId>&)>
         _timeout_now_handler;
     peer_seen_fn _peer_seen;
+    peer_binding_fn _peer_binding;
     /// `max_concurrent_connections`, shared by every acceptor. A
     /// `shared_ptr` because each session's slot keeps it alive, so a session
     /// torn down after this server is gone still releases safely.

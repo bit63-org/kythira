@@ -12,12 +12,16 @@
 #include "beast_test_thread_pool.hpp"
 #include "test_ports.hpp"
 
+#include <openssl/x509.h>
+
+#include <atomic>
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
 #include <random>
 #include <string>
 #include <thread>
+#include <tuple>
 #include <unordered_map>
 #include <vector>
 
@@ -32,7 +36,7 @@
 // concurrently under `ctest -j`.
 namespace {
 constexpr const char* test_bind_address = "127.0.0.1";
-const std::uint16_t test_bind_port_base = kythira::testing::free_port_block(7);
+const std::uint16_t test_bind_port_base = kythira::testing::free_port_block(11);
 constexpr std::uint64_t test_node_id = 1;
 
 using test_transport_types =
@@ -317,6 +321,180 @@ BOOST_AUTO_TEST_CASE(unverified_tls_ignores_certificate_name) {
         std::move(client.send_request_vote(test_node_id, req, std::chrono::milliseconds(30000)))
             .get();
     BOOST_TEST(resp.term() == 8);
+
+    server.stop();
+}
+
+// The CN of `cert`, for the binding checks below.
+auto common_name(X509* cert) -> std::string {
+    if (cert == nullptr) {
+        return {};
+    }
+    char buf[256] = {};
+    const int n = X509_NAME_get_text_by_NID(X509_get_subject_name(cert), NID_commonName, buf,
+                                            static_cast<int>(sizeof buf));
+    return n > 0 ? std::string(buf, static_cast<std::size_t>(n)) : std::string{};
+}
+
+auto vote_from(kythira::boost_beast_client<test_transport_types>& client, std::uint64_t candidate,
+               std::uint64_t term) -> bool {
+    kythira::request_vote_request<> req{};
+    req._term = term;
+    req._candidate_id = candidate;
+    try {
+        return std::move(
+                   client.send_request_vote(test_node_id, req, std::chrono::milliseconds(30000)))
+                   .get()
+                   .term() == term;
+    } catch (const std::exception& e) {
+        BOOST_TEST_MESSAGE("vote from " << candidate << " failed: " << e.what());
+        return false;
+    }
+}
+
+// The server's peer binding sees the verified client certificate and the
+// sender the request names, and a request it refuses never reaches the
+// handler: a certificate that chains to the CA speaks only for its node.
+BOOST_AUTO_TEST_CASE(peer_binding_refuses_a_sender_the_certificate_does_not_name) {
+    temp_tls_material tls;
+
+    boost::asio::io_context ioc;
+    kythira::testing::io_thread_pool io_threads(ioc, 2);
+
+    auto port = static_cast<std::uint16_t>(test_bind_port_base + 7);
+    kythira::boost_beast_server_config server_config;
+    server_config.enable_ssl = true;
+    server_config.ssl_cert_path = tls.cert_path.string();
+    server_config.ssl_key_path = tls.key_path.string();
+    server_config.ca_cert_path = tls.cert_path.string();
+    server_config.require_client_cert = true;
+    kythira::boost_beast_server<test_transport_types> server(
+        ioc, test_bind_address, port, server_config, kythira::noop_metrics{});
+    std::atomic<int> handled{0};
+    server.register_request_vote_handler(
+        [&handled](const kythira::request_vote_request<>& req) -> kythira::request_vote_response<> {
+            ++handled;
+            kythira::request_vote_response<> resp{};
+            resp._term = req.term();
+            return resp;
+        });
+    std::atomic<int> seen{0};
+    server.set_peer_seen_handler(
+        [&seen](const std::uint64_t&, const sockaddr_storage&, socklen_t) { ++seen; });
+    // The test certificate's CN is 127.0.0.1; it is node 1 and nobody else.
+    server.set_peer_binding([](X509* presented, const std::uint64_t& sender) {
+        return common_name(presented) == "127.0.0.1" && sender == 1;
+    });
+    server.start();
+
+    kythira::boost_beast_client_config client_config;
+    client_config.enable_ssl_verification = true;
+    client_config.ca_cert_path = tls.cert_path.string();
+    client_config.client_cert_path = tls.cert_path.string();
+    client_config.client_key_path = tls.key_path.string();
+    std::unordered_map<std::uint64_t, std::string> node_map{
+        {test_node_id, "https://127.0.0.1:" + std::to_string(port)}};
+    kythira::boost_beast_client<test_transport_types> client(ioc, node_map, client_config,
+                                                             kythira::noop_metrics{});
+
+    BOOST_TEST(vote_from(client, 1, 61));
+    BOOST_TEST(handled.load() == 1);
+    BOOST_TEST(seen.load() == 1);
+    BOOST_TEST(!vote_from(client, 2, 62));
+    BOOST_TEST(handled.load() == 1);
+    BOOST_TEST(seen.load() == 1);
+
+    server.stop();
+}
+
+// Over plain HTTP there is no certificate: a bound server refuses every
+// sender rather than taking the request's word for it.
+BOOST_AUTO_TEST_CASE(peer_binding_refuses_plaintext_requests) {
+    boost::asio::io_context ioc;
+    kythira::testing::io_thread_pool io_threads(ioc, 2);
+
+    auto port = static_cast<std::uint16_t>(test_bind_port_base + 8);
+    kythira::boost_beast_server<test_transport_types> server(ioc, test_bind_address, port,
+                                                             kythira::boost_beast_server_config{},
+                                                             kythira::noop_metrics{});
+    register_echo_handlers(server);
+    server.set_peer_binding(
+        [](X509* presented, const std::uint64_t&) { return presented != nullptr; });
+    server.start();
+
+    std::unordered_map<std::uint64_t, std::string> node_map{
+        {test_node_id, "http://127.0.0.1:" + std::to_string(port)}};
+    kythira::boost_beast_client<test_transport_types> client(
+        ioc, node_map, kythira::boost_beast_client_config{}, kythira::noop_metrics{});
+    BOOST_TEST(!vote_from(client, 1, 63));
+
+    server.stop();
+}
+
+// With a peer check the client decides which node a verified certificate
+// is, in place of matching it to the URL's host: a certificate naming
+// another host is accepted when the check says it is the node dialled, and
+// a certificate naming the host is refused when the check says it is not.
+BOOST_AUTO_TEST_CASE(peer_check_replaces_the_host_name_match) {
+    temp_tls_material other("node-1", "DNS:other-node.example");
+    temp_tls_material right;
+    for (const auto& [tls, expect_cn, should_pass] :
+         {std::tuple{&other, std::string("node-1"), true},
+          std::tuple{&right, std::string("node-1"), false}}) {
+        boost::asio::io_context ioc;
+        kythira::testing::io_thread_pool io_threads(ioc, 2);
+        auto port = static_cast<std::uint16_t>(test_bind_port_base + 9);
+        kythira::boost_beast_server_config server_config;
+        server_config.enable_ssl = true;
+        server_config.ssl_cert_path = tls->cert_path.string();
+        server_config.ssl_key_path = tls->key_path.string();
+        kythira::boost_beast_server<test_transport_types> server(
+            ioc, test_bind_address, port, server_config, kythira::noop_metrics{});
+        register_echo_handlers(server);
+        server.start();
+
+        kythira::boost_beast_client_config client_config;
+        client_config.enable_ssl_verification = true;
+        client_config.ca_cert_path = tls->cert_path.string();
+        std::unordered_map<std::uint64_t, std::string> node_map{
+            {test_node_id, "https://127.0.0.1:" + std::to_string(port)}};
+        kythira::boost_beast_client<test_transport_types> client(ioc, node_map, client_config,
+                                                                 kythira::noop_metrics{});
+        std::atomic<int> checked{0};
+        client.set_peer_check([&checked, cn = expect_cn](X509* presented, const std::uint64_t& id) {
+            ++checked;
+            return id == test_node_id && common_name(presented) == cn;
+        });
+        BOOST_TEST(vote_from(client, 1, 64) == should_pass);
+        BOOST_TEST(checked.load() == 1);
+        server.stop();
+    }
+}
+
+// A node named after the client was built, on a client built with no
+// https:// peer at all, is reached over TLS.
+BOOST_AUTO_TEST_CASE(add_peer_reaches_a_node_named_later) {
+    temp_tls_material tls;
+    boost::asio::io_context ioc;
+    kythira::testing::io_thread_pool io_threads(ioc, 2);
+    auto port = static_cast<std::uint16_t>(test_bind_port_base + 10);
+    kythira::boost_beast_server_config server_config;
+    server_config.enable_ssl = true;
+    server_config.ssl_cert_path = tls.cert_path.string();
+    server_config.ssl_key_path = tls.key_path.string();
+    kythira::boost_beast_server<test_transport_types> server(
+        ioc, test_bind_address, port, server_config, kythira::noop_metrics{});
+    register_echo_handlers(server);
+    server.start();
+
+    kythira::boost_beast_client_config client_config;
+    client_config.enable_ssl_verification = true;
+    client_config.ca_cert_path = tls.cert_path.string();
+    kythira::boost_beast_client<test_transport_types> client(ioc, {}, client_config,
+                                                             kythira::noop_metrics{});
+    BOOST_TEST(!vote_from(client, 1, 65));
+    client.add_peer(test_node_id, "https://127.0.0.1:" + std::to_string(port));
+    BOOST_TEST(vote_from(client, 1, 66));
 
     server.stop();
 }
