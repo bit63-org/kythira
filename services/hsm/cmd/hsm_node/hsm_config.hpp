@@ -85,6 +85,13 @@ struct hsm_options {
     std::string audit_ledger_cert;
     std::string audit_ledger_key;
     std::string audit_ledger_ca;
+    /// IAM authorization for tokens (task 14b): an identity that is an IAM
+    /// user or role ARN is authorized with hsm: actions on the token's ARN
+    /// (hsm_iam.hpp) instead of by the bindings.
+    bool iam{false};
+    std::string iam_partition{"aws"};
+    std::string iam_region{"local"};
+    std::chrono::milliseconds iam_cache{10000};
     /// Node unseal (task 8): how this node's share is sealed at rest
     /// ("file") and, for "file", the key's path (default data_dir/share.key).
     std::string share_sealer{"file"};

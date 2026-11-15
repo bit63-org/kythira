@@ -16,7 +16,12 @@
 // as PKCS#11 has them: every session the application has on the token
 // shares one login state, and closing its last session there logs it out.
 // A token the identity is not bound to is not there for it
-// (CKR_TOKEN_NOT_PRESENT), whether or not it exists.
+// (CKR_TOKEN_NOT_PRESENT), whether or not it exists. With a token
+// authorizer (session_options::authorize, IAM's `hsm:` actions when IAM is
+// present), an identity the authorizer claims is decided by it instead of
+// the bindings: hsm:OpenToken to see the token, and an action per call
+// that makes, changes, destroys or uses a key, refused with
+// CKR_ACTION_PROHIBITED.
 //
 // Using a key. An operation checks the key when it starts (it exists, is
 // visible to the session, and allows the operation) and again when the
@@ -65,6 +70,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -77,6 +83,12 @@
 #include <vector>
 
 namespace kythira::hsm {
+
+/// Whether `identity` may take `action` (`hsm:OpenToken`, `hsm:Sign`, ...)
+/// on token `token`: true or false for an identity the authorizer
+/// decides, nullopt for one the catalog's bindings decide.
+using token_authorizer = std::function<std::optional<bool>(
+    std::string_view identity, std::uint64_t token, std::string_view action)>;
 
 struct session_options {
     /// scrypt cost of new PIN verifiers (tests lower it).
@@ -94,6 +106,8 @@ struct session_options {
     /// A counted operation is logged on its first call and then once in
     /// this many.
     std::uint64_t audit_sample_every = 1000;
+    /// Decides for the identities it claims (none when empty).
+    token_authorizer authorize;
 };
 
 inline constexpr CK_ULONG min_pin_length = 4;
@@ -301,7 +315,7 @@ public:
             return out;
         }
         for (const auto& t : _store->tokens()) {
-            if (_store->may_open(*identity, t.token_id)) {
+            if (may_open(*identity, t.token_id)) {
                 out.push_back(static_cast<CK_SLOT_ID>(t.token_id));
             }
         }
@@ -339,7 +353,13 @@ public:
     auto init_token(app_id app, CK_SLOT_ID slot, std::string_view so_pin, std::string_view label)
         -> ck_result<void> {
         const auto t0 = audit_clock::now();
-        auto r = init_token_unaudited(app, slot, so_pin, label);
+        auto r = check_slot(app, slot);
+        if (r) {
+            r = permitted(identity_of(app).value_or(""), slot, "hsm:InitToken");
+        }
+        if (r) {
+            r = init_token_unaudited(app, slot, so_pin, label);
+        }
         if (_opt.audit) {
             audit_event e;
             e.action = "init_token";
@@ -559,7 +579,7 @@ public:
     /// C_InitPIN: the SO sets the user PIN, which also unlocks it.
     auto init_pin(app_id app, CK_SESSION_HANDLE h, std::string_view pin) -> ck_result<void> {
         const auto t0 = audit_clock::now();
-        auto r = init_pin_unaudited(app, h, pin);
+        auto r = guarded(app, h, "hsm:InitPIN", [&] { return init_pin_unaudited(app, h, pin); });
         if (_opt.audit) {
             emit(audit_base("init_pin", app, h), rv_of(r), t0);
         }
@@ -588,7 +608,8 @@ public:
     auto set_pin(app_id app, CK_SESSION_HANDLE h, std::string_view old_pin,
                  std::string_view new_pin) -> ck_result<void> {
         const auto t0 = audit_clock::now();
-        auto r = set_pin_unaudited(app, h, old_pin, new_pin);
+        auto r = guarded(app, h, "hsm:SetPIN",
+                         [&] { return set_pin_unaudited(app, h, old_pin, new_pin); });
         if (_opt.audit) {
             emit(audit_base("set_pin", app, h), rv_of(r), t0);
         }
@@ -623,7 +644,8 @@ public:
     auto generate_key(app_id app, CK_SESSION_HANDLE h, const CK_MECHANISM& mechanism,
                       const attribute_map& tmpl) -> ck_result<CK_OBJECT_HANDLE> {
         const auto t0 = audit_clock::now();
-        auto r = generate_key_unaudited(app, h, mechanism, tmpl);
+        auto r = guarded(app, h, "hsm:GenerateKey",
+                         [&] { return generate_key_unaudited(app, h, mechanism, tmpl); });
         audit_created("generate_key", app, h, r, tmpl, mechanism.mechanism, t0);
         return r;
     }
@@ -691,7 +713,9 @@ public:
                            const attribute_map& public_tmpl, const attribute_map& private_tmpl)
         -> ck_result<std::pair<CK_OBJECT_HANDLE, CK_OBJECT_HANDLE>> {
         const auto t0 = audit_clock::now();
-        auto r = generate_key_pair_unaudited(app, h, mechanism, public_tmpl, private_tmpl);
+        auto r = guarded(app, h, "hsm:GenerateKey", [&] {
+            return generate_key_pair_unaudited(app, h, mechanism, public_tmpl, private_tmpl);
+        });
         if (_opt.audit) {
             auto e = audit_base("generate_key_pair", app, h);
             e.mechanism = mechanism.mechanism;
@@ -796,7 +820,8 @@ public:
         -> ck_result<void> {
         const auto t0 = audit_clock::now();
         auto label = _opt.audit ? label_of(app, h, object) : std::string();
-        auto r = destroy_object_unaudited(app, h, object);
+        auto r = guarded(app, h, "hsm:DestroyObject",
+                         [&] { return destroy_object_unaudited(app, h, object); });
         audit_object("destroy_object", app, h, object, std::move(label), rv_of(r), t0);
         return r;
     }
@@ -879,7 +904,8 @@ public:
                              const attribute_map& changes) -> ck_result<void> {
         const auto t0 = audit_clock::now();
         auto label = _opt.audit ? label_of(app, h, object) : std::string();
-        auto r = set_attribute_value_unaudited(app, h, object, changes);
+        auto r = guarded(app, h, "hsm:SetAttributeValue",
+                         [&] { return set_attribute_value_unaudited(app, h, object, changes); });
         audit_object("set_attribute_value", app, h, object, std::move(label), rv_of(r), t0);
         return r;
     }
@@ -961,7 +987,8 @@ public:
     auto create_object(app_id app, CK_SESSION_HANDLE h, const attribute_map& tmpl)
         -> ck_result<CK_OBJECT_HANDLE> {
         const auto t0 = audit_clock::now();
-        auto r = create_object_unaudited(app, h, tmpl);
+        auto r = guarded(app, h, "hsm:CreateObject",
+                         [&] { return create_object_unaudited(app, h, tmpl); });
         audit_created("create_object", app, h, r, tmpl, std::nullopt, t0);
         return r;
     }
@@ -1006,7 +1033,8 @@ public:
     auto copy_object(app_id app, CK_SESSION_HANDLE h, CK_OBJECT_HANDLE object,
                      const attribute_map& tmpl) -> ck_result<CK_OBJECT_HANDLE> {
         const auto t0 = audit_clock::now();
-        auto r = copy_object_unaudited(app, h, object, tmpl);
+        auto r = guarded(app, h, "hsm:CopyObject",
+                         [&] { return copy_object_unaudited(app, h, object, tmpl); });
         audit_created("copy_object", app, h, r, tmpl, std::nullopt, t0);
         return r;
     }
@@ -1093,7 +1121,8 @@ public:
     auto wrap_key(app_id app, CK_SESSION_HANDLE h, const CK_MECHANISM& mechanism,
                   CK_OBJECT_HANDLE wrapping_key, CK_OBJECT_HANDLE key) -> ck_result<bytes> {
         const auto t0 = audit_clock::now();
-        auto r = wrap_key_unaudited(app, h, mechanism, wrapping_key, key);
+        auto r = guarded(app, h, "hsm:WrapKey",
+                         [&] { return wrap_key_unaudited(app, h, mechanism, wrapping_key, key); });
         if (_opt.audit) {
             auto e = audit_base("wrap_key", app, h);
             e.object = key;
@@ -1146,7 +1175,9 @@ public:
                     CK_OBJECT_HANDLE unwrapping_key, std::span<const std::uint8_t> wrapped,
                     const attribute_map& tmpl) -> ck_result<CK_OBJECT_HANDLE> {
         const auto t0 = audit_clock::now();
-        auto r = unwrap_key_unaudited(app, h, mechanism, unwrapping_key, wrapped, tmpl);
+        auto r = guarded(app, h, "hsm:UnwrapKey", [&] {
+            return unwrap_key_unaudited(app, h, mechanism, unwrapping_key, wrapped, tmpl);
+        });
         audit_created("unwrap_key", app, h, r, tmpl, mechanism.mechanism, t0);
         return r;
     }
@@ -1205,7 +1236,8 @@ public:
                     CK_OBJECT_HANDLE base_key, const attribute_map& tmpl)
         -> ck_result<CK_OBJECT_HANDLE> {
         const auto t0 = audit_clock::now();
-        auto r = derive_key_unaudited(app, h, mechanism, base_key, tmpl);
+        auto r = guarded(app, h, "hsm:DeriveKey",
+                         [&] { return derive_key_unaudited(app, h, mechanism, base_key, tmpl); });
         audit_created("derive_key", app, h, r, tmpl, mechanism.mechanism, t0);
         return r;
     }
@@ -1366,7 +1398,13 @@ public:
     auto operation_init(app_id app, CK_SESSION_HANDLE h, op_kind kind,
                         const CK_MECHANISM& mechanism, CK_OBJECT_HANDLE key) -> ck_result<void> {
         const auto t0 = audit_clock::now();
-        auto r = operation_init_unaudited(app, h, kind, mechanism, key);
+        static constexpr std::array<std::string_view, 5> actions{"hsm:Sign", "hsm:Verify",
+                                                                 "hsm:Encrypt", "hsm:Decrypt", ""};
+        const auto action = actions.at(static_cast<std::size_t>(kind));
+        auto r = action.empty() ? operation_init_unaudited(app, h, kind, mechanism, key)
+                                : guarded(app, h, action, [&] {
+                                      return operation_init_unaudited(app, h, kind, mechanism, key);
+                                  });
         if (_opt.audit && kind != op_kind::digest) {
             audit_counted(app, h, kind, mechanism.mechanism, key, rv_of(r), t0);
         }
@@ -1766,10 +1804,64 @@ private:
         if (!identity) {
             return unexpected(CKR_CRYPTOKI_NOT_INITIALIZED);
         }
-        if (!_store->token(slot) || !_store->may_open(*identity, slot)) {
+        if (!_store->token(slot) || !may_open(*identity, slot)) {
             return unexpected(CKR_TOKEN_NOT_PRESENT);
         }
         return {};
+    }
+
+    /// The bindings, or the authorizer's hsm:OpenToken for an identity it
+    /// decides.
+    [[nodiscard]] auto may_open(const std::string& identity, std::uint64_t token) const -> bool {
+        if (_opt.authorize) {
+            if (const auto d = _opt.authorize(identity, token, "hsm:OpenToken")) {
+                return *d;
+            }
+        }
+        return _store->may_open(identity, token);
+    }
+
+    /// The authorizer's answer for `action` through session `h`; an
+    /// identity it does not decide, or no authorizer, may.
+    [[nodiscard]] auto permitted(app_id app, CK_SESSION_HANDLE h, std::string_view action) const
+        -> ck_result<void> {
+        if (!_opt.authorize) {
+            return {};
+        }
+        std::optional<std::uint64_t> token;
+        {
+            const std::lock_guard lock(_mutex);
+            if (const auto it = _sessions.find(h);
+                it != _sessions.end() && it->second->app == app) {
+                token = it->second->token;
+            }
+        }
+        const auto identity = identity_of(app);
+        if (!token || !identity) {
+            return {};  // the call itself answers for a bad session
+        }
+        return permitted(*identity, *token, action);
+    }
+
+    [[nodiscard]] auto permitted(const std::string& identity, std::uint64_t token,
+                                 std::string_view action) const -> ck_result<void> {
+        if (!_opt.authorize) {
+            return {};
+        }
+        if (const auto d = _opt.authorize(identity, token, action); d && !*d) {
+            return unexpected(CKR_ACTION_PROHIBITED);
+        }
+        return {};
+    }
+
+    /// `f()`, unless the authorizer refuses `action` through session `h`.
+    template<class F>
+    auto guarded(app_id app, CK_SESSION_HANDLE h, std::string_view action, F&& f) const
+        -> decltype(f()) {
+        if (auto p = permitted(app, h, action); !p) {
+            return unexpected(p.error());
+        }
+        return std::forward<F>(f)();
     }
 
     /// The node is unsealed and the mechanism can do `flag`.

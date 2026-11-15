@@ -26,6 +26,10 @@
 // authorize like any network client's (Requirement 7.2 of the colocation
 // spec: co-location never widens access).
 //
+// With KYTHIRA_HSM_IAM=true and IAM co-located, an identity that is an IAM
+// user or role ARN is authorized by IAM's policies with hsm: actions on
+// the token's ARN instead of by the bindings (hsm_iam.hpp, task 14b).
+//
 // The node starts sealed: until an operator unseals it (task 7), every
 // cryptographic call answers CKR_DEVICE_ERROR, and health() says so while
 // staying healthy, since a sealed HSM is up and waiting for its operators.
@@ -36,6 +40,7 @@
 #include <kythira/hsm/hsm_admin.hpp>
 #include <kythira/hsm/hsm_group_state_machine.hpp>
 #include <kythira/hsm/hsm_host.hpp>
+#include <kythira/hsm/hsm_iam.hpp>
 #include <kythira/hsm/hsm_peer.hpp>
 #include <kythira/hsm/key_vault.hpp>
 #include <kythira/hsm/node_unseal.hpp>
@@ -150,6 +155,41 @@ private:
     std::shared_ptr<kythira::hsm::session_layer> _layer;
 };
 
+/// The co-located IAM evaluator, once the module starts; the session
+/// layer's authorizer holds it, since the layer may outlive the module.
+class iam_link {
+public:
+    void set(std::shared_ptr<service_node::iam_evaluator> evaluator) {
+        auto hooks = evaluator->hooks();
+        const std::scoped_lock lock(_mu);
+        _authorize = std::move(hooks.authorize);
+        _evaluator = std::move(evaluator);
+    }
+
+    [[nodiscard]] auto authorize(const aws_auth::principal_context& who,
+                                 const aws_auth::authz_request& r) const
+        -> aws_auth::authz_decision {
+        decltype(_authorize) f;
+        {
+            const std::scoped_lock lock(_mu);
+            f = _authorize;
+        }
+        if (!f) {
+            aws_auth::authz_decision d;
+            d.reason = "IAM has not started";
+            return d;
+        }
+        return f(who, r);
+    }
+
+private:
+    mutable std::mutex _mu;
+    std::function<aws_auth::authz_decision(const aws_auth::principal_context&,
+                                           const aws_auth::authz_request&)>
+        _authorize;
+    std::shared_ptr<service_node::iam_evaluator> _evaluator;
+};
+
 template<typename Host> class hsm_module final : public service_node::service_module<Host> {
 public:
     using types = module_host_types<Host>;
@@ -170,6 +210,8 @@ public:
         return service_node::module_numbers::hsm;
     }
     [[nodiscard]] auto env_prefix() const -> std::string_view override { return "KYTHIRA_HSM_"; }
+    /// IAM first, so its evaluator answers before a client is served.
+    [[nodiscard]] auto starts_after() const -> std::vector<std::string> override { return {"iam"}; }
 
     [[nodiscard]] auto configure(const service_node::env_lookup& env)
         -> std::optional<std::string> override {
@@ -181,6 +223,10 @@ public:
                 return "hsm: key memory: " +
                        std::string(kythira::hsm::secure_memory_error_message(r.error())) +
                        " (KYTHIRA_HSM_ALLOW_UNLOCKED_MEMORY=true starts anyway, for development)";
+            }
+            if (_opt.iam && !service_node::co_located(env, "iam")) {
+                return std::string(
+                    "KYTHIRA_HSM_IAM=true needs IAM co-located (KYTHIRA_SERVICES naming iam)");
             }
         } catch (const std::exception& e) {
             return std::string(e.what());
@@ -232,6 +278,24 @@ public:
         so.max_sessions = _opt.max_sessions;
         so.audit = audit;
         so.audit_sample_every = _opt.audit_sample_every;
+        if (_opt.iam) {
+            // The evaluator is taken at start; until then IAM identities
+            // are refused, and no client is served before start anyway.
+            _iam = std::make_shared<iam_link>();
+            kythira::hsm::iam_token_config ic;
+            ic.partition = _opt.iam_partition;
+            ic.region = _opt.iam_region;
+            ic.cache_ttl = _opt.iam_cache;
+            auto authz = std::make_shared<kythira::hsm::iam_token_authorizer>(
+                ic, [link = _iam](const aws_auth::principal_context& who,
+                                  const aws_auth::authz_request& r) {
+                    return link->authorize(who, r);
+                });
+            so.authorize = [authz](std::string_view identity, std::uint64_t token,
+                                   std::string_view action) {
+                return (*authz)(identity, token, action);
+            };
+        }
         _layer = std::make_shared<kythira::hsm::session_layer>(*_host, _vault, so);
         kythira::hsm::admin_policy policy;
         policy.operators = _opt.operators;
@@ -272,7 +336,17 @@ public:
             std::make_shared<native_pkcs11_provider>(_layer));
     }
 
-    void start(service_node::module_registry& /*registry*/) override {
+    void start(service_node::module_registry& registry) override {
+        if (_iam) {
+            auto iam = registry.lookup<service_node::iam_evaluator>(
+                std::string(service_node::interface_names::iam_evaluator));
+            if (!iam) {
+                throw std::invalid_argument(
+                    "KYTHIRA_HSM_IAM=true: the IAM module publishes no evaluator");
+            }
+            iam->add_actions(kythira::hsm::hsm_actions());
+            _iam->set(iam);
+        }
         _raft->start();
         _driving = true;
         _driver = std::thread([this] {
@@ -613,6 +687,7 @@ private:
     std::unique_ptr<raft_host> _raft;
     std::unique_ptr<hsm_host> _host;
     std::shared_ptr<audit_pipeline> _audit;
+    std::shared_ptr<iam_link> _iam;
     std::shared_ptr<kythira::hsm::session_layer> _layer;
     std::unique_ptr<admin_type> _admin;
     std::shared_ptr<const kythira::hsm::peer_client> _peers;
