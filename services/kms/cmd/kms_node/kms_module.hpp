@@ -37,6 +37,7 @@
 #include <kythira/kms/kms_api.hpp>
 #include <kythira/kms/kms_backing.hpp>
 #include <kythira/kms/kms_crypto_api.hpp>
+#include <kythira/kms/kms_audit.hpp>
 #include <kythira/kms/kms_front_end.hpp>
 #include <kythira/kms/kms_grants_api.hpp>
 #include <kythira/kms/kms_group_state_machine.hpp>
@@ -344,6 +345,7 @@ public:
         _grants.reset();
         _api.reset();
         _front_end.reset();
+        _audit.reset();  // writes what is queued
         _jobs.reset();
         _catalog.reset();
         {
@@ -380,8 +382,9 @@ public:
             return {};
         }
         const auto s = _host->stats();
+        auto out = _audit ? _audit->metrics() : std::vector<service_node::module_metric>{};
         const std::scoped_lock lock(_report_mutex);
-        return {
+        std::vector<service_node::module_metric> mine{
             {"leader", _host->leads() ? 1.0 : 0.0, {}},
             {"hsm_available", _hsm.load() == hsm_state::available ? 1.0 : 0.0, {}},
             {"job_passes", static_cast<double>(_passes), {}},
@@ -398,6 +401,8 @@ public:
             {"requests", static_cast<double>(_requests.load()), {}},
             {"peer_requests", static_cast<double>(_peer_requests.load()), {}},
         };
+        out.insert(out.end(), mine.begin(), mine.end());
+        return out;
     }
 
 private:
@@ -467,6 +472,9 @@ private:
         fc.evaluate_grants = _opt.auth != kythira::aws_auth::auth_mode::static_keys;
         fc.trusted_services.insert(_opt.trusted_services.begin(), _opt.trusted_services.end());
         _front_end = std::make_unique<front_end_type>(fc, *_authorizer);
+        _audit = std::make_unique<kythira::kms::request_audit>(_opt.audit, _opt.region);
+        _front_end->set_observer(
+            [audit = _audit.get()](const kythira::kms::request_record& r) { audit->record(r); });
         _client = std::make_shared<client_type>(*_front_end);
         const auto catalog = [this] { return _host->catalog(); };
         const auto barrier = [this] { return _host->barrier(); };
@@ -754,6 +762,7 @@ private:
     // Who may call, the API and its listener.
     std::unique_ptr<authorizer_type> _authorizer;
     std::shared_ptr<service_node::iam_evaluator> _iam;
+    std::unique_ptr<kythira::kms::request_audit> _audit;
     std::unique_ptr<front_end_type> _front_end;
     std::shared_ptr<client_type> _client;
     std::unique_ptr<kythira::kms::key_management_api<catalog_type>> _api;

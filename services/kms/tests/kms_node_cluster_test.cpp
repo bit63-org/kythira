@@ -221,6 +221,11 @@ public:
 
     void stop(std::size_t i) { stop(_members[i]); }
 
+    /// Member i's log so far.
+    [[nodiscard]] auto log_of(std::size_t i) const -> std::string {
+        return slurp(_dir / ("node-" + std::to_string(i + 1)) / "node.log");
+    }
+
     /// Waits until member i logs that it serves, once for each start (the
     /// log is appended to across restarts).
     void wait_serving(std::size_t i) const {
@@ -414,6 +419,28 @@ BOOST_FIXTURE_TEST_CASE(keys_made_through_any_member_are_seen_by_all, process_cl
     const auto d = call(2, "Decrypt", R"({"CiphertextBlob":")" + e.str("CiphertextBlob") + R"("})");
     BOOST_REQUIRE_MESSAGE(d.status == 200, d.status << " " << d.str("__type"));
     BOOST_TEST(d.str("Plaintext") == "c2VjcmV0");
+
+    // Task 14: the member that answered wrote the request's audit record
+    // (on stderr by default), naming the key.
+    const auto deadline = std::chrono::steady_clock::now() + 10s;
+    std::string record;
+    while (record.empty() && std::chrono::steady_clock::now() < deadline) {
+        const auto log = log_of(2);
+        for (auto at = log.find(R"("eventName":"Decrypt")"); at != std::string::npos;
+             at = log.find(R"("eventName":"Decrypt")", at + 1)) {
+            const auto begin = log.rfind('\n', at);
+            const auto end = log.find('\n', at);
+            record = log.substr(begin == std::string::npos ? 0 : begin + 1,
+                                end == std::string::npos ? std::string::npos : end - begin - 1);
+        }
+        if (record.empty()) {
+            std::this_thread::sleep_for(50ms);
+        }
+    }
+    BOOST_REQUIRE_MESSAGE(!record.empty(), "no Decrypt record in member 3's log");
+    BOOST_TEST(record.find(R"("eventSource":"kms.amazonaws.com")") != std::string::npos);
+    BOOST_TEST(record.find("key/" + id) != std::string::npos);
+    BOOST_TEST(record.find("c2VjcmV0") == std::string::npos);
 }
 
 // Task 13: an AWS managed key made on first use through any member is one

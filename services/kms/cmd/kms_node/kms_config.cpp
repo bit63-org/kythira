@@ -253,6 +253,11 @@ auto from_env(const env_fn& env) -> kms_options {
     }
     o.region = get_opt(env, "KYTHIRA_KMS_REGION", o.region);
     o.partition = get_opt(env, "KYTHIRA_KMS_PARTITION", o.partition);
+    o.audit = get_opt(env, "KYTHIRA_KMS_AUDIT", o.audit);
+    if (o.audit != "stderr" && o.audit != "off" &&
+        (!o.audit.starts_with("file:") || o.audit.size() == 5)) {
+        throw fail("KYTHIRA_KMS_AUDIT must be stderr, off or file:<path>");
+    }
 
     o.pkcs11 = get_opt(env, "KYTHIRA_KMS_PKCS11", o.pkcs11);
     if (o.pkcs11 != co_located_hsm && !std::filesystem::path(o.pkcs11).is_absolute()) {
@@ -349,6 +354,9 @@ auto usage_text() -> std::string_view {
                                      kms:ViaService); none by default
   KYTHIRA_KMS_REGION                 the region in key ARNs and SigV4 (us-east-1)
   KYTHIRA_KMS_PARTITION              the partition in ARNs (aws)
+  KYTHIRA_KMS_AUDIT                  where request records (CloudTrail-shaped
+                                     JSON lines) go: stderr (default), off, or
+                                     file:<path>
   KYTHIRA_KMS_PKCS11                 where backing keys live: hsm (default) for
                                      the co-located virtual HSM, or the
                                      absolute path of a PKCS#11 library

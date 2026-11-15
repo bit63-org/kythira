@@ -118,10 +118,13 @@ public:
         if (auto denied = ctx.authorize(std::move(r))) {
             // A grant that allows CreateGrant lets its grantee pass on no
             // more than it holds.
-            if (ctx.last_denial_explicit || !ctx.grants_apply || !parent_grant(**c, ctx, *g)) {
+            const auto parent = ctx.last_denial_explicit || !ctx.grants_apply
+                                    ? std::optional<grant_record>()
+                                    : parent_grant(**c, ctx, *g);
+            if (!parent) {
                 return *denied;
             }
-            ctx.allow_by_grant();
+            ctx.allow_by_grant(parent->grant_id);
         }
         if (auto dry = dry_run(in)) {
             return *dry;
@@ -294,7 +297,7 @@ public:
                                  " because the grant does not name it",
                              400);
         }
-        ctx.allow_by_grant();
+        ctx.allow_by_grant(g->grant_id);
         if (auto dry = dry_run(in)) {
             return *dry;
         }
@@ -405,14 +408,17 @@ private:
     /// constrained parent is judged by grant_within, which makes the child
     /// keep the constraint.
     [[nodiscard]] static auto parent_grant(const Catalog& c, const call_context& ctx,
-                                           const grant_record& child) -> bool {
-        const auto grants = c.grants(child.key_id);
-        return std::any_of(grants.begin(), grants.end(), [&](const grant_record& g) {
-            return grantee_matches(ctx.principal, g.grantee_principal) &&
-                   std::find(g.operations.begin(), g.operations.end(), "CreateGrant") !=
-                       g.operations.end() &&
-                   grant_within(child, g);
-        });
+                                           const grant_record& child)
+        -> std::optional<grant_record> {
+        for (auto& g : c.grants(child.key_id)) {
+            if (grantee_matches(ctx.principal, g.grantee_principal) &&
+                std::find(g.operations.begin(), g.operations.end(), "CreateGrant") !=
+                    g.operations.end() &&
+                grant_within(child, g)) {
+                return std::move(g);
+            }
+        }
+        return std::nullopt;
     }
 
     [[nodiscard]] static auto same_grant(const grant_record& a, const grant_record& b) -> bool {

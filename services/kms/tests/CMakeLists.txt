@@ -151,6 +151,11 @@ kythira_kms_test(kms_client_test kms_client_test.cpp)
 target_link_libraries(kms_client_test PRIVATE OpenSSL::SSL)
 set_tests_properties(kms_client_test PROPERTIES LABELS "unit;kms;kms-module")
 
+# Task 14: CloudTrail-shaped request records and request metrics.
+kythira_kms_test(kms_audit_test kms_audit_test.cpp)
+target_link_libraries(kms_audit_test PRIVATE OpenSSL::SSL)
+set_tests_properties(kms_audit_test PROPERTIES LABELS "unit;kms;kms-module")
+
 # Task 5, Requirements 4.1-4.3: every key spec's backing key on a real
 # module, SoftHSM2 standing in for an external one; registered when the
 # build finds SoftHSM2 and softhsm2-util (kms-module.yml installs them;
