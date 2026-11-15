@@ -63,6 +63,16 @@ add_test(NAME kms_actions_header_fresh
 set_tests_properties(kms_actions_test kms_actions_header_fresh PROPERTIES
     LABELS "unit;kms;kms-module" TIMEOUT 60)
 
+# Task 3, Requirement 5.2, 5.3 and 14.1: the ciphertext blob and its
+# additional data, with AES-GCM over OpenSSL standing in for the HSM
+# (tamper, wrong context, wrong key), and seeded mutations of real blobs
+# through the decoder (the sanitizer legs run it too).
+foreach(_kms_test IN ITEMS kms_ciphertext_test kms_ciphertext_fuzz_test)
+    kythira_kms_test(${_kms_test} ${_kms_test}.cpp)
+    set_tests_properties(${_kms_test} PROPERTIES
+        LABELS "unit;kms;kms-module" TIMEOUT 120)
+endforeach()
+
 # Task 1: kms_node links and checks its model.
 add_test(NAME kms_node_self_test COMMAND kms_node --self-test)
 set_tests_properties(kms_node_self_test PROPERTIES
