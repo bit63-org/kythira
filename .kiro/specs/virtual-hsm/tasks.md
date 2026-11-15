@@ -106,8 +106,11 @@ task is one PR unless noted.
     both groups' checkpoint files, looking for the MK, TK, shares, PINs,
     each key's value and each private scalar; it uses the memory engine,
     which writes checkpoints uncompressed (a compressing engine could
-    hide plaintext from a byte search). The scan over a real node's data
-    directory and Raft log comes with the cluster tests of task 11.
+    hide plaintext from a byte search). The scan over real nodes' data
+    directories and Raft logs is `hsm_node_cluster_test`'s
+    `no_secret_reaches_a_data_directory` (task 11): three stopped
+    `hsm_node` members after keys were used everywhere and the master
+    key rekeyed, with a token label as the control that must be found.
 
 - [ ] 6. HSM service module and session layer
   - `hsm_module` on the service module interface: groups on the node's

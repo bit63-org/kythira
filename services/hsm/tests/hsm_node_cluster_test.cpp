@@ -20,6 +20,13 @@
 //     generation, the shares of that generation unseal every node, and
 //     every key still works.
 //
+//   * no plaintext on disk (requirement 13.4): keys imported with known
+//     values and used on every member, the PINs, and the operator's shares
+//     of two master keys are searched for in every file of every member's
+//     data directory (RocksDB, the Raft logs, snapshots) after a clean
+//     stop. hsm_key_store_test scans the engine and checkpoints in memory;
+//     this is the same check over what the daemon really writes.
+//
 // (Node unseal staying sealed with only k - 1 reachable members is
 // hsm_node_unseal_test's.)
 
@@ -36,6 +43,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <csignal>
@@ -43,6 +51,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <random>
 #include <sstream>
 #include <string>
@@ -209,6 +218,18 @@ public:
         m.pid = -1;
     }
 
+    /// Stops every member with SIGTERM, so what they wrote is flushed.
+    void stop_all() {
+        for (auto& m : _members) {
+            stop(m);
+        }
+    }
+
+    /// Member i's data directory (KYTHIRA_NODE_DATA_DIR).
+    [[nodiscard]] auto data_dir(std::size_t i) const -> fs::path {
+        return _dir / ("node-" + std::to_string(i + 1)) / "data";
+    }
+
 private:
     void stop(member& m) {
         if (m.pid <= 0) {
@@ -250,4 +271,128 @@ BOOST_FIXTURE_TEST_CASE(the_token_leader_killed_during_key_generation, process_c
 
 BOOST_FIXTURE_TEST_CASE(the_catalog_leader_killed_during_rekey, process_cluster) {
     hsm::test::rekey_under_leader_kill(*this, {0ms, 15ms, 40ms, 120ms});
+}
+
+BOOST_FIXTURE_TEST_CASE(no_secret_reaches_a_data_directory, process_cluster) {
+    namespace t = hsm::test;
+    std::random_device rd;
+    const auto random_bytes = [&](std::size_t n) {
+        std::vector<std::uint8_t> out(n);
+        for (auto& b : out) {
+            b = static_cast<std::uint8_t>(rd());
+        }
+        return out;
+    };
+    const auto aes_value = random_bytes(32);
+    const auto hmac_value = random_bytes(48);
+
+    // Two token keys with known values, created on member 1.
+    {
+        auto u = t::user_session::open(*this, 0);
+        BOOST_REQUIRE(u.has_value());
+        hsm::attribute_map aes;
+        aes.set_ulong(CKA_CLASS, CKO_SECRET_KEY);
+        aes.set_ulong(CKA_KEY_TYPE, CKK_AES);
+        aes.set_bool(CKA_TOKEN, true);
+        aes.set_bool(CKA_SENSITIVE, true);
+        aes.set_bool(CKA_ENCRYPT, true);
+        aes.set_bool(CKA_DECRYPT, true);
+        aes.set_bytes(CKA_ID, std::vector<std::uint8_t>{'a', 'e', 's'});
+        aes.set_bytes(CKA_VALUE, aes_value);
+        BOOST_REQUIRE(u->c->create_object(u->s, aes).has_value());
+        hsm::attribute_map mac;
+        mac.set_ulong(CKA_CLASS, CKO_SECRET_KEY);
+        mac.set_ulong(CKA_KEY_TYPE, CKK_GENERIC_SECRET);
+        mac.set_bool(CKA_TOKEN, true);
+        mac.set_bool(CKA_SENSITIVE, true);
+        mac.set_bool(CKA_SIGN, true);
+        mac.set_bool(CKA_VERIFY, true);
+        mac.set_bytes(CKA_ID, std::vector<std::uint8_t>{'m', 'a', 'c'});
+        mac.set_bytes(CKA_VALUE, hmac_value);
+        BOOST_REQUIRE(u->c->create_object(u->s, mac).has_value());
+    }
+
+    // Each used on every member, so every replica opens them.
+    for (std::size_t i = 0; i < size(); ++i) {
+        auto u = t::user_session::open(*this, i);
+        BOOST_REQUIRE(u.has_value());
+        hsm::attribute_map find;
+        find.set_ulong(CKA_CLASS, CKO_SECRET_KEY);
+        BOOST_REQUIRE(u->c->find_objects_init(u->s, find).has_value());
+        const auto found = u->c->find_objects(u->s, 16);
+        (void)u->c->find_objects_final(u->s);
+        BOOST_REQUIRE(found.has_value());
+        BOOST_REQUIRE(found->size() == 2U);
+        for (const auto h : *found) {
+            const std::array<CK_ATTRIBUTE_TYPE, 1> types{CKA_KEY_TYPE};
+            const auto attrs = u->c->get_attribute_value(u->s, h, types);
+            BOOST_REQUIRE(attrs.has_value());
+            const bool is_aes = attrs->front().value && attrs->front().value->front() == CKK_AES;
+            const std::vector<std::uint8_t> data{'s', 'c', 'a', 'n'};
+            if (is_aes) {
+                std::vector<std::uint8_t> iv(16, 0x42);
+                const CK_MECHANISM cbc{CKM_AES_CBC_PAD, iv.data(), iv.size()};
+                BOOST_REQUIRE(u->c->encrypt_init(u->s, cbc, h).has_value());
+                BOOST_TEST(u->c->encrypt(u->s, data).has_value());
+            } else {
+                const CK_MECHANISM hmac{CKM_SHA256_HMAC, nullptr, 0};
+                BOOST_REQUIRE(u->c->sign_init(u->s, hmac, h).has_value());
+                BOOST_TEST(u->c->sign(u->s, data).has_value());
+            }
+        }
+    }
+
+    // A rekey, so two master keys' shares have existed.
+    auto old_shares = current;
+    const auto r = admin(1, "POST", "/v1/rekey", "{}");
+    BOOST_REQUIRE((r && r->status == 200));
+    current = *t::shares_of(*r);
+    for (std::size_t i = 0; i < size(); ++i) {
+        BOOST_REQUIRE(unseal(i, current));
+    }
+
+    std::vector<std::pair<std::string, std::vector<std::uint8_t>>> secrets{
+        {"the AES key's value", aes_value},
+        {"the HMAC key's value", hmac_value},
+        {"the user PIN", {t::k_cluster_user_pin.begin(), t::k_cluster_user_pin.end()}},
+        {"the SO PIN", {t::k_cluster_so_pin.begin(), t::k_cluster_so_pin.end()}},
+    };
+    for (const auto* set : {&old_shares, &current}) {
+        for (const auto& share : set->shares) {
+            secrets.emplace_back("share " + share.substr(0, 12) + "...",
+                                 std::vector<std::uint8_t>(share.begin(), share.end()));
+        }
+    }
+
+    stop_all();
+    // A control: the token's label is stored in the clear, so the scan must
+    // find it, or it is reading nothing the members wrote.
+    const std::string control = "alpha";
+    bool control_found = false;
+    std::size_t files = 0;
+    std::uintmax_t bytes = 0;
+    for (std::size_t i = 0; i < size(); ++i) {
+        for (const auto& e : fs::recursive_directory_iterator(data_dir(i))) {
+            if (!e.is_regular_file()) {
+                continue;
+            }
+            std::ifstream in(e.path(), std::ios::binary);
+            const std::vector<std::uint8_t> content((std::istreambuf_iterator<char>(in)),
+                                                    std::istreambuf_iterator<char>());
+            ++files;
+            bytes += content.size();
+            control_found =
+                control_found || std::search(content.begin(), content.end(), control.begin(),
+                                             control.end()) != content.end();
+            for (const auto& [what, needle] : secrets) {
+                const bool hit = std::search(content.begin(), content.end(), needle.begin(),
+                                             needle.end()) != content.end();
+                BOOST_TEST(!hit, what << " is in " << e.path().string());
+            }
+        }
+    }
+    BOOST_TEST_MESSAGE("scanned " << files << " files, " << bytes << " bytes");
+    // The scan saw the members' RocksDB files and Raft logs, not an empty tree.
+    BOOST_TEST(files >= 3U * 4U);
+    BOOST_TEST(control_found, "the token label, stored in the clear, is found");
 }
