@@ -344,6 +344,22 @@ task is one PR unless noted.
   - Cluster CA signing key on a token; Kinesis `pkcs11` key provider; IAM
     OIDC/STS signing keys on a token; each opt-in, defaults unchanged
   - _Requirements: 10.1-10.4_
+  - [x] 13a. Kinesis `KINESIS_KMS=pkcs11`: core
+    `include/raft/pkcs11_envelope.hpp` seals a short secret for a binding
+    under an RSA key pair on a token (OAEP over the secret and a SHA-256
+    of the binding, sealing in software, opening on the token; the OAEP
+    hash is recorded so SHA-1 seals made for SoftHSM2 still open);
+    `kinesis_kms_pkcs11.hpp` is the provider, naming keys by label or by
+    a `pkcs11:` URI on the configured token and binding the key id and
+    encryption context, opening the module on first use and a new
+    session once when the old one is gone. `KINESIS_KMS_PKCS11_URI`
+    names the token; with `module-path` it loads that library, otherwise
+    the co-located virtual HSM, which now publishes `hsm.pkcs11`
+    (`service_node::pkcs11_provider`), serves it as the application
+    `KINESIS_KMS_PKCS11_IDENTITY` (default `kinesis`), so bindings and
+    the PIN apply exactly as for a network client. Tests:
+    `kinesis_kms_pkcs11_test` (a software token) and the envelope cases
+    of `hsm_pkcs11_module_test` (native, the .so and SoftHSM2).
 
 - [ ] 14. Audit, metrics and IAM authorization
   - Audit log with optional ledger sink; metrics per 11.3; `hsm:` actions

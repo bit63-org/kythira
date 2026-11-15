@@ -37,6 +37,7 @@
 #include <kythira/kinesis/kinesis_iterators.hpp>
 #include <kythira/kinesis/kinesis_kms.hpp>
 #include <kythira/kinesis/kinesis_kms_aws.hpp>
+#include <kythira/kinesis/kinesis_kms_pkcs11.hpp>
 #include <kythira/kinesis/kinesis_lease_api.hpp>
 #include <kythira/kinesis/kinesis_maintenance.hpp>
 #include <kythira/kinesis/kinesis_on_demand.hpp>
@@ -187,9 +188,11 @@ public:
         return service_node::module_numbers::kinesis;
     }
     [[nodiscard]] auto env_prefix() const -> std::string_view override { return "KINESIS_"; }
-    /// IAM's evaluator, when co-located, answers before this module
-    /// serves.
-    [[nodiscard]] auto starts_after() const -> std::vector<std::string> override { return {"iam"}; }
+    /// IAM's evaluator, and the virtual HSM for `KINESIS_KMS=pkcs11`, when
+    /// co-located, answer before this module serves.
+    [[nodiscard]] auto starts_after() const -> std::vector<std::string> override {
+        return {"iam", "hsm"};
+    }
     [[nodiscard]] auto data_subdir() const -> std::string override {
         return _standalone ? std::string() : std::string("kinesis");
     }
@@ -333,6 +336,17 @@ public:
                 throw std::invalid_argument(*clash);
             }
             _iam_evaluator = std::move(iam);
+        }
+        if (_opt._kms == "pkcs11" && !_kms_token.module_path) {
+            // The HSM starts first (starts_after); a stand-alone node, or
+            // one without the HSM module, names a module-path instead.
+            _hsm_pkcs11 = registry.lookup<service_node::pkcs11_provider>(
+                std::string(service_node::interface_names::hsm_pkcs11));
+            if (!_hsm_pkcs11) {
+                throw std::invalid_argument(
+                    "KINESIS_KMS=pkcs11: KINESIS_KMS_PKCS11_URI names no module-path and no "
+                    "virtual HSM is co-located");
+            }
         }
         _raft->start();
 
@@ -557,6 +571,25 @@ private:
                                    env("AWS_ACCESS_KEY_ID"), env("AWS_SECRET_ACCESS_KEY"),
                                    env("AWS_SESSION_TOKEN")}] { return creds; };
             sc._kms = kinesis::key_provider(kinesis::aws_kms_provider(std::move(kc)));
+        } else if (_opt._kms == "pkcs11") {
+            _kms_token = pkcs11::uri::parse(_opt._kms_pkcs11_uri);
+            kinesis::pkcs11_kms_config kc;
+            kc.token = _kms_token;
+            kc.oaep = _opt._kms_pkcs11_oaep == "sha1" ? pkcs11::hash_algorithm::sha1
+                                                      : pkcs11::hash_algorithm::sha256;
+            // The module opens on first use, after start() has found the
+            // co-located HSM when the URI names no library.
+            sc._kms = kinesis::key_provider(
+                kinesis::pkcs11_kms_provider(std::move(kc), [this]() -> pkcs11::module {
+                    if (_kms_token.module_path) {
+                        return pkcs11::module::load(_kms_token);
+                    }
+                    if (!_hsm_pkcs11) {
+                        throw kinesis::kms_error(kinesis::kms_failure::unavailable,
+                                                 "The co-located virtual HSM is not running.");
+                    }
+                    return pkcs11::module(_hsm_pkcs11->backend_for(_opt._kms_pkcs11_identity));
+                }));
         }
         _service = std::make_unique<kinesis::kinesis_service<cluster_type>>(*_cluster, sc);
         _service->register_with(*_front_end);
@@ -635,6 +668,8 @@ private:
     /// KINESIS_AUTH=iam|both in kythira_node beside the IAM module.
     bool _iam_in_process{false};
     std::shared_ptr<service_node::iam_evaluator> _iam_evaluator;
+    pkcs11::uri _kms_token;
+    std::shared_ptr<service_node::pkcs11_provider> _hsm_pkcs11;
     std::unique_ptr<authorizer_type> _authorizer;
     kinesis::kinesis_compat_profile _profile{};
 

@@ -19,8 +19,10 @@
 // application under its certificate's or uid's identity.
 //
 // Co-located modules reach the HSM in process: the module publishes its
-// session layer as "hsm.session_layer", and a consumer opens it through a
-// native_client under its own identity, which the catalog's bindings
+// session layer as "hsm.session_layer", and, for consumers that know only
+// core, a PKCS#11 backend factory as "hsm.pkcs11" (module_interfaces.hpp)
+// that core's kythira::pkcs11::module wraps (task 13). Either way the
+// consumer acts under its own identity, which the catalog's bindings
 // authorize like any network client's (Requirement 7.2 of the colocation
 // spec: co-location never widens access).
 //
@@ -36,6 +38,7 @@
 #include <kythira/hsm/hsm_peer.hpp>
 #include <kythira/hsm/key_vault.hpp>
 #include <kythira/hsm/node_unseal.hpp>
+#include <kythira/hsm/pkcs11_native_backend.hpp>
 #include <kythira/hsm/secure_arena.hpp>
 #include <kythira/hsm/session_layer.hpp>
 #include <kythira/hsm/wire_server.hpp>
@@ -46,6 +49,7 @@
 #include <raft/future_default.hpp>
 #include <raft/json_serializer.hpp>
 #include <raft/metrics.hpp>
+#include <raft/module_interfaces.hpp>
 #include <raft/module_registry.hpp>
 #include <raft/multi_raft_impl.hpp>
 #include <raft/multi_raft_transport_handles.hpp>
@@ -121,6 +125,29 @@ template<typename Host> struct module_host_types {
 
 /// The name co-located modules look the session layer up by.
 inline constexpr std::string_view session_layer_interface = "hsm.session_layer";
+
+/// "hsm.pkcs11": a pkcs11_native_backend per consumer identity. Each
+/// backend keeps the session layer alive.
+class native_pkcs11_provider final : public service_node::pkcs11_provider {
+public:
+    explicit native_pkcs11_provider(std::shared_ptr<kythira::hsm::session_layer> layer)
+        : _layer(std::move(layer)) {}
+
+    [[nodiscard]] auto backend_for(const std::string& identity)
+        -> std::shared_ptr<kythira::pkcs11::backend> override {
+        struct owning final {
+            owning(std::shared_ptr<kythira::hsm::session_layer> l, const std::string& id)
+                : layer(std::move(l)), backend(*layer, id) {}
+            std::shared_ptr<kythira::hsm::session_layer> layer;
+            kythira::hsm::pkcs11_native_backend backend;
+        };
+        auto holder = std::make_shared<owning>(_layer, identity);
+        return {holder, &holder->backend};
+    }
+
+private:
+    std::shared_ptr<kythira::hsm::session_layer> _layer;
+};
 
 template<typename Host> class hsm_module final : public service_node::service_module<Host> {
 public:
@@ -230,6 +257,9 @@ public:
 
     void publish(service_node::module_registry& registry) override {
         registry.publish<kythira::hsm::session_layer>(std::string(session_layer_interface), _layer);
+        registry.publish<service_node::pkcs11_provider>(
+            std::string(service_node::interface_names::hsm_pkcs11),
+            std::make_shared<native_pkcs11_provider>(_layer));
     }
 
     void start(service_node::module_registry& /*registry*/) override {

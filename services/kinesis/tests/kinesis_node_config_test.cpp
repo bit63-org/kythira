@@ -275,3 +275,34 @@ BOOST_AUTO_TEST_CASE(azure_needs_its_storage_account) {
     BOOST_TEST(kn::from_env(lookup(vars))._tier_endpoint ==
                "http://azurite:10000/devstoreaccount1");
 }
+
+// Virtual HSM task 13: KINESIS_KMS=pkcs11 names a token and its PIN; the
+// library is the URI's module-path or the co-located HSM.
+BOOST_AUTO_TEST_CASE(the_pkcs11_key_provider_settings) {
+    auto vars = node_vars();
+    vars["KINESIS_KMS"] = "pkcs11";
+    vars["KINESIS_KMS_PKCS11_URI"] = "pkcs11:token=kinesis?pin-source=/run/secrets/pin";
+    auto o = kn::from_env(kn::composite_env(lookup(vars)));
+    BOOST_TEST(o._kms == "pkcs11");
+    BOOST_TEST(o._kms_pkcs11_identity == "kinesis");
+    BOOST_TEST(o._kms_pkcs11_oaep == "sha256");
+
+    vars["KINESIS_KMS_PKCS11_IDENTITY"] = "streams";
+    vars["KINESIS_KMS_PKCS11_OAEP"] = "sha1";
+    o = kn::from_env(kn::composite_env(lookup(vars)));
+    BOOST_TEST(o._kms_pkcs11_identity == "streams");
+    BOOST_TEST(o._kms_pkcs11_oaep == "sha1");
+
+    for (const std::string_view uri :
+         {"", "pkcs11:object=key?pin-source=/p", "pkcs11:token=kinesis", "pkcs11:token=a;token=b",
+          "not a uri"}) {
+        BOOST_TEST_CONTEXT("URI '" << uri << "'") {
+            vars["KINESIS_KMS_PKCS11_URI"] = std::string(uri);
+            BOOST_CHECK_THROW((void)kn::from_env(kn::composite_env(lookup(vars))),
+                              std::invalid_argument);
+        }
+    }
+    vars["KINESIS_KMS_PKCS11_URI"] = "pkcs11:token=kinesis?pin-value=1234";
+    vars["KINESIS_KMS_PKCS11_OAEP"] = "sha512";
+    BOOST_CHECK_THROW((void)kn::from_env(kn::composite_env(lookup(vars))), std::invalid_argument);
+}

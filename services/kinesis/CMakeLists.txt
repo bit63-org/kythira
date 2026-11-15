@@ -19,7 +19,9 @@ set(KYTHIRA_KINESIS_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}")
 set(KYTHIRA_KINESIS_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/include")
 add_library(kythira_kinesis INTERFACE)
 target_include_directories(kythira_kinesis INTERFACE "${KYTHIRA_KINESIS_INCLUDE_DIR}")
-target_link_libraries(kythira_kinesis INTERFACE kythira_core_headers boost_json OpenSSL::SSL OpenSSL::Crypto)
+# dlopen: KINESIS_KMS=pkcs11 loads a PKCS#11 library (raft/pkcs11_module.hpp).
+target_link_libraries(kythira_kinesis INTERFACE kythira_core_headers boost_json OpenSSL::SSL OpenSSL::Crypto
+    ${CMAKE_DL_LIBS})
 target_compile_features(kythira_kinesis INTERFACE cxx_std_23)
 # HTTP/2 for SubscribeToShard (task 13), where nghttp2 is available.
 if(TARGET kythira_nghttp2)

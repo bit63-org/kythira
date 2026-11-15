@@ -131,6 +131,32 @@ A sealed record whose tag fails is corruption, not a key problem, and gets
   - credentials come from `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` and
     `AWS_SESSION_TOKEN`, read at startup.
 
+- **`pkcs11`**: `pkcs11_kms_provider` in `kinesis_kms_pkcs11.hpp`. Data
+  keys are protected by a key pair on a PKCS#11 token: the co-located
+  virtual HSM (`services/hsm/`), or any library such as a YubiHSM 2,
+  CloudHSM or SoftHSM2:
+  - `KINESIS_KMS_PKCS11_URI` names the token, for example
+    `pkcs11:token=kinesis?pin-source=/run/secrets/kinesis-pin`. With
+    `module-path=` the node loads that library; without it the virtual
+    HSM module must run in the same `kythira_node`, and Kinesis uses it
+    in process as the application `KINESIS_KMS_PKCS11_IDENTITY` (default
+    `kinesis`). That identity needs a binding to the token and the PIN,
+    exactly as a network client would;
+  - a `KeyId` is the label of an RSA private key made for decryption on
+    that token, or a `pkcs11:` URI with `object=` or `id=` (a URI naming
+    another token, a library or a PIN is refused);
+  - to stay within what the YubiHSM 2 and CloudHSM both offer, there is
+    no AES key wrap: data keys are sealed with RSA-OAEP in software on
+    the public half, together with a SHA-256 of the key id and the
+    encryption context, and opened by one decryption on the token
+    (`include/raft/pkcs11_envelope.hpp`);
+  - `KINESIS_KMS_PKCS11_OAEP` is the OAEP hash for new data keys,
+    `sha256` (default) or `sha1` for a library that takes only SHA-1
+    (SoftHSM2 2.6). Each sealed key records its hash;
+  - the module opens on first use. A call that finds its session gone
+    (the module restarted, the HSM failed over) opens a new session and
+    tries once more.
+
   Another cloud's key service would be one more class that satisfies the
   concept.
 
@@ -167,3 +193,7 @@ Clark's go.
 - the AWS adapter against a fake KMS: signature checks, request shape and
   error mapping;
 - the encryption entries and data keys surviving the codec.
+
+`kinesis_kms_pkcs11_test` runs the `pkcs11` provider against a software
+token: round trips, the key id and context bindings, refused key ids, a
+wrong PIN, a dropped session and SHA-1 seals.
