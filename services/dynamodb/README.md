@@ -171,8 +171,10 @@ disk:
   that must hide them needs opaque key values.
 - The Raft log and transaction intents hold each write in the clear
   until the log is compacted and the transaction settles; change log
-  records, backups, point-in-time archives and exports are sealed by
-  KMS spec task 17.
+  records, backups and point-in-time archives are sealed under the table
+  key (KMS spec task 17). Exports are sealed under the KMS key
+  `S3SseKmsKeyId` names with `S3SseAlgorithm=KMS`, and otherwise left as
+  the bucket stores them, as on AWS.
 - Sizes: a sealed value is 29 bytes longer than the item.
 
 When a table's key cannot be opened on the catalog leader for ten

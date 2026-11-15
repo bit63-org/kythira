@@ -5,8 +5,10 @@ A KMS-compatible key management service for Kythira: AWS KMS's JSON 1.1 API
 against it unchanged. It holds no key material itself: every key's material
 is a non-extractable object on the virtual HSM's `kms` token
 (`services/hsm/`), and every request is authorized by IAM with the key's
-policy (`services/iam/`). Like the HSM it is software, so key material is in
-host memory while in use (`doc/hsm.md`). The spec is
+policy (`services/iam/`), or by static roles without IAM. Like the HSM it is
+software, so key material is in host memory while in use (`doc/hsm.md`).
+`doc/kms.md` is the operator guide: layouts, an AWS CLI walkthrough,
+authorization, what reaches disk and the honest limits. The spec is
 `.kiro/specs/kms-compatible-api/`; this directory follows
 `services/README.md`.
 
@@ -44,6 +46,8 @@ configuration `.github/workflows/kms-module.yml` checks.
 | `include/kythira/kms/kms_audit.hpp` | each request as one CloudTrail-shaped JSON line (`eventSource` kms.amazonaws.com, the caller, the key ARN, the grant that allowed it, `invokedBy` for a call a service made for its caller, the error) queued on core's bounded audit log, and the request counts by operation, outcome and account with latency by operation; encryption context keys only, never their values or any data | 14 |
 | `include/kythira/kms/kms_quotas.hpp` | AWS's per-account request quotas, answering `ThrottlingException`: the shared cryptographic quotas by the key's type (symmetric with HMAC and `GenerateRandom`, RSA, ECC), `GenerateDataKeyPair` by pair spec and each other operation's own rate, charged to the requesting account, counted per member at the account's rate divided by the members | 14 |
 | `tests/` | `kms_model_coverage` and its checker's fixture tests, `kms_model_header_fresh` (the header matches the model), `kms_model_test` (the tables validate requests), `kms_actions_test` and `kms_actions_header_fresh`, `kms_ciphertext_test` (tamper, wrong context, wrong key, over OpenSSL AES-GCM standing in for the HSM) and `kms_ciphertext_fuzz_test` (seeded mutations through the decoder), `kms_catalog_test` and `kms_catalog_property_test` (replicas and a restored checkpoint agree; binary material is refused), `kms_keys_test` (the jobs over an in-memory PKCS#11 backend, the sealed-HSM path, and the scan of the log, engine and checkpoint for generated material), `kms_backing_softhsm_test` (every key spec, AES-GCM tampering, and the signing, RSA-OAEP and HMAC mechanisms on SoftHSM2, when the build finds it), `kms_host_test` (three in-process members sharing a token: creation through a follower, a dead leader's Creating keys, a sealed HSM, a member cut off), `kms_api_test` (signed requests through the front end: framing, the authorization guard, key management, aliases, tags and the requests the authorizer sees), `kms_crypto_test` (the symmetric operations: round trips, every byte of a blob and every context change refused, key states, an older backing version, the HSM away, DryRun, condition keys), `kms_asymmetric_test` (RSA-OAEP, every signing algorithm in RAW and DIGEST form, GetPublicKey, data key pairs and HMAC, each checked with OpenSSL), `kms_policy_test` (the key policy operations, the default policy, the lockout safety check on `PutKeyPolicy` and `CreateKey`, and the static roles), `kms_grants_test` (grants allowing what the policy refuses, constraints, an explicit deny winning, grants under grants, retirement, tokens, paging), `kms_rotation_test` (rotation on demand and on schedule with old ciphertexts still decrypting, a retried rotation reusing its backing key, deletion at the end of the window destroying every backing key and leaving a tombstone), `kms_managed_test` (managed keys made on first use by any key operation, their policy, every customer change refused, yearly rotation, a failed attempt and another member's unaliased key; owned keys made on first use per account, refused to another service and hidden from the account itself), `kms_peer_test` (the forwarded reply's wire form, who is a member, and what the peer paths answer), `kms_quotas_test` (each quota, the requesting account charged, overrides, the rate split over members, `ThrottlingException` through the front end), `kms_audit_test` (the record's fields, a refusal and a bad signature, the grant and the service named, no context values or data, the counters and the file sink), `kms_client_test` (`kms.client` in process and a signed `kms_https_endpoint` request: the caller authorized with `kms:ViaService`, a forwarded principal honoured only when signed by a trusted service, administration refused), `kythira_node_kms_test` (kythira_node over SoftHSM2 sweeping an orphan, and a wrong PIN), `kythira_node_kms_kinesis_test` (in IAM's tests: Kinesis on the KMS in one kythira_node, a key policy denying a role that the stream's policy allows, and Kinesis on another node reaching the KMS over HTTPS as a trusted service), `kms_node_cluster_test` (three kms_node processes with mutual TLS and SoftHSM2 as the shared HSM: keys made through any member seen by all, ciphertexts crossing members, only members on the peer paths, two members carrying on without the third, the answering member's audit record, an operator's alias limit and a throttled `CreateKey`), and `kms_node_self_test`, `kms_node_help` and the daemon's refusals | 1-15 |
+| `tests/clients/kms_clients.py`, `requirements.txt` | the AWS CLI, boto3 and the AWS Encryption SDK (pinned) against a running cluster: keys, aliases, encryption with context, data keys, envelope encryption, signing, rotation, grants and deletion; `kms_node_cluster_test` runs it against its three members | 18 |
+| `services/hsm/tests/docker/hsm_chaos_test.cpp` (in the HSM module) | `encrypted_services_in_kythira_node`: the HSM, the KMS, DynamoDB and Kinesis in kythira_node under Docker and rootless Podman, a member killed and another cut off during encrypted writes, no acknowledged write lost, and no data key, plaintext or value (outside DynamoDB's Raft logs) in any data directory | 19 |
 
 The KMS cases of IAM's policy corpus (key policies, delegation,
 cross-account use, `kms:ViaService`, encryption context conditions) are in
@@ -57,7 +61,10 @@ admin may do everything. Key policies are still stored, returned and
 checked for size and JSON form, but they are not evaluated, and a policy
 that would deny the admin does not. Grants are stored and listed but
 allow nothing (`front_end_config::evaluate_grants` is off on static
-keys).
+keys). One call is let through that no role names: a co-located
+consumer's own call as an account's root, on a key in that account
+(`front_end_config::admit_consumer_root`), which DynamoDB makes to open
+table keys on every replica.
 Turn IAM on before relying on a key policy.
 
 Every request the API answers is written as one CloudTrail-shaped JSON
@@ -80,9 +87,16 @@ lowers an account's key and alias counts (AWS's 100000 and 50000); the
 leader writes it to the catalog, and an account taken off the list keeps
 its last limits until it is listed with AWS's values.
 
-Kinesis uses the KMS since task 15. DynamoDB's table encryption, on
-owned keys by default, and the rest follow in tasks 16 to 20
-(`.kiro/specs/kms-compatible-api/tasks.md`).
+Kinesis (task 15) and DynamoDB (tasks 16 and 17: table keys, owned keys
+by default, sealed backups, archives, exports and change records, and
+each global table replica's own key) encrypt through the KMS, co-located
+or on another cluster. `kms_clients.py` runs the AWS CLI, boto3 and the
+AWS Encryption SDK against a cluster (task 18), and the HSM's container
+scenario has an encrypted-services layout that kills and partitions
+members under encrypted writes and scans every data directory for
+plaintext (task 19). The differential run against real AWS KMS
+(task 18) is written and waits for the maintainer's approval of the
+spend.
 
 ## Core targets and variables used
 
