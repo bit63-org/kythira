@@ -70,6 +70,16 @@ struct front_end_config {
     /// principal they serve (raft/kms_forwarding.hpp): consuming services
     /// on other clusters. Empty: no request may.
     std::set<std::string, std::less<>> trusted_services;
+    /// On static keys (Requirement 7.7), whether a consumer's own call as
+    /// an account's root is allowed on that account's keys: a call with no
+    /// access key and kms:ViaService set, which only `kms.client` (or a
+    /// trusted service's forwarding) makes, such as DynamoDB opening a
+    /// table key on a replica or re-sealing after the request that chose
+    /// the key has gone. No static key names the root, so the roles alone
+    /// would refuse every such call, and an encrypted table could never be
+    /// read off the node that created it. The request that chose the key
+    /// was judged by the roles when it was made.
+    bool admit_consumer_root = false;
 };
 
 /// An HTTP request as the transport hands it over.
@@ -615,6 +625,15 @@ private:
         return e;
     }
 
+    /// A consumer's own call as its account's root (front_end_config::
+    /// admit_consumer_root).
+    [[nodiscard]] auto consumer_root(const call_context& ctx) const -> bool {
+        const auto& p = ctx.principal;
+        return !ctx.via_service.empty() && p.access_key_id.empty() &&
+               p.type == aws_auth::principal_type::root &&
+               p.arn == "arn:" + _config.partition + ":iam::" + p.account + ":root";
+    }
+
     [[nodiscard]] auto check(call_context& ctx, const front_end_request& req,
                              aws_auth::authz_request r) -> std::optional<aws_json::error> {
         r.source_ip = req.source_ip;
@@ -629,6 +648,12 @@ private:
         }
         if (r.resource.find(":key/") != std::string::npos) {
             ctx.audited_key_arn = r.resource;
+            if (_config.admit_consumer_root &&
+                (r.resource_account.empty() || r.resource_account == ctx.principal.account) &&
+                consumer_root(ctx)) {
+                ctx.last_denial_explicit = false;
+                return std::nullopt;
+            }
         }
         r.keys.emplace_back("kms:CallerAccount", std::vector<std::string>{ctx.principal.account});
         if (!ctx.via_service.empty()) {

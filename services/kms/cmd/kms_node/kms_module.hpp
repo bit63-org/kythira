@@ -474,6 +474,9 @@ private:
         fc.limits.max_body_bytes = static_cast<std::size_t>(_opt.max_body_bytes);
         // Requirement 7.7: on static keys the static roles decide alone.
         fc.evaluate_grants = _opt.auth != kythira::aws_auth::auth_mode::static_keys;
+        // ...except for a consumer's own calls as an account's root, which
+        // no role names (a co-located DynamoDB opening table keys).
+        fc.admit_consumer_root = _opt.auth == kythira::aws_auth::auth_mode::static_keys;
         fc.trusted_services.insert(_opt.trusted_services.begin(), _opt.trusted_services.end());
         _front_end = std::make_unique<front_end_type>(fc, *_authorizer);
         _audit = std::make_unique<kythira::kms::request_audit>(_opt.audit, _opt.region);
