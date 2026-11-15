@@ -500,6 +500,23 @@ private:
                 jobs_type jobs(*c, *hsm, propose, now_ms, _opt.grace);
                 return jobs.rotate(id, t);
             },
+            .ensure_managed = {},
+        };
+        // AWS managed keys on first use (kms_managed.hpp), through the same
+        // CreateKey steps.
+        const kythira::kms::managed_deps<catalog_type> mdeps{
+            .catalog = [this]() -> std::shared_ptr<const catalog_type> {
+                return _host->barrier() ? _host->catalog() : nullptr;
+            },
+            .propose = propose,
+            .create_key = deps.create_key,
+            .clock_ms = now_ms,
+            .partition = _opt.partition,
+            .region = _opt.region,
+        };
+        deps.ensure_managed = [mdeps](std::string_view account,
+                                      const kythira::kms::managed_service& s) {
+            return kythira::kms::ensure_managed_key(mdeps, account, s);
         };
         _api = std::make_unique<kythira::kms::key_management_api<catalog_type>>(deps);
         _grants = std::make_unique<kythira::kms::grants_api<catalog_type>>(deps);
@@ -507,6 +524,7 @@ private:
             .catalog = catalog,
             .barrier = barrier,
             .hsm = [this] { return store(); },
+            .ensure_managed = deps.ensure_managed,
         };
         _crypto = std::make_unique<kythira::kms::crypto_api<catalog_type>>(cdeps);
         _signing = std::make_unique<kythira::kms::signing_api<catalog_type>>(cdeps);

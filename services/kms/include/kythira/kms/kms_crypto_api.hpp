@@ -63,6 +63,9 @@ template<typename Catalog> struct crypto_deps {
     /// The token's backing store, or null while none is bound (the HSM is
     /// sealed, unreachable, or the token is missing).
     std::function<std::shared_ptr<backing_store>()> hsm;
+    /// Makes an AWS managed key on first use (ensure_managed_key); empty:
+    /// none is made.
+    std::function<key_result(std::string_view, const managed_service&)> ensure_managed;
 };
 
 /// Plaintext bytes that are wiped when they go.
@@ -220,7 +223,7 @@ public:
             return validation_error("Plaintext is required");
         }
         const plaintext p(std::move(*plain));
-        auto c = catalog();
+        auto c = catalog_for(ctx, in, "KeyId");
         if (!c) {
             return c.error();
         }
@@ -268,7 +271,7 @@ public:
     }
 
     auto re_encrypt(call_context& ctx, boost::json::object& in) -> result {
-        auto c = catalog();
+        auto c = catalog_for(ctx, in, "DestinationKeyId");
         if (!c) {
             return c.error();
         }
@@ -635,7 +638,7 @@ private:
         } else {
             return validation_error("KeySpec must be AES_256 or AES_128");
         }
-        auto c = catalog();
+        auto c = catalog_for(ctx, in, "KeyId");
         if (!c) {
             return c.error();
         }
@@ -702,7 +705,7 @@ private:
         } else {
             return unsupported("KeyPairSpec " + std::string(spec) + " is not supported");
         }
-        auto c = catalog();
+        auto c = catalog_for(ctx, in, "KeyId");
         if (!c) {
             return c.error();
         }
@@ -761,6 +764,22 @@ private:
             return internal_error("The KMS catalog has not opened yet");
         }
         return c;
+    }
+
+    /// catalog(), after making the AWS managed key `member` names if it
+    /// does not exist yet.
+    [[nodiscard]] auto catalog_for(const call_context& ctx, const boost::json::object& in,
+                                   std::string_view member) const
+        -> aws_json::result<std::shared_ptr<const Catalog>> {
+        auto c = catalog();
+        if (!c) {
+            return c;
+        }
+        const auto made = make_managed_if_named(ctx, **c, in, member, _d.ensure_managed);
+        if (!made) {
+            return made.error();
+        }
+        return *made ? catalog() : c;
     }
 
     crypto_deps<Catalog> _d;

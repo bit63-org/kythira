@@ -190,11 +190,15 @@ is one PR unless noted.
     `KYTHIRA_KMS_TRUSTED_SERVICES` (`kms_client_test`)
   - _Requirements: 2.2-2.5_
 
-- [ ] 13. AWS managed and owned keys
+- [x] 13. AWS managed and owned keys
   - First-use creation of `alias/aws/<service>` per account with the
     `kms:ViaService` policy, yearly rotation, customer changes refused;
     owned keys per consumer and account
-  - _Requirements: 10.1-10.3_
+  - Done: managed keys (`kms_managed.hpp`, `kms_managed_test`). Owned
+    keys (10.3) moved to task 16: DynamoDB's default table encryption is
+    their only consumer, and the consumer's own principal they are
+    authorized for only exists once a consumer calls `kms.client`
+  - _Requirements: 10.1-10.2 (10.3 in task 16)_
 
 - [ ] 14. Audit, metrics and quotas
   - CloudTrail-shaped audit records through IAM's audit sink, Prometheus
@@ -216,7 +220,8 @@ is one PR unless noted.
 - [ ] 16. DynamoDB table keys and `SSESpecification` (two PRs)
   - `SSESpecification` on `CreateTable`, `UpdateTable` and restores;
     `SSEDescription`; table key made and re-wrapped through `kms.client`;
-    owned key default with `KYTHIRA_DYNAMODB_ENCRYPT_AT_REST`; catalog
+    owned key default with `KYTHIRA_DYNAMODB_ENCRYPT_AT_REST` (the KMS's
+    owned keys, Requirement 10.3, moved here from task 13); catalog
     format bump
   - Item value sealing in the item state machine with derived, stored
     nonces; `INACCESSIBLE_ENCRYPTION_CREDENTIALS`; background

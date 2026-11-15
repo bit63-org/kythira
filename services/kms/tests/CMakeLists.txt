@@ -135,6 +135,12 @@ set_tests_properties(kms_rotation_test PROPERTIES LABELS "unit;kms;kms-module")
 
 # Task 12: the peer protocol members forward to the leader with: the
 # reply's wire form, who is a member, and serve_peer's answers.
+# Task 13, Requirements 10.1 and 10.2: AWS managed keys made on first use
+# with AWS's managed key policy, no customer changes, yearly rotation, and
+# creation idempotent across members and failed attempts.
+kythira_kms_test(kms_managed_test kms_managed_test.cpp)
+set_tests_properties(kms_managed_test PROPERTIES LABELS "unit;kms;kms-module")
+
 kythira_kms_test(kms_peer_test kms_peer_test.cpp)
 set_tests_properties(kms_peer_test PROPERTIES LABELS "unit;kms;kms-module")
 
