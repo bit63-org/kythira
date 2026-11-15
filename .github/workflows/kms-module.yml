@@ -39,6 +39,9 @@ on:
       - "services/kms/**"
       - "services/hsm/include/**"
       - "services/iam/include/**"
+      - "services/iam/tests/kythira_node_kms_kinesis_test.cpp"
+      - "services/kinesis/include/**"
+      - "services/kinesis/cmd/**"
       - "services/README.md"
       - "include/raft/aws_json*.hpp"
       - "scripts/gen_aws_json_shapes.py"
@@ -64,6 +67,9 @@ on:
       - "services/kms/**"
       - "services/hsm/include/**"
       - "services/iam/include/**"
+      - "services/iam/tests/kythira_node_kms_kinesis_test.cpp"
+      - "services/kinesis/include/**"
+      - "services/kinesis/cmd/**"
       - "services/README.md"
       - "include/raft/aws_json*.hpp"
       - "scripts/gen_aws_json_shapes.py"
@@ -269,7 +275,8 @@ jobs:
           exit $rc
 
   # Task 5: kythira_node with the KMS module over SoftHSM2
-  # (kythira_node_kms_test); task 12: kms_node, three of them with mutual
+  # (kythira_node_kms_test); task 15: Kinesis on it, beside IAM
+  # (kythira_node_kms_kinesis_test); task 12: kms_node, three of them with mutual
   # TLS forwarding to the catalog's leader (kms_node_cluster_test). The module is offered only where the catalog
   # has RocksDB, so this job configures ci_dynamodb_defconfig
   # (ci_full_defconfig with the RocksDB engine) on the tree
@@ -361,16 +368,16 @@ jobs:
 
       - name: Build kythira_node, kms_node and the tests
         run: |
-          for t in kythira_node_kms_test kms_node_cluster_test; do
+          for t in kythira_node_kms_test kythira_node_kms_kinesis_test kms_node_cluster_test; do
             if ! ctest --test-dir build -N -R "^${t}\$" | grep -q '^ *Test *#'; then
               echo "::error::${t} is not registered: no KMS module, no SoftHSM2 or no httplib"
               exit 1
             fi
           done
           cmake --build build -j"$(nproc)" --target kythira_node kythira_node_kms_test \
-            kms_node kms_node_cluster_test
+            kythira_node_kms_kinesis_test kms_node kms_node_cluster_test
 
       - name: Run the tests
         run: >-
           ctest --test-dir build --output-on-failure --no-tests=error
-          -R '^(kythira_node_(kms_test|offers_kms)|kms_node_(self_test|help|refuses_other_services|needs_kms|cluster_test))$'
+          -R '^(kythira_node_(kms_test|kms_kinesis_test|offers_kms)|kms_node_(self_test|help|refuses_other_services|needs_kms|cluster_test))$'

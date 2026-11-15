@@ -267,3 +267,11 @@ adding one generation.
 `kinesis_kms_pkcs11_test` runs the `pkcs11` provider against a software
 token: round trips, the key id and context bindings, refused key ids, a
 wrong PIN, a dropped session and SHA-1 seals.
+
+`kythira_node_kms_kinesis_test` (with IAM's tests, registered under
+`cmd/kythira_node/`) runs the real thing in kythira_node: IAM, Kinesis
+and the KMS over SoftHSM2 in one process, where a role that the stream's
+policy allows is refused with `KMSAccessDeniedException` because the
+key's policy denies it, and lets in once the deny is lifted; and Kinesis
+on a node of its own reaching the KMS over HTTPS, signing as a trusted
+service and naming each caller.

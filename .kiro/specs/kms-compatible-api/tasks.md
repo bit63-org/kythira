@@ -211,7 +211,7 @@ is one PR unless noted.
     `KYTHIRA_KMS_QUOTAS`, `KYTHIRA_KMS_ACCOUNT_QUOTAS`), key and alias
     limits by `KYTHIRA_KMS_ACCOUNT_LIMITS`, which the leader writes.
 
-- [ ] 15. Kinesis integration
+- [x] 15. Kinesis integration
   - `kythira` `kms_key_provider` over `kms.client` with the caller's
     principal, the default when the KMS runs in the same deployment;
     provider tag on wrapped generations; `alias/aws/kinesis`

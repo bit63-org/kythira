@@ -96,5 +96,6 @@ rocksdb services/kms/cmd/kms_node/main.cpp
 rocksdb services/kms/tests/kms_node_cluster_test.cpp
 rocksdb services/kms/tests/kythira_node_kms_test.cpp
 rocksdb services/kms/tests/kms_backing_softhsm_test.cpp
+rocksdb services/iam/tests/kythira_node_kms_kinesis_test.cpp
 
 no-cloud tests/multi_raft_node_s3_unavailable_test.cpp
