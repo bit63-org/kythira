@@ -114,14 +114,6 @@ private:
         return {reinterpret_cast<const std::uint8_t*>(s.data()), s.size()};
     }
 
-    /// The failures a new session may cure.
-    [[nodiscard]] static auto session_lost(CK_RV rv) -> bool {
-        return rv == CKR_SESSION_HANDLE_INVALID || rv == CKR_SESSION_CLOSED ||
-               rv == CKR_DEVICE_ERROR || rv == CKR_DEVICE_REMOVED || rv == CKR_TOKEN_NOT_PRESENT ||
-               rv == CKR_USER_NOT_LOGGED_IN || rv == CKR_CRYPTOKI_NOT_INITIALIZED ||
-               rv == CKR_KEY_HANDLE_INVALID || rv == CKR_OBJECT_HANDLE_INVALID;
-    }
-
     [[nodiscard]] static auto failure_of(CK_RV rv) -> kms_failure {
         switch (rv) {
             case CKR_OBJECT_HANDLE_INVALID:
@@ -186,7 +178,7 @@ private:
             try {
                 return use(key_of(key_id, u));
             } catch (const pkcs11::error& e) {
-                if (attempt == 0 && session_lost(e.rv())) {
+                if (attempt == 0 && pkcs11::session_lost(e.rv())) {
                     _state->_keys.clear();
                     _state->_session.reset();
                     continue;

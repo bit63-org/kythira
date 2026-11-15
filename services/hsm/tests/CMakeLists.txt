@@ -144,10 +144,26 @@ if(TARGET hsm_ctl)
         KYTHIRA_HSM_CTL="$<TARGET_FILE:hsm_ctl>")
     add_dependencies(hsm_pkcs11_module_test hsm_ctl)
 endif()
-target_link_libraries(hsm_pkcs11_module_test PRIVATE ${CMAKE_DL_LIBS})
+# The cluster CA with its key on a token (task 13b).
+target_link_libraries(hsm_pkcs11_module_test PRIVATE ${CMAKE_DL_LIBS} certificate_authority)
 add_dependencies(hsm_pkcs11_module_test kythira_pkcs11)
 set_tests_properties(hsm_pkcs11_module_test PROPERTIES
     LABELS "unit;hsm;hsm-module" TIMEOUT 300)
+
+# Task 13b, Requirement 10.1: three ca_cluster_node processes signing with
+# one root key on a SoftHSM2 token (--ca-key-uri), across a leader kill.
+if(TARGET ca_cluster_node AND KYTHIRA_SOFTHSM2_LIBRARY AND KYTHIRA_SOFTHSM2_UTIL)
+    kythira_hsm_test(hsm_ca_cluster_test hsm_ca_cluster_test.cpp)
+    target_compile_definitions(hsm_ca_cluster_test PRIVATE
+        CA_CLUSTER_NODE_PATH="$<TARGET_FILE:ca_cluster_node>"
+        KYTHIRA_SOFTHSM2_LIBRARY="${KYTHIRA_SOFTHSM2_LIBRARY}"
+        KYTHIRA_SOFTHSM2_UTIL="${KYTHIRA_SOFTHSM2_UTIL}")
+    target_link_libraries(hsm_ca_cluster_test PRIVATE
+        certificate_authority httplib::httplib boost_json kythira_test_support ${CMAKE_DL_LIBS})
+    add_dependencies(hsm_ca_cluster_test ca_cluster_node)
+    set_tests_properties(hsm_ca_cluster_test PROPERTIES
+        LABELS "hsm;hsm-module;integration" TIMEOUT 600 PROCESSORS 3)
+endif()
 
 # Task 10b, Requirement 5.6: the library under real consumers, each run
 # by services/hsm/pkcs11/tests/consumers.sh against a node this test

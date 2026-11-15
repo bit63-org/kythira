@@ -32,6 +32,17 @@
 // The client bearer token comes from $CA_SERVICE_AUTH_TOKEN (--auth-token
 // still works, but leaves the token in /proc/<pid>/cmdline).
 //
+// --ca-key-uri pkcs11:token=...;object=...?module-path=...&pin-source=...
+// keeps the CA's root key on a PKCS#11 token (`.kiro/specs/virtual-hsm/`
+// task 13b): the virtual HSM through libkythira_pkcs11.so, a YubiHSM 2,
+// CloudHSM or SoftHSM2. The bootstrapping node makes the root certificate
+// by signing it with the token key, and the replicated state records
+// "pkcs11:" and the key's URI (no library, no PIN) where it would hold the
+// sealed key, so every leader signs on the token and a node started without
+// --ca-key-uri refuses to lead instead of signing with nothing. Each node's
+// URI may name its own library path and PIN source. The unseal key is still
+// required: it derives the peer enrollment key and seals the OIDC keys.
+//
 // Every node in the cluster SHALL be started with the SAME --unseal-key-file
 // contents (Requirement 17.4) — losing it makes the persisted CA key
 // unrecoverable. --bootstrap-ca SHALL be given to exactly one node, exactly
@@ -80,6 +91,7 @@
 #include <raft/metrics.hpp>
 #include <raft/oidc_issuer.hpp>
 #include <raft/oidc_token.hpp>
+#include <raft/pkcs11_signing_key.hpp>
 #include <raft/private_file.hpp>
 #include <raft/prometheus_metrics.hpp>
 #include <raft/raft.hpp>
@@ -787,6 +799,21 @@ auto run_ca_cluster_node(ca_cluster_node::ca_cluster_node_config cfg, std::strin
     std::mutex signer_mu;
     std::unique_ptr<raft::testing::certificate_authority> signer;
 
+    // --ca-key-uri: the root key on a PKCS#11 token. The replicated state
+    // marks a token-held key with this prefix where a sealed key would be.
+    static constexpr std::string_view k_token_key_marker = "pkcs11:";
+    std::optional<kythira::pkcs11::signing_key> ca_token_key;
+    std::string ca_token_key_record;
+    if (!cfg.ca_key_uri.empty()) {
+        auto u = kythira::pkcs11::uri::parse(cfg.ca_key_uri);
+        ca_token_key.emplace(u);
+        u.module_path.reset();
+        u.module_name.reset();
+        u.pin_source.reset();
+        u.pin_value.reset();
+        ca_token_key_record = u.to_string();
+    }
+
     auto ensure_signer = [&] {
         {
             std::lock_guard lock(signer_mu);
@@ -806,6 +833,45 @@ auto run_ca_cluster_node(ca_cluster_node::ca_cluster_node_config cfg, std::strin
         }
         if (!state.has_root_material()) {
             return;
+        }
+
+        if (state.encrypted_bootstrap_material().starts_with(k_token_key_marker)) {
+            if (!ca_token_key) {
+                std::cerr << "[fatal] ca_cluster_node: the CA key is on a PKCS#11 token ("
+                          << state.encrypted_bootstrap_material()
+                          << ") but this node has no --ca-key-uri\n";
+                std::exit(1);
+            }
+            std::unique_ptr<raft::testing::certificate_authority> token_signer;
+            try {
+                token_signer = std::make_unique<raft::testing::certificate_authority>(
+                    raft::testing::certificate_authority::from_external(
+                        state.root_certificate_pem(), ca_token_key->as_ca_key()));
+            } catch (const kythira::pkcs11::error& ex) {
+                // The token is unreachable or sealed for now: retry next
+                // tick rather than give up leadership's signing for good.
+                std::cerr << "[warn] ca_cluster_node: the CA key on " << ca_token_key->name()
+                          << " cannot sign yet, will retry: " << ex.what() << "\n";
+                return;
+            } catch (const std::invalid_argument& ex) {
+                std::cerr << "[fatal] ca_cluster_node: " << ca_token_key->name()
+                          << " is not the CA certificate's key: " << ex.what() << "\n";
+                std::exit(1);
+            }
+            for (const auto& entry : state.ledger()) {
+                if (entry.revoked_at.has_value()) {
+                    token_signer->mark_revoked_externally(entry.serial, *entry.revoked_at);
+                }
+            }
+            std::lock_guard lock(signer_mu);
+            if (signer == nullptr) {
+                signer = std::move(token_signer);
+            }
+            return;
+        }
+        if (ca_token_key) {
+            std::cerr << "[warn] ca_cluster_node: this cluster's CA key is sealed in the Raft log; "
+                         "--ca-key-uri is not used\n";
         }
 
         std::string key_pem;
@@ -871,12 +937,30 @@ auto run_ca_cluster_node(ca_cluster_node::ca_cluster_node_config cfg, std::strin
 
         std::cerr << "[info] ca_cluster_node: bootstrapping fresh CA root (node " << cfg.node_id
                   << ")\n";
-        raft::testing::certificate_authority fresh_ca;
-        auto root_material = fresh_ca.export_root_material();
-        auto encrypted_key =
-            raft::testing::encrypt_ca_private_key(root_material.private_key_pem, unseal_passphrase);
-        auto cmd = raft::testing::encode_bootstrap_ca_command(root_material.certificate_pem,
-                                                              encrypted_key);
+        std::string root_pem;
+        std::string key_record;
+        if (ca_token_key) {
+            // The root is signed on the token; the log records which key,
+            // never the key.
+            try {
+                root_pem = raft::testing::certificate_authority::make_external_root(
+                    raft::testing::ca_options{},
+                    kythira::pkcs11::public_key_pem(ca_token_key->public_key()),
+                    ca_token_key->as_ca_key());
+            } catch (const std::exception& ex) {
+                std::cerr << "[warn] ca_cluster_node: cannot make the CA root on "
+                          << ca_token_key->name() << ", will retry: " << ex.what() << "\n";
+                return;
+            }
+            key_record = ca_token_key_record;  // "pkcs11:..." (k_token_key_marker)
+        } else {
+            raft::testing::certificate_authority fresh_ca;
+            auto root_material = fresh_ca.export_root_material();
+            root_pem = root_material.certificate_pem;
+            key_record = raft::testing::encrypt_ca_private_key(root_material.private_key_pem,
+                                                               unseal_passphrase);
+        }
+        auto cmd = raft::testing::encode_bootstrap_ca_command(root_pem, key_record);
         try {
             raft_node.submit_command(cmd, k_command_timeout).get();
             std::cerr << "[info] ca_cluster_node: bootstrap_ca committed\n";

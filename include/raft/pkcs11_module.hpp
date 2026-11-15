@@ -133,6 +133,16 @@ private:
     CK_RV _rv;
 };
 
+/// The failures a new session may cure: the session or the module's
+/// state is gone (the module restarted, the token was replaced, an HSM
+/// failed over), not a refusal.
+[[nodiscard]] inline auto session_lost(CK_RV rv) -> bool {
+    return rv == CKR_SESSION_HANDLE_INVALID || rv == CKR_SESSION_CLOSED || rv == CKR_DEVICE_ERROR ||
+           rv == CKR_DEVICE_REMOVED || rv == CKR_TOKEN_NOT_PRESENT ||
+           rv == CKR_USER_NOT_LOGGED_IN || rv == CKR_CRYPTOKI_NOT_INITIALIZED ||
+           rv == CKR_KEY_HANDLE_INVALID || rv == CKR_OBJECT_HANDLE_INVALID;
+}
+
 inline void check(CK_RV rv, std::string_view what) {
     if (rv != CKR_OK) {
         throw error(what, rv);

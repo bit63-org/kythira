@@ -27,6 +27,7 @@
 #   gcp       configs/ci_gcp_defconfig with KYTHIRA_GCP_REAL_TESTS=ON
 #   ion       configs/ci_ion_defconfig (ion-c, RocksDB) with
 #             KYTHIRA_HSM_CONSUMER_TESTS=ON (the opt-in PKCS#11 consumer test)
+#             and SoftHSM2 (the cluster CA's key on a token)
 #   no-cloud  configs/no_cloud_defconfig (no AWS S3, so multi_raft_node
 #             builds its "S3 unavailable" test instead of the S3 ones)
 
@@ -85,5 +86,6 @@ ion services/hsm/cmd/hsm_node/main.cpp
 ion services/hsm/tests/hsm_node_cluster_test.cpp
 ion services/hsm/tests/docker/hsm_chaos_test.cpp
 ion services/hsm/tests/hsm_pkcs11_consumers_test.cpp
+ion services/hsm/tests/hsm_ca_cluster_test.cpp
 
 no-cloud tests/multi_raft_node_s3_unavailable_test.cpp

@@ -2397,7 +2397,9 @@ jobs:
             vcpkg_cc: gcc-14
             vcpkg_cxx: g++-14
             vcpkg_ldflags: ''
-            apt: g++-14
+            # SoftHSM2 gives hsm_ca_cluster_test (the cluster CA on a
+            # token) a compile command.
+            apt: g++-14 softhsm2
             # A compile command for the opt-in PKCS#11 consumer test; its
             # tools are not needed to configure.
             cmake_extra: -DKYTHIRA_HSM_CONSUMER_TESTS=ON

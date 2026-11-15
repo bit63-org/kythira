@@ -31,6 +31,7 @@
 #include <chrono>
 #include <ctime>
 #include <mutex>
+#include <optional>
 #include <set>
 #include <sstream>
 #include <stdexcept>
@@ -515,6 +516,134 @@ inline void validate_san_entries(const std::vector<std::string>& dns_names,
     return serial;
 }
 
+/// The digest an `external_ca_key` signs for a CA public key: SHA-384 for
+/// P-384, SHA-256 otherwise. Refuses key types it cannot sign with.
+[[nodiscard]] inline auto external_digest(EVP_PKEY* pub) -> const EVP_MD* {
+    const int id = EVP_PKEY_get_base_id(pub);
+    if (id == EVP_PKEY_RSA) {
+        return EVP_sha256();
+    }
+    if (id != EVP_PKEY_EC) {
+        throw std::invalid_argument("external CA key: only EC and RSA keys are supported");
+    }
+    const int bits = EVP_PKEY_get_bits(pub);
+    if (bits != 256 && bits != 384) {
+        throw std::invalid_argument("external CA key: EC keys must be P-256 or P-384");
+    }
+    return bits == 384 ? EVP_sha384() : EVP_sha256();
+}
+
+/// A local key of `pub`'s type, used only so OpenSSL writes the signature
+/// AlgorithmIdentifiers an external signature needs (they name the hash and
+/// the key type, never the key): OpenSSL has no setter for a CRL's inner
+/// one. Its signature is replaced before anything leaves.
+[[nodiscard]] inline auto placeholder_key_for(EVP_PKEY* pub) -> evp_pkey_ptr {
+    return generate_key(EVP_PKEY_get_base_id(pub) == EVP_PKEY_RSA ? key_algorithm::rsa_2048
+                                                                  : key_algorithm::ecdsa_p256);
+}
+
+/// Stores `sig` as a signature bit string with no unused bits.
+inline void set_signature_bits(const ASN1_BIT_STRING* field, const std::vector<std::uint8_t>& sig) {
+    // OpenSSL offers only const accessors for a signed object's signature;
+    // X509_sign writes the same field.
+    auto* bits = const_cast<ASN1_BIT_STRING*>(field);
+    if (ASN1_BIT_STRING_set(bits, const_cast<std::uint8_t*>(sig.data()),
+                            static_cast<int>(sig.size())) != 1) {
+        throw_openssl_error("ASN1_BIT_STRING_set(signature) failed");
+    }
+    // Without the flag OpenSSL counts trailing zero octets as unused bits,
+    // corrupting a signature that ends in 0x00.
+    bits->flags &= ~(ASN1_STRING_FLAG_BITS_LEFT | 0x07);
+    bits->flags |= ASN1_STRING_FLAG_BITS_LEFT;
+}
+
+/// The external signature over a DER TBS encoding.
+[[nodiscard]] inline auto sign_tbs_externally(unsigned char* tbs, int tbs_len, EVP_PKEY* pub,
+                                              const external_ca_key& key)
+    -> std::vector<std::uint8_t> {
+    std::array<std::uint8_t, EVP_MAX_MD_SIZE> digest{};
+    unsigned int digest_len = 0;
+    const int ok = tbs_len > 0 ? EVP_Digest(tbs, static_cast<std::size_t>(tbs_len), digest.data(),
+                                            &digest_len, external_digest(pub), nullptr)
+                               : 0;
+    OPENSSL_free(tbs);
+    if (ok != 1) {
+        throw_openssl_error("EVP_Digest(TBS) failed");
+    }
+    return key.sign(std::span<const std::uint8_t>(digest.data(), digest_len));
+}
+
+/// Signs `cert` through `key`, checking the result against `pub`.
+inline void sign_cert_externally(X509* cert, EVP_PKEY* pub, EVP_PKEY* placeholder,
+                                 const external_ca_key& key) {
+    if (X509_sign(cert, placeholder, external_digest(pub)) == 0) {
+        throw_openssl_error("X509_sign(placeholder) failed");
+    }
+    unsigned char* tbs = nullptr;
+    const int tbs_len = i2d_re_X509_tbs(cert, &tbs);
+    const auto sig = sign_tbs_externally(tbs, tbs_len, pub, key);
+    const ASN1_BIT_STRING* field = nullptr;
+    X509_get0_signature(&field, nullptr, cert);
+    set_signature_bits(field, sig);
+    if (X509_verify(cert, pub) != 1) {
+        ERR_clear_error();
+        throw std::invalid_argument(
+            "external CA key: the signature does not verify against the CA certificate (is "
+            "the key the certificate's?)");
+    }
+}
+
+/// Signs `crl` through `key`, checking the result against `pub`.
+inline void sign_crl_externally(X509_CRL* crl, EVP_PKEY* pub, EVP_PKEY* placeholder,
+                                const external_ca_key& key) {
+    if (X509_CRL_sign(crl, placeholder, external_digest(pub)) == 0) {
+        throw_openssl_error("X509_CRL_sign(placeholder) failed");
+    }
+    unsigned char* tbs = nullptr;
+    const int tbs_len = i2d_re_X509_CRL_tbs(crl, &tbs);
+    const auto sig = sign_tbs_externally(tbs, tbs_len, pub, key);
+    const ASN1_BIT_STRING* field = nullptr;
+    X509_CRL_get0_signature(crl, &field, nullptr);
+    set_signature_bits(field, sig);
+    if (X509_CRL_verify(crl, pub) != 1) {
+        ERR_clear_error();
+        throw std::invalid_argument(
+            "external CA key: the CRL signature does not verify against the CA certificate (is "
+            "the key the certificate's?)");
+    }
+}
+
+/// An unsigned self-signed CA certificate for `pubkey`.
+[[nodiscard]] inline auto build_unsigned_root(const ca_options& options, EVP_PKEY* pubkey,
+                                              const certificate_serial& serial) -> x509_ptr {
+    x509_ptr cert(X509_new());
+    if (!cert) {
+        throw_openssl_error("X509_new(root) failed");
+    }
+    if (X509_set_version(cert.get(), 2) != 1) {
+        throw_openssl_error("X509_set_version(root) failed");
+    }
+    set_certificate_serial(cert.get(), serial);
+    // Backdated a minute: see leaf_certificate_options::not_before.
+    auto now = std::chrono::system_clock::now();
+    set_validity_window(cert.get(), now - std::chrono::minutes(1), now + options.validity);
+    X509_NAME* name = X509_get_subject_name(cert.get());
+    set_name(name, options.subject);
+    if (X509_set_issuer_name(cert.get(), name) != 1) {
+        throw_openssl_error("X509_set_issuer_name(root) failed");
+    }
+    if (X509_set_pubkey(cert.get(), pubkey) != 1) {
+        throw_openssl_error("X509_set_pubkey(root) failed");
+    }
+    X509V3_CTX ctx;
+    X509V3_set_ctx_nodb(&ctx);
+    X509V3_set_ctx(&ctx, cert.get(), cert.get(), nullptr, nullptr, 0);
+    add_extension(cert.get(), &ctx, NID_basic_constraints, "critical,CA:TRUE");
+    add_extension(cert.get(), &ctx, NID_key_usage, "critical,keyCertSign,cRLSign");
+    add_extension(cert.get(), &ctx, NID_subject_key_identifier, "hash");
+    return cert;
+}
+
 }  // namespace raft::testing::detail
 
 namespace raft::testing {
@@ -523,7 +652,10 @@ namespace raft::testing {
 /// non-reentrant OpenSSL sequences with `_mutex` so construction and issuance are
 /// safe to call concurrently on one instance.
 struct certificate_authority::impl {
+    /// The CA's private key, or only its public key when `external` signs.
     detail::evp_pkey_ptr ca_key;
+    std::optional<external_ca_key> external;
+    detail::evp_pkey_ptr placeholder;
     detail::x509_ptr ca_cert;
     std::string root_pem;
 
@@ -536,42 +668,10 @@ struct certificate_authority::impl {
 
     explicit impl(const ca_options& options) {
         ca_key = detail::generate_key(options.algorithm);
-
-        ca_cert.reset(X509_new());
-        if (!ca_cert) {
-            detail::throw_openssl_error("X509_new(root) failed");
-        }
-        if (X509_set_version(ca_cert.get(), 2) != 1) {
-            detail::throw_openssl_error("X509_set_version(root) failed");
-        }
-
-        set_certificate_serial(ca_cert.get(), next_serial());
-
-        // Backdated a minute: see leaf_certificate_options::not_before.
-        auto now = std::chrono::system_clock::now();
-        detail::set_validity_window(ca_cert.get(), now - std::chrono::minutes(1),
-                                    now + options.validity);
-
-        X509_NAME* name = X509_get_subject_name(ca_cert.get());
-        detail::set_name(name, options.subject);
-        if (X509_set_issuer_name(ca_cert.get(), name) != 1) {
-            detail::throw_openssl_error("X509_set_issuer_name(root) failed");
-        }
-        if (X509_set_pubkey(ca_cert.get(), ca_key.get()) != 1) {
-            detail::throw_openssl_error("X509_set_pubkey(root) failed");
-        }
-
-        X509V3_CTX ctx;
-        X509V3_set_ctx_nodb(&ctx);
-        X509V3_set_ctx(&ctx, ca_cert.get(), ca_cert.get(), nullptr, nullptr, 0);
-        detail::add_extension(ca_cert.get(), &ctx, NID_basic_constraints, "critical,CA:TRUE");
-        detail::add_extension(ca_cert.get(), &ctx, NID_key_usage, "critical,keyCertSign,cRLSign");
-        detail::add_extension(ca_cert.get(), &ctx, NID_subject_key_identifier, "hash");
-
+        ca_cert = detail::build_unsigned_root(options, ca_key.get(), next_serial());
         if (X509_sign(ca_cert.get(), ca_key.get(), EVP_sha256()) == 0) {
             detail::throw_openssl_error("X509_sign(root) failed");
         }
-
         root_pem = detail::serialize_cert(ca_cert.get());
     }
 
@@ -602,6 +702,39 @@ struct certificate_authority::impl {
         root_pem = detail::serialize_cert(ca_cert.get());
     }
 
+    /// Builds around a root whose key signs elsewhere
+    /// (`certificate_authority::from_external`): `ca_key` holds only the
+    /// certificate's public key, for checking each signature.
+    impl(const std::string& ca_cert_pem, external_ca_key key) : external(std::move(key)) {
+        if (!external->sign) {
+            throw std::invalid_argument("certificate_authority::from_external: no signer");
+        }
+        auto cert_bio = detail::make_bio();
+        BIO_write(cert_bio.get(), ca_cert_pem.data(), static_cast<int>(ca_cert_pem.size()));
+        ca_cert.reset(PEM_read_bio_X509(cert_bio.get(), nullptr, nullptr, nullptr));
+        if (!ca_cert) {
+            throw std::invalid_argument(
+                "certificate_authority::from_external: unparseable CA certificate PEM");
+        }
+        ca_key.reset(X509_get_pubkey(ca_cert.get()));
+        if (!ca_key) {
+            throw std::invalid_argument(
+                "certificate_authority::from_external: the CA certificate has no public key");
+        }
+        (void)detail::external_digest(ca_key.get());
+        placeholder = detail::placeholder_key_for(ca_key.get());
+        root_pem = detail::serialize_cert(ca_cert.get());
+    }
+
+    /// Signs a finished certificate with the CA key, wherever it is.
+    void sign_cert(X509* cert) const {
+        if (external) {
+            detail::sign_cert_externally(cert, ca_key.get(), placeholder.get(), *external);
+        } else if (X509_sign(cert, ca_key.get(), EVP_sha256()) == 0) {
+            detail::throw_openssl_error("X509_sign(leaf) failed");
+        }
+    }
+
     // Serials are random (see `detail::random_serial`), so they stay unique
     // across instances and processes — every ca_cluster_node replica signs
     // with the same root — without shared state. A repeat within this
@@ -626,10 +759,11 @@ struct certificate_authority::impl {
         auto leaf_key = detail::generate_key(options.algorithm);
         auto serial = next_serial();
         auto subject_name = detail::build_name(options.subject);
-        auto cert = detail::build_leaf_cert(ca_cert.get(), ca_key.get(), subject_name.get(),
-                                            leaf_key.get(), options.dns_names, options.ip_addresses,
-                                            options.uri_names, options.server_auth,
-                                            options.client_auth, not_before, not_after, serial);
+        auto cert = detail::build_unsigned_leaf_cert(
+            ca_cert.get(), subject_name.get(), leaf_key.get(), options.dns_names,
+            options.ip_addresses, options.uri_names, options.server_auth, options.client_auth,
+            not_before, not_after, serial);
+        sign_cert(cert.get());
 
         pem_material out;
         out.certificate_pem = detail::serialize_cert(cert.get());
@@ -689,10 +823,11 @@ struct certificate_authority::impl {
 
         auto serial = next_serial();
         auto now = std::chrono::system_clock::now();
-        auto cert = detail::build_leaf_cert(
-            ca_cert.get(), ca_key.get(), X509_REQ_get_subject_name(req.get()), pubkey.get(),
-            options.dns_names, options.ip_addresses, options.uri_names, options.server_auth,
-            options.client_auth, now, now + options.validity, serial);
+        auto cert = detail::build_unsigned_leaf_cert(
+            ca_cert.get(), X509_REQ_get_subject_name(req.get()), pubkey.get(), options.dns_names,
+            options.ip_addresses, options.uri_names, options.server_auth, options.client_auth, now,
+            now + options.validity, serial);
+        sign_cert(cert.get());
 
         pem_material out;
         out.certificate_pem = detail::serialize_cert(cert.get());
@@ -742,7 +877,9 @@ struct certificate_authority::impl {
         ASN1_TIME_free(next_update);
 
         X509_CRL_sort(crl.get());
-        if (X509_CRL_sign(crl.get(), ca_key.get(), EVP_sha256()) == 0) {
+        if (external) {
+            detail::sign_crl_externally(crl.get(), ca_key.get(), placeholder.get(), *external);
+        } else if (X509_CRL_sign(crl.get(), ca_key.get(), EVP_sha256()) == 0) {
             detail::throw_openssl_error("X509_CRL_sign failed");
         }
 
