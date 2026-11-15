@@ -146,6 +146,9 @@ in place is out of scope (Requirement 3.3). Per service:
 - Each stand-alone daemon's tests, compose files and docker-chaos
   scenarios run unchanged against the daemons, which are now one-module
   nodes (Requirement 3.4).
+- The virtual HSM's docker-chaos scenario (`services/hsm/tests/docker/`)
+  runs the same kills and partitions against `hsm_node` and against
+  `kythira_node` with the HSM beside Redis, from one compose file.
 - `kythira_node_cluster_test` (`services/iam/tests/`) starts three
   `kythira_node` processes with every service the build compiled in and
   runs each service's smoke test against that one cluster: an IAM account

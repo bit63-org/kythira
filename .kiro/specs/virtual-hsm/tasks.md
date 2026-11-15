@@ -280,14 +280,18 @@ task is one PR unless noted.
     smoke tests in CI
   - _Requirements: 5.1-5.7, 13.2_
 
-- [ ] 11. `hsm_node`, cluster tests and docker-chaos
+- [x] 11. `hsm_node`, cluster tests and docker-chaos
   - [x] 11a. Stand-alone daemon (`kythira_node` with only the HSM module,
     in the module's group space and data directory), cluster tests with
     kills during generation and rekey (`hsm_node_cluster_test`, the
     cluster job of `hsm-module.yml`); the operator API applies a seal or
     rekey before answering, so no status reports a stale vault unsealed
-  - [ ] 11b. docker-chaos scenario stand-alone and co-located, Docker and
-    rootless Podman, service-name addressing
+  - [x] 11b. docker-chaos scenario stand-alone and co-located, Docker and
+    rootless Podman, service-name addressing (`hsm_chaos_test`,
+    `docker-hsm-chaos-tests`, the container job of `hsm-module.yml`):
+    the token leader killed and partitioned during key generation, the
+    catalog leader killed during rekeys, in `hsm_node` and in
+    `kythira_node` beside Redis
   - _Requirements: 2.1, 2.5, 13.5, 13.6_
 
 - [ ] 12. Consumer wrapper and external modules
