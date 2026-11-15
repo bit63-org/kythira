@@ -6,7 +6,7 @@ tasks 1-3 and 8 (the service module interface, `kythira_node`, and IAM on
 the multi-raft host). Tasks 1-4 need neither and can start now. Each task
 is one PR unless noted.
 
-- [ ] 1. Module skeleton and model
+- [x] 1. Module skeleton and model
   - `KYTHIRA_KMS` Kconfig option (default off, depends on `KYTHIRA_HSM`
     and `KYTHIRA_IAM`), `services/kms/` layout, boundary check coverage
   - Pinned botocore `kms` model, generated operation and shape tables, a
@@ -14,6 +14,14 @@ is one PR unless noted.
     DynamoDB and Kinesis modules do
   - Off-by-default build proved unchanged
   - _Requirements: 1.1-1.4, 3.1_
+  - Done: Kconfig symbol `KMS` (the repo's symbols carry no `KYTHIRA_`
+    prefix), botocore 1.43.100's model with 54 operations, all listed
+    in `services/kms/doc/unsupported.md` until their task serves them;
+    `kms_node` is a placeholder with `--self-test` until task 12.
+    `DeriveSharedSecret` and `GetKeyLastUsage` are in the model but in
+    no task: refused for now, an open question for the owner.
+    `kms-module.yml` builds the module on and configures it off
+    (`configs/ci_no_kms_defconfig`).
 
 - [ ] 2. `kms` action table and IAM condition keys
   - `kms_actions.hpp` with every action, the `key` and `alias` resource

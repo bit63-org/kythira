@@ -56,3 +56,4 @@ CONFIG_DYNAMODB=y
 # and clang-tidy cover it. Needs only OpenSSL 3, which every leg has.
 # configs/ci_no_hsm_defconfig is this file without it.
 CONFIG_HSM=y
+CONFIG_KMS=y

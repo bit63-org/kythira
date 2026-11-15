@@ -916,6 +916,21 @@ else()
 endif()
 kythira_kconfig_require(HSM KYTHIRA_BUILD_HSM "OpenSSL 3")
 
+# kms-compatible-api spec: the services/kms/ module (AWS KMS's JSON 1.1 API,
+# keys held by the virtual HSM, authorized by IAM key policies). Off unless
+# CONFIG_KMS=y; Kconfig makes it depend on HSM and IAM, and it builds only
+# when both of those modules do. Entered with add_subdirectory(services/kms)
+# below, after the HSM.
+kythira_kconfig_gate(KMS)
+set(KYTHIRA_BUILD_KMS FALSE)
+if(_KYTHIRA_GATE_KMS AND DEFINED KCONFIG_KMS AND KYTHIRA_BUILD_HSM AND KYTHIRA_BUILD_IAM)
+    set(KYTHIRA_BUILD_KMS TRUE)
+    message(STATUS "KMS module enabled (services/kms/, .kiro/specs/kms-compatible-api/)")
+else()
+    message(STATUS "KMS module disabled (CONFIG_KMS=n, or the HSM or IAM module is off)")
+endif()
+kythira_kconfig_require(KMS KYTHIRA_BUILD_KMS "the HSM or IAM module")
+
 # Core's generator of AWS JSON service models (include/raft/aws_json_protocol.hpp),
 # exported for the modules that pin a botocore model (DynamoDB, Kinesis), so
 # they reach it by variable rather than by core's source path.
@@ -2315,6 +2330,12 @@ endif()
 # entered likewise.
 if(KYTHIRA_BUILD_HSM)
     add_subdirectory(services/hsm)
+endif()
+
+# The KMS module (.kiro/specs/kms-compatible-api/), after the HSM it keeps
+# its keys in.
+if(KYTHIRA_BUILD_KMS)
+    add_subdirectory(services/kms)
 endif()
 
 # kythira_node, the composite daemon (.kiro/specs/service-colocation/),

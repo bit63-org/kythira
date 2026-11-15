@@ -1,0 +1,20 @@
+# Copyright (c) 2026 Clark Rawlins
+# SPDX-License-Identifier: Apache-2.0
+
+# The KMS-compatible service (services/kms/, .kiro/specs/kms-compatible-api/).
+# Sourced from the top-level Kconfig's "Service Modules" menu.
+
+config KMS
+	bool "KMS-compatible key management service"
+	default n
+	depends on HSM && IAM
+	help
+	  Builds the services/kms/ module: AWS KMS's JSON 1.1 API, so the AWS
+	  CLI, the SDKs and the AWS Encryption SDK work against it unchanged,
+	  with every key's material a non-extractable object on the virtual
+	  HSM and every request authorized by IAM with the key's policy. So
+	  far the module holds the pinned botocore model, its generated shape
+	  tables, the coverage check and the kms_node placeholder (task 1);
+	  the catalog, the HSM binding and the API follow. Needs the HSM and
+	  IAM modules. Off by default like every new module
+	  (services/README.md). See .kiro/specs/kms-compatible-api/.
