@@ -406,7 +406,7 @@ task is one PR unless noted.
     never overwriting, tampering, no PIN in the file, plain files), and
     the OIDC cluster case starting its node from a sealed unseal file.
 
-- [ ] 14. Audit, metrics and IAM authorization
+- [x] 14. Audit, metrics and IAM authorization
   - Audit log with optional ledger sink; metrics per 11.3; `hsm:` actions
     on token ARNs when IAM is present
   - _Requirements: 8.4, 11.1-11.3_
@@ -434,8 +434,24 @@ task is one PR unless noted.
     dropped and ledger lines pending, beside the host's replica lag and
     read-index wait. Tests: `hsm_audit_test`, and audit cases in
     `hsm_session_layer_test` and `hsm_admin_test`.
-  - [ ] 14b. `hsm:` actions on token ARNs when IAM is co-located or
-    reachable (Requirement 8.4).
+  - [x] 14b. `hsm:` actions on token ARNs: with `KYTHIRA_HSM_IAM=true`
+    and IAM co-located, a client whose identity (its certificate's first
+    URI SAN) is an IAM user or role ARN is authorized by IAM's policies
+    instead of by the bindings (`include/kythira/hsm/hsm_iam.hpp`): the
+    module registers the `hsm` action table with the IAM module's
+    evaluator, and the session layer asks `hsm:OpenToken` to list or open
+    a token and one action per call that makes, changes, destroys or uses
+    a key (`hsm:GenerateKey`, `hsm:Sign`, `hsm:Decrypt`, ...), on
+    `arn:<partition>:hsm:<region>:<account>:token/<id>` in the principal's
+    account, refusing with `CKR_ACTION_PROHIBITED`. A role ARN acts as a
+    session of the role, a user ARN as the user; every other identity
+    keeps its bindings, and the PIN is still required. Decisions are kept
+    for `KYTHIRA_HSM_IAM_CACHE_MS` (10 s). A stand-alone `hsm_node` has no
+    IAM to ask and refuses the setting. Tests: `hsm_iam_test` (which ARNs
+    are principals, the action table, the request, the cache), a session
+    layer case (an authorizer deciding call by call over the bindings),
+    and `kythira_node_cluster_test` (a client named by an IAM role sees a
+    token only once a role policy grants `hsm:OpenToken` on its ARN).
 
 - [ ] 15. Documentation
   - `services/hsm/README.md` and `doc/hsm.md` opening with the threat model

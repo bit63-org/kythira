@@ -25,6 +25,7 @@
 #include <cstdint>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <optional>
 #include <ostream>
 #include <string>
@@ -732,4 +733,60 @@ BOOST_AUTO_TEST_CASE(calls_are_audited_and_signing_sampled) {
     BOOST_TEST(changed[1].action == "destroy_object");
     BOOST_TEST(changed[1].label == "renamed");
     BOOST_TEST((changed[1].object == std::optional<CK_OBJECT_HANDLE>(pair->second)));
+}
+
+// Task 14b (Requirement 8.4): an identity the authorizer claims is decided
+// by it, call by call, and the bindings no longer speak for it; every other
+// identity keeps its bindings.
+BOOST_AUTO_TEST_CASE(an_authorizer_decides_for_the_identities_it_claims) {
+    const std::string arn = "arn:aws:iam::123456789012:role/signer";
+    std::mutex mu;
+    std::set<std::pair<std::uint64_t, std::string>> grants{{k_token, "hsm:OpenToken"},
+                                                           {k_token, "hsm:Sign"}};
+    std::vector<std::string> asked;
+    auto o = options();
+    o.authorize = [&](std::string_view identity, std::uint64_t token,
+                      std::string_view action) -> std::optional<bool> {
+        if (!identity.starts_with("arn:")) {
+            return std::nullopt;
+        }
+        const std::scoped_lock lock(mu);
+        asked.emplace_back(action);
+        return grants.contains({token, std::string(action)});
+    };
+    node n(o);
+    const auto pair = n.ec_pair();
+
+    hsm::native_client iam(n.layer, arn);
+    // Bound to the other token, but IAM grants only the first.
+    BOOST_REQUIRE(n.propose_catalog(hsm::make_bind_command(arn, k_other_token)) == CKR_OK);
+    BOOST_TEST(iam.get_slot_list() == (std::vector<CK_SLOT_ID>{k_token}),
+               boost::test_tools::per_element());
+    BOOST_TEST(rv(iam.open_session(k_other_token, CKF_SERIAL_SESSION)) == CKR_TOKEN_NOT_PRESENT);
+    auto s = iam.open_session(k_token, CKF_SERIAL_SESSION | CKF_RW_SESSION);
+    BOOST_REQUIRE(s.has_value());
+    // The PIN is still needed on top of the identity (Requirement 8.3).
+    BOOST_REQUIRE(rv(iam.login(*s, CKU_USER, k_user_pin)) == CKR_OK);
+
+    BOOST_REQUIRE(rv(iam.sign_init(*s, k_ecdsa, pair.second)) == CKR_OK);
+    BOOST_REQUIRE(iam.sign(*s, data("msg")).has_value());
+    BOOST_TEST(rv(iam.verify_init(*s, k_ecdsa, pair.first)) == CKR_ACTION_PROHIBITED);
+    BOOST_TEST(rv(iam.generate_key(*s, k_aes_gen, aes_template(true))) == CKR_ACTION_PROHIBITED);
+    BOOST_TEST(rv(iam.destroy_object(*s, pair.second)) == CKR_ACTION_PROHIBITED);
+    {
+        const std::scoped_lock lock(mu);
+        grants.emplace(k_token, "hsm:GenerateKey");
+    }
+    BOOST_TEST(iam.generate_key(*s, k_aes_gen, aes_template(true)).has_value());
+    {
+        const std::scoped_lock lock(mu);
+        for (const auto* a :
+             {"hsm:OpenToken", "hsm:Sign", "hsm:Verify", "hsm:GenerateKey", "hsm:DestroyObject"}) {
+            BOOST_TEST((std::ranges::find(asked, a) != asked.end()), a);
+        }
+    }
+    // The fixture's identity is not the authorizer's: its bindings stand.
+    BOOST_TEST(n.client->get_slot_list() == (std::vector<CK_SLOT_ID>{k_token}),
+               boost::test_tools::per_element());
+    BOOST_TEST(n.client->generate_key(n.session, k_aes_gen, aes_template(true)).has_value());
 }

@@ -17,6 +17,7 @@
 #include <filesystem>
 #include <map>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace kythira::iam::testing {
@@ -35,6 +36,9 @@ struct test_pki_options {
     /// two roots with one subject and no key identifiers are told apart by
     /// trying the first, so a chain to the second fails its signature.
     std::string ca_common_name = "Kythira Test Root CA";
+    /// More client certificates: each name's `<name>.pem` and `<name>.key`
+    /// in `dir`, with the URI SAN given.
+    std::vector<std::pair<std::string, std::string>> clients;
 };
 
 struct test_pki_paths {
@@ -100,6 +104,9 @@ inline auto write_test_pki(const test_pki_options& o) -> test_pki_paths {
     p.outsider_cert = o.dir / "outsider.pem";
     p.outsider_key = o.dir / "outsider.key";
     client(k_outsider_uri, p.outsider_cert, p.outsider_key);
+    for (const auto& [name, uri] : o.clients) {
+        client(uri.c_str(), o.dir / (name + ".pem"), o.dir / (name + ".key"));
+    }
     p.unseal = o.dir / "unseal.txt";
     raft::write_private_file(p.unseal, o.unseal_passphrase + "\n");
     return p;

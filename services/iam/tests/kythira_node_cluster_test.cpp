@@ -21,7 +21,10 @@
 //               then init on one node, two of three shares on each node
 //               unseal it, a token is created on a follower, every node's
 //               PKCS#11 client listener names a client by its certificate,
-//               and one seal reaches every node.
+//               a client whose certificate names an IAM role sees the token
+//               only once a role policy grants hsm:OpenToken on its ARN
+//               (KYTHIRA_HSM_IAM, the co-located IAM module deciding), and
+//               one seal reaches every node.
 //
 // The services come from `kythira_node --help`, so a build with only some
 // modules runs only their checks (ci.yml's full builds have no ledger;
@@ -50,6 +53,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <chrono>
 #include <csignal>
 #include <cstdint>
@@ -69,6 +73,8 @@ using namespace iam_node_testing;
 namespace sigv4 = kythira::sigv4;
 
 constexpr const char* k_account = "111122223333";
+/// The HSM client identified by an IAM role (task 14b of the virtual HSM).
+constexpr const char* k_hsm_role_arn = "arn:aws:iam::111122223333:role/hsm-signer";
 
 /// The services `kythira_node --help` lists as compiled in.
 auto compiled_in() -> std::set<std::string> {
@@ -130,6 +136,7 @@ public:
         for (const auto& p : nodes) {
             o.nodes.push_back(make_id(p.n));
         }
+        o.clients = {{"hsm-role", k_hsm_role_arn}};
         pki = kythira::iam::testing::write_test_pki(o);
         _roles = _dir / "ledger-roles.txt";
         raft::write_private_file(_roles.string(),
@@ -237,6 +244,9 @@ public:
             std::string("KYTHIRA_HSM_OPERATORS=") + kythira::iam::testing::k_admin_uri,
             "KYTHIRA_HSM_ALLOW_UNLOCKED_MEMORY=true",
             "KYTHIRA_HSM_CLIENT_LISTEN=127.0.0.1:" + std::to_string(p.hsm_clients),
+            // IAM ARNs as client identities, every decision fresh.
+            "KYTHIRA_HSM_IAM=true",
+            "KYTHIRA_HSM_IAM_CACHE_MS=0",
             "PATH=/usr/bin:/bin",
         };
         const auto log = (dir / "node.log").string();
@@ -407,6 +417,77 @@ auto hsm_hello(std::uint16_t port, const kythira::iam::testing::test_pki_paths& 
     } catch (const std::exception&) {
         return std::nullopt;
     }
+}
+
+/// get_slot_list on a node's HSM client listener, as the client `cert`
+/// names: the token ids it may see, or nothing when it did not answer.
+auto hsm_slots(std::uint16_t port, const kythira::iam::testing::test_pki_paths& pki,
+               const std::string& cert, const std::string& key)
+    -> std::optional<std::vector<std::uint64_t>> {
+    try {
+        ssl::context ctx(ssl::context::tls_client);
+        ctx.load_verify_file(pki.ca.string());
+        ctx.set_verify_mode(ssl::verify_peer);
+        ctx.use_certificate_chain_file(cert);
+        ctx.use_private_key_file(key, ssl::context::pem);
+        asio::io_context ioc;
+        beast::ssl_stream<beast::tcp_stream> s(ioc, ctx);
+        beast::get_lowest_layer(s).expires_after(5s);
+        beast::get_lowest_layer(s).connect(
+            asio::ip::tcp::endpoint(asio::ip::make_address("127.0.0.1"), port));
+        s.handshake(ssl::stream_base::client);
+        // Length 5: version 1, op 2 (get_slot_list).
+        const std::array<std::uint8_t, 9> request{0, 0, 0, 5, 1, 0, 0, 0, 2};
+        asio::write(s, asio::buffer(request));
+        std::array<std::uint8_t, 4> header{};
+        asio::read(s, asio::buffer(header));
+        const std::size_t n = (std::size_t{header[0]} << 24U) | (std::size_t{header[1]} << 16U) |
+                              (std::size_t{header[2]} << 8U) | header[3];
+        if (n < 8 + 4 || n > 4096) {
+            return std::nullopt;
+        }
+        std::vector<std::uint8_t> body(n);
+        asio::read(s, asio::buffer(body));
+        // u64 CK_RV, then a u32 count and that many u64 slot ids.
+        const auto u64_at = [&](std::size_t at) {
+            std::uint64_t v = 0;
+            for (std::size_t i = 0; i < 8; ++i) {
+                v = (v << 8U) | body[at + i];
+            }
+            return v;
+        };
+        if (u64_at(0) != 0) {
+            return std::nullopt;
+        }
+        const std::size_t count = (std::size_t{body[8]} << 24U) | (std::size_t{body[9]} << 16U) |
+                                  (std::size_t{body[10]} << 8U) | body[11];
+        if (12 + (8 * count) != n) {
+            return std::nullopt;
+        }
+        std::vector<std::uint64_t> out;
+        for (std::size_t i = 0; i < count; ++i) {
+            out.push_back(u64_at(12 + (8 * i)));
+        }
+        return out;
+    } catch (const std::exception&) {
+        return std::nullopt;
+    }
+}
+
+/// `s` percent-encoded for a form body.
+auto form_encode(std::string_view s) -> std::string {
+    static constexpr std::string_view hex = "0123456789ABCDEF";
+    std::string out;
+    for (const unsigned char ch : s) {
+        if ((std::isalnum(ch) != 0) || ch == '-' || ch == '_' || ch == '.' || ch == '~') {
+            out.push_back(static_cast<char>(ch));
+        } else {
+            out.push_back('%');
+            out.push_back(hex[ch >> 4U]);
+            out.push_back(hex[ch & 0xFU]);
+        }
+    }
+    return out;
 }
 
 /// One RESP command on a fresh plaintext connection; the raw reply, or ""
@@ -720,6 +801,50 @@ BOOST_AUTO_TEST_CASE(every_compiled_in_service_on_one_cluster, *boost::unit_test
                                        c.pki.admin_key.string());
             BOOST_TEST(who.value_or("(no answer)") == kythira::iam::testing::k_admin_uri);
         }
+        // A client named by an IAM role ARN: IAM, not the bindings, decides
+        // what it sees, so token 1 appears once a role policy grants
+        // hsm:OpenToken on the token's ARN in the role's account.
+        const auto role_cert = (c.pki.ca.parent_path() / "hsm-role.pem").string();
+        const auto role_key = (c.pki.ca.parent_path() / "hsm-role.key").string();
+        const auto role_slots = [&] {
+            return hsm_slots(first.hsm_clients, c.pki, role_cert, role_key)
+                .value_or(std::vector<std::uint64_t>{99});
+        };
+        BOOST_TEST(role_slots().empty());
+        const auto iam_call = [&](const std::string& body) {
+            return until(200U,
+                         [&] { return signed_iam_call(leader->iam, c.pki, key, secret, body); });
+        };
+        auto role = iam_call(
+            "Action=CreateRole&Version=2010-05-08&RoleName=hsm-signer&AssumeRolePolicyDocument=" +
+            form_encode(std::string(R"({"Version":"2012-10-17","Statement":[{"Effect":"Allow",)") +
+                        R"("Principal":{"AWS":")" + k_account +
+                        R"("},"Action":"sts:AssumeRole"}]})"));
+        BOOST_REQUIRE(role.has_value());
+        BOOST_TEST(role->status == 200U, role->body);
+        auto grant = iam_call(
+            "Action=PutRolePolicy&Version=2010-05-08&RoleName=hsm-signer&PolicyName=hsm"
+            "&PolicyDocument=" +
+            form_encode(std::string(R"({"Version":"2012-10-17","Statement":[{"Effect":"Allow",)") +
+                        R"("Action":"hsm:OpenToken","Resource":"arn:aws:hsm:local:)" + k_account +
+                        R"(:token/1"}]})"));
+        BOOST_REQUIRE(grant.has_value());
+        BOOST_TEST(grant->status == 200U, grant->body);
+        std::vector<std::uint64_t> seen;
+        for (auto deadline = std::chrono::steady_clock::now() + 20s;
+             std::chrono::steady_clock::now() < deadline; std::this_thread::sleep_for(250ms)) {
+            seen = role_slots();
+            if (seen == std::vector<std::uint64_t>{1}) {
+                break;
+            }
+        }
+        BOOST_TEST(seen == (std::vector<std::uint64_t>{1}), boost::test_tools::per_element());
+        // The operator's identity is no ARN: its bindings (none) decide.
+        BOOST_TEST(
+            hsm_slots(first.hsm_clients, c.pki, c.pki.admin_cert.string(), c.pki.admin_key.string())
+                .value_or(std::vector<std::uint64_t>{99})
+                .empty());
+        BOOST_TEST_MESSAGE("hsm: an IAM role's client sees a token once its policy allows");
         // One seal reaches every node within a maintenance pass.
         auto sealed = admin(c.nodes.back(), http::verb::post, "/v1/seal");
         BOOST_REQUIRE(sealed.has_value());

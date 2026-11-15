@@ -321,6 +321,16 @@ auto from_env(const env_fn& env) -> hsm_options {
     o.audit_ledger_cert = get_opt(env, "KYTHIRA_HSM_AUDIT_LEDGER_CERT", o.tls_cert);
     o.audit_ledger_key = get_opt(env, "KYTHIRA_HSM_AUDIT_LEDGER_KEY", o.tls_key);
     o.audit_ledger_ca = get_opt(env, "KYTHIRA_HSM_AUDIT_LEDGER_CA", o.client_ca);
+    o.iam = bool_opt(env, "KYTHIRA_HSM_IAM", o.iam);
+    o.iam_partition = get_opt(env, "KYTHIRA_HSM_IAM_PARTITION", o.iam_partition);
+    o.iam_region = get_opt(env, "KYTHIRA_HSM_IAM_REGION", o.iam_region);
+    if (o.iam_partition.empty() || o.iam_region.empty() ||
+        o.iam_partition.find(':') != std::string::npos ||
+        o.iam_region.find(':') != std::string::npos) {
+        throw fail("KYTHIRA_HSM_IAM_PARTITION and _REGION must be non-empty and hold no ':'");
+    }
+    o.iam_cache = std::chrono::milliseconds{
+        u64_opt(env, "KYTHIRA_HSM_IAM_CACHE_MS", static_cast<std::uint64_t>(o.iam_cache.count()))};
     o.max_login_failures = static_cast<std::uint32_t>(
         u64_opt(env, "KYTHIRA_HSM_MAX_LOGIN_FAILURES", o.max_login_failures));
     if (o.max_login_failures == 0) {
@@ -416,6 +426,13 @@ auto usage_text() -> std::string_view {
   KYTHIRA_HSM_AUDIT_LEDGER           its ledger name (hsm_audit); _TABLE the
                                      table (audit); _CERT, _KEY and _CA the
                                      client TLS files (the node's own)
+  KYTHIRA_HSM_IAM                    authorize clients whose identity is an IAM
+                                     user or role ARN with hsm: actions on
+                                     arn:<partition>:hsm:<region>:<account>:
+                                     token/<id> (needs IAM co-located; false)
+  KYTHIRA_HSM_IAM_PARTITION          the ARN's partition (aws); _REGION its
+                                     region (local); _CACHE_MS how long a
+                                     decision is kept (10000)
   KYTHIRA_HSM_SHARE_SEALER           how this node's node-unseal share is
                                      sealed at rest: file (default)
   KYTHIRA_HSM_SHARE_KEY_FILE         the file sealer's key, created 0600 on

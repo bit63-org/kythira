@@ -96,6 +96,11 @@ if(TARGET httplib::httplib)
     set_tests_properties(hsm_audit_test PROPERTIES
         LABELS "unit;hsm;hsm-module" TIMEOUT 60)
 endif()
+# Task 14b, Requirement 8.4: IAM user and role ARNs as principals, the hsm
+# action table, the request IAM is asked about a token, the decision cache.
+kythira_hsm_test(hsm_iam_test hsm_iam_test.cpp)
+set_tests_properties(hsm_iam_test PROPERTIES
+    LABELS "unit;hsm;hsm-module" TIMEOUT 60)
 # Task 7: operator unseal (shares checked on arrival, k needed, expiry) and
 # the vault sealing itself after a seal or rekey.
 kythira_hsm_test(hsm_unseal_test hsm_unseal_test.cpp)
