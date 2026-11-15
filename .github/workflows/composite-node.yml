@@ -45,6 +45,8 @@ on:
       - "services/dynamodb/cmd/**"
       - "services/redis/cmd/**"
       - "services/ledger/cmd/**"
+      - "services/hsm/cmd/**"
+      - "services/hsm/include/**"
       - "configs/ci_ion_defconfig"
       - "tests/docker_chaos/os_faults.hpp"
       - "cmake/kythira_test_helpers.cmake"
@@ -77,6 +79,8 @@ on:
       - "services/dynamodb/cmd/**"
       - "services/redis/cmd/**"
       - "services/ledger/cmd/**"
+      - "services/hsm/cmd/**"
+      - "services/hsm/include/**"
       - "configs/ci_ion_defconfig"
       - "tests/docker_chaos/os_faults.hpp"
       - "cmake/kythira_test_helpers.cmake"
@@ -232,7 +236,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        leg: [redis, ledger, iam, kinesis, dynamodb, all]
+        leg: [redis, ledger, iam, kinesis, dynamodb, hsm, all]
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -305,9 +309,9 @@ jobs:
           LEG: ${{ matrix.leg }}
         run: |
           declare -A switch=([redis]=REDIS_GATEWAY [ledger]=LEDGER [iam]=IAM
-                             [kinesis]=KINESIS [dynamodb]=DYNAMODB)
+                             [kinesis]=KINESIS [dynamodb]=DYNAMODB [hsm]=HSM)
           if [ "$LEG" = all ]; then on="${!switch[*]}"; else on="$LEG"; fi
-          grep -Ev '^(# )?CONFIG_(REDIS_GATEWAY|LEDGER|IAM|KINESIS|DYNAMODB)(_[A-Z0-9_]+)?( is not set|=.*)$' \
+          grep -Ev '^(# )?CONFIG_(REDIS_GATEWAY|LEDGER|IAM|KINESIS|DYNAMODB|HSM)(_[A-Z0-9_]+)?( is not set|=.*)$' \
             configs/ci_ion_defconfig > "$RUNNER_TEMP/leg_defconfig"
           for m in "${!switch[@]}"; do
             if [[ " $on " == *" $m "* ]]; then
@@ -317,7 +321,7 @@ jobs:
             fi
           done >> "$RUNNER_TEMP/leg_defconfig"
           echo "modules=$on" >> "$GITHUB_ENV"
-          grep -E 'CONFIG_(REDIS_GATEWAY|LEDGER|IAM|KINESIS|DYNAMODB)\b' "$RUNNER_TEMP/leg_defconfig"
+          grep -E 'CONFIG_(REDIS_GATEWAY|LEDGER|IAM|KINESIS|DYNAMODB|HSM)\b' "$RUNNER_TEMP/leg_defconfig"
 
       - name: Configure
         run: |
@@ -350,7 +354,7 @@ jobs:
           ctest --test-dir build -L node -R '^kythira_node_' \
             -E '^kythira_node_(iam|cluster)_test$' --output-on-failure
           ./build/kythira_node --help | tee help.txt
-          for m in redis ledger iam kinesis dynamodb; do
+          for m in redis ledger iam kinesis dynamodb hsm; do
             if [[ " $modules " == *" $m "* ]]; then
               grep -Eq "^  $m  \(" help.txt || { echo "::error::$m is not compiled in"; exit 1; }
             elif grep -Eq "^  $m  \(" help.txt; then

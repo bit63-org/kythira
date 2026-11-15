@@ -14,7 +14,10 @@
 //               same way;
 //   * redis     SET on whichever node takes the write, then GET;
 //   * ledger    a ledger, a table and a document over its HTTPS API (Ion
-//               text bodies) with an admin client certificate, read back.
+//               text bodies) with an admin client certificate, read back;
+//   * hsm       every node's operator API answers the operator (a fresh,
+//               sealed HSM), the peer routes answer a member's certificate
+//               and refuse the operator's, and an outsider gets nothing.
 //
 // The services come from `kythira_node --help`, so a build with only some
 // modules runs only their checks (ci.yml's full builds have no ledger;
@@ -91,6 +94,7 @@ struct node_proc {
     std::uint16_t dynamodb = 0;
     std::uint16_t redis = 0;
     std::uint16_t ledger = 0;
+    std::uint16_t hsm = 0;
     pid_t pid = -1;
 };
 
@@ -98,11 +102,11 @@ class node_cluster {
 public:
     explicit node_cluster(std::set<std::string> services) : services(std::move(services)) {
         _dir = raft::make_private_temp_directory(fs::temp_directory_path(), "kythira-node-all-");
-        const auto base = kythira::testing::free_port_block(21);
+        const auto base = kythira::testing::free_port_block(24);
         for (int i = 0; i < 3; ++i) {
             node_proc p;
             p.n = i + 1;
-            const auto b = static_cast<std::uint16_t>(base + 7 * i);
+            const auto b = static_cast<std::uint16_t>(base + 8 * i);
             p.raft = b;
             p.metrics = b + 1;
             p.iam = b + 2;
@@ -110,6 +114,7 @@ public:
             p.dynamodb = b + 4;
             p.redis = b + 5;
             p.ledger = b + 6;
+            p.hsm = b + 7;
             nodes.push_back(p);
         }
         kythira::iam::testing::test_pki_options o;
@@ -139,6 +144,15 @@ public:
     }
 
     [[nodiscard]] auto has(const std::string& s) const -> bool { return services.contains(s); }
+
+    /// Every node's Raft peer identity, comma separated.
+    [[nodiscard]] auto peer_identities() const -> std::string {
+        std::string out;
+        for (const auto& q : nodes) {
+            out += (out.empty() ? "" : ",") + raft::testing::peer_identity_name(make_id(q.n));
+        }
+        return out;
+    }
 
     void start(node_proc& p) {
         const auto map = [&](const std::string& prefix, auto port_of) {
@@ -204,6 +218,16 @@ public:
             "KYTHIRA_LEDGER_TLS_KEY=" + pki.node_key(make_id(p.n)).string(),
             "KYTHIRA_LEDGER_CLIENT_CA=" + pki.ca.string(),
             "KYTHIRA_LEDGER_ROLES_FILE=" + _roles.string(),
+            // The HSM on the node's certificate (its TLS defaults), the
+            // members named by their Raft peer identities, and the IAM
+            // admin certificate as its operator. CI runners cap
+            // RLIMIT_MEMLOCK, so key memory may stay unlocked here.
+            "KYTHIRA_HSM_API_LISTEN=127.0.0.1:" + std::to_string(p.hsm),
+            "KYTHIRA_HSM_API_URLS=" +
+                map("https://localhost:", [](const auto& q) { return q.hsm; }),
+            "KYTHIRA_HSM_PEER_IDENTITIES=" + peer_identities(),
+            std::string("KYTHIRA_HSM_OPERATORS=") + kythira::iam::testing::k_admin_uri,
+            "KYTHIRA_HSM_ALLOW_UNLOCKED_MEMORY=true",
             "PATH=/usr/bin:/bin",
         };
         const auto log = (dir / "node.log").string();
@@ -561,5 +585,43 @@ BOOST_AUTO_TEST_CASE(every_compiled_in_service_on_one_cluster, *boost::unit_test
         BOOST_TEST(got->status == 200U, got->body);
         BOOST_TEST(got->body.find("hello") != std::string::npos, got->body);
         BOOST_TEST_MESSAGE("ledger: a document inserted and read back");
+    }
+
+    if (c.has("hsm")) {
+        BOOST_TEST_CHECKPOINT("hsm");
+        // A fresh HSM: initialized and unsealed by an operator later (its
+        // own tests cover that). Each node's listener is up and answers
+        // the operator.
+        for (const auto& p : c.nodes) {
+            auto st = until(200U, [&] {
+                return https_call(p.hsm, c.pki, http::verb::get, "/v1/status",
+                                  c.pki.admin_cert.string(), c.pki.admin_key.string());
+            });
+            BOOST_REQUIRE(st.has_value());
+            BOOST_TEST(st->status == 200U, st->body);
+            const auto status = json_of(st->body);
+            BOOST_TEST(status.at("initialized").as_bool() == false, st->body);
+            BOOST_TEST(status.at("sealed").as_bool() == true, st->body);
+            // An outsider's certificate is no operator.
+            auto outsider = https_call(p.hsm, c.pki, http::verb::get, "/v1/status",
+                                       c.pki.outsider_cert.string(), c.pki.outsider_key.string());
+            BOOST_REQUIRE(outsider.has_value());
+            BOOST_TEST(outsider->status == 403U, outsider->body);
+        }
+        // The forwarding routes take a member's certificate, not the
+        // operator's: a read-index round on the catalog, answered by the
+        // leader or with a not_leader reply, is 200 either way.
+        auto& first = c.nodes.front();
+        auto& second = c.nodes.at(1);
+        auto refused = https_call(second.hsm, c.pki, http::verb::post, "/v1/peer/read-index/0",
+                                  c.pki.admin_cert.string(), c.pki.admin_key.string());
+        BOOST_REQUIRE(refused.has_value());
+        BOOST_TEST(refused->status == 403U, refused->body);
+        auto member = https_call(second.hsm, c.pki, http::verb::post, "/v1/peer/read-index/0",
+                                 c.pki.node_cert(make_id(first.n)).string(),
+                                 c.pki.node_key(make_id(first.n)).string());
+        BOOST_REQUIRE(member.has_value());
+        BOOST_TEST(member->status == 200U, member->body);
+        BOOST_TEST_MESSAGE("hsm: operator API on every node, peer routes for members only");
     }
 }

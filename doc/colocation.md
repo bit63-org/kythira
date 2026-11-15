@@ -5,7 +5,8 @@ module (`.kiro/specs/service-colocation/`). `KYTHIRA_SERVICES` names them;
 `kythira_node --help` lists the ones compiled in. Each stand-alone daemon
 (`redis_gateway_node`, `dynamodb_gateway_node`, `kinesis_gateway_node`,
 `ledger_node`, `iam_node`) is still built and runs the same module code on
-its own.
+its own. The virtual HSM (`hsm`) runs only in `kythira_node` until its own
+daemon, `hsm_node`, arrives with the virtual HSM spec's task 11.
 
 This page covers resource isolation (task 9), IAM's group in both
 layouts (task 8), the container image (task 10), how to move a service
@@ -34,6 +35,7 @@ Every module keeps its own:
 | Kinesis (`kinesis`) | `KINESIS_MAX_CONNECTIONS` (256) | `KINESIS_` | `KINESIS_DISK_FLOOR_BYTES`, `KINESIS_MAX_BODY_BYTES` |
 | Ledger (`ledger`) | `KYTHIRA_LEDGER_MAX_CONNECTIONS` (512) | `KYTHIRA_LEDGER_` | `KYTHIRA_LEDGER_SNAPSHOT_DISK_MARGIN_BYTES`, `KYTHIRA_LEDGER_MAX_BODY_BYTES` |
 | IAM (`iam`) | `KYTHIRA_IAM_MAX_CONNECTIONS` (256) | none read | none |
+| Virtual HSM (`hsm`) | `KYTHIRA_HSM_MAX_CONNECTIONS` (256) | `KYTHIRA_HSM_` | `KYTHIRA_HSM_MAX_BODY_BYTES` |
 
 The stand-alone daemons read their Raft tuning under bare names
 (`KYTHIRA_EXECUTOR_STRIPES`, `KYTHIRA_ELECTION_TIMEOUT_MIN_MS`,
@@ -141,9 +143,11 @@ out of scope (Requirement 3.3). Per service:
   `kythira_node` processes with every service the build compiled in and
   runs each service's smoke test against that one cluster: an IAM account
   and user, a Kinesis record and a DynamoDB item written on one node and
-  read on another, a Redis SET and GET, and a ledger document.
+  read on another, a Redis SET and GET, a ledger document, and the
+  virtual HSM's operator API on every node with its forwarding routes
+  open to members only.
 - `.github/workflows/composite-node.yml` builds `kythira_node` with each
-  module alone and with all five, checks that `--help` lists exactly the
+  module alone and with all six, checks that `--help` lists exactly the
   leg's modules, and runs the cluster test in the legs that have IAM; its
   container job runs the composite cluster scenario above under Docker
   and rootless Podman.
@@ -159,8 +163,11 @@ when any of this matters:
   member at once.
 - **Secrets.** Any module can read any other module's memory: IAM's
   unsealing key and decrypted secrets, a gateway's forwarding secret, the
-  ledger's signing key, and (once it exists) the virtual HSM's key
-  material (the virtual HSM's Requirement 2.5). In-process calls between
+  ledger's signing key, and the virtual HSM's unsealed master key and
+  key material (the virtual HSM's Requirement 2.5). The HSM module also
+  turns off core dumps and ptrace attachment (`PR_SET_DUMPABLE=0`) for
+  the whole process when it loads, so every module on that node loses
+  core dumps too. In-process calls between
   modules are authorized like network requests, but nothing stops code in
   one module from reading another's memory.
 - **CPU and memory.** Threads and executors are per module, but the cores,

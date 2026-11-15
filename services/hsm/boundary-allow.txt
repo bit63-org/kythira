@@ -7,3 +7,4 @@
 #
 # file                                         allowed core *_impl.hpp       why
 tests/hsm_host_test.cpp                        multi_raft_impl.hpp           stands up in-process hosts
+cmd/hsm_node/hsm_module.hpp                    multi_raft_impl.hpp           instantiates the module's multi-raft host
