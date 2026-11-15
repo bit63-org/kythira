@@ -78,5 +78,7 @@ ion services/ledger/tests/ledger_host_test.cpp
 ion services/ledger/tests/ledger_node_cluster_test.cpp
 ion services/ledger/tests/ledger_crash_test.cpp
 ion services/ledger/tests/docker/ledger_chaos_test.cpp
+ion services/hsm/cmd/hsm_node/hsm_config.cpp
+ion services/hsm/cmd/hsm_node/hsm_module_registrar.cpp
 
 no-cloud tests/multi_raft_node_s3_unavailable_test.cpp

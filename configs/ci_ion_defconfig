@@ -35,6 +35,11 @@
 #                             needs ENGINE_ROCKSDB, so only this tree can
 #                             build it. It adds one translation unit to
 #                             redis_gateway_node, which this job builds.
+#   HSM                     — set in ci_full_defconfig too, and listed here
+#                             because this is the tree that builds the HSM's
+#                             kythira_node module (services/hsm/cmd/), which
+#                             stores its groups in RocksDB. ci.yml's ion
+#                             tidy variant analyses those files from here.
 #
 # Everything else is verbatim from ci_full_defconfig and must stay that way —
 # the job builds the ion targets out of the same tree the main legs build, and
@@ -44,6 +49,7 @@ CONFIG_ION_SERIALIZER=y
 CONFIG_LEDGER=y
 CONFIG_ENGINE_ROCKSDB=y
 CONFIG_REDIS_GATEWAY_ENGINE=y
+CONFIG_HSM=y
 CONFIG_EDHOC=y
 CONFIG_STDEXEC_BACKEND=y
 CONFIG_BOOST_FUTURE_BACKEND=y

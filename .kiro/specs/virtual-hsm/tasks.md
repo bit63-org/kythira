@@ -188,9 +188,26 @@ task is one PR unless noted.
       deleting, binding and unbinding tokens; only the configured
       operator identities may call it. Init, unseal, seal and rekey stay
       with task 7.
-  - [ ] 6e. `hsm_module`: configuration, the listener, the network
+  - [x] 6e. `hsm_module`: configuration, the listener, the network
     forwarder, the in-process interface for co-located modules, and the
     `kythira_node` registrar with the composite cluster test
+    - Done: `cmd/hsm_node/hsm_config.hpp` reads `KYTHIRA_HSM_*`, falling
+      back to the node's TLS files and plaintext switch (`composite_env`);
+      the data directory is always the node's `hsm/`. The API URLs must
+      name this node, operators and member identities may not overlap,
+      and every refusal names its variable. `hsm_module` (number
+      `module_numbers::hsm`) locks key memory in `configure`, registers
+      the catalog and token groups on RocksDB with the network forwarder,
+      publishes the session layer as `hsm.session_layer` for co-located
+      modules, and serves the peer routes and then the operator API on one
+      mTLS listener. Health stays up while sealed; the detail says
+      `sealed` or `not initialized`. The module is built where RocksDB,
+      the CA library and the Beast transport are, so `ci_dynamodb` has it
+      and `ci_full` does not. `kythira_node_cluster_test` checks the
+      status on every node, a non-operator's 403, a peer route refusing an
+      operator's certificate and answering a member's. Checked by hand
+      with three nodes: one catalog leader, a new one after killing it,
+      and the `kythira_hsm_*` metrics.
 
 - [ ] 7. Operator unseal, init, seal and rekey
   - `hsm_ctl init|unseal|seal|rekey|status`; partial shares in memory with
