@@ -40,11 +40,26 @@ task is one PR unless noted.
     a different, valid secret. The secure arena of task 3 replaces
     `secret_bytes`' heap storage.
 
-- [ ] 3. Secure memory
+- [x] 3. Secure memory
   - `secure_arena` (mlock, `MADV_DONTDUMP`, zeroize), `PR_SET_DUMPABLE`
     and `RLIMIT_CORE` on load, startup error on lock failure unless
     allowed
   - _Requirements: 12.3, 12.4_
+  - Done: `<kythira/hsm/secure_arena.hpp>`. Chunks (64 KiB by default)
+    are anonymous mappings, `mlock`ed, `MADV_DONTDUMP`, and
+    `MADV_WIPEONFORK` where the kernel has it; blocks are first fit in
+    32-byte granules, wiped on release, and each chunk is wiped before
+    it is unmapped (the first is kept, so the lock is proven once).
+    `secret_bytes` now allocates from `process_arena()` through
+    `secure_allocator`, which propagates on move so a moved key is never
+    copied. The process arena starts best-effort so tools and tests run
+    anywhere; `prepare_key_memory(allow_unlocked)` hardens the process
+    and calls `require_locking()`, which fails with `lock_failed` unless
+    the flag is set. `hsm_node --self-test` runs it today, with
+    `--allow-unlocked-memory` as the flag; the service module's startup
+    (task 6) calls it too. The real-limit test drops `CAP_IPC_LOCK` in a forked
+    child, since root with it ignores `RLIMIT_MEMLOCK`. Task 2's note that
+    the arena replaces `secret_bytes`' heap storage is done here.
 
 - [ ] 4. Mechanisms and attribute policy
   - OpenSSL 3 EVP implementations for every key type and mechanism in

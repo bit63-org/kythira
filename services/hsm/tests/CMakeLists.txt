@@ -33,7 +33,14 @@ kythira_hsm_test(hsm_shamir_test hsm_shamir_test.cpp)
 set_tests_properties(hsm_shamir_test PROPERTIES
     LABELS "unit;hsm;hsm-module" TIMEOUT 60)
 
-# Task 1: hsm_node links and runs.
+# Task 3, Requirements 12.3-12.4: key memory is mlock'ed and MADV_DONTDUMP,
+# wiped on release, a lock failure is an error unless allowed, and
+# harden_process() turns off core dumps and ptrace attachment.
+kythira_hsm_test(hsm_secure_arena_test hsm_secure_arena_test.cpp)
+set_tests_properties(hsm_secure_arena_test PROPERTIES
+    LABELS "unit;hsm;hsm-module" TIMEOUT 60)
+
+# Task 1: hsm_node links and runs (and, from task 3, can lock key memory).
 add_test(NAME hsm_node_self_test COMMAND hsm_node --self-test)
 set_tests_properties(hsm_node_self_test PROPERTIES
     LABELS "unit;hsm;hsm-module" TIMEOUT 60)
