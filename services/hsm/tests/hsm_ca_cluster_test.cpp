@@ -9,7 +9,8 @@
 // the key's URI, certificates issued before and after a leader is killed
 // verify against that root, and no node's data directory holds a private
 // key. A second case (task 13c) puts the OIDC issuer's signing keys on the
-// token too and checks a token minted over mTLS verifies under the JWKS.
+// token too, with the unseal passphrase sealed under a token key, and checks
+// a token minted over mTLS verifies under the JWKS.
 
 #define BOOST_TEST_MODULE hsm_ca_cluster_test
 
@@ -20,6 +21,7 @@
 #include <raft/certificate_provider.hpp>
 #include <raft/jwt.hpp>
 #include <raft/pkcs11_module.hpp>
+#include <raft/pkcs11_sealed_secret.hpp>
 #include <raft/pkcs11_signing_key.hpp>
 #include <raft/pkcs11_uri.hpp>
 
@@ -275,8 +277,23 @@ BOOST_AUTO_TEST_CASE(oidc_tokens_are_signed_on_the_token, *boost::unit_test::tim
     auto token_uri = p11::uri::parse("pkcs11:token=ca");
     token_uri.module_path = KYTHIRA_SOFTHSM2_LIBRARY;
     token_uri.pin_value = k_pin;
-    const auto unseal = (root_dir / "unseal.key").string();
-    std::ofstream(unseal) << "hsm-ca-oidc-unseal-passphrase\n";
+    // The unseal passphrase itself sealed under a decryption key on the
+    // token, so nothing on disk opens the node's secrets without it.
+    const auto unseal = (root_dir / "unseal.sealed").string();
+    {
+        const auto mod = p11::module::load(KYTHIRA_SOFTHSM2_LIBRARY);
+        auto s = mod.open(p11::uri::parse("pkcs11:token=ca"), k_pin);
+        const std::array<std::uint8_t, 2> id{0xca, 0x02};
+        (void)s.generate_key_pair(p11::key_spec::rsa_2048, p11::key_usage::decrypt, "unseal", id);
+        const auto pin_file = root_dir / "pin";
+        std::ofstream(pin_file) << k_pin << "\n";
+        auto key = p11::uri::parse("pkcs11:token=ca;object=unseal");
+        key.module_path = KYTHIRA_SOFTHSM2_LIBRARY;
+        key.pin_source = pin_file.string();
+        // SoftHSM2 2.6's RSA-OAEP takes SHA-1 only.
+        std::ofstream(unseal) << p11::seal_secret_file(key, "hsm-ca-oidc-unseal-passphrase",
+                                                       p11::hash_algorithm::sha1);
+    }
     constexpr const char* k_issuer = "https://issuer.kythira.test";
     constexpr const char* k_audience = "sts.amazonaws.com";
     constexpr const char* k_prefix = "spiffe://kythira.test/wl/";

@@ -279,7 +279,12 @@ without changing the services that use keys.
    key is an RSA decryption key pair: data keys are sealed with RSA-OAEP in
    software on its public half and opened on the token (the YubiHSM 2 has
    no standard AES key wrap, so an AES key on the token would not move).
-3. IAM SHALL be able to keep its OIDC and STS signing keys on a token.
+3. The OIDC issuer SHALL be able to keep its signing keys on a token.
+   IAM's STS keys are AES-256-GCM, which 9.2's common subset lacks, so
+   instead the unseal passphrase they are derived from SHALL be able to be
+   sealed under a decryption key on a token and opened there at startup;
+   the docs SHALL say that the STS keys are then protected by the token at
+   rest, not held in it.
 4. Each consumer SHALL keep its current key handling as the default, so
    nothing changes for an existing deployment.
 

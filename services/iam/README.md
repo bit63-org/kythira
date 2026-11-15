@@ -84,7 +84,7 @@ The module reads `KYTHIRA_IAM_*` for what is its own and the node's
 
 | Variable | Meaning | Default |
 |---|---|---|
-| `KYTHIRA_IAM_UNSEAL_KEY_FILE` | the cluster's unseal passphrase (required) | |
+| `KYTHIRA_IAM_UNSEAL_KEY_FILE` | the cluster's unseal passphrase (required): its first line, or a file from `hsm_ctl seal-secret` that opens on a PKCS#11 token (virtual-hsm task 13c) | |
 | `KYTHIRA_IAM_HTTP_BIND`, `_HTTP_PORT` | the IAM, STS and admin listener | `0.0.0.0`, `8443` |
 | `KYTHIRA_IAM_TLS_CERT`, `_TLS_KEY` | its certificate | the node's |
 | `KYTHIRA_IAM_CLIENT_CA` | the CA admin client certificates chain to | the node's |

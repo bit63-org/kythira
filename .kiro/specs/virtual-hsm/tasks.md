@@ -340,7 +340,7 @@ task is one PR unless noted.
     same keys and no longer extractable, repeats the run, and runs
     `hsm_ctl migrate` itself through `libkythira_pkcs11.so`.
 
-- [ ] 13. Consumers
+- [x] 13. Consumers
   - Cluster CA signing key on a token; Kinesis `pkcs11` key provider; IAM
     OIDC/STS signing keys on a token; each opt-in, defaults unchanged
   - _Requirements: 10.1-10.4_
@@ -378,7 +378,8 @@ task is one PR unless noted.
     signing key type, native, the .so and SoftHSM2) and
     `hsm_ca_cluster_test` (three nodes on one SoftHSM2 token across a
     leader kill).
-  - [ ] 13c. The OIDC issuer's signing keys on a token:
+  - [x] 13c. The OIDC issuer's signing keys on a token, and the unseal
+    passphrase sealed under one:
     `ca_cluster_node --oidc-key-uri` (or `CA_CLUSTER_OIDC_KEY_URI`) names
     a token; the leader makes each rotation's key pair there
     (`signing_key::generate`, RSA 2048 for RS256, P-256 for ES256,
@@ -391,9 +392,19 @@ task is one PR unless noted.
     `hsm_pkcs11_module_test` (RS256 and ES256 on three backends) and
     `hsm_ca_cluster_test` (a token over mTLS verified under the JWKS,
     the key found on the token, nothing private in the data directory).
-    IAM's STS keys are AES-GCM, outside the common subset: the unseal
-    passphrase that derives their KEK is sealed under a token key
-    instead (next).
+    IAM's STS keys are AES-256-GCM and the CA's peer enrollment key an
+    HMAC key, outside the common subset, so the passphrase both derive
+    from is protected instead: `hsm_ctl seal-secret` seals it with
+    RSA-OAEP under a decryption key on a token
+    (`include/raft/pkcs11_sealed_secret.hpp`; the file names the key,
+    library and PIN file, never the PIN), and `ca_cluster_node`,
+    `iam_node` and every embedded IAM replica open such an unseal key
+    file on the token at startup; a plain file reads as before. The docs
+    say so plainly: the token protects the passphrase at rest, the keys
+    derived from it are in memory while the node runs. Tests: the
+    `sealed_secret_file_on_softhsm2` case (the command, owner-only and
+    never overwriting, tampering, no PIN in the file, plain files), and
+    the OIDC cluster case starting its node from a sealed unseal file.
 
 - [ ] 14. Audit, metrics and IAM authorization
   - Audit log with optional ledger sink; metrics per 11.3; `hsm:` actions

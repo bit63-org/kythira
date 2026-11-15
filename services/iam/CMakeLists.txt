@@ -15,7 +15,9 @@ set(KYTHIRA_IAM_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/include")
 add_library(kythira_iam INTERFACE)
 target_include_directories(kythira_iam INTERFACE "${KYTHIRA_IAM_INCLUDE_DIR}")
 # OpenSSL for iam_seal.hpp (KYTHIRA_BUILD_IAM requires it).
-target_link_libraries(kythira_iam INTERFACE kythira_core_headers OpenSSL::Crypto)
+# ${CMAKE_DL_LIBS}: an unseal key file sealed under a PKCS#11 token key
+# (raft/pkcs11_sealed_secret.hpp) dlopens the token's library.
+target_link_libraries(kythira_iam INTERFACE kythira_core_headers OpenSSL::Crypto ${CMAKE_DL_LIBS})
 
 # The pinned AWS-managed policies (tools/aws_managed_policies.json),
 # compiled into <kythira/iam/aws_managed_policies_data.hpp> in the build

@@ -97,6 +97,7 @@
 #include <raft/metrics.hpp>
 #include <raft/oidc_issuer.hpp>
 #include <raft/oidc_token.hpp>
+#include <raft/pkcs11_sealed_secret.hpp>
 #include <raft/pkcs11_signing_key.hpp>
 #include <raft/private_file.hpp>
 #include <raft/prometheus_metrics.hpp>
@@ -194,19 +195,8 @@ void on_http_signal(int) {
 }
 
 auto read_unseal_key(const std::string& path) -> std::string {
-    std::ifstream f(path);
-    if (!f) {
-        throw std::runtime_error("cannot open --unseal-key-file " + path);
-    }
-    std::string line;
-    std::getline(f, line);
-    while (!line.empty() && (line.back() == '\n' || line.back() == '\r')) {
-        line.pop_back();
-    }
-    if (line.empty()) {
-        throw std::runtime_error("--unseal-key-file " + path + " is empty");
-    }
-    return line;
+    // Plain (the first line), or sealed under a token key (task 13c).
+    return kythira::pkcs11::read_secret_file(path, "--unseal-key-file");
 }
 
 // Performs a linearisable read of the replicated CA state and deserializes it
