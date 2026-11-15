@@ -177,7 +177,7 @@ BOOST_AUTO_TEST_CASE(key_state_usage_and_algorithm) {
     const auto mac = f.create(R"({"KeySpec":"HMAC_256","KeyUsage":"GENERATE_VERIFY_MAC"})");
     BOOST_TEST(encrypt(f, mac, "x").type() == "InvalidKeyUsageException");
     const auto rsa = f.create(R"({"KeySpec":"RSA_2048","KeyUsage":"ENCRYPT_DECRYPT"})");
-    BOOST_TEST(encrypt(f, rsa, "x").type() == "UnsupportedOperationException");
+    BOOST_TEST(encrypt(f, rsa, "x").type() == "ValidationException");
 
     const auto good = f.create();
     BOOST_TEST(f.call("Encrypt", R"({"KeyId":")" + good + R"(","Plaintext":")" + b64("x") +

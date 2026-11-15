@@ -198,3 +198,60 @@ BOOST_AUTO_TEST_CASE(aes_gcm_round_trips_and_detects_changes) {
     store.destroy("k", 1);
     BOOST_CHECK_THROW((void)store.gcm_decrypt("k", 1, sealed, aad), kms::backing_error);
 }
+
+// Task 8, Requirements 5.4 and 5.5: the signing, RSA-OAEP and HMAC
+// mechanisms as a real module takes them, each checked against the public
+// key the token reports, with OpenSSL.
+BOOST_AUTO_TEST_CASE(signatures_oaep_and_macs_on_a_real_module) {
+    const softhsm_token token;
+    auto backend = std::make_shared<p11::function_list_backend>(KYTHIRA_SOFTHSM2_LIBRARY);
+    CK_SLOT_ID slot = 0;
+    for (const auto& t : backend->tokens()) {
+        if (t.label == "kms") {
+            slot = t.slot;
+        }
+    }
+    kms::backing_store store(backend, slot, "1234");
+    const std::vector<std::uint8_t> message{'s', 'i', 'g', 'n', ' ', 'm', 'e'};
+    const auto h = kms::digest(kms::hash_alg::sha256, message);
+
+    (void)store.generate("rs", 1, kms::key_spec::rsa_2048, kms::key_usage::sign_verify);
+    const auto rsa_pub = store.public_key("rs", 1);
+    CK_RSA_PKCS_PSS_PARAMS pss{CKM_SHA256, CKG_MGF1_SHA256, 32};
+    const CK_MECHANISM pss_m{CKM_RSA_PKCS_PSS, &pss, sizeof pss};
+    const auto pss_sig = store.sign("rs", 1, CKO_PRIVATE_KEY, pss_m, h);
+    BOOST_TEST(
+        kms::verify_digest(rsa_pub, kms::sig_scheme::pss, kms::hash_alg::sha256, h, pss_sig));
+    auto info = kms::digest_info_prefix(kms::hash_alg::sha256);
+    info.insert(info.end(), h.begin(), h.end());
+    const CK_MECHANISM pkcs1_m{CKM_RSA_PKCS, nullptr, 0};
+    const auto pkcs1_sig = store.sign("rs", 1, CKO_PRIVATE_KEY, pkcs1_m, info);
+    BOOST_TEST(
+        kms::verify_digest(rsa_pub, kms::sig_scheme::pkcs1, kms::hash_alg::sha256, h, pkcs1_sig));
+    BOOST_TEST(
+        !kms::verify_digest(rsa_pub, kms::sig_scheme::pss, kms::hash_alg::sha256, h, pkcs1_sig));
+
+    (void)store.generate("ec", 1, kms::key_spec::ecc_nist_p256, kms::key_usage::sign_verify);
+    const CK_MECHANISM ecdsa_m{CKM_ECDSA, nullptr, 0};
+    const auto ec_sig = kms::ecdsa_der(store.sign("ec", 1, CKO_PRIVATE_KEY, ecdsa_m, h));
+    BOOST_TEST(kms::verify_digest(store.public_key("ec", 1), kms::sig_scheme::ecdsa,
+                                  kms::hash_alg::sha256, h, ec_sig));
+
+    (void)store.generate("re", 1, kms::key_spec::rsa_2048, kms::key_usage::encrypt_decrypt);
+    // SoftHSM2 2.6 takes RSA-OAEP with SHA-1 only (anything else is
+    // CKR_ARGUMENTS_BAD); RSAES_OAEP_SHA_256 needs a module that has it.
+    const auto ct = kms::oaep_encrypt(store.public_key("re", 1), kms::hash_alg::sha1, message);
+    BOOST_REQUIRE(ct.has_value());
+    CK_RSA_PKCS_OAEP_PARAMS oaep{CKM_SHA_1, CKG_MGF1_SHA1, CKZ_DATA_SPECIFIED, nullptr, 0};
+    const CK_MECHANISM oaep_m{CKM_RSA_PKCS_OAEP, &oaep, sizeof oaep};
+    BOOST_TEST((store.private_decrypt("re", 1, oaep_m, *ct) == message));
+    auto bad = *ct;
+    bad[5] ^= 1U;
+    BOOST_TEST(!store.private_decrypt("re", 1, oaep_m, bad).has_value());
+
+    (void)store.generate("hm", 1, kms::key_spec::hmac_256, kms::key_usage::generate_verify_mac);
+    const CK_MECHANISM hmac_m{CKM_SHA256_HMAC, nullptr, 0};
+    const auto mac = store.sign("hm", 1, CKO_SECRET_KEY, hmac_m, message);
+    BOOST_TEST(mac.size() == 32U);
+    BOOST_TEST((store.sign("hm", 1, CKO_SECRET_KEY, hmac_m, message) == mac));
+}

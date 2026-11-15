@@ -27,3 +27,10 @@ GenerateDataKey
 GenerateDataKeyWithoutPlaintext
 GenerateRandom
 ReEncrypt
+GenerateDataKeyPair
+GenerateDataKeyPairWithoutPlaintext
+GenerateMac
+GetPublicKey
+Sign
+Verify
+VerifyMac

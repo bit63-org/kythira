@@ -8,15 +8,27 @@
 // and a switch that makes every call fail as a sealed virtual HSM does
 // (CKR_DEVICE_ERROR). It implements only what backing_store calls:
 // AES-256-GCM (CKM_AES_GCM, ciphertext || tag, a failed tag
-// CKR_ENCRYPTED_DATA_INVALID) over OpenSSL with the object's material, and
-// random bytes.
+// CKR_ENCRYPTED_DATA_INVALID) over OpenSSL with the object's material,
+// random bytes, and real RSA and EC key pairs (one per size or curve per
+// process, to keep the tests fast) with the PKCS#11 signing mechanisms the
+// KMS uses (CKM_RSA_PKCS over a DigestInfo, CKM_RSA_PKCS_PSS, CKM_ECDSA as
+// r || s), RSA-OAEP decryption and HMAC.
+
+#include <kythira/kms/kms_public_key.hpp>
 
 #include <raft/pkcs11_module.hpp>
 
+#include <openssl/ec.h>
+#include <openssl/ecdsa.h>
 #include <openssl/evp.h>
+#include <openssl/hmac.h>
+#include <openssl/rsa.h>
+#include <openssl/x509.h>
 #include <openssl/rand.h>
 
+#include <array>
 #include <cstdint>
+#include <cstring>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -94,7 +106,15 @@ public:
         if (m.mechanism != CKM_AES_KEY_GEN && m.mechanism != CKM_GENERIC_SECRET_KEY_GEN) {
             throw p11::error("generate_key", CKR_MECHANISM_INVALID);
         }
-        return add(tmpl, 32);
+        std::size_t len = 32;
+        for (const auto& a : tmpl) {
+            if (a.type == CKA_VALUE_LEN && a.value.size() == sizeof(CK_ULONG)) {
+                CK_ULONG v = 0;
+                std::memcpy(&v, a.value.data(), sizeof v);
+                len = v;
+            }
+        }
+        return add(tmpl, len);
     }
 
     [[nodiscard]] auto generate_key_pair(CK_SESSION_HANDLE, const CK_MECHANISM& m,
@@ -109,8 +129,34 @@ public:
         p.push_back(p11::attribute::of_ulong(CKA_CLASS, CKO_PUBLIC_KEY));
         std::vector<p11::attribute> s(priv.begin(), priv.end());
         s.push_back(p11::attribute::of_ulong(CKA_CLASS, CKO_PRIVATE_KEY));
+        const auto* k = pair_for(pub);
+        const BIGNUM* n = nullptr;
+        if (EVP_PKEY_get_bn_param(k, "n", const_cast<BIGNUM**>(&n)) == 1) {  // NOLINT
+            BIGNUM* e = nullptr;
+            EVP_PKEY_get_bn_param(k, "e", &e);
+            p.push_back(p11::attribute::of_bytes(CKA_MODULUS, bn_bytes(n)));
+            p.push_back(p11::attribute::of_bytes(CKA_PUBLIC_EXPONENT, bn_bytes(e)));
+            BN_free(const_cast<BIGNUM*>(n));  // NOLINT
+            BN_free(e);
+        } else {
+            std::array<unsigned char, 200> point{};
+            std::size_t len = 0;
+            EVP_PKEY_get_octet_string_param(k, "encoded-pub-key", point.data(), point.size(), &len);
+            // DER OCTET STRING, as PKCS#11 returns CKA_EC_POINT.
+            p11::bytes wrapped{0x04};
+            if (len >= 128) {
+                wrapped.push_back(0x81);
+            }
+            wrapped.push_back(static_cast<std::uint8_t>(len));
+            wrapped.insert(wrapped.end(), point.begin(), point.begin() + static_cast<long>(len));
+            p.push_back(p11::attribute::of_bytes(CKA_EC_POINT, wrapped));
+        }
+        const int dl = i2d_PrivateKey(k, nullptr);
+        p11::bytes der(static_cast<std::size_t>(dl));
+        unsigned char* dp = der.data();
+        i2d_PrivateKey(k, &dp);
         const auto ph = add(p, 0);
-        return {ph, add(s, 64)};
+        return {ph, add_with(s, std::move(der))};
     }
 
     [[nodiscard]] auto create_object(CK_SESSION_HANDLE, std::span<const p11::attribute>)
@@ -124,9 +170,65 @@ public:
             throw p11::error("destroy_object", CKR_OBJECT_HANDLE_INVALID);
         }
     }
-    [[nodiscard]] auto sign(CK_SESSION_HANDLE, const CK_MECHANISM&, CK_OBJECT_HANDLE,
-                            std::span<const std::uint8_t>) -> p11::bytes override {
-        throw p11::error("sign", CKR_FUNCTION_NOT_SUPPORTED);
+    [[nodiscard]] auto sign(CK_SESSION_HANDLE, const CK_MECHANISM& m, CK_OBJECT_HANDLE key,
+                            std::span<const std::uint8_t> data) -> p11::bytes override {
+        check_unsealed();
+        const auto material = usable(key, CKA_SIGN);
+        switch (m.mechanism) {
+            case CKM_SHA224_HMAC:
+            case CKM_SHA256_HMAC:
+            case CKM_SHA384_HMAC:
+            case CKM_SHA512_HMAC: {
+                const EVP_MD* md = m.mechanism == CKM_SHA224_HMAC   ? EVP_sha224()
+                                   : m.mechanism == CKM_SHA256_HMAC ? EVP_sha256()
+                                   : m.mechanism == CKM_SHA384_HMAC ? EVP_sha384()
+                                                                    : EVP_sha512();
+                p11::bytes out(EVP_MAX_MD_SIZE);
+                unsigned int n = 0;
+                HMAC(md, material.data(), static_cast<int>(material.size()), data.data(),
+                     data.size(), out.data(), &n);
+                out.resize(n);
+                return out;
+            }
+            case CKM_RSA_PKCS:
+            case CKM_RSA_PKCS_PSS:
+            case CKM_ECDSA:
+                break;
+            default:
+                throw p11::error("sign", CKR_MECHANISM_INVALID);
+        }
+        const auto k = private_key(material);
+        const pctx ctx(EVP_PKEY_CTX_new(k.get(), nullptr));
+        bool ok = ctx && EVP_PKEY_sign_init(ctx.get()) == 1;
+        if (m.mechanism == CKM_RSA_PKCS) {
+            ok = ok && EVP_PKEY_CTX_set_rsa_padding(ctx.get(), RSA_PKCS1_PADDING) == 1;
+        } else if (m.mechanism == CKM_RSA_PKCS_PSS) {
+            const auto& pp = *static_cast<const CK_RSA_PKCS_PSS_PARAMS*>(m.pParameter);
+            ok = ok && EVP_PKEY_CTX_set_rsa_padding(ctx.get(), RSA_PKCS1_PSS_PADDING) == 1 &&
+                 EVP_PKEY_CTX_set_signature_md(ctx.get(), md_of(pp.hashAlg)) == 1 &&
+                 EVP_PKEY_CTX_set_rsa_mgf1_md(ctx.get(), md_of(pp.hashAlg)) == 1 &&
+                 EVP_PKEY_CTX_set_rsa_pss_saltlen(ctx.get(), static_cast<int>(pp.sLen)) == 1;
+        }
+        std::size_t n = 0;
+        ok = ok && EVP_PKEY_sign(ctx.get(), nullptr, &n, data.data(), data.size()) == 1;
+        p11::bytes sig(n);
+        ok = ok && EVP_PKEY_sign(ctx.get(), sig.data(), &n, data.data(), data.size()) == 1;
+        if (!ok) {
+            throw p11::error("sign", CKR_FUNCTION_FAILED);
+        }
+        sig.resize(n);
+        if (m.mechanism != CKM_ECDSA) {
+            return sig;
+        }
+        // DER to r || s, each the order's length.
+        const unsigned char* sp = sig.data();
+        ECDSA_SIG* es = d2i_ECDSA_SIG(nullptr, &sp, static_cast<long>(sig.size()));
+        const auto half = static_cast<std::size_t>((EVP_PKEY_get_bits(k.get()) + 7) / 8);
+        p11::bytes raw(2 * half);
+        BN_bn2binpad(ECDSA_SIG_get0_r(es), raw.data(), static_cast<int>(half));
+        BN_bn2binpad(ECDSA_SIG_get0_s(es), raw.data() + half, static_cast<int>(half));
+        ECDSA_SIG_free(es);
+        return raw;
     }
     [[nodiscard]] auto verify(CK_SESSION_HANDLE, const CK_MECHANISM&, CK_OBJECT_HANDLE,
                               std::span<const std::uint8_t>, std::span<const std::uint8_t>)
@@ -139,7 +241,26 @@ public:
     }
     [[nodiscard]] auto decrypt(CK_SESSION_HANDLE, const CK_MECHANISM& m, CK_OBJECT_HANDLE key,
                                std::span<const std::uint8_t> data) -> p11::bytes override {
-        return gcm(false, m, key, data);
+        if (m.mechanism != CKM_RSA_PKCS_OAEP) {
+            return gcm(false, m, key, data);
+        }
+        check_unsealed();
+        const auto& op = *static_cast<const CK_RSA_PKCS_OAEP_PARAMS*>(m.pParameter);
+        const auto k = private_key(usable(key, CKA_DECRYPT));
+        const pctx ctx(EVP_PKEY_CTX_new(k.get(), nullptr));
+        std::size_t n = 0;
+        bool ok = ctx && EVP_PKEY_decrypt_init(ctx.get()) == 1 &&
+                  EVP_PKEY_CTX_set_rsa_padding(ctx.get(), RSA_PKCS1_OAEP_PADDING) == 1 &&
+                  EVP_PKEY_CTX_set_rsa_oaep_md(ctx.get(), md_of(op.hashAlg)) == 1 &&
+                  EVP_PKEY_CTX_set_rsa_mgf1_md(ctx.get(), md_of(op.hashAlg)) == 1 &&
+                  EVP_PKEY_decrypt(ctx.get(), nullptr, &n, data.data(), data.size()) == 1;
+        p11::bytes out(n);
+        ok = ok && EVP_PKEY_decrypt(ctx.get(), out.data(), &n, data.data(), data.size()) == 1;
+        if (!ok) {
+            throw p11::error("decrypt", CKR_ENCRYPTED_DATA_INVALID);
+        }
+        out.resize(n);
+        return out;
     }
     [[nodiscard]] auto generate_random(CK_SESSION_HANDLE, std::size_t length)
         -> p11::bytes override {
@@ -176,6 +297,84 @@ public:
     int crypto_calls = 0;
 
 private:
+    struct pkey_free {
+        void operator()(EVP_PKEY* p) const { EVP_PKEY_free(p); }
+    };
+    struct pctx_free {
+        void operator()(EVP_PKEY_CTX* p) const { EVP_PKEY_CTX_free(p); }
+    };
+    using pkey = std::unique_ptr<EVP_PKEY, pkey_free>;
+    using pctx = std::unique_ptr<EVP_PKEY_CTX, pctx_free>;
+
+    static auto md_of(CK_MECHANISM_TYPE h) -> const EVP_MD* {
+        switch (h) {
+            case CKM_SHA_1:
+                return EVP_sha1();
+            case CKM_SHA384:
+                return EVP_sha384();
+            case CKM_SHA512:
+                return EVP_sha512();
+            default:
+                return EVP_sha256();
+        }
+    }
+
+    static auto bn_bytes(const BIGNUM* b) -> p11::bytes {
+        p11::bytes out(static_cast<std::size_t>(BN_num_bytes(b)));
+        BN_bn2bin(b, out.data());
+        return out;
+    }
+
+    static auto private_key(const p11::bytes& der) -> pkey {
+        const unsigned char* p = der.data();
+        pkey k(d2i_AutoPrivateKey(nullptr, &p, static_cast<long>(der.size())));
+        if (!k) {
+            throw p11::error("private key", CKR_KEY_HANDLE_INVALID);
+        }
+        return k;
+    }
+
+    /// The process's key pair for the size or curve `pub` asks for.
+    auto pair_for(std::span<const p11::attribute> pub) -> const EVP_PKEY* {
+        std::string which;
+        for (const auto& a : pub) {
+            if (a.type == CKA_MODULUS_BITS && a.value.size() == sizeof(CK_ULONG)) {
+                CK_ULONG bits = 0;
+                std::memcpy(&bits, a.value.data(), sizeof bits);
+                which = "rsa" + std::to_string(bits);
+            } else if (a.type == CKA_EC_PARAMS) {
+                which = std::string(kythira::kms::curve_name(a.value));
+            }
+        }
+        static std::mutex mu;
+        static std::map<std::string, pkey> keys;
+        const std::lock_guard l(mu);
+        auto& k = keys[which];
+        if (!k) {
+            k.reset(which.starts_with("rsa") ? EVP_RSA_gen(std::stoul(which.substr(3)))
+                                             : EVP_EC_gen(which.c_str()));
+        }
+        if (!k) {
+            throw p11::error("generate_key_pair", CKR_CURVE_NOT_SUPPORTED);
+        }
+        return k.get();
+    }
+
+    /// An object's material, when it allows `use`.
+    auto usable(CK_OBJECT_HANDLE key, CK_ATTRIBUTE_TYPE use) -> p11::bytes {
+        const std::lock_guard l(_mu);
+        const auto it = _objects.find(key);
+        if (it == _objects.end()) {
+            throw p11::error("use", CKR_KEY_HANDLE_INVALID);
+        }
+        const auto e = it->second.attrs.find(use);
+        if (e == it->second.attrs.end() || e->second != p11::bytes{CK_TRUE}) {
+            throw p11::error("use", CKR_KEY_FUNCTION_NOT_PERMITTED);
+        }
+        ++crypto_calls;
+        return it->second.material;
+    }
+
     auto gcm(bool enc, const CK_MECHANISM& m, CK_OBJECT_HANDLE key,
              std::span<const std::uint8_t> in) -> p11::bytes {
         check_unsealed();
@@ -236,6 +435,19 @@ private:
         if (sealed) {
             throw p11::error("sealed", CKR_DEVICE_ERROR);
         }
+    }
+
+    auto add_with(std::span<const p11::attribute> tmpl, p11::bytes material) -> CK_OBJECT_HANDLE {
+        const std::lock_guard l(_mu);
+        object o;
+        for (const auto& a : tmpl) {
+            o.attrs[a.type] = a.value;
+        }
+        o.material = std::move(material);
+        ++generated;
+        const auto h = _next++;
+        _objects.emplace(h, std::move(o));
+        return h;
     }
 
     auto add(std::span<const p11::attribute> tmpl, std::size_t material) -> CK_OBJECT_HANDLE {

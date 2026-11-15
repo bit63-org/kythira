@@ -31,6 +31,7 @@
 #include <kythira/kms/kms_ciphertext.hpp>
 #include <kythira/kms/kms_errors.hpp>
 #include <kythira/kms/kms_front_end.hpp>
+#include <kythira/kms/kms_public_key.hpp>
 
 #include <raft/aws_json_protocol.hpp>
 #include <raft/aws_request_authorizer.hpp>
@@ -97,160 +98,10 @@ private:
     std::vector<std::uint8_t> _b;
 };
 
-template<typename Catalog> class crypto_api : protected api_common {
-public:
-    using result = aws_json::result<boost::json::object>;
-
-    explicit crypto_api(crypto_deps<Catalog> deps) : _d(std::move(deps)) {}
-
-    static constexpr std::array<std::string_view, 6> k_operations{
-        "Decrypt",        "Encrypt",  "GenerateDataKey", "GenerateDataKeyWithoutPlaintext",
-        "GenerateRandom", "ReEncrypt"};
-
-    template<typename FrontEnd> void register_on(FrontEnd& fe) {
-        const auto bind = [this](auto method) {
-            return [this, method](call_context& ctx, boost::json::object& in) -> result {
-                return (this->*method)(ctx, in);
-            };
-        };
-        fe.on("Encrypt", bind(&crypto_api::encrypt));
-        fe.on("Decrypt", bind(&crypto_api::decrypt));
-        fe.on("ReEncrypt", bind(&crypto_api::re_encrypt));
-        fe.on("GenerateDataKey", bind(&crypto_api::generate_data_key));
-        fe.on("GenerateDataKeyWithoutPlaintext",
-              bind(&crypto_api::generate_data_key_without_plaintext));
-        fe.on("GenerateRandom", bind(&crypto_api::generate_random));
-    }
-
-    auto encrypt(call_context& ctx, boost::json::object& in) -> result {
-        auto plain = blob(in, "Plaintext");
-        if (!plain) {
-            return validation_error("Plaintext is required");
-        }
-        const plaintext p(std::move(*plain));
-        auto c = catalog();
-        if (!c) {
-            return c.error();
-        }
-        auto k = resolve(ctx, **c, in, "KeyId", true);
-        if (!k) {
-            return k.error();
-        }
-        const auto context = read_context(in, "EncryptionContext");
-        if (auto denied = authorize_use(ctx, **c, *k, "Encrypt", context)) {
-            return *denied;
-        }
-        if (auto bad = check_usable(ctx, k->record, str(in, "EncryptionAlgorithm"))) {
-            return *bad;
-        }
-        if (auto dry = dry_run(in)) {
-            return *dry;
-        }
-        auto sealed = seal(ctx, k->record, p.bytes(), context);
-        if (!sealed) {
-            return sealed.error();
-        }
-        return boost::json::object{{"CiphertextBlob", std::move(*sealed)},
-                                   {"KeyId", ctx.key_arn(k->record.account, k->record.key_id)},
-                                   {"EncryptionAlgorithm", k_symmetric}};
-    }
-
-    auto decrypt(call_context& ctx, boost::json::object& in) -> result {
-        if (in.contains("Recipient")) {
-            return unsupported("Recipient (Nitro Enclaves attestation) is not supported");
-        }
-        auto c = catalog();
-        if (!c) {
-            return c.error();
-        }
-        auto opened = open(ctx, **c, in, "CiphertextBlob", "KeyId", "EncryptionContext",
-                           "EncryptionAlgorithm", "Decrypt");
-        if (!opened) {
-            return opened.error();
-        }
-        return boost::json::object{{"KeyId", ctx.key_arn(opened->key.account, opened->key.key_id)},
-                                   {"Plaintext", opened->plain.base64()},
-                                   {"EncryptionAlgorithm", k_symmetric}};
-    }
-
-    auto re_encrypt(call_context& ctx, boost::json::object& in) -> result {
-        auto c = catalog();
-        if (!c) {
-            return c.error();
-        }
-        // The destination first: a caller who may not use it learns
-        // nothing about the source ciphertext.
-        auto dest = resolve(ctx, **c, in, "DestinationKeyId", true);
-        if (!dest) {
-            return dest.error();
-        }
-        const auto dest_context = read_context(in, "DestinationEncryptionContext");
-        if (auto denied = authorize_use(ctx, **c, *dest, "ReEncryptTo", dest_context)) {
-            return *denied;
-        }
-        if (auto bad = check_usable(ctx, dest->record, str(in, "DestinationEncryptionAlgorithm"))) {
-            return *bad;
-        }
-        auto opened = open(ctx, **c, in, "CiphertextBlob", "SourceKeyId", "SourceEncryptionContext",
-                           "SourceEncryptionAlgorithm", "ReEncryptFrom");
-        if (!opened) {
-            return opened.error();
-        }
-        auto sealed = seal(ctx, dest->record, opened->plain.bytes(), dest_context);
-        if (!sealed) {
-            return sealed.error();
-        }
-        return boost::json::object{
-            {"CiphertextBlob", std::move(*sealed)},
-            {"SourceKeyId", ctx.key_arn(opened->key.account, opened->key.key_id)},
-            {"KeyId", ctx.key_arn(dest->record.account, dest->record.key_id)},
-            {"SourceEncryptionAlgorithm", k_symmetric},
-            {"DestinationEncryptionAlgorithm", k_symmetric}};
-    }
-
-    auto generate_data_key(call_context& ctx, boost::json::object& in) -> result {
-        if (in.contains("Recipient")) {
-            return unsupported("Recipient (Nitro Enclaves attestation) is not supported");
-        }
-        return data_key(ctx, in, "GenerateDataKey", true);
-    }
-
-    auto generate_data_key_without_plaintext(call_context& ctx, boost::json::object& in) -> result {
-        return data_key(ctx, in, "GenerateDataKeyWithoutPlaintext", false);
-    }
-
-    auto generate_random(call_context& ctx, boost::json::object& in) -> result {
-        if (in.contains("CustomKeyStoreId")) {
-            return unsupported("Custom key stores are not supported");
-        }
-        if (in.contains("Recipient")) {
-            return unsupported("Recipient (Nitro Enclaves attestation) is not supported");
-        }
-        const auto* n = in.if_contains("NumberOfBytes");
-        if (n == nullptr || !n->is_int64()) {
-            return validation_error("NumberOfBytes is required");
-        }
-        aws_auth::authz_request r;
-        r.action = "kms:GenerateRandom";
-        if (auto denied = ctx.authorize(std::move(r))) {
-            return *denied;
-        }
-        auto bytes = random(static_cast<std::size_t>(n->get_int64()));
-        if (!bytes) {
-            return bytes.error();
-        }
-        return boost::json::object{{"Plaintext", bytes->base64()}};
-    }
-
-private:
-    static constexpr std::string_view k_symmetric = "SYMMETRIC_DEFAULT";
-
-    /// A decrypted ciphertext and the key that made it.
-    struct opened_blob {
-        key_record key;
-        plaintext plain;
-    };
-
+/// What the cryptographic operations share: reading blobs and contexts,
+/// DryRun, key state, and HSM failures.
+class crypto_common : protected api_common {
+protected:
     /// A blob member's bytes (the model has checked the base64).
     [[nodiscard]] static auto blob(const boost::json::object& in, std::string_view member)
         -> std::optional<std::vector<std::uint8_t>> {
@@ -295,28 +146,8 @@ private:
         return std::nullopt;
     }
 
-    /// `action` on the key, with the encryption context and algorithm as
-    /// condition keys.
-    [[nodiscard]] static auto authorize_use(call_context& ctx, const Catalog& c, const resolved& k,
-                                            std::string_view action,
-                                            const encryption_context& context)
-        -> std::optional<aws_json::error> {
-        auto r = key_request(ctx, c, k, action);
-        std::vector<std::string> keys;
-        for (const auto& [ck, cv] : context) {
-            r.keys.emplace_back("kms:EncryptionContext:" + ck, std::vector<std::string>{cv});
-            keys.push_back(ck);
-        }
-        r.keys.emplace_back("kms:EncryptionContextKeys", std::move(keys));
-        r.keys.emplace_back("kms:EncryptionAlgorithm",
-                            std::vector<std::string>{std::string(k_symmetric)});
-        return ctx.authorize(std::move(r));
-    }
-
-    /// The key's state and usage allow symmetric encryption with
-    /// `algorithm` (SYMMETRIC_DEFAULT when not given).
-    [[nodiscard]] static auto check_usable(const call_context& ctx, const key_record& k,
-                                           std::optional<std::string_view> algorithm)
+    /// The key's state allows cryptographic use.
+    [[nodiscard]] static auto check_state(const call_context& ctx, const key_record& k)
         -> std::optional<aws_json::error> {
         const auto arn = ctx.key_arn(k.account, k.key_id);
         switch (k.state) {
@@ -328,18 +159,6 @@ private:
                 return invalid_state(arn + " is pending deletion.");
             case key_state::creating:
                 return invalid_state(arn + " is pending creation.");
-        }
-        if (k.usage != key_usage::encrypt_decrypt) {
-            return kms_error("InvalidKeyUsageException",
-                             "KeyUsage for " + arn + " is not ENCRYPT_DECRYPT.");
-        }
-        if (!is_symmetric(k.spec)) {
-            return unsupported("Encryption with an asymmetric key is not supported yet");
-        }
-        if (algorithm && *algorithm != k_symmetric) {
-            return kms_error("InvalidKeyUsageException",
-                             "The encryption algorithm " + std::string(*algorithm) +
-                                 " is not compatible with " + arn + ".");
         }
         if (k.current_version == 0) {
             return invalid_state(arn + " is pending creation.");
@@ -358,6 +177,261 @@ private:
                 break;
         }
         return internal_error();
+    }
+};
+
+template<typename Catalog> class crypto_api : protected crypto_common {
+public:
+    using result = aws_json::result<boost::json::object>;
+
+    explicit crypto_api(crypto_deps<Catalog> deps) : _d(std::move(deps)) {}
+
+    static constexpr std::array<std::string_view, 8> k_operations{
+        "Decrypt",
+        "Encrypt",
+        "GenerateDataKey",
+        "GenerateDataKeyPair",
+        "GenerateDataKeyPairWithoutPlaintext",
+        "GenerateDataKeyWithoutPlaintext",
+        "GenerateRandom",
+        "ReEncrypt"};
+
+    template<typename FrontEnd> void register_on(FrontEnd& fe) {
+        const auto bind = [this](auto method) {
+            return [this, method](call_context& ctx, boost::json::object& in) -> result {
+                return (this->*method)(ctx, in);
+            };
+        };
+        fe.on("Encrypt", bind(&crypto_api::encrypt));
+        fe.on("Decrypt", bind(&crypto_api::decrypt));
+        fe.on("ReEncrypt", bind(&crypto_api::re_encrypt));
+        fe.on("GenerateDataKey", bind(&crypto_api::generate_data_key));
+        fe.on("GenerateDataKeyWithoutPlaintext",
+              bind(&crypto_api::generate_data_key_without_plaintext));
+        fe.on("GenerateDataKeyPair", bind(&crypto_api::generate_data_key_pair));
+        fe.on("GenerateDataKeyPairWithoutPlaintext",
+              bind(&crypto_api::generate_data_key_pair_without_plaintext));
+        fe.on("GenerateRandom", bind(&crypto_api::generate_random));
+    }
+
+    auto encrypt(call_context& ctx, boost::json::object& in) -> result {
+        auto plain = blob(in, "Plaintext");
+        if (!plain) {
+            return validation_error("Plaintext is required");
+        }
+        const plaintext p(std::move(*plain));
+        auto c = catalog();
+        if (!c) {
+            return c.error();
+        }
+        auto k = resolve(ctx, **c, in, "KeyId", true);
+        if (!k) {
+            return k.error();
+        }
+        const auto context = read_context(in, "EncryptionContext");
+        const auto requested = str(in, "EncryptionAlgorithm");
+        if (auto denied = authorize_use(ctx, **c, *k, "Encrypt", context, requested)) {
+            return *denied;
+        }
+        auto alg = choose_encryption(ctx, k->record, requested, context);
+        if (!alg) {
+            return alg.error();
+        }
+        if (auto dry = dry_run(in)) {
+            return *dry;
+        }
+        auto sealed = seal(ctx, k->record, *alg, p.bytes(), context);
+        if (!sealed) {
+            return sealed.error();
+        }
+        return boost::json::object{{"CiphertextBlob", std::move(*sealed)},
+                                   {"KeyId", ctx.key_arn(k->record.account, k->record.key_id)},
+                                   {"EncryptionAlgorithm", alg->name}};
+    }
+
+    auto decrypt(call_context& ctx, boost::json::object& in) -> result {
+        if (in.contains("Recipient")) {
+            return unsupported("Recipient (Nitro Enclaves attestation) is not supported");
+        }
+        auto c = catalog();
+        if (!c) {
+            return c.error();
+        }
+        auto opened = open(ctx, **c, in, "CiphertextBlob", "KeyId", "EncryptionContext",
+                           "EncryptionAlgorithm", "Decrypt");
+        if (!opened) {
+            return opened.error();
+        }
+        return boost::json::object{{"KeyId", ctx.key_arn(opened->key.account, opened->key.key_id)},
+                                   {"Plaintext", opened->plain.base64()},
+                                   {"EncryptionAlgorithm", opened->algorithm}};
+    }
+
+    auto re_encrypt(call_context& ctx, boost::json::object& in) -> result {
+        auto c = catalog();
+        if (!c) {
+            return c.error();
+        }
+        // The destination first: a caller who may not use it learns
+        // nothing about the source ciphertext.
+        auto dest = resolve(ctx, **c, in, "DestinationKeyId", true);
+        if (!dest) {
+            return dest.error();
+        }
+        const auto dest_context = read_context(in, "DestinationEncryptionContext");
+        const auto requested = str(in, "DestinationEncryptionAlgorithm");
+        if (auto denied = authorize_use(ctx, **c, *dest, "ReEncryptTo", dest_context, requested)) {
+            return *denied;
+        }
+        auto alg = choose_encryption(ctx, dest->record, requested, dest_context);
+        if (!alg) {
+            return alg.error();
+        }
+        auto opened = open(ctx, **c, in, "CiphertextBlob", "SourceKeyId", "SourceEncryptionContext",
+                           "SourceEncryptionAlgorithm", "ReEncryptFrom");
+        if (!opened) {
+            return opened.error();
+        }
+        auto sealed = seal(ctx, dest->record, *alg, opened->plain.bytes(), dest_context);
+        if (!sealed) {
+            return sealed.error();
+        }
+        return boost::json::object{
+            {"CiphertextBlob", std::move(*sealed)},
+            {"SourceKeyId", ctx.key_arn(opened->key.account, opened->key.key_id)},
+            {"KeyId", ctx.key_arn(dest->record.account, dest->record.key_id)},
+            {"SourceEncryptionAlgorithm", opened->algorithm},
+            {"DestinationEncryptionAlgorithm", alg->name}};
+    }
+
+    auto generate_data_key(call_context& ctx, boost::json::object& in) -> result {
+        if (in.contains("Recipient")) {
+            return unsupported("Recipient (Nitro Enclaves attestation) is not supported");
+        }
+        return data_key(ctx, in, "GenerateDataKey", true);
+    }
+
+    auto generate_data_key_without_plaintext(call_context& ctx, boost::json::object& in) -> result {
+        return data_key(ctx, in, "GenerateDataKeyWithoutPlaintext", false);
+    }
+
+    auto generate_data_key_pair(call_context& ctx, boost::json::object& in) -> result {
+        if (in.contains("Recipient")) {
+            return unsupported("Recipient (Nitro Enclaves attestation) is not supported");
+        }
+        return make_data_key_pair(ctx, in, "GenerateDataKeyPair", true);
+    }
+
+    auto generate_data_key_pair_without_plaintext(call_context& ctx, boost::json::object& in)
+        -> result {
+        return make_data_key_pair(ctx, in, "GenerateDataKeyPairWithoutPlaintext", false);
+    }
+
+    auto generate_random(call_context& ctx, boost::json::object& in) -> result {
+        if (in.contains("CustomKeyStoreId")) {
+            return unsupported("Custom key stores are not supported");
+        }
+        if (in.contains("Recipient")) {
+            return unsupported("Recipient (Nitro Enclaves attestation) is not supported");
+        }
+        const auto* n = in.if_contains("NumberOfBytes");
+        if (n == nullptr || !n->is_int64()) {
+            return validation_error("NumberOfBytes is required");
+        }
+        aws_auth::authz_request r;
+        r.action = "kms:GenerateRandom";
+        if (auto denied = ctx.authorize(std::move(r))) {
+            return *denied;
+        }
+        auto bytes = random(static_cast<std::size_t>(n->get_int64()));
+        if (!bytes) {
+            return bytes.error();
+        }
+        return boost::json::object{{"Plaintext", bytes->base64()}};
+    }
+
+private:
+    static constexpr std::string_view k_symmetric = "SYMMETRIC_DEFAULT";
+
+    /// The encryption algorithm a request uses: AES-GCM on the token, or
+    /// RSA-OAEP with `oaep` as its hash.
+    struct algorithm_choice {
+        std::string_view name;
+        bool symmetric = true;
+        hash_alg oaep = hash_alg::sha256;
+    };
+
+    /// A decrypted ciphertext, the key that made it and how.
+    struct opened_blob {
+        key_record key;
+        plaintext plain;
+        std::string_view algorithm;
+    };
+
+    /// `action` on the key, with the encryption context and algorithm as
+    /// condition keys (the algorithm the request names, or
+    /// SYMMETRIC_DEFAULT on a symmetric key that names none).
+    [[nodiscard]] static auto authorize_use(call_context& ctx, const Catalog& c, const resolved& k,
+                                            std::string_view action,
+                                            const encryption_context& context,
+                                            std::optional<std::string_view> algorithm)
+        -> std::optional<aws_json::error> {
+        auto r = key_request(ctx, c, k, action);
+        std::vector<std::string> keys;
+        for (const auto& [ck, cv] : context) {
+            r.keys.emplace_back("kms:EncryptionContext:" + ck, std::vector<std::string>{cv});
+            keys.push_back(ck);
+        }
+        r.keys.emplace_back("kms:EncryptionContextKeys", std::move(keys));
+        const auto alg = algorithm ? *algorithm : (is_symmetric(k.record.spec) ? k_symmetric : "");
+        if (!alg.empty()) {
+            r.keys.emplace_back("kms:EncryptionAlgorithm",
+                                std::vector<std::string>{std::string(alg)});
+        }
+        return ctx.authorize(std::move(r));
+    }
+
+    /// The algorithm the key and request settle on: SYMMETRIC_DEFAULT on a
+    /// symmetric key (the default), RSAES_OAEP_SHA_1 or RSAES_OAEP_SHA_256
+    /// on an RSA key (required, as on AWS). An asymmetric key takes no
+    /// encryption context.
+    [[nodiscard]] static auto choose_encryption(const call_context& ctx, const key_record& k,
+                                                std::optional<std::string_view> requested,
+                                                const encryption_context& context)
+        -> aws_json::result<algorithm_choice> {
+        if (auto bad = check_state(ctx, k)) {
+            return *bad;
+        }
+        const auto arn = ctx.key_arn(k.account, k.key_id);
+        if (k.usage != key_usage::encrypt_decrypt) {
+            return kms_error("InvalidKeyUsageException",
+                             "KeyUsage for " + arn + " is not ENCRYPT_DECRYPT.");
+        }
+        const auto incompatible = [&](std::string_view alg) {
+            return kms_error("InvalidKeyUsageException",
+                             "The encryption algorithm " + std::string(alg) +
+                                 " is not compatible with " + arn + ".");
+        };
+        if (is_symmetric(k.spec)) {
+            if (requested && *requested != k_symmetric) {
+                return incompatible(*requested);
+            }
+            return algorithm_choice{k_symmetric, true, hash_alg::sha256};
+        }
+        if (!requested) {
+            return validation_error("EncryptionAlgorithm is required for the asymmetric key " +
+                                    arn);
+        }
+        if (!context.empty()) {
+            return validation_error("An asymmetric key takes no encryption context");
+        }
+        if (*requested == "RSAES_OAEP_SHA_1") {
+            return algorithm_choice{"RSAES_OAEP_SHA_1", false, hash_alg::sha1};
+        }
+        if (*requested == "RSAES_OAEP_SHA_256") {
+            return algorithm_choice{"RSAES_OAEP_SHA_256", false, hash_alg::sha256};
+        }
+        return incompatible(*requested);
     }
 
     [[nodiscard]] auto store() const -> aws_json::result<std::shared_ptr<backing_store>> {
@@ -381,19 +455,36 @@ private:
         }
     }
 
-    /// A ciphertext blob of `plain` under the key's current version, as
-    /// base64.
+    [[nodiscard]] static auto oaep_params(hash_alg h) -> CK_RSA_PKCS_OAEP_PARAMS {
+        const bool sha1 = h == hash_alg::sha1;
+        return CK_RSA_PKCS_OAEP_PARAMS{sha1 ? CKM_SHA_1 : CKM_SHA256,
+                                       sha1 ? CKG_MGF1_SHA1 : CKG_MGF1_SHA256, CKZ_DATA_SPECIFIED,
+                                       nullptr, 0};
+    }
+
+    /// `plain` encrypted under the key's current version, as base64: a
+    /// ciphertext blob for a symmetric key, the bare RSA-OAEP ciphertext
+    /// (as AWS returns it) for an RSA key.
     [[nodiscard]] auto seal(const call_context& ctx, const key_record& k,
-                            std::span<const std::uint8_t> plain,
+                            const algorithm_choice& alg, std::span<const std::uint8_t> plain,
                             const encryption_context& context) const
         -> aws_json::result<std::string> {
         auto s = store();
         if (!s) {
             return s.error();
         }
-        const auto aad =
-            ciphertext_aad(ctx.key_arn(k.account, k.key_id), k.current_version, context);
         try {
+            if (!alg.symmetric) {
+                const auto spki = (*s)->public_key(k.key_id, k.current_version);
+                const auto out = oaep_encrypt(spki, alg.oaep, plain);
+                if (!out) {
+                    return validation_error("The plaintext is too long for " +
+                                            std::string(alg.name) + " with this key");
+                }
+                return aws_json::base64_encode(std::as_bytes(std::span(*out)));
+            }
+            const auto aad =
+                ciphertext_aad(ctx.key_arn(k.account, k.key_id), k.current_version, context);
             auto sealed = (*s)->gcm_encrypt(k.key_id, k.current_version, plain, aad);
             ciphertext_blob b;
             b.key_id = k.key_id;
@@ -415,8 +506,10 @@ private:
                          "the ciphertext or its encryption context was changed.");
     }
 
-    /// Decrypts the blob in `blob_member`, authorizing `action` on the key
-    /// it names; `key_member`, when present, must name the same key.
+    /// Decrypts the ciphertext in `blob_member`, authorizing `action` on
+    /// its key. A symmetric blob names its key, and `key_member`, when
+    /// present, must name the same one. An RSA ciphertext names nothing,
+    /// so `key_member` must name its key, as on AWS.
     [[nodiscard]] auto open(call_context& ctx, const Catalog& c, const boost::json::object& in,
                             std::string_view blob_member, std::string_view key_member,
                             std::string_view context_member, std::string_view algorithm_member,
@@ -424,6 +517,19 @@ private:
         const auto raw = blob(in, blob_member);
         if (!raw) {
             return validation_error(std::string(blob_member) + " is required");
+        }
+        std::optional<resolved> named;
+        if (in.contains(key_member)) {
+            auto k = resolve(ctx, c, in, key_member, true);
+            if (!k) {
+                return k.error();
+            }
+            named = std::move(*k);
+        }
+        const auto context = read_context(in, context_member);
+        const auto requested = str(in, algorithm_member);
+        if (named && !is_symmetric(named->record.spec)) {
+            return open_rsa(ctx, c, in, *named, *raw, context, requested, action);
         }
         const auto b = decode_ciphertext(*raw);
         if (!b) {
@@ -433,22 +539,13 @@ private:
         if (!key) {
             return invalid_ciphertext();
         }
-        std::optional<resolved> named;
-        if (in.contains(key_member)) {
-            auto k = resolve(ctx, c, in, key_member, true);
-            if (!k) {
-                return k.error();
-            }
-            if (k->record.key_id != b->key_id) {
-                return kms_error("IncorrectKeyException",
-                                 "The key ID in the request does not identify a CMK that can "
-                                 "perform this operation.");
-            }
-            named = std::move(*k);
+        if (named && named->record.key_id != b->key_id) {
+            return kms_error("IncorrectKeyException",
+                             "The key ID in the request does not identify a CMK that can "
+                             "perform this operation.");
         }
         const resolved k = named ? *named : resolved{*key, false, {}};
-        const auto context = read_context(in, context_member);
-        if (auto denied = authorize_use(ctx, c, k, action, context)) {
+        if (auto denied = authorize_use(ctx, c, k, action, context, requested)) {
             return *denied;
         }
         if (!c.version(b->key_id, b->backing_version)) {
@@ -457,8 +554,9 @@ private:
         // An older backing version still decrypts what it made.
         auto usable = k.record;
         usable.current_version = b->backing_version;
-        if (auto bad = check_usable(ctx, usable, str(in, algorithm_member))) {
-            return *bad;
+        auto alg = choose_encryption(ctx, usable, requested, context);
+        if (!alg) {
+            return alg.error();
         }
         if (auto dry = dry_run(in)) {
             return *dry;
@@ -478,7 +576,39 @@ private:
             if (!plain) {
                 return invalid_ciphertext();
             }
-            return opened_blob{*key, plaintext(std::move(*plain))};
+            return opened_blob{*key, plaintext(std::move(*plain)), k_symmetric};
+        } catch (const backing_error& e) {
+            return hsm_error(e);
+        }
+    }
+
+    [[nodiscard]] auto open_rsa(call_context& ctx, const Catalog& c, const boost::json::object& in,
+                                const resolved& k, std::span<const std::uint8_t> raw,
+                                const encryption_context& context,
+                                std::optional<std::string_view> requested,
+                                std::string_view action) const -> aws_json::result<opened_blob> {
+        if (auto denied = authorize_use(ctx, c, k, action, context, requested)) {
+            return *denied;
+        }
+        auto alg = choose_encryption(ctx, k.record, requested, context);
+        if (!alg) {
+            return alg.error();
+        }
+        if (auto dry = dry_run(in)) {
+            return *dry;
+        }
+        auto s = store();
+        if (!s) {
+            return s.error();
+        }
+        auto params = oaep_params(alg->oaep);
+        const CK_MECHANISM m{CKM_RSA_PKCS_OAEP, &params, sizeof params};
+        try {
+            auto plain = (*s)->private_decrypt(k.record.key_id, k.record.current_version, m, raw);
+            if (!plain) {
+                return invalid_ciphertext();
+            }
+            return opened_blob{k.record, plaintext(std::move(*plain)), alg->name};
         } catch (const backing_error& e) {
             return hsm_error(e);
         }
@@ -514,11 +644,12 @@ private:
             return k.error();
         }
         const auto context = read_context(in, "EncryptionContext");
-        if (auto denied = authorize_use(ctx, **c, *k, action, context)) {
+        if (auto denied = authorize_use(ctx, **c, *k, action, context, std::nullopt)) {
             return *denied;
         }
-        if (auto bad = check_usable(ctx, k->record, std::nullopt)) {
-            return *bad;
+        auto alg = symmetric_only(ctx, k->record, context);
+        if (!alg) {
+            return alg.error();
         }
         if (auto dry = dry_run(in)) {
             return *dry;
@@ -527,7 +658,7 @@ private:
         if (!key) {
             return key.error();
         }
-        auto sealed = seal(ctx, k->record, key->bytes(), context);
+        auto sealed = seal(ctx, k->record, *alg, key->bytes(), context);
         if (!sealed) {
             return sealed.error();
         }
@@ -535,6 +666,87 @@ private:
                                 {"KeyId", ctx.key_arn(k->record.account, k->record.key_id)}};
         if (with_plaintext) {
             out["Plaintext"] = key->base64();
+        }
+        return out;
+    }
+
+    /// Data keys are sealed only under a symmetric encryption key.
+    [[nodiscard]] static auto symmetric_only(const call_context& ctx, const key_record& k,
+                                             const encryption_context& context)
+        -> aws_json::result<algorithm_choice> {
+        if (!is_symmetric(k.spec)) {
+            return kms_error("InvalidKeyUsageException", ctx.key_arn(k.account, k.key_id) +
+                                                             " is not a symmetric encryption key.");
+        }
+        return choose_encryption(ctx, k, std::nullopt, context);
+    }
+
+    /// GenerateDataKeyPair and GenerateDataKeyPairWithoutPlaintext: a key
+    /// pair made here, its private key sealed under a symmetric KMS key.
+    [[nodiscard]] auto make_data_key_pair(call_context& ctx, boost::json::object& in,
+                                          std::string_view action, bool with_plaintext) const
+        -> result {
+        const auto spec = str(in, "KeyPairSpec").value_or("");
+        unsigned bits = 0;
+        std::string_view curve;
+        if (spec == "RSA_2048" || spec == "RSA_3072" || spec == "RSA_4096") {
+            bits = spec == "RSA_2048" ? 2048U : spec == "RSA_3072" ? 3072U : 4096U;
+        } else if (spec == "ECC_NIST_P256") {
+            curve = "prime256v1";
+        } else if (spec == "ECC_NIST_P384") {
+            curve = "secp384r1";
+        } else if (spec == "ECC_NIST_P521") {
+            curve = "secp521r1";
+        } else if (spec == "ECC_SECG_P256K1") {
+            curve = "secp256k1";
+        } else {
+            return unsupported("KeyPairSpec " + std::string(spec) + " is not supported");
+        }
+        auto c = catalog();
+        if (!c) {
+            return c.error();
+        }
+        auto k = resolve(ctx, **c, in, "KeyId", true);
+        if (!k) {
+            return k.error();
+        }
+        const auto context = read_context(in, "EncryptionContext");
+        auto r = key_request(ctx, **c, *k, action);
+        std::vector<std::string> keys;
+        for (const auto& [ck, cv] : context) {
+            r.keys.emplace_back("kms:EncryptionContext:" + ck, std::vector<std::string>{cv});
+            keys.push_back(ck);
+        }
+        r.keys.emplace_back("kms:EncryptionContextKeys", std::move(keys));
+        r.keys.emplace_back("kms:DataKeyPairSpec", std::vector<std::string>{std::string(spec)});
+        if (auto denied = ctx.authorize(std::move(r))) {
+            return *denied;
+        }
+        auto alg = symmetric_only(ctx, k->record, context);
+        if (!alg) {
+            return alg.error();
+        }
+        if (auto dry = dry_run(in)) {
+            return *dry;
+        }
+        data_key_pair pair;
+        try {
+            pair = generate_key_pair(bits, curve);
+        } catch (const std::runtime_error&) {
+            return internal_error();
+        }
+        const plaintext priv(std::move(pair.private_pkcs8));
+        auto sealed = seal(ctx, k->record, *alg, priv.bytes(), context);
+        if (!sealed) {
+            return sealed.error();
+        }
+        boost::json::object out{
+            {"PrivateKeyCiphertextBlob", std::move(*sealed)},
+            {"PublicKey", aws_json::base64_encode(std::as_bytes(std::span(pair.public_spki)))},
+            {"KeyId", ctx.key_arn(k->record.account, k->record.key_id)},
+            {"KeyPairSpec", spec}};
+        if (with_plaintext) {
+            out["PrivateKeyPlaintext"] = priv.base64();
         }
         return out;
     }

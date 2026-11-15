@@ -18,6 +18,7 @@
 #include <kythira/kms/kms_crypto_api.hpp>
 #include <kythira/kms/kms_front_end.hpp>
 #include <kythira/kms/kms_keys.hpp>
+#include <kythira/kms/kms_signing_api.hpp>
 
 #include <raft/memory_kv_engine.hpp>
 #include <raft/sigv4_verifier.hpp>
@@ -177,10 +178,18 @@ struct fixture {
         .hsm = [this] { return hsm_bound ? hsm : nullptr; },
     }};
 
+    kms::signing_api<catalog_t> signing{kms::crypto_deps<catalog_t>{
+        .catalog =
+            [this] { return std::shared_ptr<const catalog_t>(&sm, [](const catalog_t*) {}); },
+        .barrier = [this] { return !leaderless; },
+        .hsm = [this] { return hsm_bound ? hsm : nullptr; },
+    }};
+
     fixture() {
         sm.open(engine, sm.engine_range());
         api.register_on(fe);
         crypto.register_on(fe);
+        signing.register_on(fe);
     }
 
     auto propose(const std::vector<std::byte>& c) -> kms::catalog_status {

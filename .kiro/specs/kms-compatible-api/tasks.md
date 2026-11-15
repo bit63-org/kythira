@@ -116,12 +116,21 @@ is one PR unless noted.
     that still answers counts as a bad ciphertext. Asymmetric keys
     answer UnsupportedOperationException until task 8.
 
-- [ ] 8. Asymmetric and HMAC operations
+- [x] 8. Asymmetric and HMAC operations
   - RSA and ECC keys: `Encrypt`/`Decrypt` with RSA-OAEP, `Sign`/`Verify`
     (RAW and DIGEST), `GetPublicKey`, `GenerateDataKeyPair` and its
     without-plaintext form; HMAC keys: `GenerateMac`, `VerifyMac`
   - OpenSSL cross-checks of every signature and public key
   - _Requirements: 3.2, 5.1, 5.4, 5.5_
+  - Done: `kms_signing_api.hpp`, RSA-OAEP and data key pairs in
+    `kms_crypto_api.hpp`, `kms_public_key.hpp` (OpenSSL work on public
+    keys), and signing, RSA decryption and public keys in
+    `backing_store`. Tests: `kms_asymmetric_test` over the fake token's
+    real key pairs, and a SoftHSM2 case for the mechanisms. What depends
+    on the backing module: SoftHSM2 2.6 does RSA-OAEP with SHA-1 only,
+    and the virtual HSM refuses SHA-224 and has no secp256k1, so on it
+    `HMAC_SHA_224` MACs and `ECC_SECG_P256K1` keys answer
+    UnsupportedOperationException.
 
 - [ ] 9. Key policies and authorization
   - `GetKeyPolicy`, `PutKeyPolicy`, `ListKeyPolicies`, default key policy,
