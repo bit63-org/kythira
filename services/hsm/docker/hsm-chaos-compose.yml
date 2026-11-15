@@ -3,12 +3,19 @@
 
 # Three virtual HSM members for services/hsm/tests/docker/
 # hsm_chaos_test.cpp (.kiro/specs/virtual-hsm/ task 11b, Requirement
-# 13.6), in either layout from one image:
+# 13.6), in any of three layouts from one image:
 #
 #   * stand-alone (the default): `hsm_node`, the HSM module alone;
 #   * co-located: KYTHIRA_HSM_CHAOS_DAEMON=/usr/local/bin/kythira_node and
 #     KYTHIRA_HSM_CHAOS_SERVICES=hsm,redis, so the HSM shares each node's
-#     process, Raft listener and data directory with the Redis module.
+#     process, Raft listener and data directory with the Redis module;
+#   * encrypted services (.kiro/specs/kms-compatible-api/ task 19,
+#     Requirement 14.5): kythira_node with KYTHIRA_HSM_CHAOS_SERVICES=
+#     hsm,kms,dynamodb,kinesis. The KMS keeps its backing keys on the
+#     co-located HSM's token (`hsm.pkcs11`, as the application identity
+#     the test binds to the token), and DynamoDB and Kinesis encrypt
+#     through the co-located KMS. The test's static key file (/pki/keys)
+#     and the token's user PIN (/pki/kms-pin) are in the PKI directory.
 #
 # The test SIGKILLs members, starts them again and cuts them off the
 # network while it generates keys and rekeys the master key. A killed
@@ -37,7 +44,10 @@
 # mutual TLS.
 #
 # The operator API and the PKCS#11 listener are published on loopback at
-# ports the test picks (KYTHIRA_HSM_CHAOS_API_N, _CLIENTS_N). The network
+# ports the test picks (KYTHIRA_HSM_CHAOS_API_N, _CLIENTS_N), and so are
+# the KMS, DynamoDB and Kinesis APIs (_KMS_N, _DDB_N, _KINESIS_N), which
+# only the encrypted-services layout serves. All are TLS with the
+# member's certificate. The network
 # has a fixed name so the test can disconnect a member from it, and
 # reconnects it with its service-name alias.
 
@@ -73,6 +83,37 @@ x-node-env: &node-env
   KYTHIRA_REDIS_LISTEN: 0.0.0.0:6379
   KYTHIRA_REDIS_ALLOW_ANONYMOUS: "1"
   KYTHIRA_CACHE_PERSISTENCE: memory
+  # Read only by kythira_node in the encrypted-services layout. The KMS
+  # on :8443, its members forwarding to its catalog's leader by service
+  # name; DynamoDB on :8000 and Kinesis on :4567, their peers defaulting
+  # to hsm-N at the same port. Static keys for all three, one file.
+  KYTHIRA_KMS_API_LISTEN: 0.0.0.0:8443
+  KYTHIRA_KMS_API_URLS: "1=https://hsm-1:8443,2=https://hsm-2:8443,3=https://hsm-3:8443"
+  KYTHIRA_KMS_PEER_IDENTITIES: "spiffe://hsm/node-1,spiffe://hsm/node-2,spiffe://hsm/node-3"
+  KYTHIRA_KMS_AUTH: static
+  KYTHIRA_KMS_STATIC_KEYS_FILE: /pki/keys
+  KYTHIRA_KMS_PKCS11: hsm
+  KYTHIRA_KMS_PKCS11_IDENTITY: spiffe://test/app
+  KYTHIRA_KMS_TOKEN_LABEL: alpha
+  KYTHIRA_KMS_PIN_FILE: /pki/kms-pin
+  KYTHIRA_KMS_JOB_INTERVAL_MS: "500"
+  KYTHIRA_DYNAMODB_BIND: 0.0.0.0
+  KYTHIRA_DYNAMODB_PORT: "8000"
+  KYTHIRA_DYNAMODB_AUTH: static
+  KYTHIRA_DYNAMODB_STATIC_KEYS_FILE: /pki/ddb-keys
+  KYTHIRA_DYNAMODB_ACCOUNT_ID: "111122223333"
+  KYTHIRA_DYNAMODB_FORWARD_SECRET: kythira-hsm-chaos-ddb-forward-secret
+  KYTHIRA_DYNAMODB_ENGINE: rocksdb
+  KYTHIRA_DYNAMODB_DISK_FLOOR_BYTES: "0"
+  KYTHIRA_DYNAMODB_COMPAT: throttling=off
+  KYTHIRA_DYNAMODB_KMS: kythira
+  KINESIS_LISTEN: 0.0.0.0:4567
+  KINESIS_AUTH: static
+  KINESIS_STATIC_KEYS_FILE: /pki/keys
+  KINESIS_REGION: us-east-1
+  KINESIS_FORWARD_SECRET: kythira-hsm-chaos-kinesis-forward-secret
+  KINESIS_KMS: kythira
+  KINESIS_DISK_FLOOR_BYTES: "0"
 
 services:
   hsm-1:
@@ -90,6 +131,9 @@ services:
     ports:
       - "127.0.0.1:${KYTHIRA_HSM_CHAOS_API_1:-19441}:9443"
       - "127.0.0.1:${KYTHIRA_HSM_CHAOS_CLIENTS_1:-19451}:9444"
+      - "127.0.0.1:${KYTHIRA_HSM_CHAOS_KMS_1:-19461}:8443"
+      - "127.0.0.1:${KYTHIRA_HSM_CHAOS_DDB_1:-19471}:8000"
+      - "127.0.0.1:${KYTHIRA_HSM_CHAOS_KINESIS_1:-19481}:4567"
 
   hsm-2:
     <<: *node
@@ -106,6 +150,9 @@ services:
     ports:
       - "127.0.0.1:${KYTHIRA_HSM_CHAOS_API_2:-19442}:9443"
       - "127.0.0.1:${KYTHIRA_HSM_CHAOS_CLIENTS_2:-19452}:9444"
+      - "127.0.0.1:${KYTHIRA_HSM_CHAOS_KMS_2:-19462}:8443"
+      - "127.0.0.1:${KYTHIRA_HSM_CHAOS_DDB_2:-19472}:8000"
+      - "127.0.0.1:${KYTHIRA_HSM_CHAOS_KINESIS_2:-19482}:4567"
 
   hsm-3:
     <<: *node
@@ -122,6 +169,9 @@ services:
     ports:
       - "127.0.0.1:${KYTHIRA_HSM_CHAOS_API_3:-19443}:9443"
       - "127.0.0.1:${KYTHIRA_HSM_CHAOS_CLIENTS_3:-19453}:9444"
+      - "127.0.0.1:${KYTHIRA_HSM_CHAOS_KMS_3:-19463}:8443"
+      - "127.0.0.1:${KYTHIRA_HSM_CHAOS_DDB_3:-19473}:8000"
+      - "127.0.0.1:${KYTHIRA_HSM_CHAOS_KINESIS_3:-19483}:4567"
 
 volumes:
   hsm-1-data:
