@@ -27,8 +27,8 @@
 #
 # The build job also runs libkythira_pkcs11.so under its consumers
 # (pkcs11-tool, OpenSSL's pkcs11-provider, p11-kit and GnuTLS, Go, Java and
-# pkcs11test), which only this job installs. The cluster and container jobs
-# arrive with hsm_node (task 11).
+# pkcs11test), which only this job installs. The cluster job runs three
+# hsm_node daemons with leader kills (task 11).
 
 name: HSM Module
 
@@ -44,6 +44,7 @@ on:
       - "scripts/tests/test_check_module_boundaries.py"
       - "configs/ci_full_defconfig"
       - "configs/ci_no_hsm_defconfig"
+      - "configs/ci_dynamodb_defconfig"
       - "Kconfig"
       - "CMakeLists.txt"
       - ".github/workflows/hsm-module.yml"
@@ -59,6 +60,7 @@ on:
       - "scripts/tests/test_check_module_boundaries.py"
       - "configs/ci_full_defconfig"
       - "configs/ci_no_hsm_defconfig"
+      - "configs/ci_dynamodb_defconfig"
       - "Kconfig"
       - "CMakeLists.txt"
       - ".github/workflows/hsm-module.yml"
@@ -282,3 +284,105 @@ jobs:
             rc=1
           fi
           exit $rc
+
+  # Task 11, Requirement 13.5: three hsm_node processes with the token
+  # group's leader killed during key generation and the catalog's leader
+  # killed during rekeys (hsm_node_cluster_test). hsm_node is the daemon
+  # only where its groups have RocksDB, so this job configures
+  # ci_dynamodb_defconfig (ci_full_defconfig with the RocksDB engine) on
+  # the tree composite-node.yml and dynamodb-module.yml share.
+  cluster:
+    name: hsm_node cluster (clang++-18, x64)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    environment: ${{ github.ref == 'refs/heads/main' && 'build-cache-write' || '' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install system dependencies
+        run: |
+          ./scripts/drop-unused-apt-repos.sh
+          for attempt in 1 2 3; do
+            if timeout 300 sudo apt-get update -q \
+                 && timeout 600 sudo apt-get install -y --no-install-recommends \
+                 clang-18 cmake ninja-build libfiu-dev \
+                 autoconf autoconf-archive automake libtool mold; then
+              exit 0
+            fi
+            echo "::warning::apt-get install failed (attempt ${attempt}/3), retrying in 30s..."
+            sleep 30
+          done
+          echo "::error::apt-get install failed after 3 attempts" >&2
+          exit 1
+
+      - name: Install kconfiglib
+        run: pip3 install --user -r scripts/kconfig/requirements.txt
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+
+      - name: OCI build cache
+        id: buildcache
+        uses: ./.github/actions/oci-build-cache
+        with:
+          triplet: x64-linux
+          rw-access-key-id: ${{ secrets.OCI_BUILD_CACHE_RW_ACCESS_KEY_ID }}
+          rw-secret-access-key: ${{ secrets.OCI_BUILD_CACHE_RW_SECRET_ACCESS_KEY }}
+          pr-access-key-id: ${{ secrets.OCI_BUILD_CACHE_PR_ACCESS_KEY_ID }}
+          pr-secret-access-key: ${{ secrets.OCI_BUILD_CACHE_PR_SECRET_ACCESS_KEY }}
+          ro-access-key-id: ${{ secrets.OCI_BUILD_CACHE_RO_ACCESS_KEY_ID }}
+          ro-secret-access-key: ${{ secrets.OCI_BUILD_CACHE_RO_SECRET_ACCESS_KEY }}
+          bucket: ${{ vars.OCI_BUILD_CACHE_BUCKET }}
+          namespace: ${{ vars.OCI_BUILD_CACHE_NAMESPACE }}
+          region: ${{ vars.OCI_CI_REGION }}
+
+      # composite-node.yml's and dynamodb-module.yml's key: one tree with
+      # RocksDB.
+      - name: Cache vcpkg packages
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: vcpkg-cache
+        with:
+          path: vcpkg_installed
+          key: vcpkg-${{ runner.os }}-${{ runner.arch }}-edhoc-rocksdb-clang++-18-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json', 'vcpkg-overlays/**') }}
+
+      - name: Bootstrap vcpkg and install dependencies
+        if: steps.vcpkg-cache.outputs.cache-hit != 'true'
+        run: |
+          export CC=clang-18 CXX=clang++-18
+          export LDFLAGS="-Wl,--push-state,--no-as-needed -latomic -Wl,--pop-state"
+          git clone --filter=blob:none https://github.com/microsoft/vcpkg.git /tmp/vcpkg
+          git -C /tmp/vcpkg checkout 9a7f7340a6c5f11f24c3d59f85e07143feb84e06
+          /tmp/vcpkg/bootstrap-vcpkg.sh -disableMetrics
+          /tmp/vcpkg/vcpkg install --triplet x64-linux --no-print-usage --x-feature=edhoc --x-feature=rocksdb
+        env:
+          VCPKG_DEFAULT_TRIPLET: x64-linux
+
+      - name: Start sccache
+        id: sccache
+        if: steps.buildcache.outputs.enabled == 'true'
+        run: scripts/oci-build-cache/start-sccache.sh
+
+      - name: Configure (module on, ci_dynamodb_defconfig, strict)
+        run: |
+          cmake -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CXX_COMPILER=clang++-18 \
+            -DKYTHIRA_KCONFIG=configs/ci_dynamodb_defconfig \
+            -DKYTHIRA_KCONFIG_STRICT=ON \
+            -DKYTHIRA_COMPILER_LAUNCHER=${{ steps.sccache.outputs.launcher || 'none' }} \
+            -DKYTHIRA_LINKER=mold \
+            -DCMAKE_PREFIX_PATH=${{ github.workspace }}/vcpkg_installed/x64-linux
+
+      - name: Build hsm_node and its tests
+        run: |
+          if ! ctest --test-dir build -N -R '^hsm_node_cluster_test$' | grep -q '^ *Test *#'; then
+            echo "::error::hsm_node_cluster_test is not registered: hsm_node is not the daemon here"
+            exit 1
+          fi
+          cmake --build build -j"$(nproc)" --target hsm_node hsm_node_cluster_test
+
+      - name: Run the hsm_node tests
+        run: ctest --test-dir build -R '^hsm_node_(self_test|help|refuses_other_services|cluster_test)$' --output-on-failure --no-tests=error

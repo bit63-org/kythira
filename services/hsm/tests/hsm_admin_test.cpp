@@ -333,8 +333,13 @@ BOOST_FIXTURE_TEST_CASE(rekey_keeps_tokens_and_retires_old_shares, fixture) {
         *store.token(4), [](auto tk) { return std::vector<std::uint8_t>(tk.begin(), tk.end()); });
     BOOST_REQUIRE(tk_after.has_value());
     BOOST_TEST(*tk_after == *tk_before);
-    // The other node held the old key, which opens nothing now: it seals.
-    BOOST_TEST(peer.api.maintain());
+    // The other node held the old key, which opens nothing now: it seals,
+    // and its status says so at once, before any maintenance pass (an
+    // operator reading "unsealed" here would skip the unseal it needs).
+    BOOST_TEST(!peer.vault.sealed());
+    BOOST_TEST(json(peer.call("GET", "/v1/status")).at("sealed") == true);
+    BOOST_TEST(peer.vault.sealed());
+    BOOST_TEST(!peer.api.maintain());
     BOOST_TEST(json(peer.call("POST", "/v1/unseal", unseal_body(old_shares[0]))).at("error") ==
                "wrong_split");
     for (const auto& s : {new_shares[3], new_shares[0]}) {

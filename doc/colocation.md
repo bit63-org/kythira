@@ -4,9 +4,10 @@
 module (`.kiro/specs/service-colocation/`). `KYTHIRA_SERVICES` names them;
 `kythira_node --help` lists the ones compiled in. Each stand-alone daemon
 (`redis_gateway_node`, `dynamodb_gateway_node`, `kinesis_gateway_node`,
-`ledger_node`, `iam_node`) is still built and runs the same module code on
-its own. The virtual HSM (`hsm`) runs only in `kythira_node` until its own
-daemon, `hsm_node`, arrives with the virtual HSM spec's task 11.
+`ledger_node`, `iam_node`, `hsm_node`) is still built and runs the same
+module code on its own. `hsm_node` is `kythira_node` with only the virtual
+HSM (`hsm`): the same settings, and the HSM reads its Raft tuning under
+`KYTHIRA_HSM_` in both layouts.
 
 This page covers resource isolation (task 9), IAM's group in both
 layouts (task 8), the container image (task 10), how to move a service
@@ -101,17 +102,23 @@ and back. Every write a node acknowledged must read back afterwards.
 
 ## Moving a service between layouts
 
-Except for IAM, a service keeps different group ids and key prefixes in
-the two layouts (each module has its own group space in `kythira_node`),
-so its data does not move in place: moving a service, in either
-direction, is a copy from a running cluster in the old layout to a new
-cluster in the other, and then a switch of clients. Conversion in place is
-out of scope (Requirement 3.3). Per service:
+Except for IAM and the HSM, a service keeps different group ids and key
+prefixes in the two layouts (each module has its own group space in
+`kythira_node`), so its data does not move in place: moving a service,
+in either direction, is a copy from a running cluster in the old layout
+to a new cluster in the other, and then a switch of clients. Conversion
+in place is out of scope (Requirement 3.3). Per service:
 
-- **IAM** is the exception: its group has the same id and files in both
+- **IAM** moves in place: its group has the same id and files in both
   layouts (above). Stop the whole cluster, move each member's
   `iam_node --data-dir` to `KYTHIRA_NODE_DATA_DIR/iam/` on the same node
   id (or back), and start the members in the new layout.
+- **HSM**: like IAM, in place. `hsm_node` is the HSM module alone and
+  keeps the module's group ids and `KYTHIRA_NODE_DATA_DIR/hsm/`, so stop
+  the whole cluster and start each member in the other layout on the same
+  node id and data directory. It comes up sealed, as after any restart.
+  Production secrets belong on stand-alone `hsm_node` members
+  (`services/hsm/README.md`).
 - **DynamoDB**: `ExportTableToPointInTime` on the old cluster into a
   bucket, then `ImportTable` from it on the new one (both clusters must
   reach the bucket: the same `KYTHIRA_DYNAMODB_BUCKET_DIR` or S3). When

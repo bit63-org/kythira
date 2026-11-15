@@ -12,7 +12,8 @@
 //                                              whether it leads the catalog
 //   GET    /v1/tokens                          every token: id, label,
 //                                              generation, whether this
-//                                              node hosts its group
+//                                              node hosts its group and
+//                                              whether it leads it
 //   POST   /v1/tokens       {"id":N,"label":L} create a token (unsealed
 //                                              node: its key is sealed
 //                                              under the master key)
@@ -169,6 +170,11 @@ public:
             return error(403, "forbidden", "the caller is not an HSM operator");
         }
         try {
+            // The seal state every route answers from is the catalog's as
+            // this node has applied it: a seal or rekey it applied since the
+            // last maintain() seals it now, so the status never reports a
+            // vault unsealed under a master key the catalog has replaced.
+            (void)maintain();
             return route(req);
         } catch (const std::exception& e) {
             return error(400, "bad_request", e.what());
@@ -514,6 +520,7 @@ private:
             o["label"] = t.label;
             o["generation"] = t.generation;
             o["hosted"] = _host->hosts(t.token_id);
+            o["leader"] = _host->leads(t.token_id);
             out.push_back(std::move(o));
         }
         boost::json::object body;

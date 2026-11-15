@@ -1,9 +1,9 @@
 # Copyright (c) 2026 Clark Rawlins
 # SPDX-License-Identifier: Apache-2.0
 
-# The virtual HSM module: so far the vendored PKCS#11 headers and the
-# hsm_node placeholder; the key store, unseal, the session layer and
-# libkythira_pkcs11.so follow (.kiro/specs/virtual-hsm/, services/README.md).
+# The virtual HSM module (.kiro/specs/virtual-hsm/, services/README.md):
+# the header-only library, its kythira_node module, the stand-alone
+# hsm_node, hsm_ctl, libkythira_pkcs11.so and the tests.
 #
 # Entered from the top level only when KYTHIRA_BUILD_HSM is on (CONFIG_HSM,
 # services/hsm/Kconfig), after the core targets and tests/, so every core
@@ -24,7 +24,7 @@ target_include_directories(kythira_hsm SYSTEM INTERFACE
 target_link_libraries(kythira_hsm INTERFACE kythira_core_headers OpenSSL::SSL OpenSSL::Crypto)
 target_compile_features(kythira_hsm INTERFACE cxx_std_23)
 
-# hsm_node (task 1 placeholder; the daemon is task 11), before the tests,
+# hsm_node (the daemon, task 11) and the module, before the tests,
 # which run it.
 add_subdirectory(cmd)
 
