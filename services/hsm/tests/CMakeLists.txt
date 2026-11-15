@@ -104,6 +104,20 @@ kythira_hsm_test(hsm_wire_test hsm_wire_test.cpp)
 set_tests_properties(hsm_wire_test PROPERTIES
     LABELS "unit;hsm;hsm-module" TIMEOUT 120)
 
+# Task 10, Requirement 5: libkythira_pkcs11.so, loaded with dlopen as a
+# consumer loads it, against wire servers on Unix sockets: the 3.0
+# interfaces, sessions and logins, signing through the length query,
+# AES-GCM, attribute rules, find, wrap and unwrap, failover to a second
+# server, many threads, and the configuration file.
+kythira_hsm_test(hsm_pkcs11_library_test hsm_pkcs11_library_test.cpp)
+target_include_directories(hsm_pkcs11_library_test PRIVATE "${KYTHIRA_HSM_SOURCE_DIR}/pkcs11")
+target_compile_definitions(hsm_pkcs11_library_test PRIVATE
+    KYTHIRA_PKCS11_LIBRARY="$<TARGET_FILE:kythira_pkcs11>")
+target_link_libraries(hsm_pkcs11_library_test PRIVATE ${CMAKE_DL_LIBS})
+add_dependencies(hsm_pkcs11_library_test kythira_pkcs11)
+set_tests_properties(hsm_pkcs11_library_test PROPERTIES
+    LABELS "unit;hsm;hsm-module" TIMEOUT 120)
+
 add_test(NAME hsm_node_self_test COMMAND hsm_node --self-test)
 set_tests_properties(hsm_node_self_test PROPERTIES
     LABELS "unit;hsm;hsm-module" TIMEOUT 60)

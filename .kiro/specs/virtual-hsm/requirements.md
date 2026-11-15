@@ -185,8 +185,8 @@ consumer at a library and have it work.
    with `pkcs11-tool` (OpenSC), and with Go's and Java's (SunPKCS11)
    PKCS#11 bindings.
 7. Slot info SHALL NOT set `CKF_HW_SLOT`, and token info SHALL name the
-   model "Kythira virtual HSM", so a consumer that checks can tell it is
-   software.
+   manufacturer "Kythira" and the model "virtual HSM" (the model field is
+   16 bytes), so a consumer that checks can tell it is software.
 
 ### Requirement 6: Mechanisms and objects
 

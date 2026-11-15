@@ -28,6 +28,9 @@ target_compile_features(kythira_hsm INTERFACE cxx_std_23)
 # which run it.
 add_subdirectory(cmd)
 
+# libkythira_pkcs11.so (task 10), before the tests, which load it.
+add_subdirectory(pkcs11)
+
 # The tests, under the guard the top level enters tests/ with. tests/
 # defines kythira_test_pch, which add_raft_completion_test links, so its
 # presence is the check.
