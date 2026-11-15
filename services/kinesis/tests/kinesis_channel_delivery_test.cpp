@@ -282,6 +282,22 @@ BOOST_AUTO_TEST_CASE(template_and_helpers) {
     BOOST_TEST(cd::extension_of("NONE") == "");
 }
 
+// An encrypted stream's data keys are asked of the KMS as the channel's
+// service execution role, assumed by Kinesis, in the role's partition.
+BOOST_AUTO_TEST_CASE(deliveries_run_as_the_channel_role) {
+    kin::channel_record c;
+    c._id = 42;
+    c._account = "123456789012";
+    c._role_arn = "arn:aws-us-gov:iam::123456789012:role/service/Kinesis-Channel";
+    const auto p = kin::channel_detail::channel_principal(c);
+    BOOST_TEST(static_cast<int>(p.type) == static_cast<int>(az::principal_type::assumed_role));
+    BOOST_TEST(p.account == "123456789012");
+    BOOST_TEST(p.role_arn == c._role_arn);
+    BOOST_TEST(p.role_name == "kinesis-channel");
+    BOOST_TEST(p.arn ==
+               "arn:aws-us-gov:sts::123456789012:assumed-role/Kinesis-Channel/kinesis-channel-42");
+}
+
 BOOST_AUTO_TEST_CASE(delivers_once_fresh_and_never_again) {
     fixture f;
     f.on_demand("s");

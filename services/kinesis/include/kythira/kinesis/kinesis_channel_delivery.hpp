@@ -48,6 +48,7 @@
 
 #include <kythira/kinesis/kinesis_channels.hpp>
 #include <kythira/kinesis/kinesis_cluster.hpp>
+#include <kythira/kinesis/kinesis_kms.hpp>
 #include <kythira/kinesis/kinesis_stream_state_machine.hpp>
 #include <kythira/kinesis/kinesis_tiering.hpp>
 
@@ -62,6 +63,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
@@ -107,6 +109,35 @@ struct channel_delivery_stats {
 };
 
 namespace channel_detail {
+
+/// The session a channel's deliveries run as: its service execution role,
+/// assumed by Kinesis (`arn:aws:sts::<account>:assumed-role/<role>/<session>`).
+/// An encrypted stream's data keys are asked of the KMS for it, so the
+/// role's key permissions decide what the channel can read, as on AWS.
+[[nodiscard]] inline auto channel_principal(const channel_record& c)
+    -> aws_auth::principal_context {
+    aws_auth::principal_context p;
+    p.type = aws_auth::principal_type::assumed_role;
+    p.account = c._account;
+    p.role_arn = c._role_arn;
+    const auto slash = c._role_arn.rfind('/');
+    p.role_name = slash == std::string::npos ? c._role_arn : c._role_arn.substr(slash + 1);
+    p.session_name = "kinesis-channel-" + std::to_string(c._id);
+    // arn:<partition>:iam::<account>:role/... -> the partition.
+    std::string partition = "aws";
+    if (c._role_arn.rfind("arn:", 0) == 0) {
+        const auto end = c._role_arn.find(':', 4);
+        if (end != std::string::npos) {
+            partition = c._role_arn.substr(4, end - 4);
+        }
+    }
+    p.arn = "arn:" + partition + ":sts::" + c._account + ":assumed-role/" + p.role_name + "/" +
+            p.session_name;
+    for (auto& ch : p.role_name) {
+        ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+    }
+    return p;
+}
 
 /// `arn:aws:s3:::<bucket>` to `<bucket>`.
 [[nodiscard]] inline auto bucket_of(std::string_view arn) -> std::string {
@@ -444,6 +475,7 @@ private:
                        const shard_entry& shard, channel_delivery_stats& stats) -> void {
         const auto key = routing_key(stream._id, shard._ordinal);
         const auto from = checkpoint(c, key);
+        const auto as = channel_detail::channel_principal(c);
         // No position yet: start with what arrived once the channel existed.
         const auto min_ts = from == 0 ? c._created_ms : std::int64_t{0};
         std::vector<typename Service::delivery_record> batch;
@@ -456,7 +488,7 @@ private:
             // one record, so a batch overshoots by at most one.
             const auto room = std::min(_config._page_bytes, _config._max_object_bytes - bytes);
             auto page = _service.read_for_delivery(stream, shard, next, batch.empty() ? min_ts : 0,
-                                                   10'000, room);
+                                                   10'000, room, kms_caller{._principal = &as});
             if (!page) {
                 ++stats._failures;
                 return;

@@ -47,6 +47,8 @@
 
 #include <kythira/kinesis/kinesis_stream_state_machine.hpp>
 
+#include <raft/aws_request_authorizer.hpp>
+
 #include <openssl/crypto.h>
 #include <openssl/evp.h>
 #include <openssl/rand.h>
@@ -111,12 +113,36 @@ struct generated_data_key {
     std::string _key_id{};
 };
 
-template<typename P>
-concept kms_key_provider = requires(P& p, const std::string& key_id, const std::string& wrapped,
-                                    const encryption_context& context) {
-    { p.generate_data_key(key_id, context) } -> std::same_as<generated_data_key>;
-    { p.decrypt_data_key(key_id, wrapped, context) } -> std::same_as<data_key_bytes>;
+/// Who a key provider call is made for: the end caller of the Kinesis
+/// request. A provider that authorizes per caller (Kythira's KMS, which
+/// evaluates the key policy for that principal through Kinesis) needs it;
+/// the others ignore it.
+struct kms_caller {
+    const aws_auth::principal_context* _principal = nullptr;
+    std::string _source_ip{};
 };
+
+/// A provider whose calls are made for one caller each.
+template<typename P>
+concept per_caller_kms_key_provider =
+    requires(P& p, const std::string& key_id, const std::string& wrapped,
+             const encryption_context& context, const kms_caller& caller) {
+        { p.generate_data_key(key_id, context, caller) } -> std::same_as<generated_data_key>;
+        { p.decrypt_data_key(key_id, wrapped, context, caller) } -> std::same_as<data_key_bytes>;
+    };
+
+/// A provider with one authority for every caller (a local sealed key,
+/// the gateway's own AWS credentials, a PKCS#11 token).
+template<typename P>
+concept shared_kms_key_provider =
+    requires(P& p, const std::string& key_id, const std::string& wrapped,
+             const encryption_context& context) {
+        { p.generate_data_key(key_id, context) } -> std::same_as<generated_data_key>;
+        { p.decrypt_data_key(key_id, wrapped, context) } -> std::same_as<data_key_bytes>;
+    };
+
+template<typename P>
+concept kms_key_provider = shared_kms_key_provider<P> || per_caller_kms_key_provider<P>;
 
 /// Any `kms_key_provider`, shared. Calls may come from several threads at
 /// once, so a provider must be thread-safe.
@@ -130,15 +156,23 @@ public:
 
     [[nodiscard]] explicit operator bool() const noexcept { return _impl != nullptr; }
 
+    /// Whether each call is authorized for its caller, so that a data key
+    /// one caller unwrapped proves nothing about another.
+    [[nodiscard]] auto per_caller() const noexcept -> bool {
+        return _impl != nullptr && _impl->per_caller();
+    }
+
     [[nodiscard]] auto generate_data_key(const std::string& key_id,
-                                         const encryption_context& context) const
+                                         const encryption_context& context,
+                                         const kms_caller& caller = {}) const
         -> generated_data_key {
-        return impl().generate(key_id, context);
+        return impl().generate(key_id, context, caller);
     }
 
     [[nodiscard]] auto decrypt_data_key(const std::string& key_id, const std::string& wrapped,
-                                        const encryption_context& context) const -> data_key_bytes {
-        return impl().decrypt(key_id, wrapped, context);
+                                        const encryption_context& context,
+                                        const kms_caller& caller = {}) const -> data_key_bytes {
+        return impl().decrypt(key_id, wrapped, context, caller);
     }
 
 private:
@@ -149,21 +183,33 @@ private:
         auto operator=(const base&) -> base& = delete;
         auto operator=(base&&) -> base& = delete;
         virtual ~base() = default;
-        virtual auto generate(const std::string&, const encryption_context&)
+        [[nodiscard]] virtual auto per_caller() const noexcept -> bool = 0;
+        virtual auto generate(const std::string&, const encryption_context&, const kms_caller&)
             -> generated_data_key = 0;
-        virtual auto decrypt(const std::string&, const std::string&, const encryption_context&)
-            -> data_key_bytes = 0;
+        virtual auto decrypt(const std::string&, const std::string&, const encryption_context&,
+                             const kms_caller&) -> data_key_bytes = 0;
     };
 
     template<typename P> struct model final : base {
         explicit model(P p) : _p(std::move(p)) {}
-        auto generate(const std::string& id, const encryption_context& c)
-            -> generated_data_key override {
-            return _p.generate_data_key(id, c);
+        [[nodiscard]] auto per_caller() const noexcept -> bool override {
+            return per_caller_kms_key_provider<P>;
         }
-        auto decrypt(const std::string& id, const std::string& w, const encryption_context& c)
-            -> data_key_bytes override {
-            return _p.decrypt_data_key(id, w, c);
+        auto generate(const std::string& id, const encryption_context& c, const kms_caller& who)
+            -> generated_data_key override {
+            if constexpr (per_caller_kms_key_provider<P>) {
+                return _p.generate_data_key(id, c, who);
+            } else {
+                return _p.generate_data_key(id, c);
+            }
+        }
+        auto decrypt(const std::string& id, const std::string& w, const encryption_context& c,
+                     const kms_caller& who) -> data_key_bytes override {
+            if constexpr (per_caller_kms_key_provider<P>) {
+                return _p.decrypt_data_key(id, w, c, who);
+            } else {
+                return _p.decrypt_data_key(id, w, c);
+            }
         }
         P _p;
     };

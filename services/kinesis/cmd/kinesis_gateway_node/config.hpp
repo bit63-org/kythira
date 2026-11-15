@@ -108,7 +108,21 @@ struct node_options {
     /// names: through its `module-path`, or the co-located virtual HSM as
     /// `KINESIS_KMS_PKCS11_IDENTITY`; RSA-OAEP with
     /// `KINESIS_KMS_PKCS11_OAEP`, sha256 or sha1).
+    ///
+    /// `kythira` is Kythira's KMS (kms-compatible-api task 15): the
+    /// co-located KMS module's `kms.client` in kythira_node, the default
+    /// there when the KMS module runs and `KINESIS_KMS` is unset; or, with
+    /// `KINESIS_KMS_ENDPOINT`, a KMS on another cluster over HTTPS, signed
+    /// with `AWS_ACCESS_KEY_ID` and friends (a principal the KMS lists in
+    /// `KYTHIRA_KMS_TRUSTED_SERVICES`) and verified against
+    /// `KINESIS_KMS_CA`. Each call is made for the request's own caller.
     std::string _kms{"off"};
+    /// Whether `KINESIS_KMS` was set (so kythira_node may default it).
+    bool _kms_set{false};
+    std::string _kms_ca;
+    /// `KINESIS_KMS_CALLER_TTL_MS`: how long one caller's KMS answer for a
+    /// stream stands (kythira only).
+    std::chrono::milliseconds _kms_caller_ttl{300000};
     std::string _kms_passphrase;
     std::string _kms_region;
     std::string _kms_endpoint;

@@ -37,6 +37,7 @@
 #include <kythira/kinesis/kinesis_iterators.hpp>
 #include <kythira/kinesis/kinesis_kms.hpp>
 #include <kythira/kinesis/kinesis_kms_aws.hpp>
+#include <kythira/kinesis/kinesis_kms_kythira.hpp>
 #include <kythira/kinesis/kinesis_kms_pkcs11.hpp>
 #include <kythira/kinesis/kinesis_lease_api.hpp>
 #include <kythira/kinesis/kinesis_channel_delivery.hpp>
@@ -54,6 +55,7 @@
 #include <raft/console_logger.hpp>
 #include <raft/future_default.hpp>
 #include <raft/json_serializer.hpp>
+#include <raft/kms_https_client.hpp>
 #include <raft/metrics.hpp>
 #include <raft/module_interfaces.hpp>
 #include <raft/module_registry.hpp>
@@ -192,7 +194,7 @@ public:
     /// IAM's evaluator, and the virtual HSM for `KINESIS_KMS=pkcs11`, when
     /// co-located, answer before this module serves.
     [[nodiscard]] auto starts_after() const -> std::vector<std::string> override {
-        return {"iam", "hsm"};
+        return {"iam", "hsm", "kms"};
     }
     [[nodiscard]] auto data_subdir() const -> std::string override {
         return _standalone ? std::string() : std::string("kinesis");
@@ -206,6 +208,17 @@ public:
         try {
             _opt = from_env(
                 _standalone ? env : composite_env(service_node::module_tuning(env, "KINESIS_")));
+            // Kythira's KMS is the default key provider wherever it runs in
+            // the same node (kms-compatible-api Requirement 11.1).
+            const bool kms_here = !_standalone && service_node::co_located(env, "kms");
+            if (!_opt._kms_set && kms_here) {
+                _opt._kms = "kythira";
+            }
+            if (_opt._kms == "kythira" && _opt._kms_endpoint.empty() && !kms_here) {
+                return std::string(
+                    "KINESIS_KMS=kythira needs the KMS module in this node or "
+                    "KINESIS_KMS_ENDPOINT naming one on another cluster");
+            }
             _logger.emplace(_opt._log_level);
             // IAM (KINESIS_AUTH=iam or both): the co-located IAM module's
             // evaluator when kythira_node runs one, taken at start;
@@ -340,6 +353,15 @@ public:
                 throw std::invalid_argument(*clash);
             }
             _iam_evaluator = std::move(iam);
+        }
+        if (_opt._kms == "kythira" && _opt._kms_endpoint.empty()) {
+            // The KMS starts first (starts_after) and publishes its client.
+            _kms_client = registry.lookup<service_node::kms_endpoint>(
+                std::string(service_node::interface_names::kms_client));
+            if (!_kms_client) {
+                throw std::invalid_argument(
+                    "KINESIS_KMS=kythira: the KMS module publishes no client");
+            }
         }
         if (_opt._kms == "pkcs11" && !_kms_token.module_path) {
             // The HSM starts first (starts_after); a stand-alone node, or
@@ -596,6 +618,29 @@ private:
                                    env("AWS_ACCESS_KEY_ID"), env("AWS_SECRET_ACCESS_KEY"),
                                    env("AWS_SESSION_TOKEN")}] { return creds; };
             sc._kms = kinesis::key_provider(kinesis::aws_kms_provider(std::move(kc)));
+        } else if (_opt._kms == "kythira") {
+            if (!_opt._kms_endpoint.empty()) {
+                // A KMS on another cluster: signed as this gateway, which
+                // the KMS trusts to forward the caller it serves.
+                const auto env = [](const char* name) {
+                    const char* v = std::getenv(name);  // NOLINT(concurrency-mt-unsafe)
+                    return v != nullptr ? std::string(v) : std::string();
+                };
+                service_node::kms_https_config kc;
+                kc.endpoint = "https://" + _opt._kms_endpoint;
+                kc.region = _opt._kms_region;
+                kc.access_key_id = env("AWS_ACCESS_KEY_ID");
+                kc.secret_access_key = env("AWS_SECRET_ACCESS_KEY");
+                kc.session_token = env("AWS_SESSION_TOKEN");
+                kc.tls.ca_path = _opt._kms_ca;
+                kc.tls.client_certificate = false;
+                _kms_client = std::make_shared<service_node::kms_https_endpoint>(std::move(kc));
+            }
+            // Set before the listener opens (here, or in start() for the
+            // co-located client) and never after: a plain read.
+            sc._kms = kinesis::key_provider(
+                kinesis::kythira_kms_provider([this] { return _kms_client; }));
+            sc._kms_caller_ttl = _opt._kms_caller_ttl;
         } else if (_opt._kms == "pkcs11") {
             _kms_token = pkcs11::uri::parse(_opt._kms_pkcs11_uri);
             kinesis::pkcs11_kms_config kc;
@@ -703,6 +748,9 @@ private:
     std::shared_ptr<service_node::iam_evaluator> _iam_evaluator;
     pkcs11::uri _kms_token;
     std::shared_ptr<service_node::pkcs11_provider> _hsm_pkcs11;
+    /// `KINESIS_KMS=kythira`: the co-located KMS's client, or one over
+    /// HTTPS to a KMS on another cluster.
+    std::shared_ptr<service_node::kms_endpoint> _kms_client;
     std::unique_ptr<authorizer_type> _authorizer;
     kinesis::kinesis_compat_profile _profile{};
 
