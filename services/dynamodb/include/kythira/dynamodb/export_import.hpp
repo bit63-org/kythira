@@ -1373,6 +1373,8 @@ public:
           _options(options) {}
 
     void set_store(std::shared_ptr<backup_store> store) { _store = std::move(store); }
+    /// How encrypted tables' point-in-time archives are opened (KMS task 17).
+    void set_archive_keys(archive_key_source keys) { _archive_keys = std::move(keys); }
     void set_buckets(bucket_resolver buckets) { _buckets = std::move(buckets); }
     /// Look at the store on the next pass, whatever the interval.
     void poke() { _poked.store(true); }
@@ -1593,7 +1595,8 @@ private:
                     } else {
                         state.erase(k);
                     }
-                });
+                },
+                _archive_keys);
         } catch (const std::runtime_error& e) {
             if (std::string_view(e.what()).starts_with("no point-in-time recovery base")) {
                 throw pitr_rebuild_error(e.what());
@@ -1737,6 +1740,7 @@ private:
     std::shared_ptr<backup_store> _store;
     bucket_resolver _buckets;
     export_import_worker_options _options;
+    archive_key_source _archive_keys;
     std::atomic<bool> _poked{true};
     std::chrono::steady_clock::time_point _next_list{};
 };

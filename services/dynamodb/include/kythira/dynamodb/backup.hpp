@@ -61,6 +61,7 @@
 #include <kythira/dynamodb/front_end.hpp>
 #include <kythira/dynamodb/global_index.hpp>
 #include <kythira/dynamodb/item_codec.hpp>
+#include <kythira/dynamodb/item_sealing.hpp>
 #include <kythira/dynamodb/key_layout.hpp>
 #include <kythira/dynamodb/table_api.hpp>
 
@@ -78,6 +79,7 @@
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -246,6 +248,32 @@ private:
 };
 
 // -- Records ------------------------------------------------------------------
+
+/// The key that seals a table's archive objects (KMS task 17): the
+/// gateway opens the table key of the descriptor given (`table_keys.hpp`).
+using archive_key_source =
+    std::function<std::shared_ptr<const archive_key>(const table_descriptor&)>;
+
+/// The archive key of `d`: none for a table that is not sealed; throws
+/// when the table is sealed and no source is set, so nothing is written or
+/// read in the clear by mistake.
+[[nodiscard]] inline auto archive_key_of(const archive_key_source& source,
+                                         const table_descriptor& d)
+    -> std::shared_ptr<const archive_key> {
+    if (!d.seals_items()) {
+        return nullptr;
+    }
+    if (!source) {
+        throw std::runtime_error("table " + d.name +
+                                 " is encrypted and this node has no key provider for its "
+                                 "archives");
+    }
+    auto k = source(d);
+    if (!k) {
+        throw std::runtime_error("the key of table " + d.name + " is not available");
+    }
+    return k;
+}
 
 /// One data object of a backup.
 struct backup_object {
@@ -548,7 +576,8 @@ struct written_items {
 /// `prefix` are removed.
 template<typename Backend, typename KeyOf>
 auto write_items(Backend& backend, backup_store& store, std::uint64_t table_id,
-                 const std::string& prefix, KeyOf key_of) -> written_items {
+                 const std::string& prefix, KeyOf key_of, const archive_key* sealing = nullptr)
+    -> written_items {
     written_items out;
     std::string chunk;
     std::uint64_t chunk_items = 0;
@@ -559,6 +588,9 @@ auto write_items(Backend& backend, backup_store& store, std::uint64_t table_id,
         backup_object o;
         o.key = key_of(out.objects.size());
         o.items = chunk_items;
+        if (sealing != nullptr) {
+            chunk = sealing->seal(o.key, chunk);
+        }
         o.bytes = chunk.size();
         o.sha256 = sigv4::detail::sha256_hex(chunk);
         store.put(o.key, chunk);
@@ -589,13 +621,29 @@ auto write_items(Backend& backend, backup_store& store, std::uint64_t table_id,
     return out;
 }
 
+/// An archive object's body, opened under `sealing` when it is sealed.
+[[nodiscard]] inline auto open_object(const std::string& key, std::string body,
+                                      const archive_key* sealing) -> std::string {
+    if (!is_sealed_archive(body)) {
+        return body;
+    }
+    if (sealing == nullptr) {
+        throw std::runtime_error("archive object " + key +
+                                 " is sealed and this node has no key for it");
+    }
+    return sealing->open(key, body);
+}
+
 /// Calls `fn` with each line of the object, after checking its sha256.
-template<typename Fn> void read_object(backup_store& store, const backup_object& o, Fn fn) {
-    const auto body = store.get(o.key);
+template<typename Fn>
+void read_object(backup_store& store, const backup_object& o, Fn fn,
+                 const archive_key* sealing = nullptr) {
+    auto body = store.get(o.key);
     if (!body || sigv4::detail::sha256_hex(*body) != o.sha256) {
         throw std::runtime_error("backup object " + o.key + " is missing or damaged");
     }
-    std::string_view rest(*body);
+    const auto clear = open_object(o.key, std::move(*body), sealing);
+    std::string_view rest(clear);
     while (!rest.empty()) {
         const auto nl = rest.find('\n');
         const auto line = rest.substr(0, nl);
@@ -958,6 +1006,8 @@ public:
         : _backend(backend), _store(std::move(store)), _options(options) {}
 
     void set_store(std::shared_ptr<backup_store> store) { _store = std::move(store); }
+    /// How encrypted tables' backups are sealed and opened (KMS task 17).
+    void set_archive_keys(archive_key_source keys) { _archive_keys = std::move(keys); }
     /// Look at the store on the next pass, whatever the interval.
     void poke() { _poked.store(true); }
 
@@ -1003,9 +1053,15 @@ private:
             }
             return;
         }
-        auto got = bd::write_items(_backend, *_store, r.source.table_id,
-                                   std::string(bd::k_backups_prefix) + r.id + "/data/",
-                                   [&](std::size_t n) { return bd::data_key(r.id, n); });
+        // Sealed under the table key as the table has it now; the record
+        // keeps that wrapped key, so a restore opens it even after the
+        // table is gone (the table key itself never changes).
+        r.source.sse = d->sse;
+        const auto sealing = archive_key_of(_archive_keys, r.source);
+        auto got = bd::write_items(
+            _backend, *_store, r.source.table_id,
+            std::string(bd::k_backups_prefix) + r.id + "/data/",
+            [&](std::size_t n) { return bd::data_key(r.id, n); }, sealing.get());
         r.objects = std::move(got.objects);
         r.size_bytes = got.size_bytes;
         r.item_count = got.items;
@@ -1025,15 +1081,19 @@ private:
             }
         }
         if (r) {
+            const auto sealing = archive_key_of(_archive_keys, r->source);
             for (const auto& o : r->objects) {
-                bd::read_object(*_store, o, [&](std::string_view line) {
-                    auto parsed =
-                        item_from_json(boost::json::parse(line).as_object().at("Item").as_object());
-                    if (!parsed) {
-                        throw std::runtime_error("backup holds an unreadable item");
-                    }
-                    bd::restore_put(_backend, d, std::move(*parsed));
-                });
+                bd::read_object(
+                    *_store, o,
+                    [&](std::string_view line) {
+                        auto parsed = item_from_json(
+                            boost::json::parse(line).as_object().at("Item").as_object());
+                        if (!parsed) {
+                            throw std::runtime_error("backup holds an unreadable item");
+                        }
+                        bd::restore_put(_backend, d, std::move(*parsed));
+                    },
+                    sealing.get());
             }
         }
         // A backup deleted under a restore leaves the table as loaded.
@@ -1043,6 +1103,7 @@ private:
     Backend& _backend;
     std::shared_ptr<backup_store> _store;
     backup_worker_options _options;
+    archive_key_source _archive_keys;
     std::atomic<bool> _poked{true};
     std::chrono::steady_clock::time_point _next_list{};
 };
