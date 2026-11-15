@@ -18,7 +18,10 @@ set(KYTHIRA_KMS_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}")
 set(KYTHIRA_KMS_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/include")
 add_library(kythira_kms INTERFACE)
 target_include_directories(kythira_kms INTERFACE "${KYTHIRA_KMS_INCLUDE_DIR}")
-target_link_libraries(kythira_kms INTERFACE kythira_core_headers boost_json OpenSSL::Crypto)
+# ${CMAKE_DL_LIBS}: core's pkcs11::function_list_backend dlopens an external
+# PKCS#11 module (Requirement 4.3).
+target_link_libraries(kythira_kms INTERFACE kythira_core_headers boost_json OpenSSL::Crypto
+    ${CMAKE_DL_LIBS})
 target_compile_features(kythira_kms INTERFACE cxx_std_23)
 
 # kms_node (task 1 placeholder; the daemon is task 12), before the tests,

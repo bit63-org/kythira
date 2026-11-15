@@ -71,6 +71,13 @@ is one PR unless noted.
     sweep, the sealed-HSM error path
   - Plaintext scan test over the KMS group's log and snapshots
   - _Requirements: 2.1, 4.1-4.5_
+  - 5a done: `kms_backing.hpp` (backing keys through core's
+    `pkcs11::backend`) and `kms_keys.hpp` (two-step creation, sweep,
+    rotation and deletion jobs), with the plaintext scan in
+    `kms_keys_test`. Deviation: a key a dead leader left Creating with
+    no backing key is destroyed, not made: its CreateKey already failed
+    for the client, and making it would leave a second key behind a
+    retried CreateKey. 5b: the module on the multi-raft host.
 
 - [ ] 6. Key management operations
   - `CreateKey`, `DescribeKey`, `ListKeys`, `EnableKey`, `DisableKey`,

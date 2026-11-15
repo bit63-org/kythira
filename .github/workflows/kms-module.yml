@@ -14,6 +14,10 @@
 #   - a module-off configure (configs/ci_no_kms_defconfig) that asserts no
 #     KMS target or kms-module test exists with the switch off.
 #
+# The build job installs SoftHSM2, so kms_backing_softhsm_test (backing keys
+# on an external PKCS#11 module) is registered here; ci.yml's legs, which
+# do not install it, run the rest.
+#
 # The module-off configure does not build core: ci.yml's config-variants job
 # already builds every target of minimal_defconfig, where CONFIG_KMS is off
 # by default, and the boundary check's core-includes-module rule keeps core
@@ -115,7 +119,7 @@ jobs:
           for attempt in 1 2 3; do
             if timeout 300 sudo apt-get update -q \
                  && timeout 600 sudo apt-get install -y --no-install-recommends \
-                 clang-18 cmake ninja-build libfiu-dev \
+                 clang-18 cmake ninja-build libfiu-dev softhsm2 \
                  autoconf autoconf-archive automake libtool mold; then
               exit 0
             fi
