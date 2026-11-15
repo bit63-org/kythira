@@ -369,6 +369,20 @@ public:
         }
     }
 
+    /// The root of `account`: who the provider is asked for when no
+    /// request is in hand (a replica, an archive, a replica table made
+    /// for a peer region).
+    [[nodiscard]] static auto root_of(std::string_view account, std::string_view partition)
+        -> aws_auth::principal_context {
+        aws_auth::principal_context root;
+        root.type = aws_auth::principal_type::root;
+        root.account = std::string(account);
+        root.arn = "arn:" + (partition.empty() ? std::string("aws") : std::string(partition)) +
+                   ":iam::" + std::string(account) + ":root";
+        root.userid = std::string(account);
+        return root;
+    }
+
     /// The `SSESpecification` a request names: the customer key it asks
     /// for, or nothing for the owned key. Checked as DynamoDB checks it.
     [[nodiscard]] auto requested(const boost::json::object* spec) const
@@ -424,17 +438,6 @@ private:
             return ctx.principal;
         }
         return root_of(account, ctx.partition);
-    }
-
-    [[nodiscard]] static auto root_of(std::string_view account, std::string_view partition)
-        -> aws_auth::principal_context {
-        aws_auth::principal_context root;
-        root.type = aws_auth::principal_type::root;
-        root.account = std::string(account);
-        root.arn = "arn:" + (partition.empty() ? std::string("aws") : std::string(partition)) +
-                   ":iam::" + std::string(account) + ":root";
-        root.userid = std::string(account);
-        return root;
     }
 
     [[nodiscard]] static auto caller(const call_context& /*ctx*/,

@@ -777,6 +777,9 @@ template<typename TypeOf>
             if (r.status == replica_status::creation_failed && !r.failure.empty()) {
                 o["ReplicaStatusDescription"] = r.failure;
             }
+            if (!r.kms_key.empty()) {
+                o["KMSMasterKeyId"] = r.kms_key;
+            }
             replicas.push_back(std::move(o));
         }
         out["Replicas"] = std::move(replicas);
@@ -2202,7 +2205,21 @@ private:
                 return validation_error("RegionName is required");
             }
             const std::string region(region_value->as_string());
-            if (o.size() > 1) {
+            // Of the per-replica overrides, only the replica's own KMS key
+            // (KMS task 17, Requirement 12.8).
+            std::string replica_key;
+            if (const auto* k = o.if_contains("KMSMasterKeyId"); kind == "Create" && k != nullptr) {
+                if (!k->is_string() || k->as_string().empty()) {
+                    return validation_error("KMSMasterKeyId must be a non-empty string");
+                }
+                if (current->sse.kind != sse_kind::kms) {
+                    return validation_error(
+                        "A replica's KMSMasterKeyId needs the table to be encrypted with a KMS "
+                        "key; the table uses an AWS owned key or none");
+                }
+                replica_key = k->as_string();
+            }
+            if (o.size() > (replica_key.empty() ? 1U : 2U)) {
                 return unsupported("replica overrides");
             }
             // As AWS asks: the replica action too, on the table.
@@ -2228,7 +2245,8 @@ private:
                     return validation_error("Region " + region +
                                             " is not one of this cluster's peer regions");
                 }
-                c.table.replicas.push_back(table_replica{.region = region});
+                c.table.replicas.push_back(
+                    table_replica{.region = region, .kms_key = std::move(replica_key)});
             } else {
                 if (current->replica_in(region) == nullptr) {
                     return validation_error("Cannot delete replica in " + region + ": table " +

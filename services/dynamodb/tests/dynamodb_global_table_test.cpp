@@ -7,8 +7,8 @@
 // SigV4-signed and authorized as it is over HTTP: `ReplicaUpdates` and the
 // statuses `DescribeTable` reports, the backfill and its stamps, writes in
 // both directions, last-writer-wins under clock skew, a three-region mesh,
-// replica deletion, an unreachable peer, a refused creation, and the
-// refusals.
+// replica deletion, an unreachable peer, a refused creation, the
+// refusals, and each replica's table key from its own region's KMS.
 
 #define BOOST_TEST_MODULE dynamodb_global_table_test
 
@@ -17,6 +17,16 @@
 #include "dynamodb_test_fixture.hpp"
 
 #include <kythira/dynamodb/global_tables.hpp>
+#include <kythira/dynamodb/item_sealing.hpp>
+#include <kythira/dynamodb/table_key_refresh.hpp>
+#include <kythira/dynamodb/table_keys.hpp>
+
+#include <raft/kms_key_provider.hpp>
+
+#include <openssl/rand.h>
+
+#include <cstring>
+#include <set>
 
 #include <map>
 #include <memory>
@@ -64,6 +74,92 @@ auto signed_in(std::string_view region, std::string_view op, const std::string& 
     return r;
 }
 
+namespace kp = kythira::kms_provider;
+
+/// A region's KMS: it knows the managed and owned keys and the keys named
+/// in `own`, all by `alias/<name>` and by ARN in its region, and wraps a
+/// data key as "<key arn>|<context>|<key bytes>".
+struct region_kms_state {
+    std::string region;
+    std::set<std::string> own;
+    std::vector<std::pair<std::string, std::string>> asked;  // key, principal
+
+    [[nodiscard]] auto arn(const std::string& key) const -> std::optional<std::string> {
+        const auto prefix = "arn:aws:kms:" + region + ":" + std::string(k_account) + ":key/";
+        std::string name;
+        if (key == "alias/aws/dynamodb/owned") {
+            name = "owned";
+        } else if (key == "alias/aws/dynamodb") {
+            name = "managed";
+        } else if (key.starts_with("alias/")) {
+            name = key.substr(6);
+        } else if (key.starts_with(prefix)) {
+            name = key.substr(prefix.size());
+        }
+        if (name != "owned" && name != "managed" && !own.contains(name)) {
+            return std::nullopt;
+        }
+        return prefix + name;
+    }
+};
+
+class region_kms {
+public:
+    explicit region_kms(std::shared_ptr<region_kms_state> s) : _s(std::move(s)) {}
+
+    [[nodiscard]] auto generate_data_key(const std::string& key, const kp::encryption_context& c,
+                                         const kp::kms_caller& who) const
+        -> kp::generated_data_key {
+        kp::generated_data_key out;
+        BOOST_REQUIRE(RAND_bytes(out._plaintext.data(), static_cast<int>(out._plaintext.size())) ==
+                      1);
+        return wrap_data_key(key, out._plaintext, c, who);
+    }
+    [[nodiscard]] auto wrap_data_key(const std::string& key, const kp::data_key_bytes& plain,
+                                     const kp::encryption_context& c,
+                                     const kp::kms_caller& who) const -> kp::generated_data_key {
+        const auto arn = resolve(key, who);
+        kp::generated_data_key out;
+        out._plaintext = plain;
+        out._wrapped = arn + "|" + text(c) + "|" +
+                       std::string(reinterpret_cast<const char*>(plain.data()), plain.size());
+        out._key_id = arn;
+        return out;
+    }
+    [[nodiscard]] auto decrypt_data_key(const std::string& key, const std::string& wrapped,
+                                        const kp::encryption_context& c,
+                                        const kp::kms_caller& who) const -> kp::data_key_bytes {
+        const auto head = resolve(key, who) + "|" + text(c) + "|";
+        if (!wrapped.starts_with(head) || wrapped.size() != head.size() + 32) {
+            throw kp::kms_error(kp::kms_failure::invalid_state, "wrong key or context");
+        }
+        kp::data_key_bytes out{};
+        std::memcpy(out.data(), wrapped.data() + head.size(), out.size());
+        return out;
+    }
+
+private:
+    [[nodiscard]] auto resolve(const std::string& key, const kp::kms_caller& who) const
+        -> std::string {
+        _s->asked.emplace_back(key, who._principal != nullptr ? who._principal->arn : "");
+        auto arn = _s->arn(key);
+        if (!arn) {
+            throw kp::kms_error(kp::kms_failure::not_found,
+                                "Key " + key + " does not exist in " + _s->region);
+        }
+        return *arn;
+    }
+    static auto text(const kp::encryption_context& c) -> std::string {
+        std::string out;
+        for (const auto& [k, v] : c) {
+            out += k + "=" + v + ";";
+        }
+        return out;
+    }
+
+    std::shared_ptr<region_kms_state> _s;
+};
+
 /// One region: a single-node cluster with the table, item and peer APIs.
 struct region_cluster {
     std::string region;
@@ -93,6 +189,32 @@ struct region_cluster {
         backend, &peers, {.log = [this](std::string_view line) { log.emplace_back(line); }}};
     /// Peer calls to this region fail as if it could not be reached.
     bool down = false;
+    /// This region's KMS and table keys, once `use_kms` gives it one.
+    std::shared_ptr<region_kms_state> kms;
+    std::unique_ptr<ddb::table_keys> keys;
+    std::shared_ptr<ddb::table_key_ring> ring;
+    std::unique_ptr<ddb::table_key_refresher<ddb::local_backend<>>> refresher;
+
+    /// Encrypts this region's tables with keys from its own KMS, which
+    /// knows the keys named in `own` besides the managed and owned ones.
+    void use_kms(std::set<std::string> own) {
+        kms = std::make_shared<region_kms_state>(region_kms_state{region, std::move(own), {}});
+        ddb::table_key_config c;
+        c.provider_name = "kythira";
+        c.provider = kp::key_provider(region_kms(kms));
+        c.owned_key_id = "alias/aws/dynamodb/owned";
+        keys = std::make_unique<ddb::table_keys>(std::move(c));
+        ring = std::make_shared<ddb::table_key_ring>();
+        backend.set_sealer(ddb::item_sealer(ring));
+        refresher =
+            std::make_unique<ddb::table_key_refresher<ddb::local_backend<>>>(backend, *keys, ring);
+        tables.set_table_keys(keys.get());
+        receiver.set_table_keys(keys.get());
+    }
+
+    /// Opens the keys of tables made here since the last call; returns
+    /// how many it opened.
+    auto refresh() -> std::size_t { return refresher ? refresher->pass(true, clock_ms) : 0; }
 
     region_cluster(std::string_view r, std::uint64_t clock) : region(r), clock_ms(clock) {
         auth.register_service(ddb::dynamodb_static_roles());
@@ -238,6 +360,11 @@ void pump(const std::vector<region_cluster*>& all) {
         std::size_t moved = 0;
         for (auto* c : all) {
             moved += c->replicator.pass();
+        }
+        for (auto* c : all) {
+            // A replica made this round takes writes once its region has
+            // its key.
+            moved += c->refresh();
         }
         if (moved == 0) {
             return;
@@ -550,8 +677,13 @@ BOOST_FIXTURE_TEST_CASE(refusals, two_regions) {
     BOOST_TEST(east.replica_updates("orders", R"([{"Update":{"RegionName":"us-west-2"}}])")
                    .message()
                    .find("not support") != std::string::npos);
+    // A replica's own KMS key needs a table under a KMS key.
     BOOST_TEST(east.replica_updates("orders", R"([{"Create":{"RegionName":"us-west-2",)"
                                               R"("KMSMasterKeyId":"k"}}])")
+                   .message()
+                   .find("encrypted with a KMS key") != std::string::npos);
+    BOOST_TEST(east.replica_updates("orders", R"([{"Create":{"RegionName":"us-west-2",)"
+                                              R"("TableClassOverride":"STANDARD"}}])")
                    .message()
                    .find("not support") != std::string::npos);
     BOOST_TEST(east.replica_updates("orders", "[]").type() == "ValidationException");
@@ -587,6 +719,100 @@ BOOST_FIXTURE_TEST_CASE(refusals, two_regions) {
                                                       {"Writes", json::array{}}});
     BOOST_REQUIRE(!stranger.has_value());
     BOOST_TEST(stranger.error().type.ends_with("ValidationException"));
+}
+
+BOOST_FIXTURE_TEST_CASE(each_replica_takes_a_table_key_from_its_own_region, two_regions) {
+    east.use_kms({"east-key"});
+    west.use_kms({"west-key"});
+    const auto create = [&](const std::string& name, const std::string& sse) {
+        (void)east.ok("CreateTable",
+                      R"({"TableName":")" + name +
+                          R"(","AttributeDefinitions":[{"AttributeName":"pk","AttributeType":"S"},)"
+                          R"({"AttributeName":"sk","AttributeType":"N"}],)"
+                          R"("KeySchema":[{"AttributeName":"pk","KeyType":"HASH"},)"
+                          R"({"AttributeName":"sk","KeyType":"RANGE"}],)"
+                          R"("BillingMode":"PAY_PER_REQUEST")" +
+                          sse + "}");
+        (void)east.refresh();
+    };
+    create("orders", R"(,"SSESpecification":{"Enabled":true,"KMSMasterKeyId":"alias/east-key"})");
+    east.put("orders", "a", 1, "one");
+
+    // The replica names its key in its own region.
+    BOOST_REQUIRE_EQUAL(east.replica_updates("orders", R"([{"Create":{"RegionName":"us-west-2",)"
+                                                       R"("KMSMasterKeyId":"alias/west-key"}}])")
+                            .status,
+                        200U);
+    pump(all);
+    const auto east_view = east.ok("DescribeTable", R"({"TableName":"orders"})");
+    const auto& rep = east_view.at("Table").as_object().at("Replicas").as_array().at(0).as_object();
+    BOOST_TEST(rep.at("ReplicaStatus").as_string() == "ACTIVE");
+    BOOST_TEST(rep.at("KMSMasterKeyId").as_string() == "alias/west-key");
+    const auto west_view = west.ok("DescribeTable", R"({"TableName":"orders"})");
+    const auto& t = west_view.at("Table").as_object();
+    BOOST_TEST(t.at("SSEDescription").at("KMSMasterKeyArn").as_string() ==
+               "arn:aws:kms:us-west-2:" + std::string(k_account) + ":key/west-key");
+    // The source shows under the key its own region uses.
+    BOOST_TEST(t.at("Replicas").as_array().at(0).at("KMSMasterKeyId").as_string() ==
+               "arn:aws:kms:us-east-1:" + std::string(k_account) + ":key/east-key");
+    BOOST_TEST(west.get("orders", "a", 1).value_or("") == "one");
+    west.put("orders", "b", 2, "two");
+    pump(all);
+    BOOST_TEST(east.get("orders", "b", 2).value_or("") == "two");
+    // West's KMS made the key, asked as the table's account; east's was
+    // never asked for it.
+    BOOST_TEST(std::ranges::count(
+                   west.kms->asked,
+                   std::pair<std::string, std::string>{
+                       "alias/west-key", "arn:aws:iam::" + std::string(k_account) + ":root"}) == 1);
+    BOOST_TEST(std::ranges::none_of(east.kms->asked,
+                                    [](const auto& a) { return a.first == "alias/west-key"; }));
+
+    // With no key named, the replica takes its region's managed key.
+    create("managed", R"(,"SSESpecification":{"Enabled":true,"KMSMasterKeyId":"alias/east-key"})");
+    BOOST_REQUIRE_EQUAL(east.add_replica("managed", k_west).status, 200U);
+    pump(all);
+    BOOST_TEST(west.backend.describe("managed")->sse.key_arn ==
+               "arn:aws:kms:us-west-2:" + std::string(k_account) + ":key/managed");
+
+    // A table under the owned key has an owned-key replica.
+    create("owned", "");
+    BOOST_REQUIRE((east.backend.describe("owned")->sse.kind == ddb::sse_kind::owned));
+    BOOST_REQUIRE_EQUAL(east.add_replica("owned", k_west).status, 200U);
+    pump(all);
+    BOOST_TEST((west.backend.describe("owned")->sse.kind == ddb::sse_kind::owned));
+    BOOST_TEST(west.backend.describe("owned")->sse.key_arn ==
+               "arn:aws:kms:us-west-2:" + std::string(k_account) + ":key/owned");
+
+    // A key the replica's region does not have fails the replica.
+    create("lost", R"(,"SSESpecification":{"Enabled":true,"KMSMasterKeyId":"alias/east-key"})");
+    BOOST_REQUIRE_EQUAL(east.replica_updates("lost", R"([{"Create":{"RegionName":"us-west-2",)"
+                                                     R"("KMSMasterKeyId":"alias/east-key"}}])")
+                            .status,
+                        200U);
+    pump(all);
+    const auto lost = east.ok("DescribeTable", R"({"TableName":"lost"})");
+    const auto& failed = lost.at("Table").as_object().at("Replicas").as_array().at(0).as_object();
+    BOOST_TEST(failed.at("ReplicaStatus").as_string() == "CREATION_FAILED");
+    BOOST_TEST(std::string(failed.at("ReplicaStatusDescription").as_string()).find("east-key") !=
+               std::string::npos);
+    BOOST_TEST(west.describe("lost").type() == "ResourceNotFoundException");
+}
+
+BOOST_AUTO_TEST_CASE(a_replicas_kms_key_round_trips_in_format_13) {
+    ddb::table_descriptor d;
+    d.name = "orders";
+    d.table_id = 7;
+    d.schema.partition_name = "pk";
+    d.region = "us-east-1";
+    d.replicas.push_back(ddb::table_replica{.region = "us-west-2", .kms_key = "alias/west"});
+    d.replicas.push_back(ddb::table_replica{.region = "eu-west-1"});
+    BOOST_TEST(ddb::catalog_detail::version_for(d) == 13);
+    const auto back = ddb::decode_table_descriptor(ddb::encode_table_descriptor(d));
+    BOOST_REQUIRE(back.has_value());
+    BOOST_TEST((back->replicas == d.replicas));
+    d.replicas.front().kms_key.clear();
+    BOOST_TEST(ddb::catalog_detail::version_for(d) == 10);
 }
 
 BOOST_AUTO_TEST_CASE(stored_forms_round_trip) {

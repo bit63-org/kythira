@@ -247,7 +247,7 @@ is one PR unless noted.
     (`table_key_refresh.hpp`), and the catalog leader marks tables
     inaccessible and re-seals tables that gained a key.
 
-- [ ] 17. DynamoDB archives and replicas
+- [x] 17. DynamoDB archives and replicas
   - Sealing of change log records, backups, PITR archives and exports;
     `S3SseKmsKeyId` for Kythira stores and passed through for AWS buckets;
     `KMSMasterKeyId` per replica in `ReplicaUpdates`
@@ -258,7 +258,10 @@ is one PR unless noted.
     (`archive_key`, `item_sealing.hpp`); exports and imports take
     `S3SseKmsKeyId` (`bucket_sse.hpp`: S3 encrypts natively through
     `backup_store::put_sse_kms`, Kythira stores get each object sealed
-    under a data key bound to its ARN). Left: replica keys.
+    under a data key bound to its ARN); each global table replica gets
+    a table key from its own region's provider, under the
+    `KMSMasterKeyId` its `ReplicaUpdates` `Create` named (kept in the
+    replica's catalog entry, format 13) or that region's managed key.
 
 - [ ] 18. Client suites and differential fixtures
   - AWS CLI v2, boto3 and AWS Encryption SDK suites in CI against

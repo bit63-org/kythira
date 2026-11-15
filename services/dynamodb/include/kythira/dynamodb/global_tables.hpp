@@ -65,6 +65,7 @@
 #include <kythira/dynamodb/key_layout.hpp>
 #include <kythira/dynamodb/kinesis_destination.hpp>
 #include <kythira/dynamodb/streams.hpp>
+#include <kythira/dynamodb/table_keys.hpp>
 
 #include <raft/aws_json_protocol.hpp>
 #include <raft/sigv4_verifier.hpp>
@@ -332,6 +333,10 @@ public:
 
     explicit replication_receiver(Backend& backend) : _backend(backend) {}
 
+    /// The key provider a replica's own table key comes from (KMS task
+    /// 17); null: replicas are made clear.
+    void set_table_keys(const table_keys* keys) { _keys = keys; }
+
     template<typename FrontEnd> void register_with(FrontEnd& fe) {
         fe.set_replication_handler(
             [this](call_context& c, boost::json::object& in) { return handle(c, in); });
@@ -425,12 +430,17 @@ private:
                                     call_context::bare_name(name));
         }
         std::vector<table_replica> replicas;
+        std::string own_key;
         for (const auto& r : d->replicas) {
             if (r.region != ctx.region) {
                 replicas.push_back(r);
+            } else {
+                own_key = r.kms_key;
             }
         }
-        replicas.push_back(table_replica{.region = source});
+        replicas.push_back(table_replica{
+            .region = source,
+            .kms_key = d->sse.kind == sse_kind::kms ? d->sse.key_arn : std::string()});
         for (auto& r : replicas) {
             r.status = replica_status::active;
             r.backfilled = true;
@@ -442,9 +452,14 @@ private:
         d->restore = {};
         d->policies.clear();
         d->deletion_protection = false;
-        // Another region's table key is its own KMS's: a replica's own key
-        // comes with KMS task 17 (Requirement 12.8).
-        d->sse = {};
+        // Another region's table key is its own KMS's (Requirement 12.8):
+        // the replica gets a table key of its own, of the source's kind,
+        // under the key its `ReplicaUpdates` named or this region's
+        // managed key. The peer call carries no end caller, so the
+        // provider is asked as the table's account.
+        if (auto e = replica_key(ctx, *d, own_key)) {
+            return *e;
+        }
         catalog_command c;
         c.op = catalog_command::kind::create_table;
         c.table = std::move(*d);
@@ -454,6 +469,26 @@ private:
             return from_catalog(r);
         }
         return boost::json::object{{"TableStatus", "CREATING"}};
+    }
+
+    auto replica_key(const call_context& ctx, table_descriptor& d, const std::string& key) const
+        -> std::optional<aws_json::error> {
+        const auto kind = d.sse.kind;
+        d.sse = {};
+        if (kind == sse_kind::none) {
+            return std::nullopt;
+        }
+        call_context as = ctx;
+        as.principal = table_keys::root_of(table_account(d.name, ctx.owner()), ctx.partition);
+        boost::json::value spec;  // null: the owned key
+        if (kind == sse_kind::kms) {
+            boost::json::object o{{"Enabled", true}, {"SSEType", "KMS"}};
+            if (!key.empty()) {
+                o["KMSMasterKeyId"] = key;
+            }
+            spec = std::move(o);
+        }
+        return encrypt_new_table(_keys, as, d, &spec);
     }
 
     auto delete_replica(const call_context& ctx, const boost::json::object& in) -> result {
@@ -611,6 +646,7 @@ private:
     }
 
     Backend& _backend;
+    const table_keys* _keys = nullptr;
 };
 
 /// Keeps a cluster's global tables' replicas in step (see the file
