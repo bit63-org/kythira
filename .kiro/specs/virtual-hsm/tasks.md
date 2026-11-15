@@ -378,6 +378,22 @@ task is one PR unless noted.
     signing key type, native, the .so and SoftHSM2) and
     `hsm_ca_cluster_test` (three nodes on one SoftHSM2 token across a
     leader kill).
+  - [ ] 13c. The OIDC issuer's signing keys on a token:
+    `ca_cluster_node --oidc-key-uri` (or `CA_CLUSTER_OIDC_KEY_URI`) names
+    a token; the leader makes each rotation's key pair there
+    (`signing_key::generate`, RSA 2048 for RS256, P-256 for ES256,
+    labelled `oidc-` and random hex) and records `pkcs11:` and its URI
+    in place of the sealed key; the token endpoint signs records so
+    marked through `signing_key` (`jose::sign_compact` and `mint_token`
+    over a `digest_signer`) with the node's own library and PIN. Every
+    signing key on one library shares a single load (`shared_module`),
+    so no key finalizes the library under another's session. Tests:
+    `hsm_pkcs11_module_test` (RS256 and ES256 on three backends) and
+    `hsm_ca_cluster_test` (a token over mTLS verified under the JWKS,
+    the key found on the token, nothing private in the data directory).
+    IAM's STS keys are AES-GCM, outside the common subset: the unseal
+    passphrase that derives their KEK is sealed under a token key
+    instead (next).
 
 - [ ] 14. Audit, metrics and IAM authorization
   - Audit log with optional ledger sink; metrics per 11.3; `hsm:` actions
