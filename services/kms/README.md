@@ -24,17 +24,18 @@ configuration `.github/workflows/kms-module.yml` checks.
 | `implemented-operations.txt`, `doc/unsupported.md` | every model operation, implemented or listed with its planned task, reason and error; `tools/check_coverage.py` keeps the two complete | 1 |
 | `tools/kms-service-reference.json`, `tools/gen_kms_actions.py` | AWS's Service Authorization Reference for `kms` (v1.5, pinned) and the generator of `kms_actions.hpp`; `kms_actions_header_fresh` fails when stale | 2 |
 | `include/kythira/kms/kms_actions.hpp` | the `kms` action table for IAM (resources `key` and `alias`, every condition key), the operation-to-action map (with which operations write) and the static-key roles | 2 |
+| `include/kythira/kms/kms_ciphertext.hpp` | the symmetric ciphertext blob (version, key id, backing version, nonce, ciphertext, tag) and the AES-GCM additional data that binds the key ARN, the backing version and the canonical encryption context | 3 |
 | `cmd/kms_node/` | the daemon; a placeholder (`--help`, `--self-test`) until task 12 | 1 |
-| `tests/` | `kms_model_coverage` and its checker's fixture tests, `kms_model_header_fresh` (the header matches the model), `kms_model_test` (the tables validate requests), `kms_actions_test` and `kms_actions_header_fresh`, and `kms_node_self_test` | 1, 2 |
+| `tests/` | `kms_model_coverage` and its checker's fixture tests, `kms_model_header_fresh` (the header matches the model), `kms_model_test` (the tables validate requests), `kms_actions_test` and `kms_actions_header_fresh`, `kms_ciphertext_test` (tamper, wrong context, wrong key, over OpenSSL AES-GCM standing in for the HSM) and `kms_ciphertext_fuzz_test` (seeded mutations through the decoder), and `kms_node_self_test` | 1-3 |
 
 The KMS cases of IAM's policy corpus (key policies, delegation,
 cross-account use, `kms:ViaService`, encryption context conditions) are in
 `services/iam/tests/corpus/evaluate/kms_key_policies.json`, where IAM's
 evaluator runs them.
 
-The ciphertext format, catalog, HSM binding, the API, grants,
+The catalog, HSM binding, the API, grants,
 rotation, the daemon and the Kinesis and DynamoDB integrations follow in
-tasks 3 to 20 (`.kiro/specs/kms-compatible-api/tasks.md`).
+tasks 4 to 20 (`.kiro/specs/kms-compatible-api/tasks.md`).
 
 ## Core targets and variables used
 

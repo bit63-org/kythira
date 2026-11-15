@@ -38,11 +38,16 @@ is one PR unless noted.
     Grant cases are the KMS's own (task 9): IAM's evaluator never sees a
     grant, because the KMS checks grants before asking IAM.
 
-- [ ] 3. Ciphertext format
+- [x] 3. Ciphertext format
   - `kms_ciphertext.hpp`: blob encoding, AAD canonicalization of the key
     ARN, backing version and encryption context; tamper, wrong context
     and wrong key tests; a fuzz target for the decoder
   - _Requirements: 5.2, 5.3, 14.1_
+  - Done: the layout of design.md, big-endian, with the AAD prefixed by
+    a `kythira-kms` domain tag and the blob version. The decoder takes
+    only version 1, UUID key ids and blobs up to AWS's 6144 bytes. The
+    "fuzz target" is a seeded mutation test (as DynamoDB's expression
+    fuzz test is), so it runs in ctest and under the sanitizer legs.
 
 - [ ] 4. KMS catalog state machine
   - Keys, versions, aliases, policies, grants, tags, jobs; command format
