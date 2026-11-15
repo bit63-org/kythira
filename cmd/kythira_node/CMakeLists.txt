@@ -96,6 +96,28 @@ if(TARGET kythira_iam_module AND TARGET kythira_kinesis_module AND TARGET iam_no
         LABELS "integration;iam;iam-module;node" TIMEOUT 600)
 endif()
 
+# The KMS as a module (.kiro/specs/kms-compatible-api/ task 5): one
+# kythira_node with the KMS module over SoftHSM2, standing in for an
+# external PKCS#11 module. Registered here, after every service directory,
+# because it needs this binary; KYTHIRA_KMS_SOFTHSM2_* are the cache
+# entries services/kms/tests/ found.
+if(TARGET kythira_kms_module AND KYTHIRA_KMS_SOFTHSM2_LIBRARY  # module-hook
+   AND KYTHIRA_KMS_SOFTHSM2_UTIL)  # module-hook
+    add_raft_completion_test(kythira_node_kms_test
+        "${PROJECT_SOURCE_DIR}/services/kms/tests/kythira_node_kms_test.cpp")
+    target_link_libraries(kythira_node_kms_test PRIVATE kythira_kms kythira_test_support)  # module-hook
+    target_compile_definitions(kythira_node_kms_test PRIVATE
+        KYTHIRA_SOFTHSM2_LIBRARY="${KYTHIRA_KMS_SOFTHSM2_LIBRARY}"  # module-hook
+        KYTHIRA_SOFTHSM2_UTIL="${KYTHIRA_KMS_SOFTHSM2_UTIL}"  # module-hook
+        KYTHIRA_NODE_PATH="$<TARGET_FILE:kythira_node>")
+    add_dependencies(kythira_node_kms_test kythira_node)
+    set_target_properties(kythira_node_kms_test PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests")
+    set_tests_properties(kythira_node_kms_test PROPERTIES
+        WORKING_DIRECTORY "${CMAKE_BINARY_DIR}/tests"
+        LABELS "integration;kms;kms-module;node" TIMEOUT 400)
+endif()
+
 # Every compiled-in module on one three-node cluster (.kiro/specs/
 # service-colocation/ task 11, Requirement 10.1): each service's smoke test
 # against the same kythira_node processes. The test reads the module list

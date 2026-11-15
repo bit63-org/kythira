@@ -90,6 +90,15 @@ endforeach()
 kythira_kms_test(kms_keys_test kms_keys_test.cpp)
 set_tests_properties(kms_keys_test PROPERTIES LABELS "unit;kms;kms-module" TIMEOUT 120)
 
+# Task 5, Requirements 2.1 and 4.1-4.5: the catalog on three in-process
+# multi-raft members sharing one PKCS#11 token: creation through a
+# follower, a dead leader's Creating keys settled by the next, a sealed
+# HSM, and a member cut off from the leader.
+kythira_kms_test(kms_host_test kms_host_test.cpp)
+target_link_libraries(kms_host_test PRIVATE kythira_test_support)
+set_tests_properties(kms_host_test PROPERTIES
+    LABELS "integration;kms;kms-module" TIMEOUT 300)
+
 # Task 5, Requirements 4.1-4.3: every key spec's backing key on a real
 # module, SoftHSM2 standing in for an external one; registered when the
 # build finds SoftHSM2 and softhsm2-util (kms-module.yml installs them;

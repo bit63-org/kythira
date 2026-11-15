@@ -65,7 +65,7 @@ is one PR unless noted.
     material can be represented in a command" holds by construction; the
     property test feeds random 32-byte keys to every text field.
 
-- [ ] 5. KMS service module and HSM binding
+- [x] 5. KMS service module and HSM binding
   - The module on the multi-raft host (module 7), `hsm.client` use for
     backing keys on the `kms` token, two-step key creation with the orphan
     sweep, the sealed-HSM error path
@@ -77,7 +77,18 @@ is one PR unless noted.
     `kms_keys_test`. Deviation: a key a dead leader left Creating with
     no backing key is destroyed, not made: its CreateKey already failed
     for the client, and making it would leave a second key behind a
-    retried CreateKey. 5b: the module on the multi-raft host.
+    retried CreateKey.
+  - 5b done: `kms_group_state_machine.hpp` and `kms_host.hpp` (the catalog
+    as the module's one multi-raft group, with forwarding hooks), and
+    `cmd/kms_node/kms_module.hpp` (module 7 in kythira_node: the token
+    bound by label through `hsm.pkcs11` or a PKCS#11 library, PIN from
+    `KYTHIRA_KMS_PIN_FILE`, the leader's jobs every
+    `KYTHIRA_KMS_JOB_INTERVAL_MS`, health saying when the HSM is sealed
+    or the token missing). Tests: `kms_host_test` (three members on the
+    message fabric) and `kythira_node_kms_test` (the process over
+    SoftHSM2). The design's `hsm.client` is core's `hsm.pkcs11`, which
+    the HSM module publishes. Forwarding a follower's proposals over the
+    network needs the API listener and arrives with task 6.
 
 - [ ] 6. Key management operations
   - `CreateKey`, `DescribeKey`, `ListKeys`, `EnableKey`, `DisableKey`,

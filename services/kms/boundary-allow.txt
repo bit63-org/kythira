@@ -4,7 +4,8 @@
 # Core *_impl.hpp headers, and other modules' published headers, the KMS
 # module may include, one per line, with the reason (services/README.md,
 # "Boundary rules"). Only the composition root (cmd/kms_node) and tests that
-# stand up an in-process cluster may be listed. None yet: the module has no
-# Raft group until task 5.
+# stand up an in-process cluster may be listed.
 #
 # file                                         allowed header                why
+tests/kms_host_test.cpp                        multi_raft_impl.hpp           stands up in-process hosts
+cmd/kms_node/kms_module.hpp                    multi_raft_impl.hpp           instantiates the module's multi-raft host
