@@ -83,6 +83,30 @@ foreach(_kms_test IN ITEMS kms_catalog_test kms_catalog_property_test)
         LABELS "unit;kms;kms-module" TIMEOUT 120)
 endforeach()
 
+# Task 5, Requirements 3.4, 4.1, 4.4, 4.5 and 9.2-9.4: two-step key
+# creation and the leader's jobs over an in-memory PKCS#11 backend, with
+# the scan of the catalog's log, engine and checkpoint for generated
+# material.
+kythira_kms_test(kms_keys_test kms_keys_test.cpp)
+set_tests_properties(kms_keys_test PROPERTIES LABELS "unit;kms;kms-module" TIMEOUT 120)
+
+# Task 5, Requirements 4.1-4.3: every key spec's backing key on a real
+# module, SoftHSM2 standing in for an external one; registered when the
+# build finds SoftHSM2 and softhsm2-util (kms-module.yml installs them;
+# Debian and Ubuntu ship the library under lib/softhsm/).
+find_library(KYTHIRA_KMS_SOFTHSM2_LIBRARY NAMES softhsm2 PATH_SUFFIXES softhsm)
+find_program(KYTHIRA_KMS_SOFTHSM2_UTIL softhsm2-util)
+if(KYTHIRA_KMS_SOFTHSM2_LIBRARY AND KYTHIRA_KMS_SOFTHSM2_UTIL)
+    kythira_kms_test(kms_backing_softhsm_test kms_backing_softhsm_test.cpp)
+    target_compile_definitions(kms_backing_softhsm_test PRIVATE
+        KYTHIRA_SOFTHSM2_LIBRARY="${KYTHIRA_KMS_SOFTHSM2_LIBRARY}"
+        KYTHIRA_SOFTHSM2_UTIL="${KYTHIRA_KMS_SOFTHSM2_UTIL}")
+    set_tests_properties(kms_backing_softhsm_test PROPERTIES
+        LABELS "unit;kms;kms-module" TIMEOUT 300)
+else()
+    message(STATUS "kms_backing_softhsm_test: no SoftHSM2, not registered")
+endif()
+
 # Task 1: kms_node links and checks its model.
 add_test(NAME kms_node_self_test COMMAND kms_node --self-test)
 set_tests_properties(kms_node_self_test PROPERTIES

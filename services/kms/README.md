@@ -27,15 +27,17 @@ configuration `.github/workflows/kms-module.yml` checks.
 | `include/kythira/kms/kms_ciphertext.hpp` | the symmetric ciphertext blob (version, key id, backing version, nonce, ciphertext, tag) and the AES-GCM additional data that binds the key ARN, the backing version and the canonical encryption context | 3 |
 | `include/kythira/kms/kms_catalog.hpp` | the catalog state machine: keys (Creating, Enabled, Disabled, PendingDeletion, then a tombstone), backing-key versions by HSM object id, aliases, policies, grants, tags, per-account counts and quota overrides, and the queries the leader's jobs run from (creations to finish, rotations and deletions due) | 4 |
 | `include/kythira/kms/kms_codec.hpp`, `kms_group.hpp` | the catalog's encoding (integers and UTF-8 text only, no byte fields, so no command can carry key material) and its engine plumbing (the HSM module's, copied: a module includes no other module) | 4 |
+| `include/kythira/kms/kms_backing.hpp` | backing keys on a PKCS#11 token through core's `pkcs11::backend` (the virtual HSM in process, its client library, or any module): generation per key spec, private, sensitive and never extractable, labelled `kms:<key-id>:<version>`; lookup, listing and destruction by label; errors classed as unavailable (sealed or unreachable), unsupported or failed | 5 |
+| `include/kythira/kms/kms_keys.hpp` | CreateKey's two steps and the leader's jobs: settling keys a dead leader left Creating, scheduled and on-demand rotation, deletion, and destroying orphaned backing keys, each idempotent across leader changes | 5 |
 | `cmd/kms_node/` | the daemon; a placeholder (`--help`, `--self-test`) until task 12 | 1 |
-| `tests/` | `kms_model_coverage` and its checker's fixture tests, `kms_model_header_fresh` (the header matches the model), `kms_model_test` (the tables validate requests), `kms_actions_test` and `kms_actions_header_fresh`, `kms_ciphertext_test` (tamper, wrong context, wrong key, over OpenSSL AES-GCM standing in for the HSM) and `kms_ciphertext_fuzz_test` (seeded mutations through the decoder), `kms_catalog_test` and `kms_catalog_property_test` (replicas and a restored checkpoint agree; binary material is refused), and `kms_node_self_test` | 1-4 |
+| `tests/` | `kms_model_coverage` and its checker's fixture tests, `kms_model_header_fresh` (the header matches the model), `kms_model_test` (the tables validate requests), `kms_actions_test` and `kms_actions_header_fresh`, `kms_ciphertext_test` (tamper, wrong context, wrong key, over OpenSSL AES-GCM standing in for the HSM) and `kms_ciphertext_fuzz_test` (seeded mutations through the decoder), `kms_catalog_test` and `kms_catalog_property_test` (replicas and a restored checkpoint agree; binary material is refused), `kms_keys_test` (the jobs over an in-memory PKCS#11 backend, the sealed-HSM path, and the scan of the log, engine and checkpoint for generated material), `kms_backing_softhsm_test` (every key spec on SoftHSM2, when the build finds it), and `kms_node_self_test` | 1-5 |
 
 The KMS cases of IAM's policy corpus (key policies, delegation,
 cross-account use, `kms:ViaService`, encryption context conditions) are in
 `services/iam/tests/corpus/evaluate/kms_key_policies.json`, where IAM's
 evaluator runs them.
 
-The HSM binding, the API, grants,
+The module on the multi-raft host, the API, grants,
 rotation, the daemon and the Kinesis and DynamoDB integrations follow in
 tasks 5 to 20 (`.kiro/specs/kms-compatible-api/tasks.md`).
 
