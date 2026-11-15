@@ -240,6 +240,26 @@ task is one PR unless noted.
     GCP KMS; peer share exchange over mTLS checked against catalog
     membership; stays sealed below `k`
   - _Requirements: 4.4, 4.8, 13.5_
+  - [x] 8a. Node unseal with the key-file sealer and the peer exchange
+    - Done: `node_unseal.hpp`. Init and rekey in node mode (n must be the
+      member count) hand share i to the i-th member in id order, every
+      delivery before the catalog entry is proposed, so a member that
+      cannot take its share commits nothing; the operator sees no shares.
+      Each member keeps its share in `shares/share-<check value>.sealed`,
+      AES-256-GCM under a 32-byte key in an owner-only file (refused if
+      group or others can read it), bound to the key's check value. A
+      share is never overwritten, and older files are pruned only once the
+      member unseals with a newer one, so a rekey's shares survive until
+      it commits. A sealed member's warden (every 5 s at most, after a
+      catalog barrier) asks the others over `POST /v1/peer/share-request`;
+      peers answer a member's certificate only, sealed or not, and bad
+      answers are skipped; with fewer than k shares it stays sealed. The
+      README states what node mode trades (requirement 4.8). Checked by
+      hand on three nodes: init in node mode unseals all three, and a
+      member restarted with another down unseals from the third.
+  - [ ] 8b. TPM 2.0 (`tpm2-tss`) and cloud KMS (AWS KMS, Azure Key Vault,
+    GCP KMS through the existing cloud clients) share sealers behind
+    `share_sealer`, chosen with `KYTHIRA_HSM_SHARE_SEALER`
 
 - [ ] 9. Wire protocol and remote access
   - Framed protobuf protocol over TLS 1.3 with client certificates and

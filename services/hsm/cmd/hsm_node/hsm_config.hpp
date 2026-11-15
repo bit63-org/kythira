@@ -58,6 +58,10 @@ struct hsm_options {
     bool allow_single_share{false};
     /// How long partial operator shares are held.
     std::chrono::seconds unseal_timeout{600};
+    /// Node unseal (task 8): how this node's share is sealed at rest
+    /// ("file") and, for "file", the key's path (default data_dir/share.key).
+    std::string share_sealer{"file"};
+    std::filesystem::path share_key_file;
 
     // -- Raft, timing and logs -------------------------------------------------
     std::chrono::milliseconds tick_interval{5};

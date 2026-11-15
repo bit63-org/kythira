@@ -44,6 +44,7 @@
 #include <functional>
 #include <optional>
 #include <set>
+#include <span>
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -143,6 +144,10 @@ template<typename NodeId, typename FromText>
 }
 
 /// Who may send peer requests.
+/// The node-mode share routes (task 8, served by node_unseal.hpp).
+inline constexpr std::string_view peer_share_route = "/v1/peer/share";
+inline constexpr std::string_view peer_share_request_route = "/v1/peer/share-request";
+
 struct peer_policy {
     /// The members' certificate identities (a URI or DNS SAN each).
     std::set<std::string> identities;
@@ -234,6 +239,29 @@ public:
     [[nodiscard]] auto read_index(std::string_view base_url, std::uint64_t group) const
         -> forward_reply<std::string> {
         return post(base_url, std::string(peer_read_index_path) + std::to_string(group), {});
+    }
+
+    /// Hands a node-mode share (binary form) to the member at `base_url`
+    /// (task 8); true once it is stored there.
+    [[nodiscard]] auto deliver_share(std::string_view base_url, std::string share) const -> bool {
+        const auto res =
+            _client.request("POST", base_url, std::string(peer_share_route), std::move(share),
+                            "application/octet-stream", "kythira-hsm-peer");
+        return res && res->first == 200;
+    }
+
+    /// The member's share of the key with check value `check` (binary
+    /// form), or nothing when it is unreachable, refuses or holds none.
+    [[nodiscard]] auto request_share(std::string_view base_url,
+                                     std::span<const std::uint8_t, 8> check) const
+        -> std::optional<std::string> {
+        auto res = _client.request("POST", base_url, std::string(peer_share_request_route),
+                                   std::string(check.begin(), check.end()),
+                                   "application/octet-stream", "kythira-hsm-peer");
+        if (!res || res->first != 200) {
+            return std::nullopt;
+        }
+        return std::move(res->second);
     }
 
 private:

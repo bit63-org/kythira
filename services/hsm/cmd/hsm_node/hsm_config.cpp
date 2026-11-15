@@ -177,6 +177,12 @@ auto from_env(const env_fn& env) -> hsm_options {
         throw fail("KYTHIRA_NODE_ID: " + id.error());
     }
     o.data_dir = get_required(env, "KYTHIRA_HSM_DATA_DIR");
+    o.share_sealer = env("KYTHIRA_HSM_SHARE_SEALER").value_or("file");
+    if (o.share_sealer != "file") {
+        throw fail("KYTHIRA_HSM_SHARE_SEALER must be \"file\"");
+    }
+    o.share_key_file =
+        env("KYTHIRA_HSM_SHARE_KEY_FILE").value_or((o.data_dir / "share.key").string());
 
     o.insecure_plaintext = bool_opt(env, "KYTHIRA_HSM_INSECURE_PLAINTEXT", false);
     o.api_urls = id_map("KYTHIRA_HSM_API_URLS", get_required(env, "KYTHIRA_HSM_API_URLS"));
@@ -299,6 +305,10 @@ auto usage_text() -> std::string_view {
                                      (development only)
   KYTHIRA_HSM_UNSEAL_TIMEOUT_S       seconds partial operator shares are
                                      held before they are discarded (600)
+  KYTHIRA_HSM_SHARE_SEALER           how this node's node-unseal share is
+                                     sealed at rest: file (default)
+  KYTHIRA_HSM_SHARE_KEY_FILE         the file sealer's key, created 0600 on
+                                     first use (data dir/share.key)
   KYTHIRA_HSM_MAX_SESSIONS           open PKCS#11 sessions on this node (4096)
   KYTHIRA_HSM_PIN_COST_LOG2          scrypt cost of new PIN verifiers, 10-20 (15)
   KYTHIRA_HSM_PROPOSE_TIMEOUT_MS     one proposal or read barrier (5000)

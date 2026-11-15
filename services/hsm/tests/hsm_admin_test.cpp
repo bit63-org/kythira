@@ -277,14 +277,27 @@ BOOST_FIXTURE_TEST_CASE(seal_reaches_every_node, fixture) {
     }
     BOOST_REQUIRE(!vault.sealed());
     BOOST_REQUIRE(!peer.vault.sealed());
+    // The module's hook (session_layer::seal) runs on both paths.
+    int here = 0;
+    int there = 0;
+    api.set_seal_hook([&] {
+        ++here;
+        vault.seal();
+    });
+    peer.api.set_seal_hook([&] {
+        ++there;
+        peer.vault.seal();
+    });
     BOOST_TEST(!peer.api.maintain());
     BOOST_TEST(call("POST", "/v1/seal").status == 200U);
     BOOST_TEST(vault.sealed());
+    BOOST_TEST(here == 1);
     BOOST_TEST(store.catalog()->seal_epoch == 1U);
     // The other node seals itself on its next maintenance pass.
     BOOST_TEST(!peer.vault.sealed());
     BOOST_TEST(peer.api.maintain());
     BOOST_TEST(peer.vault.sealed());
+    BOOST_TEST(there == 1);
     // And the same shares unseal again.
     (void)call("POST", "/v1/unseal", unseal_body(shares[2]));
     BOOST_TEST(json(call("POST", "/v1/unseal", unseal_body(shares[0]))).at("sealed") == false);
@@ -334,7 +347,7 @@ BOOST_FIXTURE_TEST_CASE(rekey_keeps_tokens_and_retires_old_shares, fixture) {
 
 BOOST_FIXTURE_TEST_CASE(uncertain_commits_still_hand_out_the_shares, fixture) {
     store.fail_proposals = true;
-    const auto r = call("POST", "/v1/init", R"({"mode": "node", "k": 2, "n": 3})");
+    const auto r = call("POST", "/v1/init", R"({"mode": "operator", "k": 2, "n": 3})");
     BOOST_TEST(r.status == 503U);
     BOOST_TEST(shares_of(json(r)).size() == 3U);
     BOOST_TEST(json(r).at("error") == "unavailable");
