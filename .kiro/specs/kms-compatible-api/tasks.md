@@ -270,6 +270,12 @@ is one PR unless noted.
     errors (needs the maintainer's approval of the spend before
     recording; CI replays the fixtures)
   - _Requirements: 14.2, 14.3_
+  - Progress: the client suites are in (`services/kms/tests/clients/`,
+    run by `kms_node_cluster_test` in kms-module.yml's node job: boto3
+    over every key spec and operation family, the AWS CLI v2 through
+    files, the AWS Encryption SDK with one and two keys). Left: the
+    differential fixtures, waiting on the maintainer's approval of the
+    AWS spend.
 
 - [ ] 19. docker-chaos and plaintext scan
   - A scenario killing and partitioning KMS and HSM nodes under encrypted

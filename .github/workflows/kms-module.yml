@@ -377,6 +377,13 @@ jobs:
           cmake --build build -j"$(nproc)" --target kythira_node kythira_node_kms_test \
             kythira_node_kms_kinesis_test kms_node kms_node_cluster_test
 
+      # Task 18: boto3, the AWS Encryption SDK and the AWS CLI v2 (on the
+      # runner image) against the kms_node cluster, in kms_node_cluster_test.
+      - name: Install the AWS client suites
+        run: |
+          pip3 install --user -r services/kms/tests/clients/requirements.txt
+          aws --version
+
       - name: Run the tests
         run: >-
           ctest --test-dir build --output-on-failure --no-tests=error
