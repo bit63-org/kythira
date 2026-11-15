@@ -432,3 +432,49 @@ BOOST_AUTO_TEST_CASE(static_key_deployments_store_grants_but_do_not_evaluate_the
     // The same grant through the IAM-mode front end allows it.
     BOOST_TEST(f.call("Encrypt", encrypt_body(id), "AKIDREAD").status == 200U);
 }
+
+BOOST_AUTO_TEST_CASE(static_key_deployments_admit_a_consumers_own_root_calls) {
+    // No static key names an account's root, so without the exception a
+    // co-located DynamoDB could never open a table key on another node.
+    fixture f;
+    const auto id = f.create();
+    const auto root = [](std::string_view account) {
+        kythira::aws_auth::principal_context p;
+        p.type = kythira::aws_auth::principal_type::root;
+        p.account = std::string(account);
+        p.arn = "arn:aws:iam::" + std::string(account) + ":root";
+        p.userid = std::string(account);
+        return p;
+    };
+    // By ARN, so that another account reaches the key and is refused.
+    const auto arn = "arn:aws:kms:us-east-1:" + std::string(k_account) + ":key/" + id;
+    const auto via = [&](kms::front_end<test_authorizer>& fe,
+                         kythira::aws_auth::principal_context p, std::string service) {
+        return fixture::answer(fe.handle_service_call("Encrypt", encrypt_body(arn), std::move(p),
+                                                      std::move(service), "::1"));
+    };
+
+    kms::front_end_config off;
+    off.evaluate_grants = false;
+    kms::front_end<test_authorizer> roles_only{off, f.auth};
+    f.crypto.register_on(roles_only);
+    BOOST_TEST(via(roles_only, root(k_account), "dynamodb").type() == "AccessDeniedException");
+
+    kms::front_end_config on = off;
+    on.admit_consumer_root = true;
+    kms::front_end<test_authorizer> fe{on, f.auth};
+    f.crypto.register_on(fe);
+    const auto ok = via(fe, root(k_account), "dynamodb");
+    BOOST_TEST(ok.status == 200U, ok.type() + ": " + ok.message());
+    // Only the key's own account's root...
+    BOOST_TEST(via(fe, root(k_other), "dynamodb").type() == "AccessDeniedException");
+    // ...with no access key (a signed request always has one)...
+    auto keyed = root(k_account);
+    keyed.access_key_id = "AKIDREAD";
+    BOOST_TEST(via(fe, keyed, "dynamodb").type() == "AccessDeniedException");
+    // ...and never a user, whose static role decides.
+    auto user = root(k_account);
+    user.type = kythira::aws_auth::principal_type::user;
+    user.arn = "arn:aws:iam::" + std::string(k_account) + ":user/someone";
+    BOOST_TEST(via(fe, user, "dynamodb").type() == "AccessDeniedException");
+}

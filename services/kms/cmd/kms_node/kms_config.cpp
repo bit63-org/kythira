@@ -415,7 +415,9 @@ auto usage_text() -> std::string_view {
   KYTHIRA_KMS_AUTH                   static|iam|both (iam): iam and both need the
                                      IAM module co-located; with static the
                                      static roles decide alone, and key policies
-                                     and grants are not evaluated
+                                     and grants are not evaluated (a co-located
+                                     consumer's own calls as an account's root
+                                     are allowed on that account's keys)
   KYTHIRA_KMS_STATIC_KEYS_FILE       the static keys (access-key-id secret account
                                      name role per line), for static and both
   KYTHIRA_KMS_TRUSTED_SERVICES       user or role ARNs, comma-separated, of
