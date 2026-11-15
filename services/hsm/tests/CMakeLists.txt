@@ -76,6 +76,16 @@ target_link_libraries(hsm_host_test PRIVATE kythira_test_support)
 set_tests_properties(hsm_host_test PROPERTIES
     LABELS "integration;hsm;hsm-module" TIMEOUT 300)
 
+# Task 6d: forwarding between members over HTTPS with client certificates
+# (wire format, membership, refusals before the host is asked) and the
+# operator API.
+kythira_hsm_test(hsm_peer_test hsm_peer_test.cpp)
+set_tests_properties(hsm_peer_test PROPERTIES
+    LABELS "unit;hsm;hsm-module" TIMEOUT 120)
+kythira_hsm_test(hsm_admin_test hsm_admin_test.cpp)
+set_tests_properties(hsm_admin_test PROPERTIES
+    LABELS "unit;hsm;hsm-module" TIMEOUT 120)
+
 add_test(NAME hsm_node_self_test COMMAND hsm_node --self-test)
 set_tests_properties(hsm_node_self_test PROPERTIES
     LABELS "unit;hsm;hsm-module" TIMEOUT 60)
