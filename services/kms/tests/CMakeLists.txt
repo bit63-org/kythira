@@ -138,6 +138,13 @@ set_tests_properties(kms_rotation_test PROPERTIES LABELS "unit;kms;kms-module")
 kythira_kms_test(kms_peer_test kms_peer_test.cpp)
 set_tests_properties(kms_peer_test PROPERTIES LABELS "unit;kms;kms-module")
 
+# Task 12, Requirements 2.3 and 2.4: kms.client in process and over HTTPS
+# (signed and handed to the front end), the forwarded principal honoured
+# only from a trusted service, kms:ViaService, the service operations only.
+kythira_kms_test(kms_client_test kms_client_test.cpp)
+target_link_libraries(kms_client_test PRIVATE OpenSSL::SSL)
+set_tests_properties(kms_client_test PROPERTIES LABELS "unit;kms;kms-module")
+
 # Task 5, Requirements 4.1-4.3: every key spec's backing key on a real
 # module, SoftHSM2 standing in for an external one; registered when the
 # build finds SoftHSM2 and softhsm2-util (kms-module.yml installs them;

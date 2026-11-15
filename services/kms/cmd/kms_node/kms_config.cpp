@@ -242,6 +242,15 @@ auto from_env(const env_fn& env) -> kms_options {
     if (o.auth != kythira::aws_auth::auth_mode::iam && o.static_keys_file.empty()) {
         throw fail("KYTHIRA_KMS_AUTH=" + auth + " needs KYTHIRA_KMS_STATIC_KEYS_FILE");
     }
+    if (const auto trusted = get_opt(env, "KYTHIRA_KMS_TRUSTED_SERVICES"); !trusted.empty()) {
+        o.trusted_services = list_of(trusted);
+        for (const auto& arn : o.trusted_services) {
+            if (!arn.starts_with("arn:")) {
+                throw fail("KYTHIRA_KMS_TRUSTED_SERVICES lists '" + arn +
+                           "', which is not a user or role ARN");
+            }
+        }
+    }
     o.region = get_opt(env, "KYTHIRA_KMS_REGION", o.region);
     o.partition = get_opt(env, "KYTHIRA_KMS_PARTITION", o.partition);
 
@@ -334,6 +343,10 @@ auto usage_text() -> std::string_view {
                                      and grants are not evaluated
   KYTHIRA_KMS_STATIC_KEYS_FILE       the static keys (access-key-id secret account
                                      name role per line), for static and both
+  KYTHIRA_KMS_TRUSTED_SERVICES       user or role ARNs, comma-separated, of
+                                     consuming services on other clusters that
+                                     may forward the caller they serve (with
+                                     kms:ViaService); none by default
   KYTHIRA_KMS_REGION                 the region in key ARNs and SigV4 (us-east-1)
   KYTHIRA_KMS_PARTITION              the partition in ARNs (aws)
   KYTHIRA_KMS_PKCS11                 where backing keys live: hsm (default) for

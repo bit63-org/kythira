@@ -50,6 +50,10 @@ struct kms_options {
     std::set<std::string> peer_identities;
     std::uint64_t max_body_bytes{std::uint64_t{1} << 20U};
     std::uint64_t max_connections{256};
+    /// The principals (user or role ARNs) of consuming services on other
+    /// clusters whose requests may carry the caller they serve
+    /// (raft/kms_forwarding.hpp). Empty: none may.
+    std::set<std::string> trusted_services;
 
     // -- Who may call (Requirement 7) -------------------------------------------
     /// static: the key file's static roles alone (key policies and grants

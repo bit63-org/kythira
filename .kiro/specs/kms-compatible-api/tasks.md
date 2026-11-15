@@ -178,15 +178,16 @@ is one PR unless noted.
     proposal throws, so deletions and the orphan sweep still run.
     `kms_rotation_test`.
 
-- [ ] 12. `kms_node`, the published client and co-location
+- [x] 12. `kms_node`, the published client and co-location
   - `kms_node` (KMS, HSM, IAM replica), `KYTHIRA_KMS_*` settings, the API
     listener; `kms.client` in-process and over HTTPS with forwarded
     principals and `KYTHIRA_KMS_TRUSTED_SERVICES`; `kms` in
     `KYTHIRA_SERVICES`
-  - Done (12a): `kms_node`, the API listener with `KYTHIRA_KMS_AUTH`,
-    and forwarding to the leader over mutual TLS (`kms_peer.hpp`,
-    `kms_node_cluster_test`). Left (12b): `kms.client` and trusted
-    services
+  - 12a: `kms_node`, the API listener with `KYTHIRA_KMS_AUTH`, and
+    forwarding to the leader over mutual TLS (`kms_peer.hpp`,
+    `kms_node_cluster_test`). 12b: `kms.client` (`kms_in_process.hpp`),
+    core's `kms_https_endpoint` and `kms_forwarding.hpp`,
+    `KYTHIRA_KMS_TRUSTED_SERVICES` (`kms_client_test`)
   - _Requirements: 2.2-2.5_
 
 - [ ] 13. AWS managed and owned keys
