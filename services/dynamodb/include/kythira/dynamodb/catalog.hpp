@@ -330,6 +330,47 @@ struct contributor_insights {
         -> bool = default;
 };
 
+/// Which key encrypts a table at rest (KMS task 16).
+enum class sse_kind : std::uint8_t {
+    /// Not encrypted: no provider, `KYTHIRA_DYNAMODB_ENCRYPT_AT_REST=off`,
+    /// or a table made before encryption existed.
+    none = 0,
+    /// The owned key (AWS owned key); `SSEDescription` is absent.
+    owned = 1,
+    /// A KMS key the customer named, or the AWS managed key.
+    kms = 2,
+};
+
+/// `SSEDescription.Status`.
+enum class sse_status : std::uint8_t {
+    enabled = 0,
+    updating = 1,
+    /// The table's KMS key cannot be used (disabled, pending deletion,
+    /// unreachable): `INACCESSIBLE_ENCRYPTION_CREDENTIALS`.
+    inaccessible = 2,
+};
+
+/// The table's encryption at rest (KMS task 16, `table_keys.hpp`): its
+/// table key, wrapped, and what wrapped it.
+struct table_sse {
+    sse_kind kind = sse_kind::none;
+    /// The key that wraps the table key, as its provider names it (Kythira's
+    /// KMS and AWS KMS: the key ARN).
+    std::string key_arn;
+    /// The table key, wrapped under `key_arn`.
+    std::string wrapped;
+    /// The provider that wrapped it (`kythira`, `aws`, `local`).
+    std::string provider;
+    /// `aws:dynamodb:subscriberId` in the table key's encryption context.
+    std::string account;
+    sse_status status = sse_status::enabled;
+    /// When the table became inaccessible (ms since the epoch); 0 when it
+    /// is not.
+    std::uint64_t inaccessible_ms = 0;
+
+    friend auto operator==(const table_sse&, const table_sse&) -> bool = default;
+};
+
 /// What the catalog knows about a table. Later tasks add replicas; each
 /// new field gets a new descriptor format version.
 struct table_descriptor {
@@ -393,6 +434,8 @@ struct table_descriptor {
     /// in flight wrote under an old id and drops the old key spaces.
     std::vector<std::pair<std::uint64_t, std::uint64_t>> retired_ids;
     std::uint64_t salvage_after_ms = 0;
+    /// Encryption at rest (KMS task 16).
+    table_sse sse;
 
     /// The witness in `name`, or null.
     [[nodiscard]] auto witness_in(std::string_view name) const -> const table_witness* {
@@ -601,6 +644,12 @@ struct catalog_command {
         /// moves to `<account>/<name>` and the catalog records the account,
         /// once; on a catalog that already has one, nothing changes.
         qualify_tables = 25,
+        /// `UpdateTable` with `SSESpecification`, or the table's key found
+        /// unusable or usable again (KMS task 16): `table.sse` replaces the
+        /// stored one when the stored table has `table.table_id`. Refused
+        /// for a table that is not ACTIVE, unless the command only moves
+        /// it into or out of `inaccessible`.
+        set_sse = 26,
     };
 
     /// Which settings an `update_table` changes.
@@ -696,13 +745,20 @@ namespace catalog_detail {
 /// multi-region strongly consistent table.
 /// Commands only: 12 added `qualify_tables` (task 28); the descriptor is
 /// read as in 11.
-inline constexpr std::uint8_t k_descriptor_format_version = 11;
+/// 13 added `sse` after `salvage_after_ms`, with `set_sse` (KMS task 16),
+/// only for an encrypted table, so a node that predates encryption
+/// refuses an encrypted table's forms rather than reading it as a clear
+/// one.
+inline constexpr std::uint8_t k_descriptor_format_version = 13;
 inline constexpr std::uint8_t k_job_format_version = 1;
-inline constexpr std::uint8_t k_command_format_version = 12;
-inline constexpr std::uint8_t k_result_format_version = 11;
+inline constexpr std::uint8_t k_command_format_version = 13;
+inline constexpr std::uint8_t k_result_format_version = 13;
 
 /// The version a form carrying `d` is written as.
 [[nodiscard]] inline auto version_for(const table_descriptor& d) -> std::uint8_t {
+    if (d.sse != table_sse{}) {
+        return 13;
+    }
     if (d.strong || !d.witnesses.empty() || !d.retired_ids.empty()) {
         return 11;
     }
@@ -885,6 +941,15 @@ inline void put_descriptor_body(std::string& out, const table_descriptor& d, std
             detail::put_varint(out, to);
         }
         detail::put_varint(out, d.salvage_after_ms);
+    }
+    if (version >= 13) {
+        out.push_back(static_cast<char>(d.sse.kind));
+        detail::put_bytes(out, d.sse.key_arn);
+        detail::put_bytes(out, d.sse.wrapped);
+        detail::put_bytes(out, d.sse.provider);
+        detail::put_bytes(out, d.sse.account);
+        out.push_back(static_cast<char>(d.sse.status));
+        detail::put_varint(out, d.sse.inaccessible_ms);
     }
 }
 
@@ -1137,6 +1202,26 @@ inline void put_descriptor_body(std::string& out, const table_descriptor& d, std
         }
         d.salvage_after_ms = *after;
     }
+    if (version >= 13) {
+        const auto kind = r.byte();
+        auto key = r.bytes();
+        auto wrapped = r.bytes();
+        auto provider = r.bytes();
+        auto account = r.bytes();
+        const auto status = r.byte();
+        const auto since = r.varint();
+        if (!kind || *kind > 2 || !key || !wrapped || !provider || !account || !status ||
+            *status > 2 || !since) {
+            return std::nullopt;
+        }
+        d.sse.kind = static_cast<sse_kind>(*kind);
+        d.sse.key_arn = std::move(*key);
+        d.sse.wrapped = std::move(*wrapped);
+        d.sse.provider = std::move(*provider);
+        d.sse.account = std::move(*account);
+        d.sse.status = static_cast<sse_status>(*status);
+        d.sse.inaccessible_ms = *since;
+    }
     d.name = std::move(*name);
     d.table_id = *id;
     d.schema = std::move(*schema);
@@ -1216,6 +1301,9 @@ inline void put_descriptor_body(std::string& out, const table_descriptor& d, std
     // At least the version that brought the command's kind.
     auto version = catalog_detail::version_for(c.table);
     switch (c.op) {
+        case catalog_command::kind::set_sse:
+            version = std::max<std::uint8_t>(version, 13);
+            break;
         case catalog_command::kind::qualify_tables:
             version = std::max<std::uint8_t>(version, 12);
             break;
@@ -1285,8 +1373,9 @@ inline void put_descriptor_body(std::string& out, const table_descriptor& d, std
     // set_ttl came in version 3, the destination commands in 5,
     // restore_done in 6, the point-in-time recovery commands in 7, the
     // resource policy and Contributor Insights commands in 8,
-    // qualify_tables in 12.
-    const std::uint8_t last_op = version >= 12   ? 25
+    // qualify_tables in 12, set_sse in 13.
+    const std::uint8_t last_op = version >= 13   ? 26
+                                 : version >= 12 ? 25
                                  : version >= 11 ? 24
                                  : version >= 10 ? 17
                                  : version >= 8  ? 15
@@ -1505,6 +1594,9 @@ public:
                 break;
             case catalog_command::kind::qualify_tables:
                 qualify_tables(*c, batch);
+                break;
+            case catalog_command::kind::set_sse:
+                result = set_sse(*c, batch);
                 break;
         }
         const auto out = encode_catalog_result(result);
@@ -2310,6 +2402,32 @@ private:
         } else {
             d->pitr = continuous_backups{};
         }
+        ++d->revision;
+        store(batch, *d);
+        catalog_result r;
+        r.table = std::move(d);
+        return r;
+    }
+
+    /// `set_sse` (KMS task 16): see the command.
+    auto set_sse(const catalog_command& c, kythira::write_batch& batch) const -> catalog_result {
+        auto d = describe(c.table.name);
+        if (!d || d->table_id != c.table.table_id) {
+            return not_found(c.table.name);
+        }
+        const auto& got = c.table.sse;
+        // Only the key's health may change while the table is busy.
+        const bool health_only = d->sse.kind == got.kind && d->sse.key_arn == got.key_arn &&
+                                 d->sse.wrapped == got.wrapped && d->sse.provider == got.provider;
+        if (d->status != table_status::active && !health_only) {
+            return in_use(*d);
+        }
+        if (d->sse == got) {
+            catalog_result r;
+            r.table = std::move(d);
+            return r;
+        }
+        d->sse = got;
         ++d->revision;
         store(batch, *d);
         catalog_result r;

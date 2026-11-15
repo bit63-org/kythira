@@ -128,6 +128,7 @@
 #include <kythira/dynamodb/streams.hpp>
 #include <kythira/dynamodb/strong_tables.hpp>
 #include <kythira/dynamodb/table_api.hpp>
+#include <kythira/dynamodb/table_keys.hpp>
 #include <kythira/dynamodb/ttl.hpp>
 #include <kythira/dynamodb/txn_api.hpp>
 
@@ -304,6 +305,11 @@ struct gateway_config {
     /// clusters in-process), else one HTTP link per `replica_peers` entry.
     std::shared_ptr<peer_set> peers;
     std::vector<replication_peer_config> replica_peers;
+    /// Encryption at rest (KMS task 16): the settings as read, and the key
+    /// provider and how tables use it, which the daemon makes from them
+    /// (`table_key_providers.hpp`); none: no table is encrypted.
+    encryption_settings kms{};
+    table_key_config encryption{};
 };
 
 /// Reads one environment variable; empty optional when unset.
@@ -464,6 +470,21 @@ inline constexpr std::string_view k_gateway_env_help =
     "                                        to (system roots); AWS_ACCESS_KEY_ID,\n"
     "                                        AWS_SECRET_ACCESS_KEY, AWS_SESSION_TOKEN\n"
     "                                        sign the calls\n"
+    "  KYTHIRA_DYNAMODB_KMS                  kythira, aws, local or off: the key\n"
+    "                                        provider tables are encrypted with\n"
+    "                                        (kythira with the KMS module in the\n"
+    "                                        node, else off)\n"
+    "  KYTHIRA_DYNAMODB_KMS_PREVIOUS         the provider before, still opening\n"
+    "                                        older tables' keys\n"
+    "  KYTHIRA_DYNAMODB_ENCRYPT_AT_REST      owned or off: what a table naming no\n"
+    "                                        key gets (owned)\n"
+    "  KYTHIRA_DYNAMODB_KMS_OWNED_KEY        aws: the AWS key standing for the\n"
+    "                                        owned key\n"
+    "  KYTHIRA_DYNAMODB_KMS_REGION           the KMS's region (the gateway's)\n"
+    "  KYTHIRA_DYNAMODB_KMS_ENDPOINT         host:port of AWS KMS, or of a Kythira\n"
+    "                                        KMS on another cluster\n"
+    "  KYTHIRA_DYNAMODB_KMS_CA               PEM bundle that endpoint chains to\n"
+    "  KYTHIRA_DYNAMODB_KMS_PASSPHRASE       local: the master key's passphrase\n"
     "  KYTHIRA_DYNAMODB_BACKUP_DIR           directory backups live in (shared by\n"
     "                                        every node of a cluster)\n"
     "  KYTHIRA_DYNAMODB_BACKUP_S3_BUCKET     S3 bucket backups live in\n"
@@ -1077,6 +1098,11 @@ namespace gateway_detail {
     if (auto e = gateway_detail::strong_from_env(env, c)) {
         return *e;
     }
+    auto kms = encryption_settings_from_env(env);
+    if (auto* e = std::get_if<std::string>(&kms)) {
+        return *e;
+    }
+    c.kms = std::get<encryption_settings>(std::move(kms));
     return c;
 }
 
@@ -1133,6 +1159,7 @@ public:
                      ? nullptr
                      : std::make_unique<disk_guard>(_config.data_dir, _config.disk_floor_bytes)),
           _backend(backend),
+          _keys(_config.encryption),
           _tables(backend),
           _items(backend, _guard.get()),
           _queries(backend),
@@ -1237,6 +1264,7 @@ public:
                 _peers->add(p.region, http_replication_send(p));
             }
         }
+        _tables.set_table_keys(&_keys);
         _tables.set_peers([peers = _peers](std::string_view r) { return peers->has(r); });
         if constexpr (k_routes_strong) {
             // Multi-region strong consistency (task 27).
@@ -1264,10 +1292,12 @@ public:
             store = std::make_shared<directory_backup_store>(_config.backup_dir);
         }
         _backups.set_store(store);
+        _backups.set_table_keys(&_keys);
         _backups.on_created([this] { _backup_worker.poke(); });
         _backups.register_with(*_front);
         _backup_worker.set_store(store);
         _pitr.set_store(store);
+        _pitr.set_table_keys(&_keys);
         _pitr.on_changed([this] { _pitr_worker.poke(); });
         _pitr.register_with(*_front);
         _pitr_worker.set_store(store);
@@ -1278,6 +1308,7 @@ public:
             buckets = directory_buckets(std::filesystem::path(_config.backup_dir) / "buckets");
         }
         _jobs.set_store(store);
+        _jobs.set_table_keys(&_keys);
         _jobs.set_buckets(buckets);
         _jobs.on_started([this] { _job_worker.poke(); });
         _jobs.register_with(*_front);
@@ -1598,6 +1629,8 @@ private:
     authorizer _auth;
     std::unique_ptr<disk_guard> _guard;
     Backend& _backend;
+    /// Table keys (KMS task 16), from `gateway_config::encryption`.
+    table_keys _keys;
     table_api<Backend> _tables;
     item_api<Backend> _items;
     query_api<Backend> _queries;

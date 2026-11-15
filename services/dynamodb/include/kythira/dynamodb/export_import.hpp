@@ -843,6 +843,9 @@ public:
           _options(options) {}
 
     void set_store(std::shared_ptr<backup_store> store) { _store = std::move(store); }
+    /// The table keys a new table is encrypted with (`table_keys.hpp`);
+    /// null: none.
+    void set_table_keys(const table_keys* keys) { _keys = keys; }
     void set_buckets(bucket_resolver buckets) { _buckets = std::move(buckets); }
     /// Called when a job is started, so the worker looks at once.
     void on_started(std::function<void()> fn) { _started = std::move(fn); }
@@ -1139,6 +1142,9 @@ public:
         r.arn = r.table_arn + "/import/" + r.id;
         d->restore.source_backup_arn = r.arn;
         d->restore.source_table_arn = r.arn;
+        if (auto e = encrypt_new_table(_keys, ctx, *d, create.if_contains("SSESpecification"))) {
+            return *e;
+        }
         catalog_command c;
         c.op = catalog_command::kind::create_table;
         c.table = std::move(*d);
@@ -1341,6 +1347,7 @@ private:
     }
 
     Backend& _backend;
+    const table_keys* _keys = nullptr;
     std::shared_ptr<backup_store> _store;
     bucket_resolver _buckets;
     export_import_options _options;

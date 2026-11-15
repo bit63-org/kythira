@@ -442,6 +442,9 @@ private:
         d->restore = {};
         d->policies.clear();
         d->deletion_protection = false;
+        // Another region's table key is its own KMS's: a replica's own key
+        // comes with KMS task 17 (Requirement 12.8).
+        d->sse = {};
         catalog_command c;
         c.op = catalog_command::kind::create_table;
         c.table = std::move(*d);
