@@ -11,8 +11,8 @@
 // and says the HSM is unavailable.
 //
 // The co-located path (KYTHIRA_KMS_PKCS11=hsm) needs an initialized and
-// unsealed virtual HSM with a bound token, which the KMS's cluster test
-// covers with the daemon (task 12).
+// unsealed virtual HSM with a bound token; kms_node_cluster_test runs the
+// daemon over SoftHSM2 as the shared HSM (task 12).
 
 #define BOOST_TEST_MODULE kythira_node_kms_test
 
@@ -187,6 +187,11 @@ private:
         const auto raft = kythira::testing::free_port();
         const auto pin_file = w.dir / "pin";
         std::ofstream(pin_file) << pin << "\n";
+        // Static authentication: the node runs no IAM module. The API
+        // listener is idle here; it needs a port of its own.
+        const auto keys_file = w.dir / "keys";
+        std::ofstream(keys_file) << "AKIDNODETEST secret 111122223333 tester admin\n";
+        const auto api = kythira::testing::free_port();
         const std::vector<std::string> env{
             "KYTHIRA_SERVICES=kms",
             "KYTHIRA_NODE_ID=1",
@@ -197,7 +202,10 @@ private:
             "KYTHIRA_NODE_INSECURE_PLAINTEXT=1",
             "KYTHIRA_NODE_METRICS_BIND=127.0.0.1",
             "KYTHIRA_NODE_METRICS_PORT=" + std::to_string(metrics),
-            "KYTHIRA_KMS_API_URLS=1=http://127.0.0.1:1",
+            "KYTHIRA_KMS_API_URLS=1=http://127.0.0.1:" + std::to_string(api),
+            "KYTHIRA_KMS_API_LISTEN=127.0.0.1:" + std::to_string(api),
+            "KYTHIRA_KMS_AUTH=static",
+            "KYTHIRA_KMS_STATIC_KEYS_FILE=" + keys_file.string(),
             std::string("KYTHIRA_KMS_PKCS11=") + KYTHIRA_SOFTHSM2_LIBRARY,
             "KYTHIRA_KMS_PIN_FILE=" + pin_file.string(),
             "KYTHIRA_KMS_JOB_INTERVAL_MS=200",

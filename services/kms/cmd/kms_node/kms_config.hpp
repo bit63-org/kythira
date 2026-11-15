@@ -2,13 +2,15 @@
 // SPDX-License-Identifier: Apache-2.0
 #pragma once
 
-// The KMS module's configuration (.kiro/specs/kms-compatible-api/ task 5),
-// read from the environment: KYTHIRA_KMS_* for the module, the node's data
-// directory in kythira_node (composite_env), and the Raft tuning names
-// module_tuning() maps. usage_text() documents every variable.
+// The KMS module's configuration (.kiro/specs/kms-compatible-api/ tasks 5
+// and 12), read from the environment: KYTHIRA_KMS_* for the module, the
+// node-wide KYTHIRA_NODE_* settings where the module's are unset
+// (composite_env), and the Raft tuning names module_tuning() maps.
+// usage_text() documents every variable.
 
 #include <raft/console_logger.hpp>
 #include <raft/host_node_id.hpp>
+#include <raft/static_or_iam_authorizer.hpp>
 
 #include <chrono>
 #include <cstdint>
@@ -16,6 +18,7 @@
 #include <functional>
 #include <map>
 #include <optional>
+#include <set>
 #include <string>
 #include <string_view>
 
@@ -28,9 +31,34 @@ struct kms_options {
     kythira::host_node_id node_id{kythira::host_node_id_from_number(1)};
 
     /// Every member's KMS API URL, this node included: the catalog's
-    /// voters, and (task 6) where a follower forwards.
+    /// voters, and where a follower forwards.
     std::map<kythira::host_node_id, std::string> api_urls;
     std::filesystem::path data_dir;
+
+    // -- The API listener (Requirement 2.5) -------------------------------------
+    std::string api_bind{"0.0.0.0"};
+    std::uint16_t api_port{8443};
+    std::string tls_cert;
+    std::string tls_key;
+    /// The CA the members' certificates chain to: the listener asks for
+    /// (never requires) a client certificate, and forwarding presents one.
+    std::string client_ca;
+    /// Plaintext listener and forwarding (tests only).
+    bool insecure_plaintext{false};
+    /// The members' certificate identities (URI or DNS SANs): who may
+    /// forward a proposal.
+    std::set<std::string> peer_identities;
+    std::uint64_t max_body_bytes{std::uint64_t{1} << 20U};
+    std::uint64_t max_connections{256};
+
+    // -- Who may call (Requirement 7) -------------------------------------------
+    /// static: the key file's static roles alone (key policies and grants
+    /// are not evaluated); iam: the co-located IAM module; both: a key in
+    /// the file is static, any other IAM's.
+    kythira::aws_auth::auth_mode auth{kythira::aws_auth::auth_mode::iam};
+    std::filesystem::path static_keys_file;
+    std::string region{"us-east-1"};
+    std::string partition{"aws"};
 
     // -- The backing store (Requirement 4) -------------------------------------
     /// "hsm" for the co-located virtual HSM, else the path of a PKCS#11
@@ -64,8 +92,10 @@ struct kms_options {
 /// Reads one variable; nothing when unset.
 using env_fn = std::function<std::optional<std::string>(std::string_view)>;
 
-/// `env` for the module in kythira_node: the data directory is always the
-/// node's kms/.
+/// `env` for the module in kythira_node: every variable from `env`, with
+/// the TLS files and the plaintext switch filled in from the node's
+/// KYTHIRA_NODE_TLS_* and KYTHIRA_NODE_INSECURE_PLAINTEXT when unset. The
+/// data directory is always the node's kms/.
 [[nodiscard]] auto composite_env(env_fn env) -> env_fn;
 
 /// The options from `env`. Throws std::invalid_argument naming the
