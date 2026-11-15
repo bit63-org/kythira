@@ -69,6 +69,12 @@ struct scoped_s3_client {
                                   std::string_view bytes) const -> kythira::put_result {
         return client.put_object(bucket, key, bytes);
     }
+    [[nodiscard]] auto put_object_sse_kms(const std::string& bucket, const std::string& key,
+                                          std::string_view bytes,
+                                          const std::string& kms_key_id) const
+        -> kythira::put_result {
+        return client.put_object_sse_kms(bucket, key, bytes, kms_key_id);
+    }
     [[nodiscard]] auto get_object(const std::string& bucket, const std::string& key) const
         -> std::optional<kythira::get_result> {
         return client.get_object(bucket, key);

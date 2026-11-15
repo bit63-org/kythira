@@ -253,6 +253,12 @@ is one PR unless noted.
     `KMSMasterKeyId` per replica in `ReplicaUpdates`
   - Remove the matching lines from `services/dynamodb/doc/unsupported.md`
   - _Requirements: 12.3, 12.8, 12.9_
+  - Progress: change log records, backups and PITR archives of an
+    encrypted table are sealed under keys derived from its table key
+    (`archive_key`, `item_sealing.hpp`); exports and imports take
+    `S3SseKmsKeyId` (`bucket_sse.hpp`: S3 encrypts natively through
+    `backup_store::put_sse_kms`, Kythira stores get each object sealed
+    under a data key bound to its ARN). Left: replica keys.
 
 - [ ] 18. Client suites and differential fixtures
   - AWS CLI v2, boto3 and AWS Encryption SDK suites in CI against

@@ -21,7 +21,10 @@
 #include "dynamodb_test_fixture.hpp"
 
 #include <kythira/dynamodb/backup.hpp>
+#include <kythira/dynamodb/bucket_sse.hpp>
 #include <kythira/dynamodb/catalog.hpp>
+#include <kythira/dynamodb/export_formats.hpp>
+#include <kythira/dynamodb/export_import.hpp>
 #include <kythira/dynamodb/pitr.hpp>
 #include <kythira/dynamodb/item_sealing.hpp>
 #include <kythira/dynamodb/table_key_providers.hpp>
@@ -73,6 +76,7 @@ struct fake_kms {
             {"alias/aws/dynamodb", "managed"},
             {"alias/mine", "mine"},
             {"alias/other", "other"},
+            {"alias/aws/s3", "s3"},
         };
         if (const auto it = names.find(key); it != names.end()) {
             return std::string(k_arn_prefix) + it->second;
@@ -836,6 +840,182 @@ BOOST_AUTO_TEST_CASE(point_in_time_archives_of_an_encrypted_table_are_sealed) {
         BOOST_REQUIRE_MESSAGE(r.status == 200U, r.type() + ": " + r.message());
         BOOST_TEST(r.body.at("Item").at("secret").at("S").as_string() == v);
     }
+}
+
+namespace {
+
+/// A store with server-side encryption of its own, as an AWS S3 bucket.
+class native_sse_store final : public ddb::backup_store {
+public:
+    void put(const std::string& key, std::string_view bytes) override {
+        objects[key] = std::string(bytes);
+    }
+    [[nodiscard]] auto get(const std::string& key) -> std::optional<std::string> override {
+        const auto it = objects.find(key);
+        return it == objects.end() ? std::nullopt : std::optional<std::string>(it->second);
+    }
+    void remove(const std::string& key) override { objects.erase(key); }
+    [[nodiscard]] auto list(const std::string& /*prefix*/) -> std::vector<std::string> override {
+        return {};
+    }
+    [[nodiscard]] auto put_sse_kms(const std::string& key, std::string_view bytes,
+                                   const std::string& kms_key_id) -> bool override {
+        objects[key] = std::string(bytes);
+        kms_keys[key] = kms_key_id;
+        return true;
+    }
+
+    std::map<std::string, std::string> objects;
+    std::map<std::string, std::string> kms_keys;
+};
+
+}  // namespace
+
+BOOST_AUTO_TEST_CASE(a_bucket_under_a_kms_key_seals_objects_bound_to_their_names) {
+    keyed_fixture f;
+    auto inner = std::make_shared<ddb::memory_backup_store>();
+    const auto keys = ddb::object_keys_of(f.keys, std::string(k_account), "aws");
+    ddb::kms_sealed_bucket sealed(inner, "exp", "alias/mine", keys);
+    sealed.put("a/1", "hunter2");
+    const auto stored = inner->get("a/1");
+    BOOST_REQUIRE(stored.has_value());
+    BOOST_TEST(ddb::is_sse_sealed(*stored));
+    BOOST_TEST(stored->find("hunter2") == std::string::npos);
+    {
+        const std::scoped_lock lock(f.kms->mu);
+        const auto& last = f.kms->calls.back();
+        BOOST_TEST(last.op == "GenerateDataKey");
+        BOOST_TEST(last.key == "alias/mine");
+        BOOST_TEST(last.context.at("aws:s3:arn") == "arn:aws:s3:::exp/a/1");
+        BOOST_TEST(last.principal == "arn:aws:iam::111122223333:root");
+    }
+
+    // A reader with no key of its own opens it; clear objects pass through.
+    ddb::kms_sealed_bucket reader(inner, "exp", "", keys);
+    BOOST_TEST(reader.get("a/1").value_or("") == "hunter2");
+    inner->put("a/2", "plain");
+    BOOST_TEST(reader.get("a/2").value_or("") == "plain");
+
+    // Moved to another name or bucket, or tampered with, it does not open.
+    inner->put("a/3", *stored);
+    BOOST_CHECK_THROW((void)reader.get("a/3"), ddb::bucket_sse_error);
+    ddb::kms_sealed_bucket other_bucket(inner, "elsewhere", "", keys);
+    BOOST_CHECK_THROW((void)other_bucket.get("a/1"), ddb::bucket_sse_error);
+    auto bent = *stored;
+    bent.back() = static_cast<char>(bent.back() ^ 1);
+    inner->put("a/1", bent);
+    BOOST_CHECK_THROW((void)reader.get("a/1"), ddb::bucket_sse_error);
+    inner->put("a/4", std::string(ddb::k_sse_magic) + "x");
+    BOOST_CHECK_THROW((void)reader.get("a/4"), ddb::bucket_sse_error);
+
+    // A key the provider does not have, a disabled key, and no provider.
+    ddb::kms_sealed_bucket unknown(inner, "exp", "alias/none", keys);
+    BOOST_CHECK_THROW(unknown.put("b", "x"), ddb::bucket_sse_error);
+    BOOST_CHECK_THROW(ddb::kms_sealed_bucket(inner, "exp", "alias/mine", {}).put("b", "x"),
+                      ddb::bucket_sse_error);
+    sealed.put("c", "later");
+    f.kms->disabled.insert(std::string(k_arn_prefix) + "mine");
+    BOOST_CHECK_THROW((void)reader.get("c"), ddb::bucket_sse_error);
+    BOOST_TEST(!inner->get("b").has_value());
+
+    // A store that encrypts itself is asked to, and nothing is sealed.
+    auto native = std::make_shared<native_sse_store>();
+    ddb::kms_sealed_bucket on_s3(native, "exp", "alias/other", {});
+    on_s3.put("n", "clear");
+    BOOST_TEST(native->objects.at("n") == "clear");
+    BOOST_TEST(native->kms_keys.at("n") == "alias/other");
+}
+
+BOOST_AUTO_TEST_CASE(an_export_under_a_kms_key_is_sealed_and_imports_back) {
+    keyed_fixture f;
+    f.without_throttling();
+    auto store = std::make_shared<ddb::memory_backup_store>();
+    ddb::memory_buckets buckets;
+    ddb::pitr_api<ddb::local_backend<>> pitr{f.backend, store};
+    pitr.register_with(*f.fe);
+    const auto resolver = buckets.resolver();
+    ddb::export_import_api<ddb::local_backend<>> jobs{f.backend, store, resolver};
+    ddb::export_import_worker<ddb::local_backend<>> worker{f.backend, store, resolver};
+    jobs.set_table_keys(&f.keys);
+    jobs.register_with(*f.fe);
+    jobs.on_started([&] { worker.poke(); });
+    worker.set_object_keys([&](const std::string& account, const std::string& partition) {
+        return ddb::object_keys_of(f.keys, account, partition);
+    });
+
+    auto ring = std::make_shared<ddb::table_key_ring>();
+    f.backend.set_sealer(ddb::item_sealer(ring));
+    ddb::table_key_refresher<ddb::local_backend<>> refresher(f.backend, f.keys, ring);
+    BOOST_REQUIRE(f.call("CreateTable", create_body("src")).status == 200U);
+    BOOST_TEST(refresher.pass(true, 1) == 1U);
+    (void)f.ok("UpdateContinuousBackups",
+               R"({"TableName":"src","PointInTimeRecoverySpecification":)"
+               R"({"PointInTimeRecoveryEnabled":true}})");
+    (void)f.ok("PutItem", R"({"TableName":"src","Item":{"pk":{"S":"a"},)"
+                          R"("secret":{"S":"hunter2"}}})");
+    const std::string table_arn =
+        "arn:aws:dynamodb:us-east-1:" + std::string(k_account) + ":table/src";
+    const auto run_export = [&](const std::string& sse) {
+        const auto started = f.ok(
+            "ExportTableToPointInTime",
+            R"({"TableArn":")" + table_arn + R"(","S3Bucket":"exp",)" + sse + R"("S3Prefix":"p"})");
+        (void)worker.pass();
+        return f
+            .ok("DescribeExport",
+                R"({"ExportArn":")" +
+                    std::string(started.at("ExportDescription").at("ExportArn").as_string()) +
+                    R"("})")
+            .at("ExportDescription")
+            .as_object();
+    };
+
+    // The default key is the account's aws/s3, and every object is sealed.
+    auto d = run_export(R"("S3SseAlgorithm":"KMS",)");
+    BOOST_REQUIRE_MESSAGE(d.at("ExportStatus").as_string() == "COMPLETED",
+                          boost::json::serialize(d));
+    std::string data_prefix;
+    std::size_t objects = 0;
+    for (const auto& key : buckets.store("exp")->list("p/")) {
+        const auto body = buckets.store("exp")->get(key);
+        BOOST_REQUIRE(body.has_value());
+        BOOST_TEST(ddb::is_sse_sealed(*body), key);
+        BOOST_TEST(body->find("hunter2") == std::string::npos);
+        if (key.find("/data/") != std::string::npos) {
+            data_prefix = key.substr(0, key.rfind('/') + 1);
+        }
+        ++objects;
+    }
+    BOOST_TEST(objects >= 4U);
+    BOOST_REQUIRE(!data_prefix.empty());
+    {
+        const std::scoped_lock lock(f.kms->mu);
+        BOOST_TEST(std::any_of(f.kms->calls.begin(), f.kms->calls.end(),
+                               [](const fake_kms::seen& s) { return s.key == "alias/aws/s3"; }));
+    }
+
+    // An import from the bucket opens what the export sealed.
+    const auto* const compression = ddb::export_formats::has_gzip() ? "GZIP" : "NONE";
+    auto r =
+        f.call("ImportTable",
+               R"({"S3BucketSource":{"S3Bucket":"exp","S3KeyPrefix":")" + data_prefix +
+                   R"("},"InputFormat":"DYNAMODB_JSON","InputCompressionType":")" + compression +
+                   R"(","TableCreationParameters":{"TableName":"dst",)"
+                   R"("AttributeDefinitions":[{"AttributeName":"pk",)"
+                   R"("AttributeType":"S"}],"KeySchema":[{"AttributeName":)"
+                   R"("pk","KeyType":"HASH"}],"BillingMode":"PAY_PER_REQUEST"}})");
+    BOOST_REQUIRE_MESSAGE(r.status == 200U, r.type() + ": " + r.message());
+    BOOST_TEST(refresher.pass(true, 2) == 1U);
+    (void)worker.pass();
+    r = f.call("GetItem", R"({"TableName":"dst","Key":{"pk":{"S":"a"}}})");
+    BOOST_REQUIRE_MESSAGE(r.status == 200U, r.type() + ": " + r.message());
+    BOOST_TEST(r.body.at("Item").at("secret").at("S").as_string() == "hunter2");
+
+    // A key the provider refuses fails the export, saying why.
+    d = run_export(R"("S3SseAlgorithm":"KMS","S3SseKmsKeyId":"alias/none",)");
+    BOOST_TEST(d.at("ExportStatus").as_string() == "FAILED");
+    BOOST_TEST(d.at("FailureCode").as_string() == "KMSAccessDenied");
+    BOOST_TEST(std::string(d.at("FailureMessage").as_string()).find("alias/none") !=
+               std::string::npos);
 }
 
 BOOST_AUTO_TEST_CASE(the_settings_are_checked) {

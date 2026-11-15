@@ -112,6 +112,13 @@ public:
     virtual void remove(const std::string& key) = 0;
     /// Every key starting with `prefix`, in any order.
     [[nodiscard]] virtual auto list(const std::string& prefix) -> std::vector<std::string> = 0;
+    /// Puts `bytes` with the store's own server-side encryption under the
+    /// KMS key `kms_key_id` (`S3SseKmsKeyId`, `bucket_sse.hpp`). False, and
+    /// nothing put, when the store has none: the caller seals it itself.
+    [[nodiscard]] virtual auto put_sse_kms(const std::string& /*key*/, std::string_view /*bytes*/,
+                                           const std::string& /*kms_key_id*/) -> bool {
+        return false;
+    }
 };
 
 /// Backups in memory: a single node on the memory engine, whose items do not
@@ -233,6 +240,17 @@ public:
         return std::move(got->body);
     }
     void remove(const std::string& key) override { _store->delete_object(_bucket, _prefix + key); }
+    [[nodiscard]] auto put_sse_kms(const std::string& key, std::string_view bytes,
+                                   const std::string& kms_key_id) -> bool override {
+        if constexpr (requires(const Store& s) {
+                          s.put_object_sse_kms(_bucket, key, bytes, kms_key_id);
+                      }) {
+            (void)_store->put_object_sse_kms(_bucket, _prefix + key, bytes, kms_key_id);
+            return true;
+        } else {
+            return false;
+        }
+    }
     [[nodiscard]] auto list(const std::string& prefix) -> std::vector<std::string> override {
         auto keys = _store->list_keys(_bucket, _prefix + prefix);
         for (auto& k : keys) {
