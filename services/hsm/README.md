@@ -20,13 +20,15 @@ tests it; `configs/ci_no_hsm_defconfig` is the module-off configuration
 |---|---|---|
 | `third_party/pkcs11/` | the OASIS PKCS#11 v3.0 headers, unchanged, with their licence and checksums (`third_party/pkcs11/README.md`) | 1 |
 | `include/kythira/hsm/pkcs11.hpp` | the only way Kythira code includes PKCS#11: the five platform macros, then `pkcs11.h` | 1 |
+| `include/kythira/hsm/shamir.hpp` | Shamir sharing over GF(2^8) (constant-time arithmetic, AES polynomial), the share format (version, `k`, `n`, index, check value, checksum) and its `khs1-` text form | 2 |
+| `include/kythira/hsm/secret_bytes.hpp` | a move-only byte buffer wiped with `OPENSSL_cleanse`, and `constant_time_equal` | 2 |
 | `cmd/hsm_node/` | the daemon; a placeholder (`--help`, `--self-test`) until task 11 | 1 |
-| `tests/` | `hsm_pkcs11_headers_test` (the vendored headers' version, ABI types and 3.0 function table) and `hsm_node_self_test` | 1 |
+| `tests/` | `hsm_pkcs11_headers_test` (the vendored headers' version, ABI types and 3.0 function table) and `hsm_node_self_test`; `hsm_shamir_test` (split and combine properties, encoding and every refusal) | 1, 2 |
 | `pkcs11/` | `libkythira_pkcs11.so`, the PKCS#11 client library, as its own target (`pkcs11/README.md`) | 10 |
 
-The Shamir sharing, secure memory, mechanisms, the catalog and token state
+Secure memory, mechanisms, the catalog and token state
 machines, the service module, unseal, the wire protocol, the client library,
-consumers and audit follow in tasks 2 to 15 (`.kiro/specs/virtual-hsm/tasks.md`).
+consumers and audit follow in tasks 3 to 15 (`.kiro/specs/virtual-hsm/tasks.md`).
 
 ## Core targets and variables used
 

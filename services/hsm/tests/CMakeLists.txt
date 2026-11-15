@@ -27,6 +27,12 @@ kythira_hsm_test(hsm_pkcs11_headers_test hsm_pkcs11_headers_test.cpp)
 set_tests_properties(hsm_pkcs11_headers_test PROPERTIES
     LABELS "unit;hsm;hsm-module" TIMEOUT 60)
 
+# Task 2, Requirements 4.1-4.2 and 13.1: GF(2^8) Shamir splitting of the master key, the
+# share encoding (version, checksum, check value) and every refusal path.
+kythira_hsm_test(hsm_shamir_test hsm_shamir_test.cpp)
+set_tests_properties(hsm_shamir_test PROPERTIES
+    LABELS "unit;hsm;hsm-module" TIMEOUT 60)
+
 # Task 1: hsm_node links and runs.
 add_test(NAME hsm_node_self_test COMMAND hsm_node --self-test)
 set_tests_properties(hsm_node_self_test PROPERTIES
