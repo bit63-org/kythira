@@ -19,6 +19,9 @@
 //   data  ns "k" be64(token)             token entry
 //   data  ns "b" identity 0x00 be64(t)   binding (identity may open t)
 //   data  ns "r" be64(t) identity        the same binding, by token
+//   data  ns "x" be64(t)                 token t was deleted (ids are
+//                                        never reused: its group id is
+//                                        tombstoned on every member)
 //   meta  ns                             applied index
 //
 // Replies are a CK_RV (u32); CKR_FUNCTION_REJECTED is a conflict (already
@@ -297,6 +300,21 @@ public:
         return this->get(binding_key(identity, token_id)).has_value();
     }
 
+    /// Whether token `token_id` existed and was deleted.
+    [[nodiscard]] auto deleted(std::uint64_t token_id) const -> bool {
+        return this->get("x" + be64_key(token_id)).has_value();
+    }
+
+    /// Every deleted token's id, in order, so each member destroys its group.
+    [[nodiscard]] auto deleted_tokens() const -> std::vector<std::uint64_t> {
+        std::vector<std::uint64_t> out;
+        this->scan_prefix("x", [&](std::string_view k, std::string_view) {
+            out.push_back(from_be64_key(k.substr(1)));
+            return true;
+        });
+        return out;
+    }
+
 private:
     [[nodiscard]] static auto binding_key(std::string_view identity, std::uint64_t token_id)
         -> std::string {
@@ -338,7 +356,8 @@ private:
         if (!c) {
             return CKR_CRYPTOKI_NOT_INITIALIZED;
         }
-        if (t.token_id == 0 || t.generation != c->generation || token(t.token_id)) {
+        if (t.token_id == 0 || t.generation != c->generation || token(t.token_id) ||
+            deleted(t.token_id)) {
             return CKR_FUNCTION_REJECTED;
         }
         put(batch, "k" + be64_key(t.token_id), t.encode());
@@ -351,6 +370,7 @@ private:
             return CKR_TOKEN_NOT_PRESENT;
         }
         batch.erase(kythira::column_family::data, this->key("k" + be64_key(id)));
+        put(batch, "x" + be64_key(id), std::string());
         const std::string prefix = "r" + be64_key(id);
         this->scan_prefix(prefix, [&](std::string_view k, std::string_view) {
             const std::string identity(k.substr(prefix.size()));

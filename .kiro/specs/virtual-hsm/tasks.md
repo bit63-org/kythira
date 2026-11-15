@@ -152,9 +152,29 @@ task is one PR unless noted.
       needs `CKA_WRAP` on the wrapping key and `CKA_EXTRACTABLE` on the
       target, and private keys wrap as PKCS#8. `CKM_HKDF_DATA` gives a
       data object, every other derivation a secret key.
-  - [ ] 6c. `hsm_module`, the group state machine and host on the
-    node's multi-raft host, the admin API, and forwarding proposals and
-    read-index rounds from a follower to the group's leader
+  - [x] 6c. The group state machine and host on the node's multi-raft
+    host, with proposals and read-index rounds forwarded from a follower
+    to the group's leader
+    - Done: `hsm_group_state_machine` opens the catalog on `c/` and
+      token `t` on `t/<t>/` (decimal, so the namespaces are prefix-free)
+      and vetoes every split. `hsm_host` implements `hsm_store`: the
+      catalog is local group 0 and token `t` local group `t`, offset by
+      the module's group base, and every member votes in every group.
+      Members create a token's group once their catalog replica names
+      it and destroy it once the catalog records the delete; the catalog
+      now keeps a tombstone per deleted token and refuses to reuse its
+      id, since multi_raft tombstones the group id. A member that does
+      not lead a group forwards proposals and read-index rounds through
+      a `forwarder` the module supplies; the leader answers its applied
+      index and the member waits until it has applied as far, so a
+      write through a follower is visible there when the call returns.
+      A `not_leader` answer is retried (nothing was submitted); any
+      other failure answers `CKR_DEVICE_ERROR`, since the entry may
+      have committed. `C_Login` and `C_OpenSession` on a token this
+      replica has not seen initialized now pass a read barrier first.
+  - [ ] 6d. `hsm_module`: the forwarder over the node's peers, the admin
+    API (init, unseal, seal, status, tokens), and the `kythira_node`
+    registrar
 
 - [ ] 7. Operator unseal, init, seal and rekey
   - `hsm_ctl init|unseal|seal|rekey|status`; partial shares in memory with

@@ -4,6 +4,6 @@
 # Core *_impl.hpp headers the HSM module may include, one per line, with the
 # reason (services/README.md, "Boundary rules"). Only the composition root
 # (cmd/hsm_node) and tests that stand up an in-process cluster may be listed.
-# None yet: the module has no Raft group until task 5.
 #
 # file                                         allowed core *_impl.hpp       why
+tests/hsm_host_test.cpp                        multi_raft_impl.hpp           stands up in-process hosts
