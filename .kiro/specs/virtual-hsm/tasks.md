@@ -262,12 +262,32 @@ task is one PR unless noted.
       README states what node mode trades (requirement 4.8). Checked by
       hand on three nodes: init in node mode unseals all three, and a
       member restarted with another down unseals from the third.
-  - [ ] 8b. TPM 2.0 (`tpm2-tss`) and cloud KMS (AWS KMS, Azure Key Vault,
+  - [x] 8b. TPM 2.0 (`tpm2-tss`) and cloud KMS (AWS KMS, Azure Key Vault,
     GCP KMS through the existing cloud clients) share sealers behind
     `share_sealer`, chosen with `KYTHIRA_HSM_SHARE_SEALER`. Scheduled
     after the KMS-compatible API (`.kiro/specs/kms-compatible-api/`)
     makes `kms_key_provider` a shared library, so the cloud sealers
     reuse it rather than growing their own clients.
+    - Done as one `kms_share_sealer` (`share_sealers.hpp`) over any
+      `kms_provider::key_provider`: envelope encryption, the data key
+      wrapped bound to the share's check value, the resolved key id
+      stored. Sealers `aws-kms` and `pkcs11` use core's existing
+      providers. Azure Key Vault and GCP Cloud KMS had no provider:
+      `raft/kms_key_provider_azure.hpp` and `_gcp.hpp` are new core
+      providers on `peer_client` (REST, OAuth tokens from the usual
+      environment, cached), so Kinesis and DynamoDB can take them too.
+      The GCP SDK client is a build option and Azure has none in the
+      tree, so "the existing cloud clients" became the existing
+      transport. `tpm2` is `tpm2_key_provider.hpp` (ESAPI; owner storage
+      key or a persistent one; salted sessions; optional PCR policy,
+      refusing an unallocated bank), built where CMake finds tpm2-tss.
+    - A sealer that refuses a delivered share answers 503, so init and
+      rekey commit nothing; one that cannot open reads as absent and the
+      member collects from its peers.
+    - `hsm_share_sealers_test`, `hsm_cloud_kms_providers_test` (fake
+      clouds) and `hsm_tpm2_sealer_test` (swtpm; hsm-module.yml and the
+      rocksdb clang-tidy variant install tpm2-tss and swtpm). Not run
+      against real AWS, Azure or GCP keys.
 
 - [x] 9. Wire protocol and remote access
   - Framed protocol (the module's codec; design "Wire protocol" says why

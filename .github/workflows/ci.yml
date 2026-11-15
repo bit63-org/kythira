@@ -2448,7 +2448,8 @@ jobs:
             vcpkg_cc: clang-18
             vcpkg_cxx: clang++-18
             vcpkg_ldflags: -Wl,--push-state,--no-as-needed -latomic -Wl,--pop-state
-            apt: softhsm2
+            # tpm2-tss and swtpm: the HSM's TPM 2.0 sealer test.
+            apt: softhsm2 libtss2-dev swtpm swtpm-tools
             cmake_extra: ''
           - variant: no-cloud
             defconfig: configs/no_cloud_defconfig
