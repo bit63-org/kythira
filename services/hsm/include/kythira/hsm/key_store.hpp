@@ -138,13 +138,20 @@ inline void apply_public_defaults(attribute_map& key) {
 
 }  // namespace detail
 
-/// C_GenerateKey on the leader: the key, sealed, as a create_objects entry.
-/// `tmpl` must carry CKA_VALUE_LEN for AES and generic secrets.
-[[nodiscard]] inline auto prepare_generate_key(std::span<const std::uint8_t> tk,
-                                               std::uint64_t token_id, std::uint64_t handle,
-                                               const CK_MECHANISM& mechanism,
-                                               const attribute_map& tmpl)
-    -> ck_result<std::vector<std::byte>> {
+/// A new object before it is stored: its record (attributes final, `sealed`
+/// still empty) and its material in the secure arena. Token objects are
+/// sealed from this (prepare_generate_key); session objects keep the
+/// material as it is (session_layer.hpp).
+struct built_object {
+    object_record record;
+    secret_bytes material;
+};
+
+/// C_GenerateKey's object: the key and its attributes. CKA_TOKEN keeps the
+/// caller's value (PKCS#11 default false). `tmpl` must carry
+/// CKA_VALUE_LEN for AES and generic secrets.
+[[nodiscard]] inline auto build_secret_key(std::uint64_t handle, const CK_MECHANISM& mechanism,
+                                           const attribute_map& tmpl) -> ck_result<built_object> {
     const auto key_type = detail::secret_key_type_for(mechanism.mechanism);
     if (!key_type) {
         return unexpected(CKR_MECHANISM_INVALID);
@@ -159,34 +166,49 @@ inline void apply_public_defaults(attribute_map& key) {
     if (!*len) {
         return unexpected(CKR_TEMPLATE_INCOMPLETE);
     }
+    auto token = tmpl.get_bool(CKA_TOKEN, false);
+    if (!token) {
+        return unexpected(token.error());
+    }
     auto value = generate_secret_key(mechanism, **len);
     if (!value) {
         return unexpected(value.error());
     }
-    object_record o;
-    o.handle = handle;
-    o.attributes = tmpl;
-    o.attributes.set_ulong(CKA_CLASS, CKO_SECRET_KEY);
-    o.attributes.set_ulong(CKA_KEY_TYPE, *key_type);
-    o.attributes.set_ulong(CKA_KEY_GEN_MECHANISM, mechanism.mechanism);
-    o.attributes.set_bool(CKA_TOKEN, true);
-    apply_key_defaults(o.attributes);
-    set_origin_flags(o.attributes, key_origin::generated);
-    o.sealed = seal(tk, object_ad(token_id, handle, o.attributes), value->view());
-    return make_create_objects_command({o});
+    built_object out;
+    out.record.handle = handle;
+    out.record.attributes = tmpl;
+    out.record.attributes.set_ulong(CKA_CLASS, CKO_SECRET_KEY);
+    out.record.attributes.set_ulong(CKA_KEY_TYPE, *key_type);
+    out.record.attributes.set_ulong(CKA_KEY_GEN_MECHANISM, mechanism.mechanism);
+    out.record.attributes.set_bool(CKA_TOKEN, *token);
+    apply_key_defaults(out.record.attributes);
+    set_origin_flags(out.record.attributes, key_origin::generated);
+    out.material = std::move(*value);
+    return out;
 }
 
-/// C_GenerateKeyPair on the leader: both objects in one create_objects
-/// entry. The public template supplies CKA_MODULUS_BITS and
-/// CKA_PUBLIC_EXPONENT (RSA) or CKA_EC_PARAMS (EC, Ed25519).
-[[nodiscard]] inline auto prepare_generate_key_pair(
-    std::span<const std::uint8_t> tk, std::uint64_t token_id, std::uint64_t public_handle,
-    std::uint64_t private_handle, const CK_MECHANISM& mechanism, const attribute_map& public_tmpl,
-    const attribute_map& private_tmpl) -> ck_result<std::vector<std::byte>> {
+/// C_GenerateKeyPair's two objects. The public template supplies
+/// CKA_MODULUS_BITS and CKA_PUBLIC_EXPONENT (RSA) or CKA_EC_PARAMS (EC,
+/// Ed25519). The public key has no secret material.
+struct built_pair {
+    object_record public_key;
+    built_object private_key;
+};
+
+[[nodiscard]] inline auto build_key_pair(std::uint64_t public_handle, std::uint64_t private_handle,
+                                         const CK_MECHANISM& mechanism,
+                                         const attribute_map& public_tmpl,
+                                         const attribute_map& private_tmpl)
+    -> ck_result<built_pair> {
     for (const auto* t : {&public_tmpl, &private_tmpl}) {
         if (auto r = check_caller_settable(*t); !r) {
             return unexpected(r.error());
         }
+    }
+    auto pub_token = public_tmpl.get_bool(CKA_TOKEN, false);
+    auto priv_token = private_tmpl.get_bool(CKA_TOKEN, false);
+    if (!pub_token || !priv_token) {
+        return unexpected(!pub_token ? pub_token.error() : priv_token.error());
     }
     key_pair_request req;
     auto bits = public_tmpl.get_ulong(CKA_MODULUS_BITS);
@@ -205,19 +227,20 @@ inline void apply_public_defaults(attribute_map& key) {
         return unexpected(pair.error());
     }
 
-    object_record pub;
+    built_pair out;
+    auto& pub = out.public_key;
     pub.handle = public_handle;
     pub.attributes = public_tmpl;
     pub.attributes.merge(pair->public_attributes);
     pub.attributes.set_ulong(CKA_CLASS, CKO_PUBLIC_KEY);
     pub.attributes.set_ulong(CKA_KEY_TYPE, pair->key_type);
     pub.attributes.set_ulong(CKA_KEY_GEN_MECHANISM, mechanism.mechanism);
-    pub.attributes.set_bool(CKA_TOKEN, true);
+    pub.attributes.set_bool(CKA_TOKEN, *pub_token);
     pub.attributes.set_bool(CKA_LOCAL, true);
     detail::apply_public_defaults(pub.attributes);
     pub.public_der = pair->public_spki;
 
-    object_record priv;
+    auto& priv = out.private_key.record;
     priv.handle = private_handle;
     priv.attributes = private_tmpl;
     // The private object shows the public parameters too (not the point).
@@ -229,13 +252,54 @@ inline void apply_public_defaults(attribute_map& key) {
     priv.attributes.set_ulong(CKA_CLASS, CKO_PRIVATE_KEY);
     priv.attributes.set_ulong(CKA_KEY_TYPE, pair->key_type);
     priv.attributes.set_ulong(CKA_KEY_GEN_MECHANISM, mechanism.mechanism);
-    priv.attributes.set_bool(CKA_TOKEN, true);
+    priv.attributes.set_bool(CKA_TOKEN, *priv_token);
     apply_key_defaults(priv.attributes);
     set_origin_flags(priv.attributes, key_origin::generated);
     priv.public_der = pair->public_spki;
-    priv.sealed =
-        seal(tk, object_ad(token_id, private_handle, priv.attributes), pair->private_pkcs8.view());
-    return make_create_objects_command({pub, priv});
+    out.private_key.material = std::move(pair->private_pkcs8);
+    return out;
+}
+
+/// Seals a built token object under `tk`, binding its token, handle and
+/// final attributes.
+inline void seal_object(std::span<const std::uint8_t> tk, std::uint64_t token_id, built_object& o) {
+    o.record.sealed =
+        seal(tk, object_ad(token_id, o.record.handle, o.record.attributes), o.material.view());
+}
+
+/// C_GenerateKey on the leader: the key, sealed, as a create_objects entry.
+/// The object is a token object whatever the template says.
+[[nodiscard]] inline auto prepare_generate_key(std::span<const std::uint8_t> tk,
+                                               std::uint64_t token_id, std::uint64_t handle,
+                                               const CK_MECHANISM& mechanism,
+                                               const attribute_map& tmpl)
+    -> ck_result<std::vector<std::byte>> {
+    attribute_map t = tmpl;
+    t.set_bool(CKA_TOKEN, true);
+    auto o = build_secret_key(handle, mechanism, t);
+    if (!o) {
+        return unexpected(o.error());
+    }
+    seal_object(tk, token_id, *o);
+    return make_create_objects_command({o->record});
+}
+
+/// C_GenerateKeyPair on the leader: both objects, as token objects, in one
+/// create_objects entry.
+[[nodiscard]] inline auto prepare_generate_key_pair(
+    std::span<const std::uint8_t> tk, std::uint64_t token_id, std::uint64_t public_handle,
+    std::uint64_t private_handle, const CK_MECHANISM& mechanism, const attribute_map& public_tmpl,
+    const attribute_map& private_tmpl) -> ck_result<std::vector<std::byte>> {
+    attribute_map pt = public_tmpl;
+    attribute_map vt = private_tmpl;
+    pt.set_bool(CKA_TOKEN, true);
+    vt.set_bool(CKA_TOKEN, true);
+    auto pair = build_key_pair(public_handle, private_handle, mechanism, pt, vt);
+    if (!pair) {
+        return unexpected(pair.error());
+    }
+    seal_object(tk, token_id, pair->private_key);
+    return make_create_objects_command({pair->public_key, pair->private_key.record});
 }
 
 /// C_SetAttributeValue on the leader: the policy-checked new attributes,

@@ -59,6 +59,10 @@ set_tests_properties(hsm_key_store_test PROPERTIES
     LABELS "unit;hsm;hsm-module" TIMEOUT 120)
 
 # Task 1: hsm_node links and runs (and, from task 3, can lock key memory).
+kythira_hsm_test(hsm_session_layer_test hsm_session_layer_test.cpp)
+set_tests_properties(hsm_session_layer_test PROPERTIES
+    LABELS "unit;hsm;hsm-module" TIMEOUT 120)
+
 add_test(NAME hsm_node_self_test COMMAND hsm_node --self-test)
 set_tests_properties(hsm_node_self_test PROPERTIES
     LABELS "unit;hsm;hsm-module" TIMEOUT 60)
