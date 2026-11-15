@@ -155,3 +155,46 @@ BOOST_AUTO_TEST_CASE(a_wrong_pin_is_the_hsm_unavailable) {
         BOOST_TEST((e.which() == kms::backing_error::kind::unavailable));
     }
 }
+
+// Task 7, Requirement 5.2: AES-256-GCM with additional data on a real
+// module, the nonce from the token's generator; a changed byte, tag, nonce
+// or additional data is refused as the tag, not as a device fault.
+BOOST_AUTO_TEST_CASE(aes_gcm_round_trips_and_detects_changes) {
+    const softhsm_token token;
+    auto backend = std::make_shared<p11::function_list_backend>(KYTHIRA_SOFTHSM2_LIBRARY);
+    CK_SLOT_ID slot = 0;
+    for (const auto& t : backend->tokens()) {
+        if (t.label == "kms") {
+            slot = t.slot;
+        }
+    }
+    kms::backing_store store(backend, slot, "1234");
+    (void)store.generate("k", 1, kms::key_spec::symmetric_default, kms::key_usage::encrypt_decrypt);
+    const std::vector<std::uint8_t> plain{'s', 'e', 'c', 'r', 'e', 't'};
+    const std::vector<std::uint8_t> aad{'a', 'a', 'd'};
+    const auto sealed = store.gcm_encrypt("k", 1, plain, aad);
+    BOOST_TEST(sealed.ciphertext.size() == plain.size());
+    BOOST_TEST((sealed.ciphertext != plain));
+    BOOST_TEST((store.gcm_decrypt("k", 1, sealed, aad) == plain));
+    // A fresh nonce each time.
+    BOOST_TEST((store.gcm_encrypt("k", 1, plain, aad).nonce != sealed.nonce));
+
+    auto bad = sealed;
+    bad.ciphertext[0] ^= 1U;
+    BOOST_TEST(!store.gcm_decrypt("k", 1, bad, aad).has_value());
+    bad = sealed;
+    bad.tag[15] ^= 1U;
+    BOOST_TEST(!store.gcm_decrypt("k", 1, bad, aad).has_value());
+    bad = sealed;
+    bad.nonce[0] ^= 1U;
+    BOOST_TEST(!store.gcm_decrypt("k", 1, bad, aad).has_value());
+    const std::vector<std::uint8_t> other{'a', 'a', 'e'};
+    BOOST_TEST(!store.gcm_decrypt("k", 1, sealed, other).has_value());
+
+    BOOST_TEST(store.random(1024).size() == 1024U);
+    // A version with no backing key is a failure, not a tag mismatch.
+    BOOST_CHECK_THROW((void)store.gcm_encrypt("k", 2, plain, aad), kms::backing_error);
+    // After destruction the remembered handle is forgotten.
+    store.destroy("k", 1);
+    BOOST_CHECK_THROW((void)store.gcm_decrypt("k", 1, sealed, aad), kms::backing_error);
+}

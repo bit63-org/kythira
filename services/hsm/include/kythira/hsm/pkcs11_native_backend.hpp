@@ -162,6 +162,11 @@ public:
         return value(_client.encrypt(s, data), "C_Encrypt");
     }
 
+    [[nodiscard]] auto generate_random(CK_SESSION_HANDLE s, std::size_t length)
+        -> pkcs11::bytes override {
+        return value(_client.generate_random(s, length), "C_GenerateRandom");
+    }
+
     [[nodiscard]] auto decrypt(CK_SESSION_HANDLE s, const CK_MECHANISM& m, CK_OBJECT_HANDLE key,
                                std::span<const std::uint8_t> data) -> pkcs11::bytes override {
         done(_client.decrypt_init(s, m, key), "C_DecryptInit");
