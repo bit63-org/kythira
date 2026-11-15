@@ -31,11 +31,15 @@ tests it; `configs/ci_no_hsm_defconfig` is the module-off configuration
 | `include/kythira/hsm/token_state_machine.hpp` | a token group: token record, PIN verifiers, replicated login counters, objects with sealed material and versions | 5 |
 | `include/kythira/hsm/key_store.hpp` | the leader's side: generate or re-seal material and build the entry that carries it, sealed | 5 |
 | `include/kythira/hsm/persistent_group.hpp`, `codec.hpp` | the engine plumbing both groups share, and the command and record encoding | 5 |
+| `include/kythira/hsm/key_vault.hpp` | what an unsealed node holds: the MK (accepted only when its check value is the catalog's) and the token keys opened with it; `seal()` wipes both | 6 |
+| `include/kythira/hsm/hsm_store.hpp` | the interface the session layer reads and proposes through: this replica's catalog and token groups, proposals, and the read-index barrier | 6 |
+| `include/kythira/hsm/session_layer.hpp` | PKCS#11 applications, logins, sessions, session objects and multi-part operations on this node; a read-index round before every use of a token key; opened keys cached by handle and version | 6 |
+| `include/kythira/hsm/native_client.hpp` | the in-process PKCS#11 client co-located modules use, authorized by the catalog's bindings like any other | 6 |
 | `cmd/hsm_node/` | the daemon; a placeholder (`--help`, `--self-test [--allow-unlocked-memory]`, which also prepares key memory) until task 11 | 1, 3 |
-| `tests/` | `hsm_pkcs11_headers_test` (the vendored headers' version, ABI types and 3.0 function table) and `hsm_node_self_test`; `hsm_shamir_test` (split and combine properties, encoding and every refusal); `hsm_secure_arena_test` (smaps flags, wiping, lock failures under a real zero `RLIMIT_MEMLOCK`, hardening); `hsm_mechanisms_test` (published vectors, round trips, tampering, exclusions); `hsm_attribute_policy_test` (one test per rule); `hsm_key_store_test` (both state machines, persistence, the no-plaintext scan) | 1-5 |
+| `tests/` | `hsm_pkcs11_headers_test` (the vendored headers' version, ABI types and 3.0 function table) and `hsm_node_self_test`; `hsm_shamir_test` (split and combine properties, encoding and every refusal); `hsm_secure_arena_test` (smaps flags, wiping, lock failures under a real zero `RLIMIT_MEMLOCK`, hardening); `hsm_mechanisms_test` (published vectors, round trips, tampering, exclusions); `hsm_attribute_policy_test` (one test per rule); `hsm_key_store_test` (both state machines, persistence, the no-plaintext scan); `hsm_session_layer_test` (the vault, bindings, session states, replicated PIN counters, read-index checks against a destroy or narrowing elsewhere, the key cache, sealing, multi-part operations) | 1-6 |
 | `pkcs11/` | `libkythira_pkcs11.so`, the PKCS#11 client library, as its own target (`pkcs11/README.md`) | 10 |
 
-The service module, unseal, the wire protocol, the client library,
+The service module and its groups, object import, unseal, the wire protocol, the client library,
 consumers and audit follow in tasks 6 to 15 (`.kiro/specs/virtual-hsm/tasks.md`).
 
 ## Core targets and variables used

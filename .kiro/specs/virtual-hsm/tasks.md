@@ -117,6 +117,32 @@ task is one PR unless noted.
     use, key cache by `(handle, version)`
   - `native_client` for co-located modules
   - _Requirements: 2.1-2.3, 3.4, 3.5, 7.3_
+  - [x] 6a. Key vault, store interface, session layer and native client
+    - Done: `key_vault.hpp` holds the MK (taken only when its check
+      value is the catalog's) and the token keys opened with it, and
+      remembers the MK generation; a key sealed under another
+      generation does not open. `hsm_store.hpp` is the session layer's
+      view of the replicated store (this replica's reads, proposals and
+      a read-index barrier), so every PKCS#11 rule is tested on a store
+      applied to directly. `session_layer.hpp` keeps applications
+      (identity, logins per application and token), sessions, session
+      objects and multi-part state on the node; a token the identity
+      is not bound to answers `CKR_TOKEN_NOT_PRESENT` whether or not it
+      exists. PINs are checked on the serving node and every outcome,
+      success included, is proposed, so the lock is decided in log
+      order. Each use of a token key runs a read-index round first and
+      re-checks the object and its usage flag; opened keys are cached
+      by handle, version and sealed bytes. Multi-part operations buffer
+      input (bounded) and run the one-shot mechanism at the final call.
+      A sealed node answers `CKR_DEVICE_ERROR` to every cryptographic
+      call. `native_client.hpp` is one application in process.
+      `key_store.hpp` gains `build_secret_key` / `build_key_pair` so
+      session objects and token objects share one construction.
+  - [ ] 6b. `C_CreateObject`, `C_CopyObject`, `C_WrapKey`,
+    `C_UnwrapKey` and `C_DeriveKey` in the session layer
+  - [ ] 6c. `hsm_module`, the group state machine and host on the
+    node's multi-raft host, the admin API, and forwarding proposals and
+    read-index rounds from a follower to the group's leader
 
 - [ ] 7. Operator unseal, init, seal and rekey
   - `hsm_ctl init|unseal|seal|rekey|status`; partial shares in memory with

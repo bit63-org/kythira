@@ -205,6 +205,14 @@ inline constexpr std::size_t checksum_size = 4;
 
 }  // namespace shamir_detail
 
+/// The key check value a share carries: the first 8 bytes of
+/// HMAC-SHA256(secret, "kythira-hsm master key check v1"). The catalog
+/// records the MK's, so a node can tell the right MK from a wrong one.
+[[nodiscard]] inline auto key_check_value(std::span<const std::uint8_t> secret)
+    -> std::array<std::uint8_t, 8> {
+    return shamir_detail::check_value_of(secret);
+}
+
 /// Splits `secret` into n shares with threshold k. `allow_single` permits
 /// k = 1, which Requirement 4.1 keeps behind an explicit development flag.
 [[nodiscard]] inline auto shamir_split(std::span<const std::uint8_t> secret, unsigned k, unsigned n,
