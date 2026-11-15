@@ -9,12 +9,12 @@
 // runbook covers both daemons.
 
 #include <raft/host_node_id.hpp>
+#include <raft/pkcs11_sealed_secret.hpp>
 #include <raft/tcp_rpc.hpp>
 
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
-#include <fstream>
 #include <iostream>
 #include <optional>
 #include <set>
@@ -182,21 +182,12 @@ namespace detail {
 
 }  // namespace detail
 
-/// The first line of the unseal key file, which must not be empty.
+/// The unseal passphrase: the key file's first line, which must not be
+/// empty, or the secret a sealed file opens on its token.
 [[nodiscard]] inline auto read_unseal_passphrase(const std::string& path) -> std::string {
-    std::ifstream f(path);
-    if (!f) {
-        throw std::runtime_error("cannot open --unseal-key-file " + path);
-    }
-    std::string line;
-    std::getline(f, line);
-    while (!line.empty() && (line.back() == '\n' || line.back() == '\r')) {
-        line.pop_back();
-    }
-    if (line.empty()) {
-        throw std::runtime_error("--unseal-key-file " + path + " is empty");
-    }
-    return line;
+    // Plain (the first line), or sealed under a key on a PKCS#11 token
+    // (virtual-hsm task 13c), which opens it there at startup.
+    return kythira::pkcs11::read_secret_file(path, "--unseal-key-file");
 }
 
 inline constexpr const char* k_usage =

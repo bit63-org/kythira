@@ -29,6 +29,7 @@
 #include <raft/jwt.hpp>
 #include <raft/pkcs11_envelope.hpp>
 #include <raft/pkcs11_module.hpp>
+#include <raft/pkcs11_sealed_secret.hpp>
 #include <raft/pkcs11_signing_key.hpp>
 #include <raft/pkcs11_uri.hpp>
 
@@ -817,5 +818,67 @@ BOOST_AUTO_TEST_CASE(migrate_to_softhsm2) {
     BOOST_TEST(json.find("\"needs_reissue\":1") != std::string::npos);
     BOOST_TEST(json.find(k_user_pin) == std::string::npos);
 #endif
+}
+// Task 13c: an unseal passphrase sealed under an RSA decryption key on
+// SoftHSM2, by hsm_ctl seal-secret where it is built, opened by the reader
+// every node uses; a plain file still reads as its first line.
+BOOST_AUTO_TEST_CASE(sealed_secret_file_on_softhsm2) {
+    const softhsm_token token("sealing");
+    const auto m = p11::module::load(KYTHIRA_SOFTHSM2_LIBRARY);
+    {
+        auto s = m.open(p11::uri::parse("pkcs11:token=sealing"), k_user_pin);
+        const std::array<std::uint8_t, 2> id{0x5e, 0x01};
+        (void)s.generate_key_pair(p11::key_spec::rsa_2048, p11::key_usage::decrypt, "unseal", id);
+    }
+    const auto pin = token.dir / "pin";
+    std::ofstream(pin) << k_user_pin << "\n";
+    auto key = p11::uri::parse("pkcs11:token=sealing;object=unseal");
+    key.module_path = KYTHIRA_SOFTHSM2_LIBRARY;
+    key.pin_source = pin.string();
+    const std::string secret = "correct horse battery staple";
+    const auto sealed = token.dir / "unseal.sealed";
+#if defined(KYTHIRA_HSM_CTL)
+    const auto plain_in = token.dir / "unseal.plain";
+    std::ofstream(plain_in) << secret << "\n";
+    const std::string cmd = std::string(KYTHIRA_HSM_CTL) + " seal-secret --key-uri '" +
+                            key.to_string() + "' --oaep sha1 --in " + plain_in.string() +
+                            " --out " + sealed.string() + " > /dev/null";
+    BOOST_REQUIRE(std::system(cmd.c_str()) == 0);  // NOLINT(cert-env33-c,concurrency-mt-unsafe)
+    std::filesystem::remove(plain_in);
+    BOOST_TEST(((std::filesystem::status(sealed).permissions() & std::filesystem::perms::all) ==
+                (std::filesystem::perms::owner_read | std::filesystem::perms::owner_write)));
+    // It does not overwrite.
+    BOOST_TEST(std::system((cmd + " 2>/dev/null").c_str()) !=  // NOLINT(cert-env33-c)
+               0);
+#else
+    std::ofstream(sealed) << p11::seal_secret_file(key, secret, p11::hash_algorithm::sha1);
+#endif
+    std::string text;
+    {
+        std::ifstream in(sealed);
+        text.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+    }
+    BOOST_TEST(text.starts_with(p11::k_sealed_secret_header));
+    BOOST_TEST(text.find(secret) == std::string::npos);
+    BOOST_TEST(text.find(k_user_pin) == std::string::npos);
+    BOOST_TEST(text.find("object=unseal") != std::string::npos);
+    BOOST_TEST(p11::read_secret_file(sealed.string(), "--unseal-key-file") == secret);
+
+    // Altered, it does not open.
+    auto altered = text;
+    const auto last = altered.rfind('\n', altered.size() - 2) + 10;
+    altered[last] = altered[last] == 'A' ? 'B' : 'A';
+    const auto bad = token.dir / "altered.sealed";
+    std::ofstream(bad) << altered;
+    BOOST_CHECK_THROW((void)p11::read_secret_file(bad.string(), "--unseal-key-file"),
+                      std::runtime_error);
+    // The file never carries a PIN.
+    auto with_pin = key;
+    with_pin.pin_value = k_user_pin;
+    BOOST_CHECK_THROW((void)p11::seal_secret_file(with_pin, secret), std::invalid_argument);
+    // A plain file reads as before.
+    const auto plain = token.dir / "plain";
+    std::ofstream(plain) << "plain-passphrase\r\nignored\n";
+    BOOST_TEST(p11::read_secret_file(plain.string(), "--unseal-key-file") == "plain-passphrase");
 }
 #endif

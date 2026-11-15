@@ -5,7 +5,8 @@
 // (.kiro/specs/virtual-hsm/ task 7). Each command but migrate is one
 // request to a node's operator API over mutual TLS, with the operator's
 // certificate; migrate (task 12b) is a PKCS#11 application on two modules
-// (kythira/hsm/migrate.hpp).
+// (kythira/hsm/migrate.hpp), and seal-secret (task 13c) one on a single
+// module (raft/pkcs11_sealed_secret.hpp).
 //
 //   hsm_ctl [options] status
 //   hsm_ctl [options] init --k K --n N [--mode operator|node]
@@ -15,6 +16,7 @@
 //   hsm_ctl [options] rekey [--k K] [--n N] [--mode operator|node]
 //   hsm_ctl migrate --from URI --to URI [--transport-key URI] [--dry-run]
 //                   [--keep-extractable]
+//   hsm_ctl seal-secret --key-uri URI --out FILE [--in FILE] [--oaep sha1|sha256]
 //
 // Options (each also read from the environment):
 //   --url URL     HSM_CTL_URL    a node's API, https://host:port
@@ -33,13 +35,21 @@
 #include <kythira/hsm/mtls_client.hpp>
 
 #include <raft/pkcs11_module.hpp>
+#include <raft/pkcs11_sealed_secret.hpp>
 #include <raft/pkcs11_uri.hpp>
 
 #include <boost/json.hpp>
 
+#include <openssl/crypto.h>
+
+#include <fcntl.h>
+#include <sys/types.h>
+#include <unistd.h>
+
 #include <chrono>
 #include <cstdlib>
 #include <exception>
+#include <fstream>
 #include <iostream>
 #include <map>
 #include <optional>
@@ -74,6 +84,14 @@ commands:
                                       pkcs11:token=alpha?module-path=/usr/lib/
                                       libkythira_pkcs11.so&pin-source=/run/pin
                                       (no --url or certificates needed)
+  seal-secret --key-uri URI --out FILE [--in FILE] [--oaep sha1|sha256]
+                                      seal the first line of FILE (stdin by
+                                      default), such as an unseal passphrase,
+                                      under the RSA decryption key URI names
+                                      (with module-path and pin-source); a
+                                      node given the result as its
+                                      --unseal-key-file opens it on the token
+                                      at startup. --oaep sha1 for SoftHSM2.
 
 options (environment):
   --url URL        (HSM_CTL_URL)        a node's API, https://host:port
@@ -136,7 +154,8 @@ auto parse(int argc, char** argv) -> invocation {
         } else if (w == "--insecure-plaintext") {
             inv.tls.plaintext = true;
         } else if (w == "--k" || w == "--n" || w == "--mode" || w == "--from" || w == "--to" ||
-                   w == "--transport-key") {
+                   w == "--transport-key" || w == "--key-uri" || w == "--in" || w == "--out" ||
+                   w == "--oaep") {
             inv.flags[w.substr(2)] = value();
         } else if (w == "--reset" || w == "--dry-run" || w == "--keep-extractable") {
             inv.flags[w.substr(2)] = "true";
@@ -156,7 +175,7 @@ auto parse(int argc, char** argv) -> invocation {
     if (inv.command.empty()) {
         throw usage_error("no command");
     }
-    if (inv.url.empty() && inv.command != "migrate") {
+    if (inv.url.empty() && inv.command != "migrate" && inv.command != "seal-secret") {
         throw usage_error("no --url (or HSM_CTL_URL)");
     }
     return inv;
@@ -307,6 +326,51 @@ auto run_migrate(const invocation& inv) -> int {
     return report.ok() ? 0 : 1;
 }
 
+/// seal-secret: one line sealed under a token key, written owner-only.
+auto run_seal_secret(const invocation& inv) -> int {
+    namespace p11 = kythira::pkcs11;
+    if (!inv.flags.contains("key-uri") || !inv.flags.contains("out")) {
+        throw usage_error("seal-secret needs --key-uri and --out");
+    }
+    auto oaep = p11::hash_algorithm::sha256;
+    if (const auto it = inv.flags.find("oaep"); it != inv.flags.end()) {
+        if (it->second == "sha1") {
+            oaep = p11::hash_algorithm::sha1;
+        } else if (it->second != "sha256") {
+            throw usage_error("--oaep is sha1 or sha256");
+        }
+    }
+    std::string secret;
+    const auto in = inv.flags.contains("in") ? inv.flags.at("in") : std::string("-");
+    if (in == "-") {
+        std::getline(std::cin, secret);
+    } else {
+        std::ifstream f(in, std::ios::binary);
+        if (!f) {
+            throw std::runtime_error("cannot read " + in);
+        }
+        std::getline(f, secret);
+    }
+    while (!secret.empty() && (secret.back() == '\r' || secret.back() == '\n')) {
+        secret.pop_back();
+    }
+    const auto text = p11::seal_secret_file(p11::uri::parse(inv.flags.at("key-uri")), secret, oaep);
+    OPENSSL_cleanse(secret.data(), secret.size());
+    const auto& out = inv.flags.at("out");
+    const int fd = ::open(out.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+    if (fd < 0) {
+        throw std::runtime_error("cannot create " + out + " (it must not exist yet)");
+    }
+    const auto written = ::write(fd, text.data(), text.size());
+    const bool ok = written == static_cast<ssize_t>(text.size()) && ::fsync(fd) == 0;
+    ::close(fd);
+    if (!ok) {
+        throw std::runtime_error("cannot write " + out);
+    }
+    std::cout << boost::json::serialize(boost::json::object{{"sealed", out}}) << "\n";
+    return 0;
+}
+
 }  // namespace
 
 auto main(int argc, char** argv) -> int {
@@ -318,6 +382,9 @@ auto main(int argc, char** argv) -> int {
         }
         if (inv.command == "migrate") {
             return run_migrate(inv);
+        }
+        if (inv.command == "seal-secret") {
+            return run_seal_secret(inv);
         }
         const auto c = call_of(inv);
         const kythira::hsm::mtls_client client(inv.tls);

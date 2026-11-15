@@ -45,12 +45,12 @@
 #include <raft/multi_raft.hpp>
 #include <raft/node_core.hpp>
 #include <raft/node_host.hpp>
+#include <raft/pkcs11_sealed_secret.hpp>
 #include <raft/service_module.hpp>
 
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
-#include <fstream>
 #include <functional>
 #include <map>
 #include <memory>
@@ -137,21 +137,11 @@ struct embedded_replica_config {
     return out;
 }
 
-/// The first line of the unseal key file, which must not be empty.
+/// The unseal passphrase: the key file's first line, which must not be
+/// empty, or the secret a file sealed under a PKCS#11 token key opens on
+/// the token (virtual-hsm task 13c).
 [[nodiscard]] inline auto read_unseal_passphrase_file(const std::string& path) -> std::string {
-    std::ifstream f(path);
-    if (!f) {
-        throw std::runtime_error("cannot open the IAM unseal key file " + path);
-    }
-    std::string line;
-    std::getline(f, line);
-    while (!line.empty() && (line.back() == '\n' || line.back() == '\r')) {
-        line.pop_back();
-    }
-    if (line.empty()) {
-        throw std::runtime_error("the IAM unseal key file " + path + " is empty");
-    }
-    return line;
+    return pkcs11::read_secret_file(path, "the IAM unseal key file");
 }
 
 class embedded_replica {
