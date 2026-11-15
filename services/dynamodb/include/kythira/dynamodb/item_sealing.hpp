@@ -59,6 +59,9 @@ namespace kythira::dynamodb {
 
 /// The first byte of a sealed item value.
 inline constexpr std::uint8_t k_sealed_item_format = 2;
+/// The first byte of a sealed change record: above every clear record
+/// format (`change_log.hpp`), so an older reader refuses it.
+inline constexpr std::uint8_t k_sealed_record_format = 0x80;
 
 /// A table key as its provider unwraps it.
 using table_key_bytes = std::array<unsigned char, 32>;
@@ -137,8 +140,8 @@ using key32 = std::array<unsigned char, 32>;
     return out;
 }
 
-[[nodiscard]] inline auto aad(std::uint64_t id) -> std::string {
-    return "kythira-ddb-item/" + id_bytes(id);
+[[nodiscard]] inline auto aad(std::string_view purpose, std::uint64_t id) -> std::string {
+    return "kythira-ddb-" + std::string(purpose) + "/" + id_bytes(id);
 }
 
 struct cipher_ctx {
@@ -178,19 +181,22 @@ public:
     }
 
     /// `clear` (an encoded item) sealed for engine key `key` of table or
-    /// index `id`.
-    [[nodiscard]] auto seal(std::uint64_t id, std::string_view key, std::string_view clear) const
-        -> std::string {
+    /// index `id`. `purpose` names what is sealed (`item`, or `change`
+    /// for a change record, whose `key` is its stream and sequence), so a
+    /// value sealed for one purpose does not open as another.
+    [[nodiscard]] auto seal(std::uint64_t id, std::string_view key, std::string_view clear,
+                            std::string_view purpose = "item") const -> std::string {
         namespace d = item_sealing_detail;
         const auto idb = d::id_bytes(id);
         const auto klen = d::length_bytes(key.size());
-        const std::array<std::string_view, 4> parts{idb, klen, key, clear};
+        const auto plen = d::length_bytes(purpose.size());
+        const std::array<std::string_view, 6> parts{plen, purpose, idb, klen, key, clear};
         const auto mac = d::hmac(_nonce, parts);
         std::string out;
         out.reserve(clear.size() + d::k_overhead);
         out.push_back(static_cast<char>(k_sealed_item_format));
         out.append(reinterpret_cast<const char*>(mac.data()), d::k_nonce_len);
-        const auto a = d::aad(id);
+        const auto a = d::aad(purpose, id);
         d::cipher_ctx c;
         int len = 0;
         const auto* nonce = mac.data();
@@ -225,7 +231,8 @@ public:
 
     /// The encoded item `sealed` holds. Throws `sealed_value_error` when
     /// it does not open under this key for table or index `id`.
-    [[nodiscard]] auto open(std::uint64_t id, std::string_view sealed) const -> std::string {
+    [[nodiscard]] auto open(std::uint64_t id, std::string_view sealed,
+                            std::string_view purpose = "item") const -> std::string {
         namespace d = item_sealing_detail;
         if (sealed.size() < d::k_overhead ||
             static_cast<std::uint8_t>(sealed[0]) != k_sealed_item_format) {
@@ -234,7 +241,7 @@ public:
         const auto* nonce = reinterpret_cast<const unsigned char*>(sealed.data() + 1);
         const auto body = sealed.substr(1 + d::k_nonce_len);
         const auto n = body.size() - d::k_tag_len;
-        const auto a = d::aad(id);
+        const auto a = d::aad(purpose, id);
         d::cipher_ctx c;
         int len = 0;
         if (EVP_DecryptInit_ex(c.ctx, EVP_aes_256_gcm(), nullptr, nullptr, nullptr) != 1 ||
@@ -391,7 +398,44 @@ public:
         return key_for(*id)->open(*id, stored);
     }
 
+    /// A change record body (`change_log.hpp`) of table `id`, as stored
+    /// at `seq` of stream `stream`: sealed when `sealed`, else as is. A
+    /// sealed body is `k_sealed_record_format`, the table id (8 bytes, big
+    /// endian, so a reader finds the key), then the sealed value.
+    [[nodiscard]] auto store_record(bool sealed, std::uint64_t id, std::string_view stream,
+                                    std::uint64_t seq, std::string body) const -> std::string {
+        if (!sealed) {
+            return body;
+        }
+        std::string out(1, static_cast<char>(k_sealed_record_format));
+        out += item_sealing_detail::id_bytes(id);
+        out += key_for(id)->seal(id, record_place(stream, seq), body, "change");
+        return out;
+    }
+
+    /// The change record body `stored`, and whether it was sealed. Where
+    /// it was stored only made its nonce: segments move between streams'
+    /// copies on peers whole, so the place is not bound to the record.
+    [[nodiscard]] auto load_record(std::string_view stored) const -> std::pair<std::string, bool> {
+        if (stored.empty() || static_cast<std::uint8_t>(stored[0]) != k_sealed_record_format) {
+            return {std::string(stored), false};
+        }
+        if (stored.size() < 9) {
+            throw sealed_value_error("dynamodb: a sealed change record is malformed");
+        }
+        std::uint64_t id = 0;
+        for (std::size_t i = 1; i < 9; ++i) {
+            id = (id << 8U) | static_cast<unsigned char>(stored[i]);
+        }
+        return {key_for(id)->open(id, stored.substr(9), "change"), true};
+    }
+
 private:
+    [[nodiscard]] static auto record_place(std::string_view stream, std::uint64_t seq)
+        -> std::string {
+        return std::string(stream) + "#" + item_sealing_detail::id_bytes(seq);
+    }
+
     [[nodiscard]] auto key_for(std::uint64_t id) const -> std::shared_ptr<const item_key> {
         if (!_ring) {
             throw table_key_unavailable(id);

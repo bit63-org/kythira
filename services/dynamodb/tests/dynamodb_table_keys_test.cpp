@@ -33,6 +33,9 @@
 
 #include <openssl/rand.h>
 
+#include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -674,6 +677,50 @@ BOOST_AUTO_TEST_CASE(a_clear_table_that_gains_a_key_is_resealed) {
     BOOST_TEST(r.body.at("Item").at("v").at("S").as_string() == "plain-b");
     r = f.call("DescribeTable", R"({"TableName":"old"})");
     BOOST_TEST(r.body.at("Table").at("SSEDescription").at("Status").as_string() == "ENABLED");
+}
+
+BOOST_AUTO_TEST_CASE(change_records_of_an_encrypted_table_are_sealed) {
+    keyed_fixture f;
+    auto ring = std::make_shared<ddb::table_key_ring>();
+    f.backend.set_sealer(ddb::item_sealer(ring));
+    ddb::table_key_refresher<ddb::local_backend<>> refresher(f.backend, f.keys, ring);
+    auto body = create_body("logged");
+    body.pop_back();
+    body += R"(,"StreamSpecification":{"StreamEnabled":true,"StreamViewType":"NEW_IMAGE"}})";
+    auto r = f.call("CreateTable", body);
+    BOOST_REQUIRE_MESSAGE(r.status == 200U, r.type() + ": " + r.message());
+    const std::string arn(r.body.at("TableDescription").at("LatestStreamArn").as_string());
+    BOOST_TEST(refresher.pass(true, 1) == 1U);
+    BOOST_REQUIRE(f.call("PutItem", R"({"TableName":"logged","Item":{"pk":{"S":"a"},)"
+                                    R"("secret":{"S":"hunter2"}}})")
+                      .status == 200U);
+
+    // The stream reads the record back clear...
+    r = f.call("DescribeStream", R"({"StreamArn":")" + arn + R"("})");
+    const std::string shard(
+        r.body.at("StreamDescription").at("Shards").as_array().at(0).at("ShardId").as_string());
+    r = f.call("GetShardIterator", R"({"StreamArn":")" + arn + R"(","ShardId":")" + shard +
+                                       R"(","ShardIteratorType":"TRIM_HORIZON"})");
+    const std::string it(r.body.at("ShardIterator").as_string());
+    r = f.call("GetRecords", R"({"ShardIterator":")" + it + R"("})");
+    const auto& records = r.body.at("Records").as_array();
+    BOOST_REQUIRE(records.size() == 1U);
+    BOOST_TEST(records[0].at("dynamodb").at("NewImage").at("secret").at("S").as_string() ==
+               "hunter2");
+
+    // ...and nothing the change log keeps on disk holds it.
+    std::size_t files = 0;
+    for (const auto& e : std::filesystem::recursive_directory_iterator(f.log_dir.path)) {
+        if (!e.is_regular_file()) {
+            continue;
+        }
+        ++files;
+        std::ifstream in(e.path(), std::ios::binary);
+        const std::string bytes((std::istreambuf_iterator<char>(in)),
+                                std::istreambuf_iterator<char>());
+        BOOST_TEST(bytes.find("hunter2") == std::string::npos, e.path());
+    }
+    BOOST_TEST(files > 0U);
 }
 
 BOOST_AUTO_TEST_CASE(the_settings_are_checked) {
