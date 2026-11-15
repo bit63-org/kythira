@@ -88,13 +88,18 @@ is one PR unless noted.
     message fabric) and `kythira_node_kms_test` (the process over
     SoftHSM2). The design's `hsm.client` is core's `hsm.pkcs11`, which
     the HSM module publishes. Forwarding a follower's proposals over the
-    network needs the API listener and arrives with task 6.
+    network needs the API listener and arrives with it in task 12.
 
-- [ ] 6. Key management operations
+- [x] 6. Key management operations
   - `CreateKey`, `DescribeKey`, `ListKeys`, `EnableKey`, `DisableKey`,
     `UpdateKeyDescription`, `ScheduleKeyDeletion`, `CancelKeyDeletion`,
     aliases and tags, alias resolution everywhere AWS takes one
   - _Requirements: 3.1-3.6, 6.1-6.3_
+  - Done: `kms_errors.hpp`, `kms_front_end.hpp` (framing, SigV4, the
+    authorization guard) and `kms_api.hpp` (the fifteen operations over
+    `api_deps`: the catalog replica, a read barrier, proposals and
+    CreateKey's two steps), tested by `kms_api_test` through signed
+    requests. The module serves them once task 12 adds the listener.
 
 - [ ] 7. Symmetric cryptographic operations
   - `Encrypt`, `Decrypt`, `ReEncrypt`, `GenerateDataKey`,

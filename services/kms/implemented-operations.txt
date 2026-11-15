@@ -6,3 +6,18 @@
 # doc/unsupported.md; tools/check_coverage.py (the ctest kms_model_coverage)
 # enforces it. A task that implements an operation moves it from there to
 # here.
+CancelKeyDeletion
+CreateAlias
+CreateKey
+DeleteAlias
+DescribeKey
+DisableKey
+EnableKey
+ListAliases
+ListKeys
+ListResourceTags
+ScheduleKeyDeletion
+TagResource
+UntagResource
+UpdateAlias
+UpdateKeyDescription

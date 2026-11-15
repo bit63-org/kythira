@@ -99,6 +99,12 @@ target_link_libraries(kms_host_test PRIVATE kythira_test_support)
 set_tests_properties(kms_host_test PROPERTIES
     LABELS "integration;kms;kms-module" TIMEOUT 300)
 
+# Task 6, Requirements 3.1-3.6, 6.1-6.3, 7.2 and 7.3: the front end's
+# framing, SigV4 and authorization guard, and key management, aliases and
+# tags through signed requests over a catalog replica and a fake HSM.
+kythira_kms_test(kms_api_test kms_api_test.cpp)
+set_tests_properties(kms_api_test PROPERTIES LABELS "unit;kms;kms-module" TIMEOUT 120)
+
 # Task 5, Requirements 4.1-4.3: every key spec's backing key on a real
 # module, SoftHSM2 standing in for an external one; registered when the
 # build finds SoftHSM2 and softhsm2-util (kms-module.yml installs them;
