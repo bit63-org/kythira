@@ -170,6 +170,7 @@ struct fixture {
                 std::snprintf(buf, sizeof buf, "%08x-2222-4000-8000-000000000000", ++next_id);
                 return std::string(buf);
             },
+        .rotate = [this](std::string_view id, kms::rotation_type t) { return jobs.rotate(id, t); },
     }};
 
     kms::grants_api<catalog_t> grants{kms::api_deps<catalog_t>{
@@ -179,6 +180,8 @@ struct fixture {
         .propose = [this](const std::vector<std::byte>& c) { return propose(c); },
         .create_key = {},
         .clock_ms = [this] { return now; },
+        .new_key_id = kms::random_key_id,
+        .rotate = {},
     }};
 
     kms::crypto_api<catalog_t> crypto{kms::crypto_deps<catalog_t>{

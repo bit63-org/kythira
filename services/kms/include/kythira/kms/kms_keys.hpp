@@ -174,7 +174,15 @@ public:
             }
         }
         for (const auto& k : _catalog->due_rotations(now)) {
-            if (rotate(k.key_id, rotation_type::automatic).ok()) {
+            // rotate() proposes directly, so a lost leader throws; that
+            // must not end the pass before the deletions and the sweep.
+            bool ok = false;
+            try {
+                ok = rotate(k.key_id, rotation_type::automatic).ok();
+            } catch (const std::exception&) {
+                ok = false;  // the next pass retries, reusing the HSM key
+            }
+            if (ok) {
                 ++r.rotated;
             } else {
                 ++r.failures;

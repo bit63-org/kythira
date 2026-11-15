@@ -128,6 +128,11 @@ set_tests_properties(kms_policy_test PROPERTIES LABELS "unit;kms;kms-module")
 kythira_kms_test(kms_grants_test kms_grants_test.cpp)
 set_tests_properties(kms_grants_test PROPERTIES LABELS "unit;kms;kms-module")
 
+# Task 11, Requirements 9.1-9.4: rotation (on demand and scheduled) and
+# deletion at the end of the window.
+kythira_kms_test(kms_rotation_test kms_rotation_test.cpp)
+set_tests_properties(kms_rotation_test PROPERTIES LABELS "unit;kms;kms-module")
+
 # Task 5, Requirements 4.1-4.3: every key spec's backing key on a real
 # module, SoftHSM2 standing in for an external one; registered when the
 # build finds SoftHSM2 and softhsm2-util (kms-module.yml installs them;

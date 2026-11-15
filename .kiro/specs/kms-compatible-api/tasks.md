@@ -167,10 +167,16 @@ is one PR unless noted.
     the composition root sets in task 12. Root-principal grantees are not
     delegated through IAM (doc/unsupported.md). `kms_grants_test`.
 
-- [ ] 11. Rotation and deletion jobs
+- [x] 11. Rotation and deletion jobs
   - Scheduled and on-demand rotation, `ListKeyRotations`, deletion at the
     end of the window, idempotent across leader changes
   - _Requirements: 9.1-9.4_
+  - Done: the five rotation operations in `kms_api.hpp` over the jobs of
+    task 5 (symmetric keys only, AWS's ten on-demand rotations per key,
+    disabled keys DisabledException, AWS managed keys refused).
+    `key_jobs::run_once` no longer ends a pass when a scheduled rotation's
+    proposal throws, so deletions and the orphan sweep still run.
+    `kms_rotation_test`.
 
 - [ ] 12. `kms_node`, the published client and co-location
   - `kms_node` (KMS, HSM, IAM replica), `KYTHIRA_KMS_*` settings, the API
