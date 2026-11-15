@@ -172,6 +172,24 @@ public:
         return out;
     }
 
+    /// Wraps a data key the caller holds under `key_id` (`Encrypt`).
+    [[nodiscard]] auto wrap_data_key(const std::string& key_id, const data_key_bytes& plaintext,
+                                     const encryption_context& context) const
+        -> generated_data_key {
+        boost::json::object req{
+            {"KeyId", key_id},
+            {"Plaintext", aws_detail::base64_encode(std::string_view(
+                              reinterpret_cast<const char*>(plaintext.data()), plaintext.size()))}};
+        add_context(req, context);
+        const auto res = call("Encrypt", req);
+        generated_data_key out;
+        out._plaintext = plaintext;
+        out._wrapped = blob(res, "CiphertextBlob");
+        const auto* id = res.if_contains("KeyId");
+        out._key_id = id != nullptr && id->is_string() ? std::string(id->get_string()) : key_id;
+        return out;
+    }
+
     [[nodiscard]] auto decrypt_data_key(const std::string& key_id, const std::string& wrapped,
                                         const encryption_context& context) const -> data_key_bytes {
         boost::json::object req{{"KeyId", key_id},
@@ -311,5 +329,7 @@ private:
 };
 
 static_assert(kms_key_provider<aws_kms_provider>);
+
+static_assert(wrapping_kms_key_provider<aws_kms_provider>);
 
 }  // namespace kythira::kms_provider

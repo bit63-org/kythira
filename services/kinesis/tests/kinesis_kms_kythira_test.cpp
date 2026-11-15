@@ -126,6 +126,13 @@ public:
             return {200,
                     json::serialize(json::object{{"KeyId", b.at("k")}, {"Plaintext", b.at("p")}})};
         }
+        if (r.operation == "Encrypt") {
+            const auto blob = json::serialize(
+                json::object{{"k", k_key_arn}, {"c", context}, {"p", in.at("Plaintext")}});
+            return {200, json::serialize(json::object{
+                             {"KeyId", k_key_arn},
+                             {"CiphertextBlob", kin::kms_aws_detail::base64_encode(blob)}})};
+        }
         return refuse(400, "UnsupportedOperationException", r.operation);
     }
 
@@ -300,6 +307,33 @@ BOOST_AUTO_TEST_CASE(the_provider_authorizes_each_caller) {
     } catch (const kin::kms_error& e) {
         BOOST_TEST((e.failure() == kin::kms_failure::not_found));
     }
+}
+
+BOOST_AUTO_TEST_CASE(a_held_data_key_wraps_under_another_key) {
+    // What re-wraps a DynamoDB table key: Encrypt of the key it holds,
+    // for the caller, opening again with Decrypt.
+    auto kms = std::make_shared<fake_kms>();
+    kms->allow("admin", {"Encrypt", "Decrypt"});
+    const kin::key_provider real(kin::kythira_kms_provider([kms] { return kms; }));
+    az::principal_context p;
+    p.arn = arn_of("admin");
+    const kin::kms_caller who{._principal = &p};
+    kin::data_key_bytes key{};
+    key.fill(7);
+    const kin::encryption_context context{{"aws:dynamodb:tableName", "t"}};
+    const auto w = real.wrap_data_key("alias/s", key, context, who);
+    BOOST_TEST(w._key_id == k_key_arn);
+    BOOST_TEST((w._plaintext == key));
+    BOOST_TEST((real.decrypt_data_key(k_key_arn, w._wrapped, context, who) == key));
+    BOOST_TEST(kms->count("Encrypt") == 1U);
+    BOOST_TEST(kms->calls.back().via == "kinesis");
+
+    // The local provider wraps under its passphrase, bound to the context.
+    const kin::key_provider local(kin::local_kms_provider("correct horse battery"));
+    const auto lw = local.wrap_data_key("owned", key, context);
+    BOOST_TEST((local.decrypt_data_key("owned", lw._wrapped, context) == key));
+    BOOST_CHECK_THROW((void)local.decrypt_data_key("owned", lw._wrapped, {}), kin::kms_error);
+    BOOST_TEST(lw._wrapped != local.wrap_data_key("owned", key, context)._wrapped);
 }
 
 BOOST_AUTO_TEST_CASE(stream_key_and_start_encryption_are_the_callers) {
