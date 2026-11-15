@@ -13,6 +13,9 @@
 // can open anything. It remembers the MK generation it was unsealed at; a
 // token key sealed under another generation (a rekey this node has not
 // caught up with) does not open, and the caller answers CKR_DEVICE_ERROR.
+// It also remembers the catalog's seal epoch: enforce() seals a vault the
+// catalog has since sealed (a `seal` command) or rekeyed past, so every
+// node drops its keys once it applies either entry (requirement 4.7).
 //
 // Keys never leave the vault: callers pass a function that gets a view of
 // the key under the vault's lock, so a seal() waits for every use in
@@ -83,17 +86,38 @@ public:
         _tks.clear();
         _mk = std::move(mk);
         _generation = catalog->generation;
+        _seal_epoch = catalog->seal_epoch;
         _epoch.fetch_add(1, std::memory_order_acq_rel);
         return unseal_result::unsealed;
+    }
+
+    /// Seals the vault when `catalog` no longer matches the one it was
+    /// unsealed under: sealed since (a newer seal epoch), rekeyed (another
+    /// generation, so the MK opens no token key), or gone. True when it
+    /// sealed.
+    auto enforce(const std::optional<catalog_record>& catalog) -> bool {
+        const auto current = [&] {
+            return _mk.empty() || (catalog && catalog->generation == _generation &&
+                                   catalog->seal_epoch == _seal_epoch);
+        };
+        {
+            const std::shared_lock lock(_mutex);
+            if (current()) {
+                return false;
+            }
+        }
+        const std::unique_lock lock(_mutex);
+        if (current()) {
+            return false;  // unsealed again in between, under this catalog
+        }
+        wipe_locked();
+        return true;
     }
 
     /// Wipes the MK and every token key (requirement 4.7).
     auto seal() -> void {
         const std::unique_lock lock(_mutex);
-        _tks.clear();
-        _mk.wipe();
-        _generation = 0;
-        _epoch.fetch_add(1, std::memory_order_acq_rel);
+        wipe_locked();
     }
 
     /// Calls `f(mk)` with the master key; CKR_DEVICE_ERROR while sealed.
@@ -145,6 +169,14 @@ public:
     }
 
 private:
+    auto wipe_locked() -> void {
+        _tks.clear();
+        _mk.wipe();
+        _generation = 0;
+        _seal_epoch = 0;
+        _epoch.fetch_add(1, std::memory_order_acq_rel);
+    }
+
     struct cached_tk {
         sealed_bytes sealed;
         secret_bytes key;
@@ -153,6 +185,7 @@ private:
     mutable std::shared_mutex _mutex;
     secret_bytes _mk;
     std::uint32_t _generation{0};
+    std::uint64_t _seal_epoch{0};
     std::map<std::uint64_t, cached_tk> _tks;
     std::atomic<std::uint64_t> _epoch{0};
 };

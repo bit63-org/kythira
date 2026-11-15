@@ -85,6 +85,11 @@ set_tests_properties(hsm_peer_test PROPERTIES
 kythira_hsm_test(hsm_admin_test hsm_admin_test.cpp)
 set_tests_properties(hsm_admin_test PROPERTIES
     LABELS "unit;hsm;hsm-module" TIMEOUT 120)
+# Task 7: operator unseal (shares checked on arrival, k needed, expiry) and
+# the vault sealing itself after a seal or rekey.
+kythira_hsm_test(hsm_unseal_test hsm_unseal_test.cpp)
+set_tests_properties(hsm_unseal_test PROPERTIES
+    LABELS "unit;hsm" TIMEOUT 60)
 
 add_test(NAME hsm_node_self_test COMMAND hsm_node --self-test)
 set_tests_properties(hsm_node_self_test PROPERTIES

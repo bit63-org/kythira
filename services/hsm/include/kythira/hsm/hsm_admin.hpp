@@ -21,10 +21,24 @@
 //   PUT    /v1/tokens/N/bindings/<identity>    let a client identity open it
 //   DELETE /v1/tokens/N/bindings/<identity>    and no longer
 //
+// and, from task 7 (requirement 4):
+//
+//   POST   /v1/init    {"mode":"operator"|"node","k":K,"n":N}
+//                      generate the master key, record its check value
+//                      and hand out its n shares, once; no node is left
+//                      unsealed, each is unsealed with k shares
+//   POST   /v1/unseal  {"share":"khs1-..."}  one operator's share for this
+//                      node; held in memory until k arrive or the timeout
+//   DELETE /v1/unseal  discard the shares held on this node
+//   POST   /v1/seal    every node discards its master key and token keys
+//   POST   /v1/rekey   {"mode":M,"k":K,"n":N} (each optional) a new master
+//                      key: every token key re-sealed in one entry, new
+//                      shares handed out, the old ones stop working, and
+//                      every other node is sealed until unsealed with them
+//
 // <identity> is percent-encoded (a SPIFFE URI has slashes). Only the
 // operator identities in admin_policy may call any of it; the client
-// certificate's URI or DNS SAN is the identity. Init, unseal, seal and
-// rekey come with task 7 (hsm_ctl).
+// certificate's URI or DNS SAN is the identity.
 //
 // Answers: 200/201 with JSON, 400 for a malformed request, 403 for a caller
 // who is not an operator, 404 for an unknown route or token, 405 for a
@@ -32,16 +46,24 @@
 // catalog refuses (not initialized, id taken or deleted), 503 while sealed
 // or when the group could not commit (the change may still have taken
 // effect; read the tokens before retrying).
+//
+// Init and rekey answer the shares even when the entry's commit is
+// uncertain (503 with "shares"): if it did commit, those shares are the
+// only way to the new master key, so dropping them would lose every key.
+// The status's generation says which set is current.
 
 #include <kythira/hsm/catalog_state_machine.hpp>
 #include <kythira/hsm/hsm_host.hpp>
 #include <kythira/hsm/key_store.hpp>
 #include <kythira/hsm/key_vault.hpp>
+#include <kythira/hsm/shamir.hpp>
+#include <kythira/hsm/unseal.hpp>
 
 #include <boost/json.hpp>
 
 #include <cctype>
 #include <charconv>
+#include <chrono>
 #include <cstdint>
 #include <exception>
 #include <optional>
@@ -57,6 +79,10 @@ namespace kythira::hsm {
 struct admin_policy {
     /// The operators' certificate identities.
     std::set<std::string> operators;
+    /// Permit k = 1 at init and rekey (development only; requirement 4.1).
+    bool allow_single_share = false;
+    /// How long partial operator shares are held (requirement 4.3).
+    std::chrono::seconds unseal_timeout{std::chrono::minutes{10}};
 };
 
 struct admin_request {
@@ -98,7 +124,18 @@ struct admin_response {
 template<typename HsmHost> class admin_api {
 public:
     admin_api(HsmHost& host, key_vault& vault, admin_policy policy)
-        : _host(&host), _vault(&vault), _policy(std::move(policy)) {}
+        : _host(&host),
+          _vault(&vault),
+          _policy(std::move(policy)),
+          _unseal(vault, _policy.unseal_timeout) {}
+
+    /// Run periodically: seals this node when the catalog was sealed or
+    /// rekeyed since it unsealed, and drops expired partial shares. True
+    /// when it sealed.
+    auto maintain() -> bool {
+        _unseal.expire();
+        return _vault->enforce(_host->catalog());
+    }
 
     [[nodiscard]] auto handle(const admin_request& req) -> admin_response {
         if (!is_operator(req)) {
@@ -125,6 +162,22 @@ private:
         constexpr std::string_view tokens = "/v1/tokens";
         if (req.path == "/v1/status") {
             return req.method == "GET" ? status() : not_allowed();
+        }
+        if (req.path == "/v1/init") {
+            return req.method == "POST" ? initialize(req.body) : not_allowed();
+        }
+        if (req.path == "/v1/unseal") {
+            if (req.method == "DELETE") {
+                _unseal.reset();
+                return status();
+            }
+            return req.method == "POST" ? unseal(req.body) : not_allowed();
+        }
+        if (req.path == "/v1/seal") {
+            return req.method == "POST" ? seal() : not_allowed();
+        }
+        if (req.path == "/v1/rekey") {
+            return req.method == "POST" ? rekey(req.body) : not_allowed();
         }
         if (req.path == tokens) {
             if (req.method == "GET") {
@@ -171,9 +224,214 @@ private:
             o["n"] = c->n;
             o["generation"] = c->generation;
         }
+        const auto p = _unseal.progress(c);
+        o["unseal_received"] = p.received;
+        o["unseal_needed"] = p.needed;
         o["tokens"] = _host->tokens().size();
         o["catalog_leader"] = _host->leads(0);
         return ok(200, o);
+    }
+
+    /// The mode, k and n of an init or rekey body; absent fields take
+    /// `fallback`'s. Nothing (with `why`) when a field is malformed.
+    auto split_of(const boost::json::object& o, split_parameters fallback, std::string& why) const
+        -> std::optional<split_parameters> {
+        split_parameters out = fallback;
+        if (const auto* m = o.if_contains("mode")) {
+            if (m->is_string() && m->as_string() == "operator") {
+                out.mode = unseal_mode::operator_shares;
+            } else if (m->is_string() && m->as_string() == "node") {
+                out.mode = unseal_mode::node_shares;
+            } else {
+                why = R"(mode is "operator" or "node")";
+                return std::nullopt;
+            }
+        }
+        for (const auto& [name, field] : {std::pair{"k", &out.k}, std::pair{"n", &out.n}}) {
+            if (const auto* v = o.if_contains(name)) {
+                if (!v->is_int64() || v->as_int64() < 1 || v->as_int64() > shamir_max_shares) {
+                    why = std::string(name) + " is an integer from 1 to 16";
+                    return std::nullopt;
+                }
+                *field = static_cast<std::uint8_t>(v->as_int64());
+            }
+        }
+        if (out.k == 0 || out.n == 0 || out.k > out.n) {
+            why = "k and n are required, with 1 <= k <= n <= 16";
+            return std::nullopt;
+        }
+        if (out.k == 1 && !_policy.allow_single_share) {
+            why = "k = 1 needs KYTHIRA_HSM_ALLOW_SINGLE_SHARE (development only)";
+            return std::nullopt;
+        }
+        return out;
+    }
+
+    /// A fresh master key, its shares and its check value.
+    struct fresh_key {
+        secret_bytes mk;
+        std::vector<std::string> shares;
+        std::array<std::uint8_t, 8> check{};
+    };
+
+    [[nodiscard]] auto fresh(split_parameters split) const -> fresh_key {
+        fresh_key out;
+        out.mk = secret_bytes(sealing_key_size);
+        if (!generate_random(out.mk.span())) {
+            throw std::runtime_error("no randomness for the master key");
+        }
+        auto shares = shamir_split(out.mk.view(), split.k, split.n, _policy.allow_single_share);
+        if (!shares) {
+            throw std::runtime_error(std::string(shamir_error_message(shares.error())));
+        }
+        for (const auto& share : *shares) {
+            out.shares.push_back(shamir_encode_text(share));
+        }
+        out.check = key_check_value(out.mk.view());
+        return out;
+    }
+
+    /// The answer carrying new shares: `status` 200 when the entry
+    /// committed, 503 when that is uncertain (see the header comment).
+    static auto with_shares(unsigned status, const split_parameters& split,
+                            std::uint32_t generation, const std::vector<std::string>& shares)
+        -> admin_response {
+        boost::json::object o;
+        boost::json::array list;
+        for (const auto& s : shares) {
+            list.emplace_back(s);
+        }
+        o["shares"] = std::move(list);
+        o["mode"] = split.mode == unseal_mode::operator_shares ? "operator" : "node";
+        o["k"] = split.k;
+        o["n"] = split.n;
+        o["generation"] = generation;
+        if (status != 200) {
+            o["error"] = "unavailable";
+            o["message"] =
+                "the entry's commit is uncertain: keep these shares, and use them if the "
+                "status shows generation " +
+                std::to_string(generation);
+        }
+        return ok(status, o);
+    }
+
+    auto initialize(const std::string& text) -> admin_response {
+        const auto v = boost::json::parse(text);
+        if (!v.is_object()) {
+            return error(400, "bad_request", R"(expected {"mode": M, "k": K, "n": N})");
+        }
+        std::string why;
+        const auto split = split_of(v.as_object(), {}, why);
+        if (!split) {
+            return error(400, "bad_request", why);
+        }
+        if (_host->catalog()) {
+            return error(409, "already_initialized", "the HSM is already initialized");
+        }
+        auto key = fresh(*split);
+        const auto rv =
+            propose(make_initialize_command(split->mode, split->k, split->n, key.check));
+        if (rv == CKR_FUNCTION_REJECTED) {
+            return error(409, "already_initialized", "the HSM is already initialized");
+        }
+        if (rv == CKR_DEVICE_ERROR) {
+            return with_shares(503, *split, 1, key.shares);
+        }
+        if (rv != CKR_OK) {
+            return refusal(rv);
+        }
+        return with_shares(200, *split, 1, key.shares);
+    }
+
+    auto unseal(const std::string& text) -> admin_response {
+        const auto v = boost::json::parse(text);
+        const auto* share = v.is_object() ? v.as_object().if_contains("share") : nullptr;
+        if (share == nullptr || !share->is_string()) {
+            return error(400, "bad_request", R"(expected {"share": "khs1-..."})");
+        }
+        // The catalog this node checks shares against must be current: a
+        // lagging replica would refuse new shares after a rekey, or accept
+        // a seal it has not applied yet.
+        if (!_host->catalog_barrier()) {
+            return error(503, "unavailable", "the catalog group has no quorum");
+        }
+        const auto c = _host->catalog();
+        const auto outcome = _unseal.submit(std::string_view(share->as_string()), c);
+        switch (outcome) {
+            case share_outcome::accepted:
+            case share_outcome::unsealed:
+            case share_outcome::already_unsealed:
+                break;
+            case share_outcome::not_initialized:
+                return error(409, "not_initialized", share_outcome_message(outcome));
+            case share_outcome::duplicate:
+                return error(409, "duplicate", share_outcome_message(outcome));
+            case share_outcome::malformed:
+                return error(400, "malformed_share", share_outcome_message(outcome));
+            case share_outcome::wrong_split:
+                return error(400, "wrong_split", share_outcome_message(outcome));
+            case share_outcome::wrong_key:
+                return error(400, "wrong_key", share_outcome_message(outcome));
+        }
+        const auto p = _unseal.progress(c);
+        boost::json::object o;
+        o["outcome"] = share_outcome_message(outcome);
+        o["sealed"] = p.sealed;
+        o["unseal_received"] = p.received;
+        o["unseal_needed"] = p.needed;
+        return ok(200, o);
+    }
+
+    auto seal() -> admin_response {
+        const auto rv = propose(make_seal_command());
+        if (rv != CKR_OK) {
+            return refusal(rv);
+        }
+        // This node at once; the others when they apply the entry.
+        _unseal.reset();
+        _vault->seal();
+        return ok(200, boost::json::object{{"sealed", true}});
+    }
+
+    auto rekey(const std::string& text) -> admin_response {
+        const auto v = boost::json::parse(text.empty() ? std::string("{}") : text);
+        if (!v.is_object()) {
+            return error(400, "bad_request", R"(expected {"mode": M, "k": K, "n": N})");
+        }
+        const auto c = _host->catalog();
+        if (!c) {
+            return error(409, "not_initialized", "the HSM is not initialized");
+        }
+        std::string why;
+        const auto split = split_of(v.as_object(), {c->mode, c->k, c->n}, why);
+        if (!split) {
+            return error(400, "bad_request", why);
+        }
+        auto key = fresh(*split);
+        const auto tokens = _host->tokens();
+        auto entry = _vault->with_master_key([&](std::span<const std::uint8_t> old_mk) {
+            return prepare_rekey(old_mk, key.mk.view(), key.check, *split, *c, tokens);
+        });
+        if (!entry) {
+            return error(503, "sealed", "this node is sealed");
+        }
+        if (!*entry) {
+            // The vault's MK opens no token key: this replica lagged a rekey.
+            return error(409, "conflict", "this node's master key is stale; retry");
+        }
+        const auto generation = c->generation + 1;
+        const auto rv = propose(std::move(**entry));
+        if (rv == CKR_DEVICE_ERROR) {
+            return with_shares(503, *split, generation, key.shares);
+        }
+        if (rv != CKR_OK) {
+            return refusal(rv);  // a token created meanwhile, or a concurrent rekey
+        }
+        // The entry has applied here, so the vault takes the new MK; every
+        // other node seals itself when it applies the entry.
+        (void)_vault->unseal(std::move(key.mk), _host->catalog());
+        return with_shares(200, *split, generation, key.shares);
     }
 
     auto list_tokens() -> admin_response {
@@ -307,6 +565,7 @@ private:
     HsmHost* _host;
     key_vault* _vault;
     admin_policy _policy;
+    operator_unseal _unseal;
 };
 
 }  // namespace kythira::hsm

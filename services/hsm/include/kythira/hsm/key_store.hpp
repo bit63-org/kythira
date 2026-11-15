@@ -57,12 +57,12 @@ struct new_token {
 }
 
 /// The rekey entry: every token key re-sealed from `old_mk` to `new_mk`
-/// under the next generation. Fails (nothing) if any key does not open,
-/// which means `old_mk` is wrong.
+/// under the next generation, with the new shares' mode and threshold.
+/// Fails (nothing) if any key does not open, which means `old_mk` is wrong.
 [[nodiscard]] inline auto prepare_rekey(std::span<const std::uint8_t> old_mk,
                                         std::span<const std::uint8_t> new_mk,
                                         std::span<const std::uint8_t, 8> new_mk_check,
-                                        const catalog_record& catalog,
+                                        split_parameters split, const catalog_record& catalog,
                                         const std::vector<token_entry>& tokens)
     -> std::optional<std::vector<std::byte>> {
     const std::uint32_t next = catalog.generation + 1;
@@ -74,7 +74,7 @@ struct new_token {
         }
         resealed.emplace_back(t.token_id, seal(new_mk, token_key_ad(t.token_id, next), tk->view()));
     }
-    return make_rekey_command(next, new_mk_check, resealed);
+    return make_rekey_command(next, new_mk_check, split, resealed);
 }
 
 /// An object's material, or nothing if the sealed bytes do not belong to

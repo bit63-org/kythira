@@ -17,7 +17,10 @@
 //               text bodies) with an admin client certificate, read back;
 //   * hsm       every node's operator API answers the operator (a fresh,
 //               sealed HSM), the peer routes answer a member's certificate
-//               and refuse the operator's, and an outsider gets nothing.
+//               and refuse the operator's, and an outsider gets nothing;
+//               then init on one node, two of three shares on each node
+//               unseal it, a token is created on a follower, and one seal
+//               reaches every node.
 //
 // The services come from `kythira_node --help`, so a build with only some
 // modules runs only their checks (ci.yml's full builds have no ledger;
@@ -623,5 +626,52 @@ BOOST_AUTO_TEST_CASE(every_compiled_in_service_on_one_cluster, *boost::unit_test
         BOOST_REQUIRE(member.has_value());
         BOOST_TEST(member->status == 200U, member->body);
         BOOST_TEST_MESSAGE("hsm: operator API on every node, peer routes for members only");
+
+        // Init on one node hands out the shares once, and leaves every node
+        // sealed; two shares unseal each node.
+        const auto admin = [&](const node_proc& p, http::verb verb, const std::string& target,
+                               const std::string& body = {}) {
+            return https_call(p.hsm, c.pki, verb, target, c.pki.admin_cert.string(),
+                              c.pki.admin_key.string(), {}, {{"Content-Type", "application/json"}},
+                              body);
+        };
+        auto init =
+            admin(first, http::verb::post, "/v1/init", R"({"mode": "operator", "k": 2, "n": 3})");
+        BOOST_REQUIRE(init.has_value());
+        BOOST_REQUIRE_MESSAGE(init->status == 200U, init->body);
+        std::vector<std::string> shares;
+        // Held: a range-for does not extend json_of's temporary (C++20).
+        const auto init_body = json_of(init->body);
+        for (const auto& v : init_body.at("shares").as_array()) {
+            shares.emplace_back(v.as_string());
+        }
+        BOOST_REQUIRE(shares.size() == 3U);
+        for (const auto& p : c.nodes) {
+            for (const auto& share : {shares[p.n % 3], shares[(p.n + 1) % 3]}) {
+                auto r = admin(p, http::verb::post, "/v1/unseal",
+                               boost::json::serialize(boost::json::object{{"share", share}}));
+                BOOST_REQUIRE(r.has_value());
+                BOOST_TEST(r->status == 200U, r->body);
+            }
+            auto st = admin(p, http::verb::get, "/v1/status");
+            BOOST_REQUIRE(st.has_value());
+            BOOST_TEST(json_of(st->body).at("sealed").as_bool() == false, st->body);
+        }
+        // A token created through a follower is forwarded to the leader.
+        auto token = admin(second, http::verb::post, "/v1/tokens", R"({"id": 1, "label": "ca"})");
+        BOOST_REQUIRE(token.has_value());
+        BOOST_TEST(token->status == 201U, token->body);
+        // One seal reaches every node within a maintenance pass.
+        auto sealed = admin(c.nodes.back(), http::verb::post, "/v1/seal");
+        BOOST_REQUIRE(sealed.has_value());
+        BOOST_TEST(sealed->status == 200U, sealed->body);
+        for (const auto& p : c.nodes) {
+            auto st = until(
+                200U, [&] { return admin(p, http::verb::get, "/v1/status"); }, R"("sealed":true)",
+                20s);
+            BOOST_REQUIRE(st.has_value());
+            BOOST_TEST(st->body.find(R"("sealed":true)") != std::string::npos, st->body);
+        }
+        BOOST_TEST_MESSAGE("hsm: init, unseal on every node, a token, and a cluster-wide seal");
     }
 }

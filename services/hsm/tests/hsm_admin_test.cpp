@@ -1,11 +1,13 @@
 // Copyright (c) 2026 Clark Rawlins
 // SPDX-License-Identifier: Apache-2.0
 
-// The HSM's operator API (.kiro/specs/virtual-hsm/ task 6d) over the
+// The HSM's operator API (.kiro/specs/virtual-hsm/ tasks 6d and 7) over the
 // direct store: only operators get in, the status reflects the catalog and
 // the vault, tokens are created sealed under the master key and only on an
 // unsealed node, bindings take percent-encoded identities, and each
-// refusal from the catalog maps to its HTTP status.
+// refusal from the catalog maps to its HTTP status. Init hands out shares
+// once, unseal takes them one at a time, seal reaches every node, and
+// rekey keeps every token while retiring the old shares.
 
 #define BOOST_TEST_MODULE hsm_admin_test
 #include <boost/test/unit_test.hpp>
@@ -39,6 +41,7 @@ struct admin_host {
     }
     [[nodiscard]] static auto fits(std::uint64_t id) -> bool { return id != 0 && id <= 1000; }
     [[nodiscard]] static auto leads(std::uint64_t /*local*/) -> bool { return true; }
+    [[nodiscard]] static auto catalog_barrier() -> hsm::ck_result<void> { return {}; }
 };
 
 const std::string k_operator = "spiffe://ops/alice";
@@ -176,4 +179,173 @@ BOOST_FIXTURE_TEST_CASE(routes_methods_and_commit_failures, fixture) {
     const auto r = call("POST", "/v1/tokens", R"({"id": 9, "label": "x"})");
     BOOST_TEST(r.status == 503U);
     BOOST_TEST(json(r).at("error") == "unavailable");
+}
+
+namespace {
+
+auto shares_of(const boost::json::object& o) -> std::vector<std::string> {
+    std::vector<std::string> out;
+    for (const auto& v : o.at("shares").as_array()) {
+        out.emplace_back(v.as_string());
+    }
+    return out;
+}
+
+auto unseal_body(const std::string& share) -> std::string {
+    return boost::json::serialize(boost::json::object{{"share", share}});
+}
+
+/// A second node on the same replicated store, with its own vault.
+struct other_node {
+    hsm::key_vault vault;
+    hsm::admin_api<admin_host> api;
+
+    explicit other_node(admin_host& host) : api{host, vault, hsm::admin_policy{{k_operator}}} {}
+
+    auto call(const std::string& method, const std::string& path, const std::string& body = "")
+        -> hsm::admin_response {
+        return api.handle({method, path, body, {k_operator}});
+    }
+};
+
+}  // namespace
+
+BOOST_FIXTURE_TEST_CASE(init_hands_out_shares_once_and_leaves_nodes_sealed, fixture) {
+    BOOST_TEST(call("POST", "/v1/init", R"({"mode": "operator", "k": 1, "n": 1})").status == 400U);
+    BOOST_TEST(call("POST", "/v1/init", R"({"mode": "operator", "k": 4, "n": 3})").status == 400U);
+    BOOST_TEST(call("POST", "/v1/init", R"({"mode": "hybrid", "k": 2, "n": 3})").status == 400U);
+    BOOST_TEST(call("POST", "/v1/init", R"({"k": 2})").status == 400U);
+    BOOST_TEST(call("GET", "/v1/init").status == 405U);
+    const auto r = call("POST", "/v1/init", R"({"mode": "operator", "k": 2, "n": 3})");
+    BOOST_REQUIRE(r.status == 200U);
+    const auto shares = shares_of(json(r));
+    BOOST_TEST(shares.size() == 3U);
+    BOOST_TEST(json(r).at("generation").to_number<int>() == 1);
+    BOOST_TEST(vault.sealed());
+    BOOST_REQUIRE(store.catalog().has_value());
+    BOOST_TEST(store.catalog()->k == 2);
+    const auto again = call("POST", "/v1/init", R"({"mode": "operator", "k": 2, "n": 3})");
+    BOOST_TEST(again.status == 409U);
+    BOOST_TEST(json(again).at("error") == "already_initialized");
+    BOOST_TEST(!json(again).contains("shares"));
+}
+
+BOOST_FIXTURE_TEST_CASE(single_share_needs_the_development_flag, fixture) {
+    hsm::key_vault v;
+    hsm::admin_policy policy{{k_operator}};
+    policy.allow_single_share = true;
+    hsm::admin_api<admin_host> dev{host, v, policy};
+    const auto r =
+        dev.handle({"POST", "/v1/init", R"({"mode": "operator", "k": 1, "n": 1})", {k_operator}});
+    BOOST_REQUIRE(r.status == 200U);
+    const auto shares = shares_of(json(r));
+    BOOST_REQUIRE(shares.size() == 1U);
+    BOOST_TEST(json(dev.handle({"POST", "/v1/unseal", unseal_body(shares[0]), {k_operator}}))
+                   .at("sealed") == false);
+}
+
+BOOST_FIXTURE_TEST_CASE(unseal_takes_k_shares_one_at_a_time, fixture) {
+    BOOST_TEST(call("POST", "/v1/unseal", unseal_body("khs1-00")).status == 409U);  // no catalog
+    const auto shares =
+        shares_of(json(call("POST", "/v1/init", R"({"mode": "operator", "k": 2, "n": 3})")));
+    BOOST_TEST(call("POST", "/v1/unseal", R"({"key": 1})").status == 400U);
+    BOOST_TEST(json(call("POST", "/v1/unseal", unseal_body("khs1-00"))).at("error") ==
+               "malformed_share");
+    const auto first = json(call("POST", "/v1/unseal", unseal_body(shares[2])));
+    BOOST_TEST(first.at("sealed") == true);
+    BOOST_TEST(first.at("unseal_received").to_number<int>() == 1);
+    BOOST_TEST(first.at("unseal_needed").to_number<int>() == 2);
+    BOOST_TEST(json(call("GET", "/v1/status")).at("unseal_received").to_number<int>() == 1);
+    BOOST_TEST(call("POST", "/v1/unseal", unseal_body(shares[2])).status == 409U);  // duplicate
+    // An operator can discard what was entered.
+    BOOST_TEST(call("DELETE", "/v1/unseal").status == 200U);
+    BOOST_TEST(json(call("GET", "/v1/status")).at("unseal_received").to_number<int>() == 0);
+    BOOST_TEST(json(call("POST", "/v1/unseal", unseal_body(shares[0]))).at("sealed") == true);
+    const auto last = json(call("POST", "/v1/unseal", unseal_body(shares[1])));
+    BOOST_TEST(last.at("sealed") == false);
+    BOOST_TEST(!vault.sealed());
+    BOOST_TEST(call("POST", "/v1/tokens", R"({"id": 2, "label": "after"})").status == 201U);
+}
+
+BOOST_FIXTURE_TEST_CASE(seal_reaches_every_node, fixture) {
+    other_node peer(host);
+    const auto shares =
+        shares_of(json(call("POST", "/v1/init", R"({"mode": "operator", "k": 2, "n": 3})")));
+    for (const auto& s : {shares[0], shares[1]}) {
+        (void)call("POST", "/v1/unseal", unseal_body(s));
+        (void)peer.call("POST", "/v1/unseal", unseal_body(s));
+    }
+    BOOST_REQUIRE(!vault.sealed());
+    BOOST_REQUIRE(!peer.vault.sealed());
+    BOOST_TEST(!peer.api.maintain());
+    BOOST_TEST(call("POST", "/v1/seal").status == 200U);
+    BOOST_TEST(vault.sealed());
+    BOOST_TEST(store.catalog()->seal_epoch == 1U);
+    // The other node seals itself on its next maintenance pass.
+    BOOST_TEST(!peer.vault.sealed());
+    BOOST_TEST(peer.api.maintain());
+    BOOST_TEST(peer.vault.sealed());
+    // And the same shares unseal again.
+    (void)call("POST", "/v1/unseal", unseal_body(shares[2]));
+    BOOST_TEST(json(call("POST", "/v1/unseal", unseal_body(shares[0]))).at("sealed") == false);
+    BOOST_TEST(!api.maintain());
+}
+
+BOOST_FIXTURE_TEST_CASE(rekey_keeps_tokens_and_retires_old_shares, fixture) {
+    other_node peer(host);
+    BOOST_TEST(call("POST", "/v1/rekey").status == 409U);  // not initialized
+    const auto old_shares =
+        shares_of(json(call("POST", "/v1/init", R"({"mode": "operator", "k": 2, "n": 3})")));
+    BOOST_TEST(call("POST", "/v1/rekey").status == 503U);  // sealed
+    for (const auto& s : {old_shares[0], old_shares[1]}) {
+        (void)call("POST", "/v1/unseal", unseal_body(s));
+        (void)peer.call("POST", "/v1/unseal", unseal_body(s));
+    }
+    BOOST_REQUIRE(call("POST", "/v1/tokens", R"({"id": 4, "label": "ca"})").status == 201U);
+    const auto tk_before = vault.with_token_key(
+        *store.token(4), [](auto tk) { return std::vector<std::uint8_t>(tk.begin(), tk.end()); });
+    BOOST_REQUIRE(tk_before.has_value());
+
+    BOOST_TEST(call("POST", "/v1/rekey", R"({"k": 5})").status == 400U);  // k > n
+    const auto r = call("POST", "/v1/rekey", R"({"k": 3, "n": 4})");
+    BOOST_REQUIRE(r.status == 200U);
+    const auto new_shares = shares_of(json(r));
+    BOOST_TEST(new_shares.size() == 4U);
+    BOOST_TEST(store.catalog()->generation == 2U);
+    BOOST_TEST(store.catalog()->k == 3);
+    BOOST_TEST(store.token(4)->generation == 2U);
+    // This node holds the new key; the token key under it is the same.
+    BOOST_TEST(!vault.sealed());
+    const auto tk_after = vault.with_token_key(
+        *store.token(4), [](auto tk) { return std::vector<std::uint8_t>(tk.begin(), tk.end()); });
+    BOOST_REQUIRE(tk_after.has_value());
+    BOOST_TEST(*tk_after == *tk_before);
+    // The other node held the old key, which opens nothing now: it seals.
+    BOOST_TEST(peer.api.maintain());
+    BOOST_TEST(json(peer.call("POST", "/v1/unseal", unseal_body(old_shares[0]))).at("error") ==
+               "wrong_split");
+    for (const auto& s : {new_shares[3], new_shares[0]}) {
+        BOOST_TEST(json(peer.call("POST", "/v1/unseal", unseal_body(s))).at("sealed") == true);
+    }
+    BOOST_TEST(json(peer.call("POST", "/v1/unseal", unseal_body(new_shares[1]))).at("sealed") ==
+               false);
+    BOOST_TEST(peer.vault.with_token_key(*store.token(4), [](auto) { return 0; }).has_value());
+}
+
+BOOST_FIXTURE_TEST_CASE(uncertain_commits_still_hand_out_the_shares, fixture) {
+    store.fail_proposals = true;
+    const auto r = call("POST", "/v1/init", R"({"mode": "node", "k": 2, "n": 3})");
+    BOOST_TEST(r.status == 503U);
+    BOOST_TEST(shares_of(json(r)).size() == 3U);
+    BOOST_TEST(json(r).at("error") == "unavailable");
+    store.fail_proposals = false;
+    initialize();
+    unseal();
+    store.fail_proposals = true;
+    const auto rk = call("POST", "/v1/rekey");
+    BOOST_TEST(rk.status == 503U);
+    BOOST_TEST(shares_of(json(rk)).size() == 3U);
+    BOOST_TEST(json(rk).at("generation").to_number<int>() == 2);
+    BOOST_TEST(call("POST", "/v1/seal").status == 503U);
+    BOOST_TEST(!vault.sealed());  // the seal did not commit, so nothing changed here
 }

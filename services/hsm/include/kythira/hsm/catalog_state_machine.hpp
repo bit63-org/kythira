@@ -60,10 +60,14 @@ struct catalog_record {
     std::uint8_t n = 0;
     std::uint32_t generation = 1;
     std::array<std::uint8_t, 8> mk_check{};
+    /// Bumped by every `seal` command: a node unsealed under an earlier
+    /// value discards its keys (requirement 4.7).
+    std::uint64_t seal_epoch = 0;
 
     [[nodiscard]] auto encode() const -> std::string {
         byte_writer w;
         w.u8(1).u8(static_cast<std::uint8_t>(mode)).u8(k).u8(n).u32(generation).bytes(mk_check);
+        w.u64(seal_epoch);
         return w.take_string();
     }
 
@@ -78,6 +82,7 @@ struct catalog_record {
         c.n = r.u8();
         c.generation = r.u32();
         auto check = r.bytes();
+        c.seal_epoch = r.u64();
         r.finish();
         if (check.size() != c.mk_check.size()) {
             throw std::invalid_argument("catalog record: bad check value");
@@ -122,7 +127,7 @@ enum class catalog_command : std::uint8_t {
     bind = 4,
     unbind = 5,
     rekey = 6,
-    set_mode = 7,
+    seal = 7,
 };
 
 [[nodiscard]] inline auto valid_unseal_parameters(unseal_mode mode, std::uint8_t k, std::uint8_t n)
@@ -176,15 +181,27 @@ enum class catalog_command : std::uint8_t {
     return w.take();
 }
 
+/// The unseal mode and threshold a rekey's new shares were split with.
+struct split_parameters {
+    unseal_mode mode = unseal_mode::operator_shares;
+    std::uint8_t k = 0;
+    std::uint8_t n = 0;
+};
+
 /// Every token's key re-sealed under a new MK, as one entry: `generation`
 /// must be the current one plus one and `tokens` must name every token.
+/// The new shares' mode and threshold ride in the same entry, so a mode
+/// switch and its re-split commit together (requirement 4.5).
 [[nodiscard]] inline auto make_rekey_command(
-    std::uint32_t generation, std::span<const std::uint8_t, 8> mk_check,
+    std::uint32_t generation, std::span<const std::uint8_t, 8> mk_check, split_parameters split,
     const std::vector<std::pair<std::uint64_t, sealed_bytes>>& tokens) -> std::vector<std::byte> {
     byte_writer w;
     w.u8(static_cast<std::uint8_t>(catalog_command::rekey))
         .u32(generation)
         .bytes(mk_check)
+        .u8(static_cast<std::uint8_t>(split.mode))
+        .u8(split.k)
+        .u8(split.n)
         .u32(static_cast<std::uint32_t>(tokens.size()));
     for (const auto& [id, sealed] : tokens) {
         w.u64(id).bytes(sealed);
@@ -192,15 +209,12 @@ enum class catalog_command : std::uint8_t {
     return w.take();
 }
 
-/// Records a new unseal mode (requirement 4.5: the switch itself, with its
-/// re-split, happens on an unsealed cluster before this is proposed).
-[[nodiscard]] inline auto make_set_mode_command(unseal_mode mode, std::uint8_t k, std::uint8_t n)
-    -> std::vector<std::byte> {
+/// Every node discards its master key and token keys (requirement 4.7):
+/// the entry bumps the catalog's seal epoch, and a node whose vault was
+/// unsealed under an earlier epoch seals itself when it sees the new one.
+[[nodiscard]] inline auto make_seal_command() -> std::vector<std::byte> {
     byte_writer w;
-    w.u8(static_cast<std::uint8_t>(catalog_command::set_mode))
-        .u8(static_cast<std::uint8_t>(mode))
-        .u8(k)
-        .u8(n);
+    w.u8(static_cast<std::uint8_t>(catalog_command::seal));
     return w.take();
 }
 
@@ -245,8 +259,8 @@ public:
             case catalog_command::rekey:
                 rv = apply_rekey(r, batch);
                 break;
-            case catalog_command::set_mode:
-                rv = apply_set_mode(r, batch);
+            case catalog_command::seal:
+                rv = apply_seal(batch);
                 break;
             default:
                 throw std::invalid_argument("hsm_catalog_state_machine: unknown command");
@@ -403,13 +417,17 @@ private:
     auto apply_rekey(byte_reader& r, kythira::write_batch& batch) -> CK_RV {
         const auto generation = r.u32();
         auto check = r.bytes();
+        split_parameters split;
+        split.mode = static_cast<unseal_mode>(r.u8());
+        split.k = r.u8();
+        split.n = r.u8();
         const auto count = r.u32();
         std::vector<std::pair<std::uint64_t, sealed_bytes>> resealed;
         for (std::uint32_t i = 0; i < count; ++i) {
             const auto id = r.u64();
             resealed.emplace_back(id, r.bytes());
         }
-        if (check.size() != 8) {
+        if (check.size() != 8 || !valid_unseal_parameters(split.mode, split.k, split.n)) {
             throw std::invalid_argument("hsm_catalog_state_machine: bad rekey");
         }
         auto c = catalog();
@@ -446,24 +464,19 @@ private:
         }
         c->generation = generation;
         std::ranges::copy(check, c->mk_check.begin());
+        c->mode = split.mode;
+        c->k = split.k;
+        c->n = split.n;
         put(batch, "c", c->encode());
         return CKR_OK;
     }
 
-    auto apply_set_mode(byte_reader& r, kythira::write_batch& batch) -> CK_RV {
-        const auto mode = static_cast<unseal_mode>(r.u8());
-        const auto k = r.u8();
-        const auto n = r.u8();
-        if (!valid_unseal_parameters(mode, k, n)) {
-            throw std::invalid_argument("hsm_catalog_state_machine: bad mode");
-        }
+    auto apply_seal(kythira::write_batch& batch) -> CK_RV {
         auto c = catalog();
         if (!c) {
             return CKR_CRYPTOKI_NOT_INITIALIZED;
         }
-        c->mode = mode;
-        c->k = k;
-        c->n = n;
+        ++c->seal_epoch;
         put(batch, "c", c->encode());
         return CKR_OK;
     }

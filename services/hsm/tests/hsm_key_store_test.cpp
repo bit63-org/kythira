@@ -177,13 +177,12 @@ BOOST_AUTO_TEST_CASE(catalog_initializes_once_and_records_the_mode) {
     BOOST_TEST(rec->n == 5);
     BOOST_TEST(rec->generation == 1U);
     BOOST_TEST(rec->mk_check == check);
-    BOOST_TEST(c.apply(hsm::make_set_mode_command(hsm::unseal_mode::node_shares, 2, 3)) == CKR_OK);
-    BOOST_TEST(static_cast<int>(c.sm.catalog()->mode) ==
-               static_cast<int>(hsm::unseal_mode::node_shares));
-    BOOST_CHECK_THROW(
-        (void)c.sm.apply(hsm::make_set_mode_command(hsm::unseal_mode::node_shares, 4, 3),
-                         ++c.index),
-        std::invalid_argument);
+    BOOST_TEST(rec->seal_epoch == 0U);
+    // A seal bumps the epoch every node compares its unseal against.
+    BOOST_TEST(c.apply(hsm::make_seal_command()) == CKR_OK);
+    BOOST_TEST(c.apply(hsm::make_seal_command()) == CKR_OK);
+    BOOST_TEST(c.sm.catalog()->seal_epoch == 2U);
+    BOOST_TEST(c.sm.catalog()->k == 3);
 }
 
 BOOST_AUTO_TEST_CASE(catalog_tokens_bindings_and_deletion) {
@@ -242,15 +241,21 @@ BOOST_AUTO_TEST_CASE(rekey_reseals_every_token_and_retires_the_old_mk) {
     auto new_mk = random_key();
     std::array<std::uint8_t, 8> new_check{9, 9, 9, 9, 9, 9, 9, 9};
     // A wrong old MK cannot produce a rekey entry.
-    BOOST_TEST(!hsm::prepare_rekey(random_key().view(), new_mk.view(), new_check, *c.sm.catalog(),
-                                   c.sm.tokens())
+    // The new shares switch to node unseal, 3 of 4, in the same entry.
+    const hsm::split_parameters split{hsm::unseal_mode::node_shares, 3, 4};
+    BOOST_TEST(!hsm::prepare_rekey(random_key().view(), new_mk.view(), new_check, split,
+                                   *c.sm.catalog(), c.sm.tokens())
                     .has_value());
-    auto entry =
-        hsm::prepare_rekey(old_mk.view(), new_mk.view(), new_check, *c.sm.catalog(), c.sm.tokens());
+    auto entry = hsm::prepare_rekey(old_mk.view(), new_mk.view(), new_check, split, *c.sm.catalog(),
+                                    c.sm.tokens());
     BOOST_REQUIRE(entry.has_value());
     BOOST_TEST(c.apply(*entry) == CKR_OK);
     BOOST_TEST(c.sm.catalog()->generation == 2U);
     BOOST_TEST(c.sm.catalog()->mk_check == new_check);
+    BOOST_TEST(static_cast<int>(c.sm.catalog()->mode) ==
+               static_cast<int>(hsm::unseal_mode::node_shares));
+    BOOST_TEST(c.sm.catalog()->k == 3);
+    BOOST_TEST(c.sm.catalog()->n == 4);
     for (const auto* t : {&a, &b}) {
         auto e = c.sm.token(t->entry.token_id);
         BOOST_TEST(!hsm::open_token_key(old_mk.view(), *e).has_value());
@@ -263,7 +268,8 @@ BOOST_AUTO_TEST_CASE(rekey_reseals_every_token_and_retires_the_old_mk) {
     BOOST_TEST(c.apply(*entry) == CKR_FUNCTION_REJECTED);
     std::vector<std::pair<std::uint64_t, hsm::sealed_bytes>> partial{
         {1, hsm::seal(new_mk.view(), hsm::token_key_ad(1, 3), a.tk.view())}};
-    BOOST_TEST(c.apply(hsm::make_rekey_command(3, new_check, partial)) == CKR_FUNCTION_REJECTED);
+    BOOST_TEST(c.apply(hsm::make_rekey_command(3, new_check, split, partial)) ==
+               CKR_FUNCTION_REJECTED);
 }
 
 // --- Token ----------------------------------------------------------------------
