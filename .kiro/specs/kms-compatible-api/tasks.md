@@ -303,9 +303,17 @@ is one PR unless noted.
     the write, so its Raft log holds writes in the clear until compaction
     (Kinesis seals before proposing); item keys stay in the clear.
 
-- [ ] 20. Documentation
+- [x] 20. Documentation
   - `doc/kms.md` (deployment in both layouts, the AWS CLI walkthrough,
     authorization, the honest limits), module README, updates to
     `doc/dynamodb.md` (what is visible on disk) and the Kinesis encryption
     doc
   - _Requirements: 1.2, 7.7, 12.3_
+  - `doc/kms.md` opens with what the KMS protects against and what it
+    does not, then the two layouts (co-located HSM with the token setup,
+    any PKCS#11 module), the CLI walkthrough, IAM and static
+    authorization (with the consumer-root exception from task 19), the
+    consumers, what reaches disk and what has not been checked against
+    AWS. `doc/dynamodb.md` gains "Encryption at rest" with what is visible
+    on disk; the DynamoDB README's claim that exports are always sealed
+    is corrected (only with `S3SseAlgorithm=KMS`, as on AWS).

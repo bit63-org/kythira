@@ -9,7 +9,7 @@ Terraform's `aws_dynamodb_table` work against it unchanged with
 grow.
 
 This page covers the model, running a cluster, the compatibility switches,
-limits, what is implemented and what is not. The module's layout, file by
+encryption at rest, limits, what is implemented and what is not. The module's layout, file by
 file, is in `services/dynamodb/README.md`.
 
 ## Model
@@ -139,6 +139,35 @@ the limit or delay applies.
 An unknown switch or value is refused, so a typo in a tag fails at
 `TagResource` or `CreateTable` instead of silently keeping AWS's
 behaviour.
+
+## Encryption at rest
+
+With a key provider (`KYTHIRA_DYNAMODB_KMS`: `kythira` for Kythira's KMS,
+the default in a `kythira_node` that runs the KMS module; `aws`; or
+`local`), every table has its own 256-bit table key, stored only wrapped
+under a KMS key in the catalog: DynamoDB's owned key when the table names
+none, `alias/aws/dynamodb`, or the table's `KMSMasterKeyId`. The setup, the
+providers and the table states (`INACCESSIBLE_ENCRYPTION_CREDENTIALS`,
+re-sealing a table that gains a key) are in `services/dynamodb/README.md`
+("Tables are encrypted at rest"); the KMS's side is `doc/kms.md`.
+
+What is visible on disk in an encrypted table's data directory:
+
+| Where | Visible |
+|---|---|
+| Engine values (items, LSI and GSI entries) | nothing: sealed with AES-256-GCM under keys derived from the table key, 29 bytes longer than the item |
+| Engine keys | partition, sort and index key values, in the clear: the engine orders by them. A table that must hide them needs opaque key values |
+| Raft log | each write in the clear, until the log is compacted: values are sealed when a write applies (an `UpdateItem`'s result is known only then) |
+| Transaction intents | a transaction's writes in the clear until it settles |
+| Backups, point-in-time archives, change records | sealed under the table key |
+| Exports | as S3 holds them: in the clear with `S3SseAlgorithm=AES256` (S3's default, which a Kythira bucket directory does not apply), sealed under the KMS key `S3SseKmsKeyId` names with `S3SseAlgorithm=KMS` |
+| The catalog | the wrapped table key and the KMS key's ARN; never the table key in the clear |
+
+The KMS's container scenario checks this on Docker and rootless Podman
+(`services/hsm/tests/docker/hsm_chaos_test.cpp`,
+`encrypted_services_in_kythira_node`): after encrypted writes under a
+killed and a partitioned member, no item value appears in any member's
+data directory outside the Raft logs, which it reports.
 
 ## Limits
 

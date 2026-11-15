@@ -269,6 +269,14 @@ adding one generation.
 token: round trips, the key id and context bindings, refused key ids, a
 wrong PIN, a dropped session and SHA-1 seals.
 
+The HSM's container scenario (`services/hsm/tests/docker/hsm_chaos_test.cpp`,
+`encrypted_services_in_kythira_node`; KMS task 19) writes to an encrypted
+stream through three kythira_node members on the `kythira` provider while
+one is killed and another cut off, reads back every acknowledged record,
+and searches every member's data directory for the records' data, raw
+and in base64: none may appear, the Raft logs included. `doc/kms.md` is
+the KMS's operator guide.
+
 `kythira_node_kms_kinesis_test` (with IAM's tests, registered under
 `cmd/kythira_node/`) runs the real thing in kythira_node: IAM, Kinesis
 and the KMS over SoftHSM2 in one process, where a role that the stream's
