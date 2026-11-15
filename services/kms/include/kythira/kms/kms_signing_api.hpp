@@ -311,7 +311,7 @@ private:
         r.keys.emplace_back("kms:SigningAlgorithm",
                             std::vector<std::string>{std::string(alg_name)});
         r.keys.emplace_back("kms:MessageType", std::vector<std::string>{std::string(type)});
-        if (auto denied = ctx.authorize(std::move(r))) {
+        if (auto denied = authorize_with_grants(ctx, **c, k->record, std::move(r))) {
             return *denied;
         }
         const auto& key = k->record;
@@ -366,7 +366,7 @@ private:
         }
         auto r = key_request(ctx, **c, *k, action);
         r.keys.emplace_back("kms:MacAlgorithm", std::vector<std::string>{std::string(alg_name)});
-        if (auto denied = ctx.authorize(std::move(r))) {
+        if (auto denied = authorize_with_grants(ctx, **c, k->record, std::move(r))) {
             return *denied;
         }
         const auto& key = k->record;

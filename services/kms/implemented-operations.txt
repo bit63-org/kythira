@@ -7,6 +7,7 @@
 # here.
 CancelKeyDeletion
 CreateAlias
+CreateGrant
 CreateKey
 Decrypt
 DeleteAlias
@@ -23,11 +24,15 @@ GenerateRandom
 GetKeyPolicy
 GetPublicKey
 ListAliases
+ListGrants
 ListKeyPolicies
 ListKeys
 ListResourceTags
+ListRetirableGrants
 PutKeyPolicy
 ReEncrypt
+RetireGrant
+RevokeGrant
 ScheduleKeyDeletion
 Sign
 TagResource
