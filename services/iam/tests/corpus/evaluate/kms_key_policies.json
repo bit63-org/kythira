@@ -1,0 +1,1274 @@
+{
+  "source": "https://docs.aws.amazon.com/kms/latest/developerguide/key-policies.html",
+  "description": "KMS key policies through IAM's evaluator (.kiro/specs/kms-compatible-api/ Requirement 7.3, 7.6): the default key policy's delegation to the account, key policies without it, cross-account use, kms:ViaService and kms:CallerAccount, and encryption context conditions. Grants are not here: the KMS evaluates them itself before IAM (design.md), so their cases are the KMS module's own (task 9). The KMS sets kms:CallerAccount, kms:ViaService and the encryption context keys; a case lists them in context as the KMS would.",
+  "cases": [
+    {
+      "name": "default key policy delegates: identity allow is enough",
+      "kind": "evaluate",
+      "principal": "user/alice",
+      "action": "kms:Encrypt",
+      "resource": "arn:aws:kms:us-east-1:111122223333:key/1234abcd-12ab-34cd-56ef-1234567890ab",
+      "source": "https://docs.aws.amazon.com/kms/latest/developerguide/key-policy-default.html#key-policy-default-allow-root-enable-iam",
+      "resource_kind": "key",
+      "resource_policy": {
+        "Version": "2012-10-17",
+        "Statement": [
+          {
+            "Sid": "Enable IAM User Permissions",
+            "Effect": "Allow",
+            "Principal": {
+              "AWS": "arn:aws:iam::111122223333:root"
+            },
+            "Action": "kms:*",
+            "Resource": "*"
+          }
+        ]
+      },
+      "identity": [
+        {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Action": "kms:Encrypt",
+              "Resource": "arn:aws:kms:us-east-1:111122223333:key/1234abcd-12ab-34cd-56ef-1234567890ab"
+            }
+          ]
+        }
+      ],
+      "expect": "allow"
+    },
+    {
+      "name": "default key policy delegates: no identity allow, no access",
+      "kind": "evaluate",
+      "principal": "user/alice",
+      "action": "kms:Encrypt",
+      "resource": "arn:aws:kms:us-east-1:111122223333:key/1234abcd-12ab-34cd-56ef-1234567890ab",
+      "source": "https://docs.aws.amazon.com/kms/latest/developerguide/key-policy-default.html#key-policy-default-allow-root-enable-iam",
+      "resource_kind": "key",
+      "resource_policy": {
+        "Version": "2012-10-17",
+        "Statement": [
+          {
+            "Sid": "Enable IAM User Permissions",
+            "Effect": "Allow",
+            "Principal": {
+              "AWS": "arn:aws:iam::111122223333:root"
+            },
+            "Action": "kms:*",
+            "Resource": "*"
+          }
+        ]
+      },
+      "expect": "implicit_deny"
+    },
+    {
+      "name": "default key policy delegates: identity allow for another action only",
+      "kind": "evaluate",
+      "principal": "user/alice",
+      "action": "kms:Decrypt",
+      "resource": "arn:aws:kms:us-east-1:111122223333:key/1234abcd-12ab-34cd-56ef-1234567890ab",
+      "source": "https://docs.aws.amazon.com/kms/latest/developerguide/key-policy-default.html#key-policy-default-allow-root-enable-iam",
+      "resource_kind": "key",
+      "resource_policy": {
+        "Version": "2012-10-17",
+        "Statement": [
+          {
+            "Sid": "Enable IAM User Permissions",
+            "Effect": "Allow",
+            "Principal": {
+              "AWS": "arn:aws:iam::111122223333:root"
+            },
+            "Action": "kms:*",
+            "Resource": "*"
+          }
+        ]
+      },
+      "identity": [
+        {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Action": "kms:Encrypt",
+              "Resource": "*"
+            }
+          ]
+        }
+      ],
+      "expect": "implicit_deny"
+    },
+    {
+      "name": "default key policy: the account root user",
+      "kind": "evaluate",
+      "principal": "root",
+      "action": "kms:ScheduleKeyDeletion",
+      "resource": "arn:aws:kms:us-east-1:111122223333:key/1234abcd-12ab-34cd-56ef-1234567890ab",
+      "source": "https://docs.aws.amazon.com/kms/latest/developerguide/key-policy-default.html#key-policy-default-allow-root-enable-iam",
+      "resource_kind": "key",
+      "resource_policy": {
+        "Version": "2012-10-17",
+        "Statement": [
+          {
+            "Sid": "Enable IAM User Permissions",
+            "Effect": "Allow",
+            "Principal": {
+              "AWS": "arn:aws:iam::111122223333:root"
+            },
+            "Action": "kms:*",
+            "Resource": "*"
+          }
+        ]
+      },
+      "expect": "allow"
+    },
+    {
+      "name": "default key policy delegates to role sessions too",
+      "kind": "evaluate",
+      "principal": "role/app/s1",
+      "action": "kms:Decrypt",
+      "resource": "arn:aws:kms:us-east-1:111122223333:key/1234abcd-12ab-34cd-56ef-1234567890ab",
+      "source": "https://docs.aws.amazon.com/kms/latest/developerguide/key-policy-default.html#key-policy-default-allow-root-enable-iam",
+      "resource_kind": "key",
+      "resource_policy": {
+        "Version": "2012-10-17",
+        "Statement": [
+          {
+            "Sid": "Enable IAM User Permissions",
+            "Effect": "Allow",
+            "Principal": {
+              "AWS": "arn:aws:iam::111122223333:root"
+            },
+            "Action": "kms:*",
+            "Resource": "*"
+          }
+        ]
+      },
+      "identity": [
+        {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Action": "kms:Decrypt",
+              "Resource": "*"
+            }
+          ]
+        }
+      ],
+      "expect": "allow"
+    },
+    {
+      "name": "identity deny wins over the default key policy",
+      "kind": "evaluate",
+      "principal": "user/alice",
+      "action": "kms:Encrypt",
+      "resource": "arn:aws:kms:us-east-1:111122223333:key/1234abcd-12ab-34cd-56ef-1234567890ab",
+      "source": "https://docs.aws.amazon.com/kms/latest/developerguide/key-policy-default.html#key-policy-default-allow-root-enable-iam",
+      "resource_kind": "key",
+      "resource_policy": {
+        "Version": "2012-10-17",
+        "Statement": [
+          {
+            "Sid": "Enable IAM User Permissions",
+            "Effect": "Allow",
+            "Principal": {
+              "AWS": "arn:aws:iam::111122223333:root"
+            },
+            "Action": "kms:*",
+            "Resource": "*"
+          }
+        ]
+      },
+      "identity": [
+        {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Action": "kms:*",
+              "Resource": "*"
+            },
+            {
+              "Sid": "NoEncrypt",
+              "Effect": "Deny",
+              "Action": "kms:Encrypt",
+              "Resource": "*"
+            }
+          ]
+        }
+      ],
+      "decided_by": "identity[0]#NoEncrypt",
+      "expect": "explicit_deny"
+    },
+    {
+      "name": "no delegation: identity allow alone does not reach the key",
+      "kind": "evaluate",
+      "principal": "user/alice",
+      "action": "kms:Encrypt",
+      "resource": "arn:aws:kms:us-east-1:111122223333:key/1234abcd-12ab-34cd-56ef-1234567890ab",
+      "source": "https://docs.aws.amazon.com/kms/latest/developerguide/key-policies.html#key-policy-elements",
+      "resource_kind": "key",
+      "resource_policy": {
+        "Version": "2012-10-17",
+        "Statement": [
+          {
+            "Sid": "KeyAdmins",
+            "Effect": "Allow",
+            "Principal": {
+              "AWS": "arn:aws:iam::111122223333:user/bob"
+            },
+            "Action": "kms:*",
+            "Resource": "*"
+          },
+          {
+            "Sid": "KeyUsers",
+            "Effect": "Allow",
+            "Principal": {
+              "AWS": "arn:aws:iam::111122223333:role/app"
+            },
+            "Action": [
+              "kms:Encrypt",
+              "kms:Decrypt",
+              "kms:GenerateDataKey*"
+            ],
+            "Resource": "*"
+          }
+        ]
+      },
+      "identity": [
+        {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Action": "kms:*",
+              "Resource": "*"
+            }
+          ]
+        }
+      ],
+      "expect": "implicit_deny"
+    },
+    {
+      "name": "no delegation: a user the key policy names needs no identity policy",
+      "kind": "evaluate",
+      "principal": "user/bob",
+      "action": "kms:PutKeyPolicy",
+      "resource": "arn:aws:kms:us-east-1:111122223333:key/1234abcd-12ab-34cd-56ef-1234567890ab",
+      "source": "https://docs.aws.amazon.com/kms/latest/developerguide/key-policy-default.html#key-policy-default-allow-administrators",
+      "resource_kind": "key",
+      "resource_policy": {
+        "Version": "2012-10-17",
+        "Statement": [
+          {
+            "Sid": "KeyAdmins",
+            "Effect": "Allow",
+            "Principal": {
+              "AWS": "arn:aws:iam::111122223333:user/bob"
+            },
+            "Action": "kms:*",
+            "Resource": "*"
+          },
+          {
+            "Sid": "KeyUsers",
+            "Effect": "Allow",
+            "Principal": {
+              "AWS": "arn:aws:iam::111122223333:role/app"
+            },
+            "Action": [
+              "kms:Encrypt",
+              "kms:Decrypt",
+              "kms:GenerateDataKey*"
+            ],
+            "Resource": "*"
+          }
+        ]
+      },
+      "decided_by": "resource#KeyAdmins",
+      "expect": "allow"
+    },
+    {
+      "name": "no delegation: a role the key policy names, for the actions it lists",
+      "kind": "evaluate",
+      "principal": "role/app/s1",
+      "action": "kms:GenerateDataKeyWithoutPlaintext",
+      "resource": "arn:aws:kms:us-east-1:111122223333:key/1234abcd-12ab-34cd-56ef-1234567890ab",
+      "source": "https://docs.aws.amazon.com/kms/latest/developerguide/key-policy-default.html#key-policy-default-allow-users",
+      "resource_kind": "key",
+      "resource_policy": {
+        "Version": "2012-10-17",
+        "Statement": [
+          {
+            "Sid": "KeyAdmins",
+            "Effect": "Allow",
+            "Principal": {
+              "AWS": "arn:aws:iam::111122223333:user/bob"
+            },
+            "Action": "kms:*",
+            "Resource": "*"
+          },
+          {
+            "Sid": "KeyUsers",
+            "Effect": "Allow",
+            "Principal": {
+              "AWS": "arn:aws:iam::111122223333:role/app"
+            },
+            "Action": [
+              "kms:Encrypt",
+              "kms:Decrypt",
+              "kms:GenerateDataKey*"
+            ],
+            "Resource": "*"
+          }
+        ]
+      },
+      "expect": "allow"
+    },
+    {
+      "name": "no delegation: a role the key policy names, outside the actions it lists",
+      "kind": "evaluate",
+      "principal": "role/app/s1",
+      "action": "kms:ScheduleKeyDeletion",
+      "resource": "arn:aws:kms:us-east-1:111122223333:key/1234abcd-12ab-34cd-56ef-1234567890ab",
+      "source": "https://docs.aws.amazon.com/kms/latest/developerguide/key-policy-default.html#key-policy-default-allow-users",
+      "resource_kind": "key",
+      "resource_policy": {
+        "Version": "2012-10-17",
+        "Statement": [
+          {
+            "Sid": "KeyAdmins",
+            "Effect": "Allow",
+            "Principal": {
+              "AWS": "arn:aws:iam::111122223333:user/bob"
+            },
+            "Action": "kms:*",
+            "Resource": "*"
+          },
+          {
+            "Sid": "KeyUsers",
+            "Effect": "Allow",
+            "Principal": {
+              "AWS": "arn:aws:iam::111122223333:role/app"
+            },
+            "Action": [
+              "kms:Encrypt",
+              "kms:Decrypt",
+              "kms:GenerateDataKey*"
+            ],
+            "Resource": "*"
+          }
+        ]
+      },
+      "identity": [
+        {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Action": "kms:*",
+              "Resource": "*"
+            }
+          ]
+        }
+      ],
+      "expect": "implicit_deny"
+    },
+    {
+      "name": "no delegation: even the root user is not let in by the key policy",
+      "kind": "evaluate",
+      "principal": "root",
+      "action": "kms:Decrypt",
+      "resource": "arn:aws:kms:us-east-1:111122223333:key/1234abcd-12ab-34cd-56ef-1234567890ab",
+      "source": "https://docs.aws.amazon.com/kms/latest/developerguide/key-policy-overview.html",
+      "resource_kind": "key",
+      "resource_policy": {
+        "Version": "2012-10-17",
+        "Statement": [
+          {
+            "Sid": "KeyAdmins",
+            "Effect": "Allow",
+            "Principal": {
+              "AWS": "arn:aws:iam::111122223333:user/bob"
+            },
+            "Action": "kms:*",
+            "Resource": "*"
+          },
+          {
+            "Sid": "KeyUsers",
+            "Effect": "Allow",
+            "Principal": {
+              "AWS": "arn:aws:iam::111122223333:role/app"
+            },
+            "Action": [
+              "kms:Encrypt",
+              "kms:Decrypt",
+              "kms:GenerateDataKey*"
+            ],
+            "Resource": "*"
+          }
+        ]
+      },
+      "expect": "implicit_deny"
+    },
+    {
+      "name": "key policy deny wins over its own allow",
+      "kind": "evaluate",
+      "principal": "user/bob",
+      "action": "kms:ScheduleKeyDeletion",
+      "resource": "arn:aws:kms:us-east-1:111122223333:key/1234abcd-12ab-34cd-56ef-1234567890ab",
+      "source": "https://docs.aws.amazon.com/kms/latest/developerguide/key-policies.html#key-policy-elements",
+      "resource_kind": "key",
+      "resource_policy": {
+        "Version": "2012-10-17",
+        "Statement": [
+          {
+            "Effect": "Allow",
+            "Principal": {
+              "AWS": "arn:aws:iam::111122223333:user/bob"
+            },
+            "Action": "kms:*",
+            "Resource": "*"
+          },
+          {
+            "Sid": "NoDelete",
+            "Effect": "Deny",
+            "Principal": {
+              "AWS": "*"
+            },
+            "Action": "kms:ScheduleKeyDeletion",
+            "Resource": "*"
+          }
+        ]
+      },
+      "decided_by": "resource#NoDelete",
+      "expect": "explicit_deny"
+    },
+    {
+      "name": "cross-account: key policy allows the account and the identity policy allows",
+      "kind": "evaluate",
+      "principal": "user/carol",
+      "principal_account": "444455556666",
+      "action": "kms:Decrypt",
+      "resource": "arn:aws:kms:us-east-1:111122223333:key/1234abcd-12ab-34cd-56ef-1234567890ab",
+      "resource_account": "111122223333",
+      "source": "https://docs.aws.amazon.com/kms/latest/developerguide/key-policy-modifying-external-accounts.html",
+      "resource_kind": "key",
+      "resource_policy": {
+        "Version": "2012-10-17",
+        "Statement": [
+          {
+            "Sid": "Enable IAM User Permissions",
+            "Effect": "Allow",
+            "Principal": {
+              "AWS": "arn:aws:iam::111122223333:root"
+            },
+            "Action": "kms:*",
+            "Resource": "*"
+          },
+          {
+            "Sid": "External",
+            "Effect": "Allow",
+            "Principal": {
+              "AWS": "arn:aws:iam::444455556666:root"
+            },
+            "Action": [
+              "kms:Encrypt",
+              "kms:Decrypt",
+              "kms:DescribeKey"
+            ],
+            "Resource": "*"
+          }
+        ]
+      },
+      "identity": [
+        {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Action": "kms:Decrypt",
+              "Resource": "arn:aws:kms:us-east-1:111122223333:key/1234abcd-12ab-34cd-56ef-1234567890ab"
+            }
+          ]
+        }
+      ],
+      "expect": "allow"
+    },
+    {
+      "name": "cross-account: key policy allows the account, no identity policy",
+      "kind": "evaluate",
+      "principal": "user/carol",
+      "principal_account": "444455556666",
+      "action": "kms:Decrypt",
+      "resource": "arn:aws:kms:us-east-1:111122223333:key/1234abcd-12ab-34cd-56ef-1234567890ab",
+      "resource_account": "111122223333",
+      "source": "https://docs.aws.amazon.com/kms/latest/developerguide/key-policy-modifying-external-accounts.html",
+      "resource_kind": "key",
+      "resource_policy": {
+        "Version": "2012-10-17",
+        "Statement": [
+          {
+            "Sid": "Enable IAM User Permissions",
+            "Effect": "Allow",
+            "Principal": {
+              "AWS": "arn:aws:iam::111122223333:root"
+            },
+            "Action": "kms:*",
+            "Resource": "*"
+          },
+          {
+            "Sid": "External",
+            "Effect": "Allow",
+            "Principal": {
+              "AWS": "arn:aws:iam::444455556666:root"
+            },
+            "Action": [
+              "kms:Encrypt",
+              "kms:Decrypt",
+              "kms:DescribeKey"
+            ],
+            "Resource": "*"
+          }
+        ]
+      },
+      "expect": "implicit_deny"
+    },
+    {
+      "name": "cross-account: identity policy allows, key policy names only its own account",
+      "kind": "evaluate",
+      "principal": "user/carol",
+      "principal_account": "444455556666",
+      "action": "kms:Decrypt",
+      "resource": "arn:aws:kms:us-east-1:111122223333:key/1234abcd-12ab-34cd-56ef-1234567890ab",
+      "resource_account": "111122223333",
+      "source": "https://docs.aws.amazon.com/kms/latest/developerguide/key-policy-modifying-external-accounts.html",
+      "resource_kind": "key",
+      "resource_policy": {
+        "Version": "2012-10-17",
+        "Statement": [
+          {
+            "Sid": "Enable IAM User Permissions",
+            "Effect": "Allow",
+            "Principal": {
+              "AWS": "arn:aws:iam::111122223333:root"
+            },
+            "Action": "kms:*",
+            "Resource": "*"
+          }
+        ]
+      },
+      "identity": [
+        {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Action": "kms:Decrypt",
+              "Resource": "arn:aws:kms:us-east-1:111122223333:key/1234abcd-12ab-34cd-56ef-1234567890ab"
+            }
+          ]
+        }
+      ],
+      "expect": "implicit_deny"
+    },
+    {
+      "name": "cross-account: an action the key policy does not give the other account",
+      "kind": "evaluate",
+      "principal": "user/carol",
+      "principal_account": "444455556666",
+      "action": "kms:ScheduleKeyDeletion",
+      "resource": "arn:aws:kms:us-east-1:111122223333:key/1234abcd-12ab-34cd-56ef-1234567890ab",
+      "resource_account": "111122223333",
+      "source": "https://docs.aws.amazon.com/kms/latest/developerguide/key-policy-modifying-external-accounts.html",
+      "resource_kind": "key",
+      "resource_policy": {
+        "Version": "2012-10-17",
+        "Statement": [
+          {
+            "Sid": "Enable IAM User Permissions",
+            "Effect": "Allow",
+            "Principal": {
+              "AWS": "arn:aws:iam::111122223333:root"
+            },
+            "Action": "kms:*",
+            "Resource": "*"
+          },
+          {
+            "Sid": "External",
+            "Effect": "Allow",
+            "Principal": {
+              "AWS": "arn:aws:iam::444455556666:root"
+            },
+            "Action": [
+              "kms:Encrypt",
+              "kms:Decrypt",
+              "kms:DescribeKey"
+            ],
+            "Resource": "*"
+          }
+        ]
+      },
+      "identity": [
+        {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Action": "kms:*",
+              "Resource": "*"
+            }
+          ]
+        }
+      ],
+      "expect": "implicit_deny"
+    },
+    {
+      "name": "kms:ViaService: the request comes through the named service",
+      "kind": "evaluate",
+      "principal": "user/alice",
+      "action": "kms:Decrypt",
+      "resource": "arn:aws:kms:us-east-1:111122223333:key/1234abcd-12ab-34cd-56ef-1234567890ab",
+      "source": "https://docs.aws.amazon.com/kms/latest/developerguide/conditions-kms.html#conditions-kms-via-service",
+      "resource_kind": "key",
+      "resource_policy": {
+        "Version": "2012-10-17",
+        "Statement": [
+          {
+            "Sid": "Enable IAM User Permissions",
+            "Effect": "Allow",
+            "Principal": {
+              "AWS": "arn:aws:iam::111122223333:root"
+            },
+            "Action": "kms:*",
+            "Resource": "*"
+          }
+        ]
+      },
+      "identity": [
+        {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Action": "kms:Decrypt",
+              "Resource": "*",
+              "Condition": {
+                "StringEquals": {
+                  "kms:ViaService": "dynamodb.us-east-1.amazonaws.com"
+                }
+              }
+            }
+          ]
+        }
+      ],
+      "context": {
+        "kms:ViaService": "dynamodb.us-east-1.amazonaws.com"
+      },
+      "expect": "allow"
+    },
+    {
+      "name": "kms:ViaService: a direct request has no kms:ViaService",
+      "kind": "evaluate",
+      "principal": "user/alice",
+      "action": "kms:Decrypt",
+      "resource": "arn:aws:kms:us-east-1:111122223333:key/1234abcd-12ab-34cd-56ef-1234567890ab",
+      "source": "https://docs.aws.amazon.com/kms/latest/developerguide/conditions-kms.html#conditions-kms-via-service",
+      "resource_kind": "key",
+      "resource_policy": {
+        "Version": "2012-10-17",
+        "Statement": [
+          {
+            "Sid": "Enable IAM User Permissions",
+            "Effect": "Allow",
+            "Principal": {
+              "AWS": "arn:aws:iam::111122223333:root"
+            },
+            "Action": "kms:*",
+            "Resource": "*"
+          }
+        ]
+      },
+      "identity": [
+        {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Action": "kms:Decrypt",
+              "Resource": "*",
+              "Condition": {
+                "StringEquals": {
+                  "kms:ViaService": "dynamodb.us-east-1.amazonaws.com"
+                }
+              }
+            }
+          ]
+        }
+      ],
+      "expect": "implicit_deny"
+    },
+    {
+      "name": "kms:ViaService: through another service",
+      "kind": "evaluate",
+      "principal": "user/alice",
+      "action": "kms:Decrypt",
+      "resource": "arn:aws:kms:us-east-1:111122223333:key/1234abcd-12ab-34cd-56ef-1234567890ab",
+      "source": "https://docs.aws.amazon.com/kms/latest/developerguide/conditions-kms.html#conditions-kms-via-service",
+      "resource_kind": "key",
+      "resource_policy": {
+        "Version": "2012-10-17",
+        "Statement": [
+          {
+            "Sid": "Enable IAM User Permissions",
+            "Effect": "Allow",
+            "Principal": {
+              "AWS": "arn:aws:iam::111122223333:root"
+            },
+            "Action": "kms:*",
+            "Resource": "*"
+          }
+        ]
+      },
+      "identity": [
+        {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Action": "kms:Decrypt",
+              "Resource": "*",
+              "Condition": {
+                "StringEquals": {
+                  "kms:ViaService": "dynamodb.us-east-1.amazonaws.com"
+                }
+              }
+            }
+          ]
+        }
+      ],
+      "context": {
+        "kms:ViaService": "kinesis.us-east-1.amazonaws.com"
+      },
+      "expect": "implicit_deny"
+    },
+    {
+      "name": "kms:ViaService with kms:CallerAccount in the key policy: a caller of the account through the service",
+      "kind": "evaluate",
+      "principal": "user/alice",
+      "action": "kms:GenerateDataKey",
+      "resource": "arn:aws:kms:us-east-1:111122223333:key/1234abcd-12ab-34cd-56ef-1234567890ab",
+      "source": "https://docs.aws.amazon.com/kms/latest/developerguide/conditions-kms.html#conditions-kms-caller-account",
+      "resource_kind": "key",
+      "resource_policy": {
+        "Version": "2012-10-17",
+        "Statement": [
+          {
+            "Sid": "Allow access through DynamoDB for all principals in the account that are authorized to use DynamoDB",
+            "Effect": "Allow",
+            "Principal": {
+              "AWS": "*"
+            },
+            "Action": [
+              "kms:Encrypt",
+              "kms:Decrypt",
+              "kms:ReEncrypt*",
+              "kms:GenerateDataKey*",
+              "kms:DescribeKey"
+            ],
+            "Resource": "*",
+            "Condition": {
+              "StringEquals": {
+                "kms:CallerAccount": "111122223333",
+                "kms:ViaService": "dynamodb.us-east-1.amazonaws.com"
+              }
+            }
+          }
+        ]
+      },
+      "context": {
+        "kms:ViaService": "dynamodb.us-east-1.amazonaws.com",
+        "kms:CallerAccount": "111122223333"
+      },
+      "expect": "allow"
+    },
+    {
+      "name": "kms:ViaService with kms:CallerAccount in the key policy: the same caller directly",
+      "kind": "evaluate",
+      "principal": "user/alice",
+      "action": "kms:GenerateDataKey",
+      "resource": "arn:aws:kms:us-east-1:111122223333:key/1234abcd-12ab-34cd-56ef-1234567890ab",
+      "source": "https://docs.aws.amazon.com/kms/latest/developerguide/conditions-kms.html#conditions-kms-caller-account",
+      "resource_kind": "key",
+      "resource_policy": {
+        "Version": "2012-10-17",
+        "Statement": [
+          {
+            "Sid": "Allow access through DynamoDB for all principals in the account that are authorized to use DynamoDB",
+            "Effect": "Allow",
+            "Principal": {
+              "AWS": "*"
+            },
+            "Action": [
+              "kms:Encrypt",
+              "kms:Decrypt",
+              "kms:ReEncrypt*",
+              "kms:GenerateDataKey*",
+              "kms:DescribeKey"
+            ],
+            "Resource": "*",
+            "Condition": {
+              "StringEquals": {
+                "kms:CallerAccount": "111122223333",
+                "kms:ViaService": "dynamodb.us-east-1.amazonaws.com"
+              }
+            }
+          }
+        ]
+      },
+      "context": {
+        "kms:CallerAccount": "111122223333"
+      },
+      "expect": "implicit_deny"
+    },
+    {
+      "name": "kms:ViaService deny: a direct request is denied (absent key fails StringNotEquals' negation)",
+      "kind": "evaluate",
+      "principal": "user/alice",
+      "action": "kms:Decrypt",
+      "resource": "arn:aws:kms:us-east-1:111122223333:key/1234abcd-12ab-34cd-56ef-1234567890ab",
+      "source": "https://docs.aws.amazon.com/kms/latest/developerguide/conditions-kms.html#conditions-kms-via-service",
+      "resource_kind": "key",
+      "resource_policy": {
+        "Version": "2012-10-17",
+        "Statement": [
+          {
+            "Sid": "Enable IAM User Permissions",
+            "Effect": "Allow",
+            "Principal": {
+              "AWS": "arn:aws:iam::111122223333:root"
+            },
+            "Action": "kms:*",
+            "Resource": "*"
+          },
+          {
+            "Sid": "OnlyThroughDynamoDB",
+            "Effect": "Deny",
+            "Principal": {
+              "AWS": "*"
+            },
+            "Action": "kms:Decrypt",
+            "Resource": "*",
+            "Condition": {
+              "StringNotEquals": {
+                "kms:ViaService": "dynamodb.us-east-1.amazonaws.com"
+              }
+            }
+          }
+        ]
+      },
+      "identity": [
+        {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Action": "kms:Decrypt",
+              "Resource": "*"
+            }
+          ]
+        }
+      ],
+      "decided_by": "resource#OnlyThroughDynamoDB",
+      "expect": "explicit_deny"
+    },
+    {
+      "name": "kms:ViaService deny: through the service the deny does not apply",
+      "kind": "evaluate",
+      "principal": "user/alice",
+      "action": "kms:Decrypt",
+      "resource": "arn:aws:kms:us-east-1:111122223333:key/1234abcd-12ab-34cd-56ef-1234567890ab",
+      "source": "https://docs.aws.amazon.com/kms/latest/developerguide/conditions-kms.html#conditions-kms-via-service",
+      "resource_kind": "key",
+      "resource_policy": {
+        "Version": "2012-10-17",
+        "Statement": [
+          {
+            "Sid": "Enable IAM User Permissions",
+            "Effect": "Allow",
+            "Principal": {
+              "AWS": "arn:aws:iam::111122223333:root"
+            },
+            "Action": "kms:*",
+            "Resource": "*"
+          },
+          {
+            "Sid": "OnlyThroughDynamoDB",
+            "Effect": "Deny",
+            "Principal": {
+              "AWS": "*"
+            },
+            "Action": "kms:Decrypt",
+            "Resource": "*",
+            "Condition": {
+              "StringNotEquals": {
+                "kms:ViaService": "dynamodb.us-east-1.amazonaws.com"
+              }
+            }
+          }
+        ]
+      },
+      "identity": [
+        {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Action": "kms:Decrypt",
+              "Resource": "*"
+            }
+          ]
+        }
+      ],
+      "context": {
+        "kms:ViaService": "dynamodb.us-east-1.amazonaws.com"
+      },
+      "expect": "allow"
+    },
+    {
+      "name": "kms:EncryptionContext: the pair matches",
+      "kind": "evaluate",
+      "principal": "user/alice",
+      "action": "kms:Decrypt",
+      "resource": "arn:aws:kms:us-east-1:111122223333:key/1234abcd-12ab-34cd-56ef-1234567890ab",
+      "source": "https://docs.aws.amazon.com/kms/latest/developerguide/conditions-kms.html#conditions-kms-encryption-context",
+      "resource_kind": "key",
+      "resource_policy": {
+        "Version": "2012-10-17",
+        "Statement": [
+          {
+            "Sid": "Enable IAM User Permissions",
+            "Effect": "Allow",
+            "Principal": {
+              "AWS": "arn:aws:iam::111122223333:root"
+            },
+            "Action": "kms:*",
+            "Resource": "*"
+          }
+        ]
+      },
+      "identity": [
+        {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Action": "kms:Decrypt",
+              "Resource": "*",
+              "Condition": {
+                "StringEquals": {
+                  "kms:EncryptionContext:Department": "IT"
+                }
+              }
+            }
+          ]
+        }
+      ],
+      "context": {
+        "kms:EncryptionContext:Department": "IT"
+      },
+      "expect": "allow"
+    },
+    {
+      "name": "kms:EncryptionContext: another value",
+      "kind": "evaluate",
+      "principal": "user/alice",
+      "action": "kms:Decrypt",
+      "resource": "arn:aws:kms:us-east-1:111122223333:key/1234abcd-12ab-34cd-56ef-1234567890ab",
+      "source": "https://docs.aws.amazon.com/kms/latest/developerguide/conditions-kms.html#conditions-kms-encryption-context",
+      "resource_kind": "key",
+      "resource_policy": {
+        "Version": "2012-10-17",
+        "Statement": [
+          {
+            "Sid": "Enable IAM User Permissions",
+            "Effect": "Allow",
+            "Principal": {
+              "AWS": "arn:aws:iam::111122223333:root"
+            },
+            "Action": "kms:*",
+            "Resource": "*"
+          }
+        ]
+      },
+      "identity": [
+        {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Action": "kms:Decrypt",
+              "Resource": "*",
+              "Condition": {
+                "StringEquals": {
+                  "kms:EncryptionContext:Department": "IT"
+                }
+              }
+            }
+          ]
+        }
+      ],
+      "context": {
+        "kms:EncryptionContext:Department": "Finance"
+      },
+      "expect": "implicit_deny"
+    },
+    {
+      "name": "kms:EncryptionContext: no encryption context",
+      "kind": "evaluate",
+      "principal": "user/alice",
+      "action": "kms:Decrypt",
+      "resource": "arn:aws:kms:us-east-1:111122223333:key/1234abcd-12ab-34cd-56ef-1234567890ab",
+      "source": "https://docs.aws.amazon.com/kms/latest/developerguide/conditions-kms.html#conditions-kms-encryption-context",
+      "resource_kind": "key",
+      "resource_policy": {
+        "Version": "2012-10-17",
+        "Statement": [
+          {
+            "Sid": "Enable IAM User Permissions",
+            "Effect": "Allow",
+            "Principal": {
+              "AWS": "arn:aws:iam::111122223333:root"
+            },
+            "Action": "kms:*",
+            "Resource": "*"
+          }
+        ]
+      },
+      "identity": [
+        {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Action": "kms:Decrypt",
+              "Resource": "*",
+              "Condition": {
+                "StringEquals": {
+                  "kms:EncryptionContext:Department": "IT"
+                }
+              }
+            }
+          ]
+        }
+      ],
+      "expect": "implicit_deny"
+    },
+    {
+      "name": "kms:EncryptionContextKeys ForAllValues: every key is allowed",
+      "kind": "evaluate",
+      "principal": "user/alice",
+      "action": "kms:Encrypt",
+      "resource": "arn:aws:kms:us-east-1:111122223333:key/1234abcd-12ab-34cd-56ef-1234567890ab",
+      "source": "https://docs.aws.amazon.com/kms/latest/developerguide/conditions-kms.html#conditions-kms-encryption-context-keys",
+      "resource_kind": "key",
+      "resource_policy": {
+        "Version": "2012-10-17",
+        "Statement": [
+          {
+            "Sid": "Enable IAM User Permissions",
+            "Effect": "Allow",
+            "Principal": {
+              "AWS": "arn:aws:iam::111122223333:root"
+            },
+            "Action": "kms:*",
+            "Resource": "*"
+          }
+        ]
+      },
+      "identity": [
+        {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Action": "kms:Encrypt",
+              "Resource": "*",
+              "Condition": {
+                "ForAllValues:StringEquals": {
+                  "kms:EncryptionContextKeys": [
+                    "Department",
+                    "Project"
+                  ]
+                }
+              }
+            }
+          ]
+        }
+      ],
+      "context": {
+        "kms:EncryptionContextKeys": [
+          "Department"
+        ]
+      },
+      "expect": "allow"
+    },
+    {
+      "name": "kms:EncryptionContextKeys ForAllValues: one key is not",
+      "kind": "evaluate",
+      "principal": "user/alice",
+      "action": "kms:Encrypt",
+      "resource": "arn:aws:kms:us-east-1:111122223333:key/1234abcd-12ab-34cd-56ef-1234567890ab",
+      "source": "https://docs.aws.amazon.com/kms/latest/developerguide/conditions-kms.html#conditions-kms-encryption-context-keys",
+      "resource_kind": "key",
+      "resource_policy": {
+        "Version": "2012-10-17",
+        "Statement": [
+          {
+            "Sid": "Enable IAM User Permissions",
+            "Effect": "Allow",
+            "Principal": {
+              "AWS": "arn:aws:iam::111122223333:root"
+            },
+            "Action": "kms:*",
+            "Resource": "*"
+          }
+        ]
+      },
+      "identity": [
+        {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Action": "kms:Encrypt",
+              "Resource": "*",
+              "Condition": {
+                "ForAllValues:StringEquals": {
+                  "kms:EncryptionContextKeys": [
+                    "Department",
+                    "Project"
+                  ]
+                }
+              }
+            }
+          ]
+        }
+      ],
+      "context": {
+        "kms:EncryptionContextKeys": [
+          "Department",
+          "Owner"
+        ]
+      },
+      "expect": "implicit_deny"
+    },
+    {
+      "name": "Null on kms:EncryptionContextKeys: a request without context is denied",
+      "kind": "evaluate",
+      "principal": "user/alice",
+      "action": "kms:Encrypt",
+      "resource": "arn:aws:kms:us-east-1:111122223333:key/1234abcd-12ab-34cd-56ef-1234567890ab",
+      "source": "https://docs.aws.amazon.com/kms/latest/developerguide/conditions-kms.html#conditions-kms-encryption-context-keys",
+      "resource_kind": "key",
+      "resource_policy": {
+        "Version": "2012-10-17",
+        "Statement": [
+          {
+            "Sid": "Enable IAM User Permissions",
+            "Effect": "Allow",
+            "Principal": {
+              "AWS": "arn:aws:iam::111122223333:root"
+            },
+            "Action": "kms:*",
+            "Resource": "*"
+          },
+          {
+            "Sid": "RequireContext",
+            "Effect": "Deny",
+            "Principal": {
+              "AWS": "*"
+            },
+            "Action": "kms:Encrypt",
+            "Resource": "*",
+            "Condition": {
+              "Null": {
+                "kms:EncryptionContextKeys": "true"
+              }
+            }
+          }
+        ]
+      },
+      "identity": [
+        {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Action": "kms:Encrypt",
+              "Resource": "*"
+            }
+          ]
+        }
+      ],
+      "decided_by": "resource#RequireContext",
+      "expect": "explicit_deny"
+    },
+    {
+      "name": "Null on kms:EncryptionContextKeys: a request with context is not",
+      "kind": "evaluate",
+      "principal": "user/alice",
+      "action": "kms:Encrypt",
+      "resource": "arn:aws:kms:us-east-1:111122223333:key/1234abcd-12ab-34cd-56ef-1234567890ab",
+      "source": "https://docs.aws.amazon.com/kms/latest/developerguide/conditions-kms.html#conditions-kms-encryption-context-keys",
+      "resource_kind": "key",
+      "resource_policy": {
+        "Version": "2012-10-17",
+        "Statement": [
+          {
+            "Sid": "Enable IAM User Permissions",
+            "Effect": "Allow",
+            "Principal": {
+              "AWS": "arn:aws:iam::111122223333:root"
+            },
+            "Action": "kms:*",
+            "Resource": "*"
+          },
+          {
+            "Sid": "RequireContext",
+            "Effect": "Deny",
+            "Principal": {
+              "AWS": "*"
+            },
+            "Action": "kms:Encrypt",
+            "Resource": "*",
+            "Condition": {
+              "Null": {
+                "kms:EncryptionContextKeys": "true"
+              }
+            }
+          }
+        ]
+      },
+      "identity": [
+        {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Action": "kms:Encrypt",
+              "Resource": "*"
+            }
+          ]
+        }
+      ],
+      "context": {
+        "kms:EncryptionContextKeys": [
+          "Department"
+        ],
+        "kms:EncryptionContext:Department": "IT"
+      },
+      "expect": "allow"
+    }
+  ]
+}
