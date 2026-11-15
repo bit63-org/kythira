@@ -28,6 +28,8 @@
 #   ion       configs/ci_ion_defconfig (ion-c, RocksDB) with
 #             KYTHIRA_HSM_CONSUMER_TESTS=ON (the opt-in PKCS#11 consumer test)
 #             and SoftHSM2 (the cluster CA's key on a token)
+#   rocksdb   configs/ci_dynamodb_defconfig (RocksDB with IAM, the HSM and
+#             the KMS, and SoftHSM2: the KMS's kythira_node module)
 #   no-cloud  configs/no_cloud_defconfig (no AWS S3, so multi_raft_node
 #             builds its "S3 unavailable" test instead of the S3 ones)
 
@@ -87,5 +89,10 @@ ion services/hsm/tests/hsm_node_cluster_test.cpp
 ion services/hsm/tests/docker/hsm_chaos_test.cpp
 ion services/hsm/tests/hsm_pkcs11_consumers_test.cpp
 ion services/hsm/tests/hsm_ca_cluster_test.cpp
+
+rocksdb services/kms/cmd/kms_node/kms_config.cpp
+rocksdb services/kms/cmd/kms_node/kms_module_registrar.cpp
+rocksdb services/kms/tests/kythira_node_kms_test.cpp
+rocksdb services/kms/tests/kms_backing_softhsm_test.cpp
 
 no-cloud tests/multi_raft_node_s3_unavailable_test.cpp

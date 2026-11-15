@@ -108,6 +108,7 @@ struct node_proc {
     std::uint16_t ledger = 0;
     std::uint16_t hsm = 0;
     std::uint16_t hsm_clients = 0;
+    std::uint16_t kms = 0;
     pid_t pid = -1;
 };
 
@@ -115,11 +116,11 @@ class node_cluster {
 public:
     explicit node_cluster(std::set<std::string> services) : services(std::move(services)) {
         _dir = raft::make_private_temp_directory(fs::temp_directory_path(), "kythira-node-all-");
-        const auto base = kythira::testing::free_port_block(27);
+        const auto base = kythira::testing::free_port_block(30);
         for (int i = 0; i < 3; ++i) {
             node_proc p;
             p.n = i + 1;
-            const auto b = static_cast<std::uint16_t>(base + 9 * i);
+            const auto b = static_cast<std::uint16_t>(base + 10 * i);
             p.raft = b;
             p.metrics = b + 1;
             p.iam = b + 2;
@@ -129,6 +130,7 @@ public:
             p.ledger = b + 6;
             p.hsm = b + 7;
             p.hsm_clients = b + 8;
+            p.kms = b + 9;
             nodes.push_back(p);
         }
         kythira::iam::testing::test_pki_options o;
@@ -141,6 +143,8 @@ public:
         _roles = _dir / "ledger-roles.txt";
         raft::write_private_file(_roles.string(),
                                  std::string(kythira::iam::testing::k_admin_uri) + " * admin\n");
+        _kms_pin = _dir / "kms-pin";
+        raft::write_private_file(_kms_pin.string(), "kms-user-pin\n");
     }
 
     node_cluster(const node_cluster&) = delete;
@@ -247,6 +251,12 @@ public:
             // IAM ARNs as client identities, every decision fresh.
             "KYTHIRA_HSM_IAM=true",
             "KYTHIRA_HSM_IAM_CACHE_MS=0",
+            // The KMS over the co-located HSM, which has no "kms" token
+            // here: it elects and stays healthy, saying so
+            // (kythira_node_kms_test covers its jobs on a token).
+            "KYTHIRA_KMS_API_URLS=" +
+                map("https://localhost:", [](const auto& q) { return q.kms; }),
+            "KYTHIRA_KMS_PIN_FILE=" + _kms_pin.string(),
             "PATH=/usr/bin:/bin",
         };
         const auto log = (dir / "node.log").string();
@@ -321,6 +331,7 @@ public:
 private:
     fs::path _dir;
     fs::path _roles;
+    fs::path _kms_pin;
 };
 
 /// A SigV4-signed AWS JSON call (`<target_prefix>.<action>`) to `service`.
