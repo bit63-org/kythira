@@ -11,6 +11,8 @@
 #
 #   HSM                     — the point of the file.
 # CONFIG_HSM is not set
+#   KMS                     — needs the HSM, so it goes with it.
+# CONFIG_KMS is not set
 CONFIG_EDHOC=y
 CONFIG_STDEXEC_BACKEND=y
 CONFIG_BOOST_FUTURE_BACKEND=y

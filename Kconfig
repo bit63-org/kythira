@@ -647,6 +647,7 @@ source "services/ledger/Kconfig"
 source "services/kinesis/Kconfig"
 source "services/dynamodb/Kconfig"
 source "services/hsm/Kconfig"
+source "services/kms/Kconfig"
 
 endmenu # Service Modules
 
