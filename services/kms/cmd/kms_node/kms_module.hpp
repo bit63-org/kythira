@@ -383,6 +383,10 @@ public:
         }
         const auto s = _host->stats();
         auto out = _audit ? _audit->metrics() : std::vector<service_node::module_metric>{};
+        if (_quotas) {
+            const auto q = _quotas->metrics();
+            out.insert(out.end(), q.begin(), q.end());
+        }
         const std::scoped_lock lock(_report_mutex);
         std::vector<service_node::module_metric> mine{
             {"leader", _host->leads() ? 1.0 : 0.0, {}},
@@ -473,6 +477,12 @@ private:
         fc.trusted_services.insert(_opt.trusted_services.begin(), _opt.trusted_services.end());
         _front_end = std::make_unique<front_end_type>(fc, *_authorizer);
         _audit = std::make_unique<kythira::kms::request_audit>(_opt.audit, _opt.region);
+        if (_opt.throttling) {
+            auto q = _opt.quotas;
+            q.members = std::max<std::size_t>(_opt.api_urls.size(), 1);
+            _quotas = std::make_shared<kythira::kms::request_quotas>(std::move(q));
+            _front_end->set_quotas(_quotas);
+        }
         _front_end->set_observer(
             [audit = _audit.get()](const kythira::kms::request_record& r) { audit->record(r); });
         _client = std::make_shared<client_type>(*_front_end);
@@ -635,6 +645,7 @@ private:
         if (!_host->leads() || !_host->barrier()) {
             return;
         }
+        apply_account_limits();
         if (!bind_token()) {
             return;
         }
@@ -673,6 +684,35 @@ private:
         _total.deleted += r.deleted;
         _total.orphans_destroyed += r.orphans_destroyed;
         _total.failures += r.failures;
+    }
+
+    /// Writes the operator's key and alias limits (KYTHIRA_KMS_ACCOUNT_
+    /// LIMITS) where the catalog differs: every leader does, so a change
+    /// to the setting takes effect at the next pass after a restart.
+    void apply_account_limits() {
+        if (_opt.account_limits.empty()) {
+            return;
+        }
+        const auto c = _host->catalog();
+        if (!c) {
+            return;
+        }
+        for (const auto& [account, limits] : _opt.account_limits) {
+            if (c->limits(account) == limits) {
+                continue;
+            }
+            try {
+                const auto s =
+                    _host->propose(kythira::kms::make_set_account_limits_command(account, limits));
+                if (s != kythira::kms::catalog_status::ok) {
+                    log(kythira::log_level::warning,
+                        "kms: account limits for " + account + " were not written");
+                }
+            } catch (const std::exception& e) {
+                log(kythira::log_level::warning,
+                    "kms: account limits for " + account + ": " + e.what());
+            }
+        }
     }
 
     /// Finds the token by label and logs in, once; true when the store is
@@ -763,6 +803,7 @@ private:
     std::unique_ptr<authorizer_type> _authorizer;
     std::shared_ptr<service_node::iam_evaluator> _iam;
     std::unique_ptr<kythira::kms::request_audit> _audit;
+    std::shared_ptr<kythira::kms::request_quotas> _quotas;
     std::unique_ptr<front_end_type> _front_end;
     std::shared_ptr<client_type> _client;
     std::unique_ptr<kythira::kms::key_management_api<catalog_type>> _api;

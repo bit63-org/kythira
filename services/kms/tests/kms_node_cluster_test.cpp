@@ -192,6 +192,9 @@ public:
             "KYTHIRA_KMS_STATIC_KEYS_FILE=" + (_dir / "keys").string(),
             std::string("KYTHIRA_KMS_PKCS11=") + KYTHIRA_SOFTHSM2_LIBRARY,
             "KYTHIRA_KMS_PIN_FILE=" + (_dir / "pin").string(),
+            // Task 14: an operator's alias limit, written by the leader.
+            "KYTHIRA_KMS_ACCOUNT_LIMITS=" + std::string(k_account) + "=100:3",
+            "KYTHIRA_KMS_JOB_INTERVAL_MS=200",
             "SOFTHSM2_CONF=" + (_dir / "softhsm2.conf").string(),
             "PATH=/usr/bin:/bin",
         };
@@ -480,4 +483,42 @@ BOOST_FIXTURE_TEST_CASE(two_members_carry_on_without_the_third, process_cluster)
     BOOST_REQUIRE_MESSAGE(d.status == 200, d.status << " " << d.str("__type"));
     BOOST_TEST(d.body.at("KeyMetadata").as_object().at("Description").as_string() ==
                "while 3 was away");
+}
+
+// Task 14: the operator's key and alias limits reach every member's
+// catalog, and AWS's quotas answer ThrottlingException.
+BOOST_FIXTURE_TEST_CASE(account_limits_and_quotas_apply, process_cluster) {
+    const auto k = call(0, "CreateKey", "{}");
+    BOOST_REQUIRE_MESSAGE(k.status == 200, k.status << " " << k.str("__type"));
+    const auto id = std::string(k.body.at("KeyMetadata").as_object().at("KeyId").as_string());
+    const auto alias = [&](std::size_t on, int n) {
+        return call(
+            on, "CreateAlias",
+            R"({"AliasName":"alias/a)" + std::to_string(n) + R"(","TargetKeyId":")" + id + R"("})");
+    };
+    // The leader writes the limit at a job pass (every 200 ms here).
+    std::this_thread::sleep_for(3s);
+    const auto deadline = std::chrono::steady_clock::now() + 30s;
+    int made = 0;
+    std::string refused;
+    while (refused.empty() && std::chrono::steady_clock::now() < deadline) {
+        const auto r = alias(static_cast<std::size_t>(made) % 3, made);
+        if (r.status == 200) {
+            ++made;
+        } else if (r.str("__type") == "ThrottlingException") {
+            std::this_thread::sleep_for(1s);
+        } else {
+            refused = r.str("__type");
+        }
+    }
+    BOOST_TEST(refused == "LimitExceededException");
+    BOOST_TEST(made == 3);
+
+    // DescribeKey's 2000 per second is far away; CreateKey's 5 is not.
+    std::size_t throttled = 0;
+    for (int i = 0; i < 20; ++i) {
+        throttled += call(1, "CreateKey", "{}").str("__type") == "ThrottlingException" ? 1U : 0U;
+    }
+    BOOST_TEST(throttled > 0U);
+    BOOST_TEST(call(1, "DescribeKey", R"({"KeyId":")" + id + R"("})").status == 200);
 }

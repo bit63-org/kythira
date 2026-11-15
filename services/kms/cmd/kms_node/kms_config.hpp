@@ -8,6 +8,8 @@
 // (composite_env), and the Raft tuning names module_tuning() maps.
 // usage_text() documents every variable.
 
+#include <kythira/kms/kms_quotas.hpp>
+
 #include <raft/console_logger.hpp>
 #include <raft/host_node_id.hpp>
 #include <raft/static_or_iam_authorizer.hpp>
@@ -67,6 +69,16 @@ struct kms_options {
     // -- Audit (Requirement 13) ----------------------------------------------------
     /// Where request records go: stderr, off or file:<path>.
     std::string audit{"stderr"};
+
+    // -- Quotas (Requirement 13.3 and 13.4) -----------------------------------------
+    /// AWS's request quotas, answering ThrottlingException (on by default).
+    bool throttling = true;
+    /// The shared cryptographic quotas, by default and per account; the
+    /// module sets `members`.
+    kythira::kms::quota_config quotas;
+    /// Per-account key and alias count limits the leader writes to the
+    /// catalog; an account not listed keeps AWS's.
+    std::map<std::string, kythira::kms::account_limits> account_limits;
 
     // -- The backing store (Requirement 4) -------------------------------------
     /// "hsm" for the co-located virtual HSM, else the path of a PKCS#11

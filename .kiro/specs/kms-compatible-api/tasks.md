@@ -200,14 +200,16 @@ is one PR unless noted.
     authorized for only exists once a consumer calls `kms.client`
   - _Requirements: 10.1-10.2 (10.3 in task 16)_
 
-- [ ] 14. Audit, metrics and quotas
+- [x] 14. Audit, metrics and quotas
   - CloudTrail-shaped audit records through IAM's audit sink, Prometheus
     metrics, per-account request quotas with operator overrides
   - _Requirements: 13.1-13.3_
   - Done: audit records and metrics (`kms_audit.hpp`, `KYTHIRA_KMS_AUDIT`),
     on core's bounded audit log (`raft/audit_log.hpp`), the queue IAM's
     authorizer and the HSM write through; context keys only, never
-    values. Open: quotas.
+    values. Quotas in `kms_quotas.hpp` (`KYTHIRA_KMS_THROTTLING`,
+    `KYTHIRA_KMS_QUOTAS`, `KYTHIRA_KMS_ACCOUNT_QUOTAS`), key and alias
+    limits by `KYTHIRA_KMS_ACCOUNT_LIMITS`, which the leader writes.
 
 - [ ] 15. Kinesis integration
   - `kythira` `kms_key_provider` over `kms.client` with the caller's
