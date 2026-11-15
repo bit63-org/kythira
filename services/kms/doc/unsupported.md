@@ -26,15 +26,12 @@ retryable fault.
 | `DisconnectCustomKeyStore` | out of scope | Custom key stores are out of scope: the virtual HSM's external-module support swaps the backing store for the whole KMS (design, "Metadata in the KMS, material in the HSM"). | `UnsupportedOperationException`, HTTP 400 |
 | `EnableKeyRotation` | task 11 | Not built yet (rotation). | `UnsupportedOperationException`, HTTP 400 |
 | `GetKeyLastUsage` | none | Not in the spec: when a key was last used (a recent KMS addition). Open question for the owner. | `UnsupportedOperationException`, HTTP 400 |
-| `GetKeyPolicy` | task 9 | Not built yet (key policies). | `UnsupportedOperationException`, HTTP 400 |
 | `GetKeyRotationStatus` | task 11 | Not built yet (rotation). | `UnsupportedOperationException`, HTTP 400 |
 | `GetParametersForImport` | out of scope | Imported key material is out of scope for this spec (design, "What stays out"): it needs an RSA-OAEP unwrap into a non-extractable HSM object, left for a follow-up spec. | `UnsupportedOperationException`, HTTP 400 |
 | `ImportKeyMaterial` | out of scope | Imported key material is out of scope for this spec (design, "What stays out"): it needs an RSA-OAEP unwrap into a non-extractable HSM object, left for a follow-up spec. | `UnsupportedOperationException`, HTTP 400 |
 | `ListGrants` | task 10 | Not built yet (grants). | `UnsupportedOperationException`, HTTP 400 |
-| `ListKeyPolicies` | task 9 | Not built yet (key policies). | `UnsupportedOperationException`, HTTP 400 |
 | `ListKeyRotations` | task 11 | Not built yet (rotation). | `UnsupportedOperationException`, HTTP 400 |
 | `ListRetirableGrants` | task 10 | Not built yet (grants). | `UnsupportedOperationException`, HTTP 400 |
-| `PutKeyPolicy` | task 9 | Not built yet (key policies). | `UnsupportedOperationException`, HTTP 400 |
 | `ReplicateKey` | out of scope | Multi-Region keys are out of scope: they need key material replicated across regions' HSMs, which the virtual HSM does not do (design, "What stays out"). | `UnsupportedOperationException`, HTTP 400 |
 | `RetireGrant` | task 10 | Not built yet (grants). | `UnsupportedOperationException`, HTTP 400 |
 | `RevokeGrant` | task 10 | Not built yet (grants). | `UnsupportedOperationException`, HTTP 400 |

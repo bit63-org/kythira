@@ -118,6 +118,11 @@ set_tests_properties(kms_crypto_test PROPERTIES LABELS "unit;kms;kms-module" TIM
 kythira_kms_test(kms_asymmetric_test kms_asymmetric_test.cpp)
 set_tests_properties(kms_asymmetric_test PROPERTIES LABELS "unit;kms;kms-module" TIMEOUT 300)
 
+# Task 9, Requirements 7.1, 7.2, 7.5 and 7.7: the key policy operations,
+# the lockout safety check and the static roles.
+kythira_kms_test(kms_policy_test kms_policy_test.cpp)
+set_tests_properties(kms_policy_test PROPERTIES LABELS "unit;kms;kms-module")
+
 # Task 5, Requirements 4.1-4.3: every key spec's backing key on a real
 # module, SoftHSM2 standing in for an external one; registered when the
 # build finds SoftHSM2 and softhsm2-util (kms-module.yml installs them;

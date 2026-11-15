@@ -132,11 +132,21 @@ is one PR unless noted.
     `HMAC_SHA_224` MACs and `ECC_SECG_P256K1` keys answer
     UnsupportedOperationException.
 
-- [ ] 9. Key policies and authorization
+- [x] 9. Key policies and authorization
   - `GetKeyPolicy`, `PutKeyPolicy`, `ListKeyPolicies`, default key policy,
     lockout safety check; every handler authorized through IAM with the
     key policy; static-roles mode with IAM off
   - _Requirements: 7.1-7.3, 7.5, 7.7_
+  - Done: the three operations in `kms_api.hpp` (policy name `default`
+    only; a marker past it ends `ListKeyPolicies`). The lockout check asks
+    the authorizer for `kms:PutKeyPolicy` with the new policy in place,
+    on `PutKeyPolicy` and on `CreateKey` with a caller-supplied policy,
+    and refuses with `MalformedPolicyDocumentException` unless
+    `BypassPolicyLockoutSafetyCheck` is true. Every handler already
+    authorizes on the key ARN with the key policy as a `key` resource
+    policy (task 6); choosing IAM or static keys is the composition
+    root's (task 12). The static roles ignore key policies, as the README
+    says. `kms_policy_test`.
 
 - [ ] 10. Grants
   - `CreateGrant`, `ListGrants`, `ListRetirableGrants`, `RetireGrant`,
