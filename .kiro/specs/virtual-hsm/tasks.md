@@ -61,11 +61,26 @@ task is one PR unless noted.
     child, since root with it ignores `RLIMIT_MEMLOCK`. Task 2's note that
     the arena replaces `secret_bytes`' heap storage is done here.
 
-- [ ] 4. Mechanisms and attribute policy
+- [x] 4. Mechanisms and attribute policy
   - OpenSSL 3 EVP implementations for every key type and mechanism in
     6.1-6.2; `attribute_policy` with one function and one test per rule in
     6.3-6.4; excluded functions and mechanisms answer as 6.5
   - _Requirements: 6.1-6.5, 13.3_
+  - Done: `mechanisms.hpp` (single-part operations over key material;
+    task 6 adds handles and multi-part buffering), `attribute_policy.hpp`
+    and `attributes.hpp`. Choices the requirement left open:
+    PKCS#1 v1.5 is offered for signatures only, since v1.5 decryption is
+    a padding oracle and OAEP covers encryption; OAEP may use SHA-1
+    (6.5 excludes SHA-1 only for signatures); AES-GCM tags are 96 to
+    128 bits; key wrap mechanisms are refused for `C_Encrypt` so wrapping
+    always goes through the wrap checks; ECDH1 supports `CKD_NULL` only
+    (HKDF after it covers KDFs); HKDF's `CKF_HKDF_SALT_KEY` waits for
+    the session layer, which resolves handles; EdDSA is pure Ed25519 (no
+    pre-hash or context). New keys default to sensitive and not
+    extractable, the values PKCS#11 leaves to the token. Anything
+    outside the mechanism table answers `CKR_MECHANISM_INVALID`;
+    `unsupported_functions()` lists what the library (task 10) answers
+    `CKR_FUNCTION_NOT_SUPPORTED`.
 
 - [ ] 5. Token and catalog state machines
   - `hsm_catalog_state_machine` (tokens, client bindings, wrapped TKs,

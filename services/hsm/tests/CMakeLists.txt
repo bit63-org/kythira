@@ -40,6 +40,17 @@ kythira_hsm_test(hsm_secure_arena_test hsm_secure_arena_test.cpp)
 set_tests_properties(hsm_secure_arena_test PROPERTIES
     LABELS "unit;hsm;hsm-module" TIMEOUT 60)
 
+# Task 4, Requirements 6.1-6.2 and 6.5: every key type and mechanism on
+# OpenSSL 3, checked against published vectors, and the exclusions.
+kythira_hsm_test(hsm_mechanisms_test hsm_mechanisms_test.cpp)
+set_tests_properties(hsm_mechanisms_test PROPERTIES
+    LABELS "unit;hsm;hsm-module" TIMEOUT 120)
+
+# Task 4, Requirements 6.3-6.4 and 13.3: one test per attribute rule.
+kythira_hsm_test(hsm_attribute_policy_test hsm_attribute_policy_test.cpp)
+set_tests_properties(hsm_attribute_policy_test PROPERTIES
+    LABELS "unit;hsm;hsm-module" TIMEOUT 60)
+
 # Task 1: hsm_node links and runs (and, from task 3, can lock key memory).
 add_test(NAME hsm_node_self_test COMMAND hsm_node --self-test)
 set_tests_properties(hsm_node_self_test PROPERTIES
