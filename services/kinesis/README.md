@@ -38,7 +38,7 @@ Built when `CONFIG_KINESIS=y` (`services/kinesis/Kconfig`, off by default).
 | `include/kythira/kinesis/kinesis_cluster.hpp` | what handlers need from the cluster (`stream_cluster`), and an in-process implementation for tests and one-node use | 6 |
 | `include/kythira/kinesis/kinesis_raft_cluster.hpp` | `stream_cluster` over the multi-raft host: propose to the key's group, forward to its leader, read the local replica, and run resharding's tier-1 transactions | 6, 11 |
 | `include/kythira/kinesis/kinesis_forward.hpp` | the gateway-to-gateway wire for forwarded writes and its HMAC (`KINESIS_FORWARD_SECRET`) | 6 |
-| `include/kythira/kinesis/kinesis_gateway.hpp`, `kinesis_peer_client.hpp` | the listener's routes (API, internal propose and segment endpoints, `/healthz`) and the client that calls other gateways | 6 |
+| `include/kythira/kinesis/kinesis_gateway.hpp`, `kinesis_peer_client.hpp` | the listener's routes (API, internal propose and segment endpoints, `/healthz`) and the client that calls other gateways (core's `raft/https_peer_client.hpp`) | 6 |
 | `include/kythira/kinesis/kinesis_static_keys.hpp` | the `KINESIS_STATIC_KEYS_FILE` format for clusters without IAM | 6 |
 | `include/kythira/kinesis/kinesis_iterators.hpp` | shard iterators: HMAC-SHA256 tokens, the key ring and its rotation, `KINESIS_ITERATOR_KEYS_FILE` | 7 |
 | `include/kythira/kinesis/kinesis_lease_api.hpp` | the Lease API for the KCL lease layer: REST under `/v1/leases/<application>/`, versions as ETags, DynamoDB actions on the application's table ARN | 9 |
@@ -57,7 +57,7 @@ Built when `CONFIG_KINESIS=y` (`services/kinesis/Kconfig`, off by default).
 | `doc/on-demand.md`, `include/kythira/kinesis/kinesis_on_demand.hpp` | on-demand capacity mode: `UpdateStreamMode` and the controller that splits shards that stay hot | 12 |
 | `doc/kinesis.md` | the operator's page: the model, compatibility switches, limits, the clock assumption, lease backends by KCL version, deployment and the unsupported list | 18 |
 | `doc/fan-out.md` | enhanced fan-out: consumers, `SubscribeToShard` event streams over HTTP/1.1 and HTTP/2, pacing and limits | 13 |
-| `doc/encryption.md`, `include/kythira/kinesis/kinesis_kms.hpp`, `include/kythira/kinesis/kinesis_kms_aws.hpp` | encryption at rest: sealed records, data keys in the catalog, the `kms_key_provider` concept with the local and AWS KMS providers (`KINESIS_KMS`) | 14 |
+| `doc/encryption.md`, `include/kythira/kinesis/kinesis_kms.hpp`, `include/kythira/kinesis/kinesis_kms_aws.hpp` | encryption at rest: sealed records, data keys in the catalog, the providers (`KINESIS_KMS`), which are core's `raft/kms_key_provider*.hpp` shared with DynamoDB | 14 |
 | `doc/tags-policies-metrics.md`, `include/kythira/kinesis/kinesis_metrics.hpp` | tags in both forms, resource policies handed to the authorizer, enhanced monitoring, the account calls, and the Prometheus metrics on `GET /metrics` (`KINESIS_METRICS`) | 15 |
 
 Core pieces the module builds on live in `include/raft/`, because DynamoDB

@@ -276,6 +276,7 @@ public:
             ._tls = !_opt._allow_plaintext,
             ._ca_path = _opt._peer_ca_path,
             ._timeout = _opt._command_timeout,
+            ._user_agent = std::string(kinesis::k_peer_user_agent),
         });
         for (const auto& [id, gw] : _opt._peer_gateways) {
             if (id != _opt._node_id) {
