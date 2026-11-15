@@ -65,7 +65,7 @@ public:
                 if (!parsed) {
                     return unexpected(parsed.error());
                 }
-                out._values.emplace(a.type, parsed->flatten());
+                out._values.emplace(a.type, parsed->encode());
                 continue;
             }
             const auto* p = static_cast<const std::uint8_t*>(a.pValue);
@@ -128,7 +128,7 @@ public:
         if (it == _values.end()) {
             return attribute_map{};
         }
-        return unflatten(it->second);
+        return decode(it->second);
     }
 
     void set_bool(CK_ATTRIBUTE_TYPE type, bool v) {
@@ -146,7 +146,7 @@ public:
     }
 
     void set_template(CK_ATTRIBUTE_TYPE type, const attribute_map& inner) {
-        _values[type] = inner.flatten();
+        _values[type] = inner.encode();
     }
 
     void erase(CK_ATTRIBUTE_TYPE type) { _values.erase(type); }
@@ -172,9 +172,10 @@ public:
 
     auto operator==(const attribute_map&) const -> bool = default;
 
-private:
-    // type (8 bytes LE) | length (8 bytes LE) | value, repeated.
-    [[nodiscard]] auto flatten() const -> value_type {
+    /// The canonical byte form, also used for template attributes: type
+    /// (8 bytes LE) | length (8 bytes LE) | value, repeated in type order.
+    /// Equal maps encode equally, so the encoding can be hashed.
+    [[nodiscard]] auto encode() const -> value_type {
         value_type out;
         for (const auto& [type, value] : _values) {
             put_u64(out, type);
@@ -184,8 +185,8 @@ private:
         return out;
     }
 
-    [[nodiscard]] static auto unflatten(std::span<const std::uint8_t> in)
-        -> ck_result<attribute_map> {
+    /// encode()'s inverse; malformed input is CKR_ATTRIBUTE_VALUE_INVALID.
+    [[nodiscard]] static auto decode(std::span<const std::uint8_t> in) -> ck_result<attribute_map> {
         attribute_map out;
         std::size_t at = 0;
         while (at < in.size()) {
@@ -206,6 +207,7 @@ private:
         return out;
     }
 
+private:
     static void put_u64(value_type& out, std::uint64_t v) {
         for (int i = 0; i < 8; ++i) {
             out.push_back(static_cast<std::uint8_t>(v >> (8 * i)));

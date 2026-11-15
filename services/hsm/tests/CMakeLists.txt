@@ -51,6 +51,13 @@ kythira_hsm_test(hsm_attribute_policy_test hsm_attribute_policy_test.cpp)
 set_tests_properties(hsm_attribute_policy_test PROPERTIES
     LABELS "unit;hsm;hsm-module" TIMEOUT 60)
 
+# Task 5, Requirements 3.1-3.3, 4.5-4.6, 7.1-7.2, 7.4, 8.2 and 13.4: the
+# catalog and token state machines, leader-side generation, sealing, PIN
+# verifiers, and the no-plaintext scan of engine, log and checkpoints.
+kythira_hsm_test(hsm_key_store_test hsm_key_store_test.cpp)
+set_tests_properties(hsm_key_store_test PROPERTIES
+    LABELS "unit;hsm;hsm-module" TIMEOUT 120)
+
 # Task 1: hsm_node links and runs (and, from task 3, can lock key memory).
 add_test(NAME hsm_node_self_test COMMAND hsm_node --self-test)
 set_tests_properties(hsm_node_self_test PROPERTIES

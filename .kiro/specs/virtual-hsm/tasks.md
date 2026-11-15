@@ -82,13 +82,32 @@ task is one PR unless noted.
     `unsupported_functions()` lists what the library (task 10) answers
     `CKR_FUNCTION_NOT_SUPPORTED`.
 
-- [ ] 5. Token and catalog state machines
+- [x] 5. Token and catalog state machines
   - `hsm_catalog_state_machine` (tokens, client bindings, wrapped TKs,
     unseal mode) and `token_state_machine` (objects, attributes, sealed
     material, scrypt PIN verifiers, login counters) on the persistent
     concept; leader-side generation with wrapped material in the entry
   - Plaintext-scan test over data directory, log and snapshots
   - _Requirements: 3.1-3.3, 7.1, 7.2, 7.4, 13.4_
+  - Done: `catalog_state_machine.hpp`, `token_state_machine.hpp` (both
+    on `persistent_group.hpp`, satisfying `persistent_state_machine`),
+    `sealing.hpp` and `key_store.hpp`. TKs are sealed under the MK with
+    the MK generation in the AD, so a rekey (one entry re-sealing every
+    TK, refused unless it names every token) retires the old MK. Object
+    material is sealed under the TK with token, handle and attribute
+    digest as AD; `C_SetAttributeValue` re-seals on the leader. Handles
+    are chosen by the leader (random, below 2^31) and versions guard
+    every update and destroy; a taken handle or stale version is
+    `CKR_FUNCTION_REJECTED`, meaning read again and retry. PIN checks
+    run on the serving node and only the outcome is replicated, so
+    failures count cluster-wide; locking reports the `CKF_*_PIN_*`
+    flags. scrypt is N=2^15, r=8, p=1, stored per verifier. The
+    plaintext scan covers every engine key and value, every command and
+    both groups' checkpoint files, looking for the MK, TK, shares, PINs,
+    each key's value and each private scalar; it uses the memory engine,
+    which writes checkpoints uncompressed (a compressing engine could
+    hide plaintext from a byte search). The scan over a real node's data
+    directory and Raft log comes with the cluster tests of task 11.
 
 - [ ] 6. HSM service module and session layer
   - `hsm_module` on the service module interface: groups on the node's
