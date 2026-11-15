@@ -299,7 +299,7 @@ task is one PR unless noted.
     `kythira_node` beside Redis
   - _Requirements: 2.1, 2.5, 13.5, 13.6_
 
-- [ ] 12. Consumer wrapper and external modules
+- [x] 12. Consumer wrapper and external modules
   - Core `kythira::pkcs11::module` (dlopen or native client, RFC 7512 URI
     lookup); documented YubiHSM 2 / CloudHSM common subset; consumer tests
     against SoftHSM2; `hsm_ctl migrate`
@@ -322,7 +322,23 @@ task is one PR unless noted.
     (core) and `hsm_pkcs11_module_test` (one scenario in process, through
     the dlopen'd library and on SoftHSM2, which `hsm-module.yml` now
     installs).
-  - [ ] 12b. `hsm_ctl migrate`, against SoftHSM2.
+  - [x] 12b. `hsm_ctl migrate --from URI --to URI` (`migrate.hpp`): the
+    target makes (or names) an RSA transport key, its public half is
+    imported into the source, a session AES-256 key goes across under
+    RSA-OAEP (SHA-256, else SHA-1 for SoftHSM2), and every extractable
+    key follows under RFC 5649 key wrap, landing sensitive and, unless
+    `--keep-extractable`, not extractable; public halves and certificates
+    are created as they are. Non-extractable keys are reported
+    `needs_reissue`, data objects `skipped`, objects already on the
+    target `exists` (so a failed run can be repeated), and `--dry-run`
+    changes nothing. The target's RFC 5649 mechanism is
+    `CKM_AES_KEY_WRAP_KWP` or, as SoftHSM2 names it,
+    `CKM_AES_KEY_WRAP_PAD`; a target with neither (the YubiHSM 2, which
+    has only its own AES-CCM wrap) is refused before anything moves, as
+    is a source without KWP. `hsm_pkcs11_module_test` copies AES, EC and
+    RSA keys and a certificate to SoftHSM2, checks the copies are the
+    same keys and no longer extractable, repeats the run, and runs
+    `hsm_ctl migrate` itself through `libkythira_pkcs11.so`.
 
 - [ ] 13. Consumers
   - Cluster CA signing key on a token; Kinesis `pkcs11` key provider; IAM
