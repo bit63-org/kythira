@@ -580,6 +580,7 @@ private:
             c.gsis = gsis;
             c.log_changes = d->logs_changes();
             c.stream_ms = d->stream_label();
+            c.sealed = d->seals_items();
             c.region = region;
             c.written_ms = written;
             commands.push_back(std::move(c));

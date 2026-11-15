@@ -141,6 +141,7 @@ public:
         if (iam) {
             _cfg.iam = std::move(iam);
         }
+        _backend->set_sealer(ddb::item_sealer(_cfg.key_ring));
         _gateway = std::make_unique<ddb::gateway<ddb::local_backend<>>>(_cfg, *_backend, _log);
         _gateway->start();
         _log(false, "serving " + std::string(_cfg.http.insecure_plaintext ? "http" : "https") +
@@ -415,6 +416,10 @@ private:
                 "KYTHIRA_DYNAMODB_KMS_ENDPOINT");
         }
         _kms_in_process = uses_kythira && s.endpoint.empty();
+        // Every node holds the keys its replicas seal with, even with no
+        // provider: a table sealed before the provider was turned off then
+        // reports its key as unavailable rather than reading as corrupt.
+        _cfg.key_ring = std::make_shared<ddb::table_key_ring>();
         try {
             _cfg.encryption = ddb::make_table_key_config(s, provider, _cfg.front.region, _kms_slot);
         } catch (const std::exception& e) {

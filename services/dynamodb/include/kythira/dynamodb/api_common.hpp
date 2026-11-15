@@ -66,6 +66,13 @@ template<dynamo_backend Backend>
     if (!d || d->status == table_status::creating || d->status == table_status::deleting) {
         return not_found();
     }
+    if (d->sse.status == sse_status::inaccessible) {
+        // Requirement 12.6: as AWS answers while the table's KMS key is
+        // disabled, pending deletion or unreachable.
+        return validation_error("KMS key access denied error: the table's KMS key " +
+                                d->sse.key_arn +
+                                " is not accessible (INACCESSIBLE_ENCRYPTION_CREDENTIALS)");
+    }
     return std::move(*d);
 }
 

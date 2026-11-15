@@ -505,6 +505,13 @@ struct table_descriptor {
         return it == destinations.end() ? nullptr : &*it;
     }
 
+    /// Whether the table's item values are stored sealed under its table
+    /// key (KMS task 16): it has one. Every write to it carries
+    /// `item_command::sealed`.
+    [[nodiscard]] auto seals_items() const -> bool {
+        return sse.kind != sse_kind::none && !sse.wrapped.empty();
+    }
+
     /// The label a logged write carries: the enabled stream's, else 0.
     [[nodiscard]] auto stream_label() const -> std::uint64_t {
         const auto* s = enabled_stream();
@@ -648,7 +655,10 @@ struct catalog_command {
         /// unusable or usable again (KMS task 16): `table.sse` replaces the
         /// stored one when the stored table has `table.table_id`. Refused
         /// for a table that is not ACTIVE, unless the command only moves
-        /// it into or out of `inaccessible`.
+        /// it into or out of `inaccessible`. With `done`, only the key's
+        /// health (`status`, `inaccessible_ms`) is taken, and only while the
+        /// stored table is under the same wrapped key: a watcher's verdict
+        /// on a key the table has since left changes nothing.
         set_sse = 26,
     };
 
@@ -2419,6 +2429,18 @@ private:
         // Only the key's health may change while the table is busy.
         const bool health_only = d->sse.kind == got.kind && d->sse.key_arn == got.key_arn &&
                                  d->sse.wrapped == got.wrapped && d->sse.provider == got.provider;
+        if (c.done) {
+            catalog_result r;
+            if (health_only &&
+                (d->sse.status != got.status || d->sse.inaccessible_ms != got.inaccessible_ms)) {
+                d->sse.status = got.status;
+                d->sse.inaccessible_ms = got.inaccessible_ms;
+                ++d->revision;
+                store(batch, *d);
+            }
+            r.table = std::move(d);
+            return r;
+        }
         if (d->status != table_status::active && !health_only) {
             return in_use(*d);
         }

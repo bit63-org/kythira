@@ -223,7 +223,7 @@ is one PR unless noted.
     where the key policy denies a role that the stream policy allows
   - _Requirements: 11.1-11.8, 14.4_
 
-- [ ] 16. DynamoDB table keys and `SSESpecification` (two PRs)
+- [x] 16. DynamoDB table keys and `SSESpecification` (two PRs)
   - `SSESpecification` on `CreateTable`, `UpdateTable` and restores;
     `SSEDescription`; table key made and re-wrapped through `kms.client`;
     owned key default with `KYTHIRA_DYNAMODB_ENCRYPT_AT_REST` (the KMS's
@@ -241,8 +241,11 @@ is one PR unless noted.
     which re-wraps a table key when its table changes key or provider;
     the KMS gives services owned keys; DynamoDB has table keys
     (`table_keys.hpp`, catalog format 13, `SSESpecification`,
-    `SSEDescription`, `KYTHIRA_DYNAMODB_KMS`). Left: sealing, the
-    inaccessible state, background re-encryption.
+    `SSEDescription`, `KYTHIRA_DYNAMODB_KMS`). Item values, LSI and GSI
+    entries are sealed (`item_sealing.hpp`, command format 5, `reseal`),
+    the node's key ring is filled by the gateway
+    (`table_key_refresh.hpp`), and the catalog leader marks tables
+    inaccessible and re-seals tables that gained a key.
 
 - [ ] 17. DynamoDB archives and replicas
   - Sealing of change log records, backups, PITR archives and exports;

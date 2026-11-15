@@ -260,6 +260,7 @@ public:
                 c.gsis = maintained_indexes(w.table.gsis);
                 c.log_changes = w.table.logs_changes();
                 c.stream_ms = w.table.stream_label();
+                c.sealed = w.table.seals_items();
                 c.region = w.table.region;
                 if (put != nullptr) {
                     auto it = item_from_json(put->as_object().at("Item").as_object());

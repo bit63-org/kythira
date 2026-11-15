@@ -375,6 +375,7 @@ private:
                 put.payload = it;
                 put.gsis = d.gsis;
                 put.log_changes = d.logs_changes();
+                put.sealed = d.seals_items();
                 put.written_ms = _backend.now_ms();
                 (void)_backend.write(put);
             }

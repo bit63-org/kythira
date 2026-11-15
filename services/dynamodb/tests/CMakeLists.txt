@@ -209,6 +209,12 @@ set_tests_properties(dynamodb_pitr_test PROPERTIES
 kythira_dynamodb_test(dynamodb_table_keys_test dynamodb_table_keys_test.cpp)
 set_tests_properties(dynamodb_table_keys_test PROPERTIES
     LABELS "unit;dynamodb;dynamodb-module" TIMEOUT 60)
+# Item sealing (KMS task 16): sealed values, the key ring, the item
+# state machine sealing what a sealed command writes, a replica without
+# the key, re-sealing, and the command format.
+kythira_dynamodb_test(dynamodb_item_sealing_test dynamodb_item_sealing_test.cpp)
+set_tests_properties(dynamodb_item_sealing_test PROPERTIES
+    LABELS "unit;dynamodb;dynamodb-module" TIMEOUT 60)
 # Exports and imports (task 20): the formats (Ion, CSV, gzip, zstd, MD5),
 # full, point-in-time and incremental exports, imports of each format.
 kythira_dynamodb_test(dynamodb_export_import_test dynamodb_export_import_test.cpp)

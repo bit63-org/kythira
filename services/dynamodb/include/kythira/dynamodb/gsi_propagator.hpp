@@ -75,6 +75,7 @@ struct gsi_plan {
         put.target = *key;
         put.version = work.pending.version;
         put.payload = *gsi_entry(table->schema, g, *work.current);
+        put.sealed = table->seals_items();
         plan.index_writes.push_back(std::move(put));
         now.push_back(std::move(*key));
     }

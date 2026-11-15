@@ -722,6 +722,7 @@ private:
                     c.gsis = gsis;
                     c.log_changes = d->logs_changes();
                     c.stream_ms = d->stream_label();
+                    c.sealed = d->seals_items();
                     c.region = d->region;
                     c.old_on_condition_failure = report_conditions;
                     const auto res = _backend.write(c);

@@ -95,6 +95,8 @@ configuration `.github/workflows/dynamodb-module.yml` checks.
 | `tests/dynamodb_strong_cluster_test.cpp`, `dynamodb_cluster_fixture.hpp` | Three in-process regions over one strong host: cross-region reads, racing conditional writes, losing a region, cutting one off through relays, a witness, splits under load | 27 |
 | `tools/strong/` | Three regions on RocksDB under Docker, rootless Podman or as processes, with a region killed and restarted (`run_strong.sh`) | 27 |
 | `include/kythira/dynamodb/table_keys.hpp` | Table keys (KMS spec task 16): `SSESpecification` checked as AWS checks it, each table's key made under the owned, AWS managed or named KMS key, bound to the table by its encryption context, re-wrapped by `UpdateTable`, `SSEDescription`; the `KYTHIRA_DYNAMODB_KMS` settings | KMS 16 |
+| `include/kythira/dynamodb/item_sealing.hpp` | Item values sealed under the table key (AES-256-GCM, deterministic nonces so replicas write the same bytes), the node's key ring, the group's sealer | KMS 16 |
+| `include/kythira/dynamodb/table_key_refresh.hpp` | The gateway's refresher that fills the key ring, and the catalog leader's watch: `INACCESSIBLE_ENCRYPTION_CREDENTIALS` and re-sealing of tables that gained a key | KMS 16 |
 | `include/kythira/dynamodb/table_key_providers.hpp` | The `kythira`, `aws` and `local` key providers (core's `raft/kms_key_provider*.hpp`, shared with Kinesis) made from those settings | KMS 16 |
 | `tests/dynamodb_table_keys_test.cpp` | Table keys over a fake KMS: the owned default, a named key used for the caller, refusals, `off` and no provider, re-wrapping without new data keys, the previous provider, restores, catalog format 13, the settings | KMS 16 |
 
@@ -153,10 +155,33 @@ encryption context `aws:dynamodb:tableName` and
 under the operator's credentials; Kythira's IAM still decides who may use
 the table. A table keeps opening after the cluster moves to another
 provider while the old one is named by `KYTHIRA_DYNAMODB_KMS_PREVIOUS`.
-This step makes and keeps the keys; sealing items, change records,
-backups and exports under them, `INACCESSIBLE_ENCRYPTION_CREDENTIALS`
-and re-encrypting existing tables come with the next step of task 16,
-so until then items are stored as before.
+
+An encrypted table's item values, LSI entries and GSI entries are sealed
+with AES-256-GCM under keys derived from its table key before they reach
+the storage engine (`item_sealing.hpp`). Every replica of the table's
+groups holds the table key in memory, fetched by the gateway on its node
+as the table's account (`table_key_refresh.hpp`), never while a group
+applies an entry: a replica without the key halts the group until it has
+it, and the request that wrote the entry answers `InternalServerError`
+(the write still applies once the key arrives). What stays visible on
+disk:
+
+- Keys: partition and sort key values, LSI and GSI key values, in the
+  clear in the engine's keys, since the engine orders by them. A table
+  that must hide them needs opaque key values.
+- The Raft log and transaction intents hold each write in the clear
+  until the log is compacted and the transaction settles; change log
+  records, backups, point-in-time archives and exports are sealed by
+  KMS spec task 17.
+- Sizes: a sealed value is 29 bytes longer than the item.
+
+When a table's key cannot be opened on the catalog leader for ten
+minutes (disabled, pending deletion, or the provider unreachable), the
+table goes `INACCESSIBLE_ENCRYPTION_CREDENTIALS` and data-plane calls
+answer `ValidationException` ("KMS key access denied error"); it comes
+back once the key opens again. Kythira never archives such a table. A
+clear table that gains a key with `UpdateTable` shows `UPDATING` while
+the catalog leader re-seals its values through the log, then `ENABLED`.
 
 Backups live in `KYTHIRA_DYNAMODB_BACKUP_DIR` (a directory every node of a
 cluster shares) or, in a build with the AWS SDK, an S3 bucket
