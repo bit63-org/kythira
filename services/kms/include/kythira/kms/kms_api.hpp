@@ -7,7 +7,8 @@
 // (.kiro/specs/kms-compatible-api/ task 6, Requirements 3.1-3.6, 6.1-6.3
 // and 7.2): key management, aliases and tags. The cryptographic
 // operations are in kms_crypto_api.hpp and kms_signing_api.hpp; key
-// policies (task 9, Requirements 7.1-7.5) are here; grants join in 10.
+// policies (task 9, Requirements 7.1-7.5) and rotation (task 11,
+// Requirement 9.1) are here; grants are in kms_grants_api.hpp.
 //
 // Every handler resolves the key the request names (key id, key ARN, and
 // where AWS takes one an alias name or alias ARN), authorizes the
@@ -169,6 +170,8 @@ template<typename Catalog> struct api_deps {
     /// Milliseconds since the epoch.
     std::function<std::uint64_t()> clock_ms;
     std::function<std::string()> new_key_id = random_key_id;
+    /// A rotation's two steps (key_jobs::rotate), for RotateKeyOnDemand.
+    std::function<key_result(std::string_view, rotation_type)> rotate;
 };
 
 /// What every KMS operation shares: reading the request, resolving the key
@@ -367,13 +370,15 @@ public:
     explicit key_management_api(api_deps<Catalog> deps) : _d(std::move(deps)) {}
 
     /// The operations this registers, for implemented-operations.txt.
-    static constexpr std::array<std::string_view, 18> k_operations{
-        "CreateKey",           "DescribeKey",       "ListKeys",
-        "EnableKey",           "DisableKey",        "UpdateKeyDescription",
-        "ScheduleKeyDeletion", "CancelKeyDeletion", "CreateAlias",
-        "UpdateAlias",         "DeleteAlias",       "ListAliases",
-        "TagResource",         "UntagResource",     "ListResourceTags",
-        "GetKeyPolicy",        "PutKeyPolicy",      "ListKeyPolicies"};
+    static constexpr std::array<std::string_view, 23> k_operations{
+        "CreateKey",           "DescribeKey",        "ListKeys",
+        "EnableKey",           "DisableKey",         "UpdateKeyDescription",
+        "ScheduleKeyDeletion", "CancelKeyDeletion",  "CreateAlias",
+        "UpdateAlias",         "DeleteAlias",        "ListAliases",
+        "TagResource",         "UntagResource",      "ListResourceTags",
+        "GetKeyPolicy",        "PutKeyPolicy",       "ListKeyPolicies",
+        "EnableKeyRotation",   "DisableKeyRotation", "GetKeyRotationStatus",
+        "RotateKeyOnDemand",   "ListKeyRotations"};
 
     template<typename FrontEnd> void register_on(FrontEnd& fe) {
         const auto bind = [this](auto method) {
@@ -399,6 +404,11 @@ public:
         fe.on("GetKeyPolicy", bind(&key_management_api::get_key_policy));
         fe.on("PutKeyPolicy", bind(&key_management_api::put_key_policy));
         fe.on("ListKeyPolicies", bind(&key_management_api::list_key_policies));
+        fe.on("EnableKeyRotation", bind(&key_management_api::enable_rotation));
+        fe.on("DisableKeyRotation", bind(&key_management_api::disable_rotation));
+        fe.on("GetKeyRotationStatus", bind(&key_management_api::get_rotation_status));
+        fe.on("RotateKeyOnDemand", bind(&key_management_api::rotate_on_demand));
+        fe.on("ListKeyRotations", bind(&key_management_api::list_rotations));
     }
 
     // -- Keys ------------------------------------------------------------------
@@ -933,7 +943,201 @@ public:
         return boost::json::object{{"PolicyNames", std::move(names)}, {"Truncated", false}};
     }
 
+    // -- Rotation --------------------------------------------------------------
+
+    auto enable_rotation(call_context& ctx, boost::json::object& in) -> result {
+        std::uint32_t days = k_default_rotation_days;
+        if (const auto* d = in.if_contains("RotationPeriodInDays"); d != nullptr && d->is_int64()) {
+            const auto v = d->get_int64();
+            if (v < 90 || v > 2560) {
+                return validation_error("RotationPeriodInDays must be between 90 and 2560");
+            }
+            days = static_cast<std::uint32_t>(v);
+        }
+        return set_rotation(ctx, in, "EnableKeyRotation", true, days);
+    }
+
+    auto disable_rotation(call_context& ctx, boost::json::object& in) -> result {
+        return set_rotation(ctx, in, "DisableKeyRotation", false, 0);
+    }
+
+    auto get_rotation_status(call_context& ctx, boost::json::object& in) -> result {
+        auto c = catalog();
+        if (!c) {
+            return c.error();
+        }
+        auto k = resolve(ctx, **c, in, "KeyId", false);
+        if (!k) {
+            return k.error();
+        }
+        if (auto denied = authorize_key(ctx, **c, *k, "GetKeyRotationStatus")) {
+            return *denied;
+        }
+        if (auto bad = rotatable(ctx, k->record)) {
+            return *bad;
+        }
+        const auto& key = k->record;
+        boost::json::object out{{"KeyId", ctx.key_arn(key.account, key.key_id)},
+                                {"KeyRotationEnabled", key.rotation_enabled}};
+        if (key.rotation_enabled) {
+            out["RotationPeriodInDays"] = key.rotation_period_days;
+            out["NextRotationDate"] = seconds(key.next_rotation_ms);
+        }
+        return out;
+    }
+
+    auto rotate_on_demand(call_context& ctx, boost::json::object& in) -> result {
+        auto c = catalog();
+        if (!c) {
+            return c.error();
+        }
+        auto k = resolve(ctx, **c, in, "KeyId", false);
+        if (!k) {
+            return k.error();
+        }
+        if (auto denied = authorize_key(ctx, **c, *k, "RotateKeyOnDemand")) {
+            return *denied;
+        }
+        const auto& key = k->record;
+        if (auto bad = rotatable(ctx, key)) {
+            return *bad;
+        }
+        if (auto bad = usable_state(ctx, key)) {
+            return *bad;
+        }
+        const auto versions = (*c)->versions(key.key_id);
+        const auto on_demand = std::count_if(versions.begin(), versions.end(), [](const auto& v) {
+            return v.type == rotation_type::on_demand;
+        });
+        if (on_demand >= static_cast<std::ptrdiff_t>(k_max_on_demand_rotations)) {
+            return kms_error("LimitExceededException",
+                             key_label(ctx, key) + " has had its 10 on-demand rotations");
+        }
+        key_result r;
+        try {
+            r = _d.rotate(key.key_id, rotation_type::on_demand);
+        } catch (const std::exception&) {
+            return dependency_timeout();
+        }
+        if (!r.ok()) {
+            return outcome_error(r, key_label(ctx, key));
+        }
+        return boost::json::object{{"KeyId", ctx.key_arn(key.account, key.key_id)}};
+    }
+
+    auto list_rotations(call_context& ctx, boost::json::object& in) -> result {
+        auto c = catalog();
+        if (!c) {
+            return c.error();
+        }
+        auto k = resolve(ctx, **c, in, "KeyId", false);
+        if (!k) {
+            return k.error();
+        }
+        if (auto denied = authorize_key(ctx, **c, *k, "ListKeyRotations")) {
+            return *denied;
+        }
+        if (auto bad = rotatable(ctx, k->record)) {
+            return *bad;
+        }
+        const auto limit = std::min<std::size_t>(limit_of(in, 100), 1000);
+        // The marker is the last version answered; the initial backing key
+        // is not a rotation.
+        const auto marker = str(in, "Marker").value_or("");
+        std::uint32_t after = 0;
+        if (!marker.empty()) {
+            try {
+                after = static_cast<std::uint32_t>(std::stoul(std::string(marker)));
+            } catch (const std::exception&) {
+                return kms_error("InvalidMarkerException", "The marker is not valid");
+            }
+        }
+        const auto arn = ctx.key_arn(k->record.account, k->record.key_id);
+        boost::json::array out;
+        bool truncated = false;
+        std::uint32_t last = 0;
+        for (const auto& v : (*c)->versions(k->record.key_id)) {
+            if (v.type == rotation_type::initial || v.version <= after) {
+                continue;
+            }
+            if (out.size() == limit) {
+                truncated = true;
+                break;
+            }
+            out.push_back(boost::json::object{
+                {"KeyId", arn},
+                {"RotationDate", seconds(v.created_ms)},
+                {"RotationType", v.type == rotation_type::on_demand ? "ON_DEMAND" : "AUTOMATIC"}});
+            last = v.version;
+        }
+        boost::json::object res{{"Rotations", std::move(out)}, {"Truncated", truncated}};
+        if (truncated) {
+            res["NextMarker"] = std::to_string(last);
+        }
+        return res;
+    }
+
 private:
+    static constexpr std::uint32_t k_default_rotation_days = 365;
+    /// AWS allows ten on-demand rotations in a key's life.
+    static constexpr std::size_t k_max_on_demand_rotations = 10;
+
+    /// AWS rotates customer managed symmetric keys only; it rotates its own
+    /// managed keys itself.
+    [[nodiscard]] static auto rotatable(const call_context& ctx, const key_record& k)
+        -> std::optional<aws_json::error> {
+        if (!is_symmetric(k.spec)) {
+            return unsupported(key_label(ctx, k) +
+                               " is not a symmetric encryption key, which alone can rotate");
+        }
+        return std::nullopt;
+    }
+
+    /// The rotation operations' key states, as AWS's key state table has
+    /// them: a disabled key is DisabledException, a key pending deletion
+    /// or still being created is KMSInvalidStateException.
+    [[nodiscard]] static auto usable_state(const call_context& ctx, const key_record& k)
+        -> std::optional<aws_json::error> {
+        switch (k.state) {
+            case key_state::enabled:
+                return std::nullopt;
+            case key_state::disabled:
+                return kms_error("DisabledException", key_label(ctx, k) + " is disabled.");
+            case key_state::pending_deletion:
+                return invalid_state(key_label(ctx, k) + " is pending deletion.");
+            case key_state::creating:
+                return invalid_state(key_label(ctx, k) + " is still being created");
+        }
+        return std::nullopt;
+    }
+
+    auto set_rotation(call_context& ctx, boost::json::object& in, std::string_view action,
+                      bool enabled, std::uint32_t days) -> result {
+        auto c = catalog();
+        if (!c) {
+            return c.error();
+        }
+        auto k = resolve(ctx, **c, in, "KeyId", false);
+        if (!k) {
+            return k.error();
+        }
+        if (auto denied = authorize_key(ctx, **c, *k, action)) {
+            return *denied;
+        }
+        const auto& key = k->record;
+        if (auto bad = rotatable(ctx, key)) {
+            return *bad;
+        }
+        if (key.manager == key_manager::aws) {
+            return unsupported("AWS rotates its managed keys itself");
+        }
+        if (auto bad = usable_state(ctx, key)) {
+            return *bad;
+        }
+        return write(make_set_rotation_command(key.key_id, enabled, days, _d.clock_ms()),
+                     key_label(ctx, key));
+    }
+
     /// A key's only policy, as on AWS.
     static constexpr std::string_view k_policy_name = "default";
 

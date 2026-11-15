@@ -13,7 +13,9 @@ Decrypt
 DeleteAlias
 DescribeKey
 DisableKey
+DisableKeyRotation
 EnableKey
+EnableKeyRotation
 Encrypt
 GenerateDataKey
 GenerateDataKeyPair
@@ -22,10 +24,12 @@ GenerateDataKeyWithoutPlaintext
 GenerateMac
 GenerateRandom
 GetKeyPolicy
+GetKeyRotationStatus
 GetPublicKey
 ListAliases
 ListGrants
 ListKeyPolicies
+ListKeyRotations
 ListKeys
 ListResourceTags
 ListRetirableGrants
@@ -33,6 +37,7 @@ PutKeyPolicy
 ReEncrypt
 RetireGrant
 RevokeGrant
+RotateKeyOnDemand
 ScheduleKeyDeletion
 Sign
 TagResource
