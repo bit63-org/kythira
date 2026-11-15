@@ -15,23 +15,16 @@ retryable fault.
 
 | Operation | Planned | Reason | Error |
 |---|---|---|---|
-| `CancelKeyDeletion` | task 6 | Not built yet (key management, aliases and tags). | `UnsupportedOperationException`, HTTP 400 |
 | `ConnectCustomKeyStore` | out of scope | Custom key stores are out of scope: the virtual HSM's external-module support swaps the backing store for the whole KMS (design, "Metadata in the KMS, material in the HSM"). | `UnsupportedOperationException`, HTTP 400 |
-| `CreateAlias` | task 6 | Not built yet (key management, aliases and tags). | `UnsupportedOperationException`, HTTP 400 |
 | `CreateCustomKeyStore` | out of scope | Custom key stores are out of scope: the virtual HSM's external-module support swaps the backing store for the whole KMS (design, "Metadata in the KMS, material in the HSM"). | `UnsupportedOperationException`, HTTP 400 |
 | `CreateGrant` | task 10 | Not built yet (grants). | `UnsupportedOperationException`, HTTP 400 |
-| `CreateKey` | task 6 | Not built yet (key management, aliases and tags). | `UnsupportedOperationException`, HTTP 400 |
 | `Decrypt` | task 7 | Not built yet (symmetric operations). | `UnsupportedOperationException`, HTTP 400 |
-| `DeleteAlias` | task 6 | Not built yet (key management, aliases and tags). | `UnsupportedOperationException`, HTTP 400 |
 | `DeleteCustomKeyStore` | out of scope | Custom key stores are out of scope: the virtual HSM's external-module support swaps the backing store for the whole KMS (design, "Metadata in the KMS, material in the HSM"). | `UnsupportedOperationException`, HTTP 400 |
 | `DeleteImportedKeyMaterial` | out of scope | Imported key material is out of scope for this spec (design, "What stays out"): it needs an RSA-OAEP unwrap into a non-extractable HSM object, left for a follow-up spec. | `UnsupportedOperationException`, HTTP 400 |
 | `DeriveSharedSecret` | none | Not in the spec: ECDH key agreement on an ECC key pair (KMS added it after the spec was written). Open question for the owner. | `UnsupportedOperationException`, HTTP 400 |
 | `DescribeCustomKeyStores` | out of scope | Custom key stores are out of scope: the virtual HSM's external-module support swaps the backing store for the whole KMS (design, "Metadata in the KMS, material in the HSM"). | `UnsupportedOperationException`, HTTP 400 |
-| `DescribeKey` | task 6 | Not built yet (key management, aliases and tags). | `UnsupportedOperationException`, HTTP 400 |
-| `DisableKey` | task 6 | Not built yet (key management, aliases and tags). | `UnsupportedOperationException`, HTTP 400 |
 | `DisableKeyRotation` | task 11 | Not built yet (rotation). | `UnsupportedOperationException`, HTTP 400 |
 | `DisconnectCustomKeyStore` | out of scope | Custom key stores are out of scope: the virtual HSM's external-module support swaps the backing store for the whole KMS (design, "Metadata in the KMS, material in the HSM"). | `UnsupportedOperationException`, HTTP 400 |
-| `EnableKey` | task 6 | Not built yet (key management, aliases and tags). | `UnsupportedOperationException`, HTTP 400 |
 | `EnableKeyRotation` | task 11 | Not built yet (rotation). | `UnsupportedOperationException`, HTTP 400 |
 | `Encrypt` | task 7 | Not built yet (symmetric operations). | `UnsupportedOperationException`, HTTP 400 |
 | `GenerateDataKey` | task 7 | Not built yet (symmetric operations). | `UnsupportedOperationException`, HTTP 400 |
@@ -46,12 +39,9 @@ retryable fault.
 | `GetParametersForImport` | out of scope | Imported key material is out of scope for this spec (design, "What stays out"): it needs an RSA-OAEP unwrap into a non-extractable HSM object, left for a follow-up spec. | `UnsupportedOperationException`, HTTP 400 |
 | `GetPublicKey` | task 8 | Not built yet (asymmetric and HMAC operations). | `UnsupportedOperationException`, HTTP 400 |
 | `ImportKeyMaterial` | out of scope | Imported key material is out of scope for this spec (design, "What stays out"): it needs an RSA-OAEP unwrap into a non-extractable HSM object, left for a follow-up spec. | `UnsupportedOperationException`, HTTP 400 |
-| `ListAliases` | task 6 | Not built yet (key management, aliases and tags). | `UnsupportedOperationException`, HTTP 400 |
 | `ListGrants` | task 10 | Not built yet (grants). | `UnsupportedOperationException`, HTTP 400 |
 | `ListKeyPolicies` | task 9 | Not built yet (key policies). | `UnsupportedOperationException`, HTTP 400 |
 | `ListKeyRotations` | task 11 | Not built yet (rotation). | `UnsupportedOperationException`, HTTP 400 |
-| `ListKeys` | task 6 | Not built yet (key management, aliases and tags). | `UnsupportedOperationException`, HTTP 400 |
-| `ListResourceTags` | task 6 | Not built yet (key management, aliases and tags). | `UnsupportedOperationException`, HTTP 400 |
 | `ListRetirableGrants` | task 10 | Not built yet (grants). | `UnsupportedOperationException`, HTTP 400 |
 | `PutKeyPolicy` | task 9 | Not built yet (key policies). | `UnsupportedOperationException`, HTTP 400 |
 | `ReEncrypt` | task 7 | Not built yet (symmetric operations). | `UnsupportedOperationException`, HTTP 400 |
@@ -59,13 +49,8 @@ retryable fault.
 | `RetireGrant` | task 10 | Not built yet (grants). | `UnsupportedOperationException`, HTTP 400 |
 | `RevokeGrant` | task 10 | Not built yet (grants). | `UnsupportedOperationException`, HTTP 400 |
 | `RotateKeyOnDemand` | task 11 | Not built yet (rotation). | `UnsupportedOperationException`, HTTP 400 |
-| `ScheduleKeyDeletion` | task 6 | Not built yet (key management, aliases and tags). | `UnsupportedOperationException`, HTTP 400 |
 | `Sign` | task 8 | Not built yet (asymmetric and HMAC operations). | `UnsupportedOperationException`, HTTP 400 |
-| `TagResource` | task 6 | Not built yet (key management, aliases and tags). | `UnsupportedOperationException`, HTTP 400 |
-| `UntagResource` | task 6 | Not built yet (key management, aliases and tags). | `UnsupportedOperationException`, HTTP 400 |
-| `UpdateAlias` | task 6 | Not built yet (key management, aliases and tags). | `UnsupportedOperationException`, HTTP 400 |
 | `UpdateCustomKeyStore` | out of scope | Custom key stores are out of scope: the virtual HSM's external-module support swaps the backing store for the whole KMS (design, "Metadata in the KMS, material in the HSM"). | `UnsupportedOperationException`, HTTP 400 |
-| `UpdateKeyDescription` | task 6 | Not built yet (key management, aliases and tags). | `UnsupportedOperationException`, HTTP 400 |
 | `UpdatePrimaryRegion` | out of scope | Multi-Region keys are out of scope: they need key material replicated across regions' HSMs, which the virtual HSM does not do (design, "What stays out"). | `UnsupportedOperationException`, HTTP 400 |
 | `Verify` | task 8 | Not built yet (asymmetric and HMAC operations). | `UnsupportedOperationException`, HTTP 400 |
 | `VerifyMac` | task 8 | Not built yet (asymmetric and HMAC operations). | `UnsupportedOperationException`, HTTP 400 |
