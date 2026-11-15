@@ -125,6 +125,20 @@ concept shared_kms_key_provider =
 template<typename P>
 concept kms_key_provider = shared_kms_key_provider<P> || per_caller_kms_key_provider<P>;
 
+/// A provider that also wraps a data key it is given under another key,
+/// as KMS `Encrypt` does: what re-wraps a DynamoDB table key when its
+/// table moves to another KMS key, with no rewrite of the data under it.
+template<typename P>
+concept wrapping_kms_key_provider =
+    requires(P& p, const std::string& key_id, const data_key_bytes& plaintext,
+             const encryption_context& context, const kms_caller& caller) {
+        { p.wrap_data_key(key_id, plaintext, context, caller) } -> std::same_as<generated_data_key>;
+    } ||
+    requires(P& p, const std::string& key_id, const data_key_bytes& plaintext,
+             const encryption_context& context) {
+        { p.wrap_data_key(key_id, plaintext, context) } -> std::same_as<generated_data_key>;
+    };
+
 /// Any `kms_key_provider`, shared. Calls may come from several threads at
 /// once, so a provider must be thread-safe.
 class key_provider {
@@ -156,6 +170,14 @@ public:
         return impl().decrypt(key_id, wrapped, context, caller);
     }
 
+    /// Wraps `plaintext` under `key_id`. Throws `unavailable` for a
+    /// provider that cannot (wrapping_kms_key_provider).
+    [[nodiscard]] auto wrap_data_key(const std::string& key_id, const data_key_bytes& plaintext,
+                                     const encryption_context& context,
+                                     const kms_caller& caller = {}) const -> generated_data_key {
+        return impl().wrap(key_id, plaintext, context, caller);
+    }
+
 private:
     struct base {
         base() = default;
@@ -169,6 +191,8 @@ private:
             -> generated_data_key = 0;
         virtual auto decrypt(const std::string&, const std::string&, const encryption_context&,
                              const kms_caller&) -> data_key_bytes = 0;
+        virtual auto wrap(const std::string&, const data_key_bytes&, const encryption_context&,
+                          const kms_caller&) -> generated_data_key = 0;
     };
 
     template<typename P> struct model final : base {
@@ -190,6 +214,17 @@ private:
                 return _p.decrypt_data_key(id, w, c, who);
             } else {
                 return _p.decrypt_data_key(id, w, c);
+            }
+        }
+        auto wrap(const std::string& id, const data_key_bytes& k, const encryption_context& c,
+                  const kms_caller& who) -> generated_data_key override {
+            if constexpr (requires { _p.wrap_data_key(id, k, c, who); }) {
+                return _p.wrap_data_key(id, k, c, who);
+            } else if constexpr (requires { _p.wrap_data_key(id, k, c); }) {
+                return _p.wrap_data_key(id, k, c);
+            } else {
+                throw kms_error(kms_failure::unavailable,
+                                "This key provider cannot wrap a data key under another key.");
             }
         }
         P _p;
@@ -347,9 +382,21 @@ public:
     [[nodiscard]] auto generate_data_key(const std::string& key_id,
                                          const encryption_context& context) const
         -> generated_data_key {
+        data_key_bytes plaintext{};
+        detail::random_fill(plaintext);
+        auto out = wrap_data_key(key_id, plaintext, context);
+        OPENSSL_cleanse(plaintext.data(), plaintext.size());
+        return out;
+    }
+
+    /// Wraps a data key the caller holds, as generate_data_key wraps a new
+    /// one.
+    [[nodiscard]] auto wrap_data_key(const std::string& key_id, const data_key_bytes& plaintext,
+                                     const encryption_context& context) const
+        -> generated_data_key {
         check_id(key_id);
         generated_data_key out;
-        detail::random_fill(out._plaintext);
+        out._plaintext = plaintext;
         std::array<unsigned char, k_salt_len> salt{};
         std::array<unsigned char, detail::k_nonce_len> nonce{};
         detail::random_fill(salt);
@@ -447,5 +494,7 @@ private:
 };
 
 static_assert(kms_key_provider<local_kms_provider>);
+
+static_assert(wrapping_kms_key_provider<local_kms_provider>);
 
 }  // namespace kythira::kms_provider
