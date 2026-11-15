@@ -27,10 +27,13 @@
 #include <openssl/evp.h>
 #include <openssl/param_build.h>
 #include <openssl/pem.h>
+#include <openssl/rand.h>
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <functional>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -96,6 +99,19 @@ namespace kythira::pkcs11 {
     return {data, static_cast<std::size_t>(len)};
 }
 
+/// The library at `path`, loaded once per process. Every signing key on a
+/// library shares one load, so no key's module finalizes the library under
+/// another's open session (C_Finalize ends every session in the process).
+[[nodiscard]] inline auto shared_module(const std::string& path) -> module {
+    static std::mutex mutex;
+    static std::map<std::string, module> loaded;
+    const std::scoped_lock lock(mutex);
+    if (auto it = loaded.find(path); it != loaded.end()) {
+        return it->second;
+    }
+    return loaded.emplace(path, module::load(path)).first->second;
+}
+
 /// One signing key pair on a token.
 class signing_key {
 public:
@@ -122,8 +138,31 @@ public:
                 throw std::invalid_argument("pkcs11 signing key " + u.to_string() +
                                             " has no module-path");
             }
-            _state->_source = [path = *u.module_path] { return module::load(path); };
+            _state->_source = [path = *u.module_path] { return shared_module(path); };
         }
+    }
+
+    /// Makes a signing key pair labelled `label` on the token `token` names
+    /// (module, token, PIN) and returns it, named by `token` with object=
+    /// `label`.
+    [[nodiscard]] static auto generate(uri token, key_spec spec, const std::string& label,
+                                       module_source source = {}) -> signing_key {
+        token.object = label;
+        token.id.reset();
+        token.type.reset();
+        signing_key key(std::move(token), std::move(source));
+        std::array<std::uint8_t, 8> id{};
+        if (RAND_bytes(id.data(), static_cast<int>(id.size())) != 1) {
+            throw error("signing_key: no randomness for a key id", CKR_FUNCTION_FAILED);
+        }
+        auto& st = *key._state;
+        const std::scoped_lock lock(st._mutex);
+        if (!st._module) {
+            st._module.emplace(st._source());
+        }
+        auto s = st._module->open(st._uri);
+        (void)s.generate_key_pair(spec, key_usage::sign, label, id);
+        return key;
     }
 
     /// The key's public half, as the token reports it.

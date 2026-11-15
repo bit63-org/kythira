@@ -26,6 +26,7 @@
 
 #include <raft/certificate_authority.hpp>
 #include <raft/certificate_provider.hpp>
+#include <raft/jwt.hpp>
 #include <raft/pkcs11_envelope.hpp>
 #include <raft/pkcs11_module.hpp>
 #include <raft/pkcs11_signing_key.hpp>
@@ -260,6 +261,31 @@ void ca_on_token(const p11::module& m, const p11::uri& base, const std::string& 
     BOOST_TEST(rv_of([&] { (void)not_signing.sign_digest(d); }) != CKR_OK);
 }
 
+/// OIDC signing keys made on the token (task 13c): a JWS signed through
+/// `signing_key` verifies with the token key's public half, for RS256 and
+/// ES256.
+void jws_on_token(const p11::module& m, const p11::uri& base, const std::string& pin) {
+    auto token = base;
+    token.pin_value = pin;
+    for (const auto alg : {kythira::jose::jws_alg::rs256, kythira::jose::jws_alg::es256}) {
+        const bool ec = alg == kythira::jose::jws_alg::es256;
+        BOOST_TEST_CONTEXT((ec ? "ES256" : "RS256")) {
+            const auto key = p11::signing_key::generate(
+                token, ec ? p11::key_spec::ec_p256 : p11::key_spec::rsa_2048,
+                ec ? "oidc-es256" : "oidc-rs256", [&m] { return m; });
+            const kythira::jose::digest_signer signer = [&key](std::span<const unsigned char> d) {
+                return key.sign_digest(d);
+            };
+            const auto jws = kythira::jose::sign_compact(boost::json::object{{"typ", "JWT"}},
+                                                         R"({"sub":"x"})", signer, alg);
+            const auto pub = to_pkey(key.public_key());
+            const auto verified = kythira::jose::verify_compact(jws, pub.get(), alg);
+            BOOST_REQUIRE(verified.has_value());
+            BOOST_TEST(verified->payload == R"({"sub":"x"})");
+        }
+    }
+}
+
 /// `token_uri` names a token whose user PIN is `pin`; `oaep` are the
 /// hashes its RSA-OAEP takes.
 void consumer_scenario(const p11::module& m, const std::string& token_uri, const std::string& pin,
@@ -450,6 +476,7 @@ void consumer_scenario(const p11::module& m, const std::string& token_uri, const
             again.sign_digest(key, p11::signature_scheme::ecdsa, p11::hash_algorithm::sha256, d)));
 
         ca_on_token(m, base, pin);
+        jws_on_token(m, base, pin);
 
         // No token by that name; a library that is not this one.
         BOOST_TEST(rv_of([&] { (void)m.open(p11::uri::parse("pkcs11:token=nobody"), pin); }) ==

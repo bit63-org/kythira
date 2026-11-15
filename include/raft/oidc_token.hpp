@@ -476,4 +476,20 @@ struct token_grant {
     };
 }
 
+/// `mint_token` with the signing key held elsewhere (a PKCS#11 token).
+[[nodiscard]] inline auto mint_token(token_grant grant, std::string_view jti,
+                                     const oidc_key_record& key, const jose::digest_signer& signer,
+                                     std::int64_t now) -> boost::json::object {
+    grant.claims["jti"] = jti;
+    boost::json::object header{{"typ", "JWT"}, {"kid", key.kid}};
+    auto token = jose::sign_compact(std::move(header), boost::json::serialize(grant.claims), signer,
+                                    key.alg);
+    return boost::json::object{
+        {"token", std::move(token)},
+        {"token_type", k_token_type_jwt},
+        {"expires_at", rfc3339_utc(grant.expires_at)},
+        {"expires_in", grant.expires_at - now},
+    };
+}
+
 }  // namespace kythira::oidc

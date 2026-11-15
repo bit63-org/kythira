@@ -44,6 +44,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <span>
@@ -698,6 +699,35 @@ inline void push_ec_public(OSSL_PARAM_BLD* bld, const boost::json::object& jwk,
     input += '.';
     input += base64url_encode(payload);
     const auto sig = sign_bytes(input, key, alg);
+    input += '.';
+    input += base64url_encode(sig);
+    return input;
+}
+
+/// Signs a digest elsewhere (a PKCS#11 token, raft/pkcs11_signing_key.hpp)
+/// and returns the raw JWS signature: R||S for ECDSA, PKCS#1 v1.5 for RSA.
+using digest_signer =
+    std::function<std::vector<unsigned char>(std::span<const unsigned char> digest)>;
+
+/// `sign_compact` with the key held elsewhere: the signing input is hashed
+/// here with `alg`'s digest and `signer` signs the digest.
+[[nodiscard]] inline auto sign_compact(boost::json::object header, std::string_view payload,
+                                       const digest_signer& signer, jws_alg alg) -> std::string {
+    header["alg"] = std::string(alg_name(alg));
+    std::string input = base64url_encode(boost::json::serialize(header));
+    input += '.';
+    input += base64url_encode(payload);
+    std::array<unsigned char, EVP_MAX_MD_SIZE> digest{};
+    unsigned int digest_len = 0;
+    if (EVP_Digest(input.data(), input.size(), digest.data(), &digest_len, detail::digest_for(alg),
+                   nullptr) != 1) {
+        detail::throw_openssl_error("EVP_Digest (JWS signing input) failed");
+    }
+    const auto sig = signer(std::span<const unsigned char>(digest.data(), digest_len));
+    if (is_ecdsa(alg) && sig.size() != 2 * detail::curve_for(alg)->coord_len) {
+        throw std::runtime_error("jose: the signer returned no R||S signature for " +
+                                 std::string(alg_name(alg)));
+    }
     input += '.';
     input += base64url_encode(sig);
     return input;

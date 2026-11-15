@@ -112,6 +112,10 @@ struct ca_cluster_node_config {
     // /.well-known/openid-configuration and /.well-known/jwks.json.
     std::string oidc_issuer_url;
     kythira::jose::jws_alg oidc_alg{kythira::jose::jws_alg::rs256};
+    // --oidc-key-uri: the PKCS#11 token (module-path, token, PIN; no key)
+    // the leader makes each OIDC signing key on (virtual-hsm task 13c),
+    // instead of sealing it under the unseal key into the Raft log.
+    std::string oidc_key_uri;
     std::chrono::seconds oidc_key_rotation{std::chrono::hours(24 * 90)};
     std::chrono::seconds oidc_max_token_lifetime{std::chrono::hours(12)};
     // POST /v1/oidc/token (Requirements 1.6-1.8): the audiences a token may
@@ -348,6 +352,7 @@ namespace detail {
         << "                       [--allow-plaintext-rpc] [--allow-plaintext-http]\n"
         << "                       [--rpc-renewal-window-secs <n>]\n"
         << "                       [--oidc-issuer-url <https url> [--oidc-alg RS256|ES256]\n"
+        << "                        [--oidc-key-uri <pkcs11 token URI>]\n"
         << "                        [--oidc-key-rotation-days <n>]\n"
         << "                        [--oidc-max-token-lifetime-secs <n>]\n"
         << "                        [--oidc-audience <aud>]... [--oidc-workload-uri-prefix "
@@ -441,6 +446,8 @@ namespace detail {
             } else {
                 usage_error("--oidc-alg must be RS256 or ES256");
             }
+        } else if (arg == "--oidc-key-uri") {
+            cfg.oidc_key_uri = next();
         } else if (arg == "--oidc-key-rotation-days") {
             const auto days = std::stoll(next());
             // A successor is published a day before it signs, so a period of
@@ -566,6 +573,31 @@ namespace detail {
             }
         } catch (const kythira::pkcs11::uri_error& e) {
             usage_error(std::string("--ca-key-uri: ") + e.what());
+        }
+    }
+    if (cfg.oidc_key_uri.empty()) {
+        cfg.oidc_key_uri = env_or("CA_CLUSTER_OIDC_KEY_URI", "");
+    }
+    if (!cfg.oidc_key_uri.empty()) {
+        if (!cfg.oidc_enabled()) {
+            usage_error("--oidc-key-uri needs --oidc-issuer-url");
+        }
+        try {
+            const auto u = kythira::pkcs11::uri::parse(cfg.oidc_key_uri);
+            if (!u.module_path) {
+                usage_error("--oidc-key-uri needs module-path= (the PKCS#11 library)");
+            }
+            if (!u.token && !u.serial) {
+                usage_error("--oidc-key-uri needs token= or serial=");
+            }
+            if (u.object || u.id) {
+                usage_error("--oidc-key-uri names a token, not a key (no object= or id=)");
+            }
+            if (!u.pin_source && !u.pin_value) {
+                usage_error("--oidc-key-uri needs pin-source= (or pin-value=)");
+            }
+        } catch (const kythira::pkcs11::uri_error& e) {
+            usage_error(std::string("--oidc-key-uri: ") + e.what());
         }
     }
     if (cfg.auth_token.empty()) {

@@ -40,8 +40,14 @@
 // "pkcs11:" and the key's URI (no library, no PIN) where it would hold the
 // sealed key, so every leader signs on the token and a node started without
 // --ca-key-uri refuses to lead instead of signing with nothing. Each node's
-// URI may name its own library path and PIN source. The unseal key is still
-// required: it derives the peer enrollment key and seals the OIDC keys.
+// URI may name its own library path and PIN source.
+//
+// --oidc-key-uri pkcs11:token=...?module-path=...&pin-source=... (task 13c)
+// names the token the leader makes each OIDC signing key on (RS256: RSA
+// 2048, ES256: P-256), labelled oidc-<random hex>; the state records the
+// key's URI in place of the sealed key and tokens are signed on the token.
+// Keys recorded before the flag was set stay sealed and sign as before.
+// The unseal key is still required: it derives the peer enrollment key.
 //
 // Every node in the cluster SHALL be started with the SAME --unseal-key-file
 // contents (Requirement 17.4) — losing it makes the persisted CA key
@@ -813,6 +819,33 @@ auto run_ca_cluster_node(ca_cluster_node::ca_cluster_node_config cfg, std::strin
         u.pin_value.reset();
         ca_token_key_record = u.to_string();
     }
+    // A token key's URI as the replicated state records it: token and key,
+    // without the library or PIN, which each node supplies from its own
+    // flag.
+    auto key_record_uri = [](const kythira::pkcs11::signing_key& key) {
+        auto u = kythira::pkcs11::uri::parse(key.name());
+        u.module_path.reset();
+        u.module_name.reset();
+        u.pin_source.reset();
+        u.pin_value.reset();
+        u.type.reset();
+        return u.to_string();
+    };
+    // --oidc-key-uri: each OIDC key is a new key pair on the token, labelled
+    // uniquely so one token can hold every key the rotation keeps.
+    auto oidc_token_key_label = [] {
+        std::array<unsigned char, 8> r{};
+        if (RAND_bytes(r.data(), static_cast<int>(r.size())) != 1) {
+            throw std::runtime_error("no randomness for an OIDC key label");
+        }
+        static constexpr std::string_view hex = "0123456789abcdef";
+        std::string label = "oidc-";
+        for (const auto b : r) {
+            label += hex[b >> 4U];
+            label += hex[b & 0xfU];
+        }
+        return label;
+    };
 
     auto ensure_signer = [&] {
         {
@@ -1002,13 +1035,37 @@ auto run_ca_cluster_node(ca_cluster_node::ca_cluster_node_config cfg, std::strin
             kythira::oidc::plan_oidc_rotation(state.oidc_keys(), now, cfg.oidc_rotation_config());
         try {
             if (const auto* create = std::get_if<kythira::oidc::create_key>(&step)) {
-                auto key = kythira::jose::generate_signing_key(cfg.oidc_alg);
                 kythira::oidc::oidc_key_record rec;
                 rec.alg = cfg.oidc_alg;
-                rec.public_jwk = kythira::jose::public_jwk(key.get());
+                if (cfg.oidc_key_uri.empty()) {
+                    auto key = kythira::jose::generate_signing_key(cfg.oidc_alg);
+                    rec.public_jwk = kythira::jose::public_jwk(key.get());
+                    rec.sealed_private_key = raft::testing::encrypt_ca_private_key(
+                        kythira::jose::private_key_to_pem(key.get()), unseal_passphrase);
+                } else {
+                    // On the token: the record holds the key's URI (no
+                    // library, no PIN) where a sealed key would be. A key
+                    // made here whose record never commits stays on the
+                    // token unused.
+                    auto token = kythira::pkcs11::uri::parse(cfg.oidc_key_uri);
+                    const auto key = kythira::pkcs11::signing_key::generate(
+                        token,
+                        cfg.oidc_alg == kythira::jose::jws_alg::es256
+                            ? kythira::pkcs11::key_spec::ec_p256
+                            : kythira::pkcs11::key_spec::rsa_2048,
+                        oidc_token_key_label());
+                    const auto pem = kythira::pkcs11::public_key_pem(key.public_key());
+                    std::unique_ptr<BIO, decltype(&BIO_free)> bio(
+                        BIO_new_mem_buf(pem.data(), static_cast<int>(pem.size())), &BIO_free);
+                    std::unique_ptr<EVP_PKEY, decltype(&EVP_PKEY_free)> pub(
+                        PEM_read_bio_PUBKEY(bio.get(), nullptr, nullptr, nullptr), &EVP_PKEY_free);
+                    if (!pub) {
+                        throw std::runtime_error("unreadable public key from " + key.name());
+                    }
+                    rec.public_jwk = kythira::jose::public_jwk(pub.get());
+                    rec.sealed_private_key = std::string(k_token_key_marker) + key_record_uri(key);
+                }
                 rec.kid = kythira::jose::jwk_thumbprint(rec.public_jwk);
-                rec.sealed_private_key = raft::testing::encrypt_ca_private_key(
-                    kythira::jose::private_key_to_pem(key.get()), unseal_passphrase);
                 rec.publish_after = create->publish_after;
                 rec.sign_after = create->sign_after;
                 raft_node
@@ -1630,6 +1687,35 @@ auto run_ca_cluster_node(ca_cluster_node::ca_cluster_node_config cfg, std::strin
         oidc_key_cache[rec.kid] = key;
         return key;
     };
+    // An OIDC key on a token (the record holds k_token_key_marker and its
+    // URI): signed through this node's --oidc-key-uri library and PIN.
+    std::map<std::string, kythira::pkcs11::signing_key> oidc_token_keys;
+    auto oidc_token_signer =
+        [&](const kythira::oidc::oidc_key_record& rec) -> kythira::jose::digest_signer {
+        std::lock_guard lock(oidc_key_cache_mu);
+        auto it = oidc_token_keys.find(rec.kid);
+        if (it == oidc_token_keys.end()) {
+            if (cfg.oidc_key_uri.empty()) {
+                throw std::runtime_error(
+                    "the signing key is on a PKCS#11 token and this node "
+                    "has no --oidc-key-uri");
+            }
+            auto u = kythira::pkcs11::uri::parse(cfg.oidc_key_uri);
+            const auto named = kythira::pkcs11::uri::parse(
+                std::string_view(rec.sealed_private_key).substr(k_token_key_marker.size()));
+            u.token = named.token;
+            u.serial = named.serial;
+            u.object = named.object;
+            u.id = named.id;
+            if (oidc_token_keys.size() >= 4) {
+                oidc_token_keys.clear();
+            }
+            it = oidc_token_keys.emplace(rec.kid, kythira::pkcs11::signing_key(std::move(u))).first;
+        }
+        return [key = it->second](std::span<const unsigned char> digest) {
+            return key.sign_digest(digest);
+        };
+    };
     // Returns true iff this node should proceed to handle the request as
     // leader. Otherwise `res` has already been populated with a 308 redirect
     // or 503 no_known_leader per Requirement 17.7, and the caller must return.
@@ -1999,17 +2085,26 @@ auto run_ca_cluster_node(ca_cluster_node::ca_cluster_node_config cfg, std::strin
                         send_error(503, "no_signing_key", "the issuer has no signing key yet");
                         return;
                     }
-                    auto private_key = oidc_unsealed_key(*key);
+                    const bool on_token = key->sealed_private_key.starts_with(k_token_key_marker);
+                    std::shared_ptr<EVP_PKEY> private_key;
+                    kythira::jose::digest_signer token_signer;
+                    if (on_token) {
+                        token_signer = oidc_token_signer(*key);
+                    } else {
+                        private_key = oidc_unsealed_key(*key);
+                    }
                     std::array<unsigned char, 16> jti_bytes{};
                     if (RAND_bytes(jti_bytes.data(), static_cast<int>(jti_bytes.size())) != 1) {
                         send_error(503, "unavailable", "no randomness for the token id");
                         return;
                     }
-                    auto body = kythira::oidc::mint_token(
-                        std::get<kythira::oidc::token_grant>(std::move(decision)),
-                        kythira::jose::base64url_encode(
-                            std::span<const unsigned char>(jti_bytes.data(), jti_bytes.size())),
-                        *key, private_key.get(), now);
+                    auto grant = std::get<kythira::oidc::token_grant>(std::move(decision));
+                    const auto jti = kythira::jose::base64url_encode(
+                        std::span<const unsigned char>(jti_bytes.data(), jti_bytes.size()));
+                    auto body = on_token ? kythira::oidc::mint_token(std::move(grant), jti, *key,
+                                                                     token_signer, now)
+                                         : kythira::oidc::mint_token(std::move(grant), jti, *key,
+                                                                     private_key.get(), now);
                     res.set_header("Cache-Control", "no-store");
                     res.set_content(boost::json::serialize(body), "application/json");
                 } catch (const std::exception& ex) {
