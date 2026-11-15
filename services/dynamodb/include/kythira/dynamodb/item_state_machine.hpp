@@ -1140,12 +1140,14 @@ public:
         }
         const auto got = _log->read(key, from_seq, limits);
         for (const auto& r : got._records) {
-            auto rec = decode_change_record(
+            auto [body, sealed] = _sealer.load_record(
                 {reinterpret_cast<const char*>(r._data.data()), r._data.size()});  // NOLINT
+            auto rec = decode_change_record(body);
             if (!rec) {
                 throw kythira::persistent_storage_error(
                     "dynamo_item_state_machine: corrupt change record");
             }
+            rec->sealed = sealed;
             out.emplace_back(r._seq, std::move(*rec));
         }
         return out;
@@ -1619,6 +1621,7 @@ private:
                 rec->written_ms = stamp ? stamp->written_ms : c.written_ms;
                 rec->stream_ms = c.stream_ms;
                 rec->origin = c.region;
+                rec->sealed = c.sealed;
                 changes->push_back(std::move(*rec));
             }
         }
@@ -2039,10 +2042,12 @@ private:
         std::vector<kythira::segment_record_view> views;
         bodies.reserve(_staged_changes.size());
         views.reserve(_staged_changes.size());
+        auto seq = st.current.last_seq;
         for (auto& rec : _staged_changes) {
             rec.written_ms = std::max(rec.written_ms, st.last_ms);
             st.last_ms = rec.written_ms;
-            bodies.push_back(encode_change_record(rec));
+            bodies.push_back(_sealer.store_record(rec.sealed, rec.table_id, st.current.key, ++seq,
+                                                  encode_change_record(rec)));
             auto& tables = st.current.tables;
             if (const auto at = std::ranges::lower_bound(tables, rec.table_id);
                 at == tables.end() || *at != rec.table_id) {

@@ -79,6 +79,9 @@ struct change_record {
     /// replicator sends only its own region's records on; empty for other
     /// tables.
     std::string origin;
+    /// Stored sealed under the table key (KMS task 17): not part of the
+    /// encoded record, which is sealed whole (`item_sealing.hpp`).
+    bool sealed = false;
 
     friend auto operator==(const change_record&, const change_record&) -> bool = default;
 };
