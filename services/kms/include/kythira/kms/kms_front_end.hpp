@@ -34,6 +34,7 @@
 
 #include <raft/aws_json_protocol.hpp>
 #include <raft/aws_request_authorizer.hpp>
+#include <raft/kms_forwarding.hpp>
 #include <raft/sigv4_verifier.hpp>
 
 #include <boost/json.hpp>
@@ -45,6 +46,7 @@
 #include <functional>
 #include <map>
 #include <optional>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -61,6 +63,10 @@ struct front_end_config {
     /// deployment on static keys turns it off, because Requirement 7.7 has
     /// the static roles decide alone. Grants are still stored and listed.
     bool evaluate_grants = true;
+    /// The principals (user or role ARNs) whose requests may carry the
+    /// principal they serve (raft/kms_forwarding.hpp): consuming services
+    /// on other clusters. Empty: no request may.
+    std::set<std::string, std::less<>> trusted_services;
 };
 
 /// An HTTP request as the transport hands it over.
@@ -121,6 +127,9 @@ struct call_context {
     /// Whether grants may allow what the authorizer refused
     /// (front_end_config::evaluate_grants).
     bool grants_apply = true;
+    /// The consuming service the call came through ("kinesis"), for
+    /// kms:ViaService; empty for a caller's own request.
+    std::string via_service;
 
     [[nodiscard]] auto authorize(aws_auth::authz_request r) -> std::optional<aws_json::error> {
         return authorize_fn(std::move(r));
@@ -230,13 +239,68 @@ public:
             e.message = who.error().message;
             return _codec.respond(e, id, json);
         }
+        auto principal = *who;
+        std::string via;
+        if (auto bad = forwarded(*who, req, principal, via)) {
+            return _codec.respond(*bad, id, json);
+        }
+        return run(req, view, *op, std::move(principal), std::move(via), id);
+    }
 
-        const auto h = _handlers.find(op->name);
+    /// A consuming service's call for its caller (`kms.client` in process,
+    /// service-colocation Requirement 7.2): authorized as `principal`,
+    /// with kms:ViaService set to `via_service`, exactly as the same call
+    /// forwarded over HTTPS by a trusted service. No signature: the caller
+    /// is a module of this process. Only the service operations are taken
+    /// (kms_forwarding::service_operations).
+    [[nodiscard]] auto handle_service_call(std::string_view operation, std::string body,
+                                           aws_auth::principal_context principal,
+                                           std::string via_service, std::string source_ip)
+        -> aws_json::http_response {
+        constexpr auto json = aws_json::body_encoding::json;
+        auto id = _codec.new_request_id();
+        if (!kms_forwarding::is_service_operation(operation)) {
+            return _codec.respond(
+                unsupported(std::string(operation) + " is not taken through a service"), id, json);
+        }
+        if (!kms_forwarding::valid_service_name(via_service) || principal.arn.empty() ||
+            principal.account.empty()) {
+            return _codec.respond(internal_error(), id, json);  // a consumer's bug
+        }
+        front_end_request req;
+        req.method = "POST";
+        req.path = "/";
+        req.headers = {{"Content-Type", "application/x-amz-json-1.1"},
+                       {"X-Amz-Target", "TrentService." + std::string(operation)}};
+        req.body = std::move(body);
+        req.source_ip = std::move(source_ip);
+        req.secure = true;
+        const aws_json::http_request_view view{req.method, req.path, req.headers[0].second,
+                                               req.headers[1].second, req.body};
+        const auto* op = _codec.resolve_target(view);
+        if (op == nullptr) {
+            return _codec.respond(unknown_operation(), id, json);
+        }
+        return run(req, view, *op, std::move(principal), std::move(via_service), id);
+    }
+
+private:
+    /// Dispatches an authenticated request to its handler as `principal`.
+    template<typename Operation>
+    [[nodiscard]] auto run(const front_end_request& req, const aws_json::http_request_view& view,
+                           const Operation& op, aws_auth::principal_context principal,
+                           std::string via, std::string& id) -> aws_json::http_response {
+        constexpr auto json = aws_json::body_encoding::json;
+        const auto h = _handlers.find(op.name);
         if (h == _handlers.end()) {
             return _codec.respond(
-                unsupported("Kythira's KMS does not implement " + std::string(op->name) +
+                unsupported("Kythira's KMS does not implement " + std::string(op.name) +
                             "; see services/kms/doc/unsupported.md"),
                 id, json);
+        }
+        if (!via.empty() && !kms_forwarding::is_service_operation(op.name)) {
+            return _codec.respond(
+                access_denied(std::string(op.name) + " is not taken through a service"), id, json);
         }
         auto parsed = _codec.parse(view);
         if (!parsed) {
@@ -247,13 +311,14 @@ public:
         }
 
         call_context ctx;
-        ctx.operation = op->name;
+        ctx.operation = op.name;
         ctx.request_id = id;
-        ctx.principal = *who;
+        ctx.principal = std::move(principal);
         ctx.region = _config.region;
         ctx.partition = _config.partition;
         ctx.grants_apply = _config.evaluate_grants;
-        const auto* acts = find_operation_actions(op->name);
+        ctx.via_service = std::move(via);
+        const auto* acts = find_operation_actions(op.name);
         ctx.replica_read_ok = acts != nullptr && !acts->writes;
         ctx.authorize_fn = [this, &ctx, &req](aws_auth::authz_request r) {
             auto denied = check(ctx, req, std::move(r));
@@ -273,13 +338,50 @@ public:
                 // unauthorized.
                 return _codec.respond(internal_error(), id, json);
             }
-            return _codec.respond(*out, id, json, op);
+            return _codec.respond(*out, id, json, &op);
         } catch (const std::exception&) {
             return _codec.respond(internal_error(), id, json);
         }
     }
 
-private:
+    /// A trusted service's forwarded principal (raft/kms_forwarding.hpp):
+    /// on success `principal` and `via` are the end caller and the
+    /// service. A request with neither header is the signer's own.
+    [[nodiscard]] auto forwarded(const aws_auth::principal_context& signer,
+                                 const front_end_request& req,
+                                 aws_auth::principal_context& principal, std::string& via) const
+        -> std::optional<aws_json::error> {
+        const auto fwd = front_end_detail::header_value(req, kms_forwarding::principal_header);
+        const auto service =
+            front_end_detail::header_value(req, kms_forwarding::via_service_header);
+        if (fwd.empty() && service.empty()) {
+            return std::nullopt;
+        }
+        if (!kms_forwarding::header_is_signed(req.headers, kms_forwarding::principal_header) ||
+            !kms_forwarding::header_is_signed(req.headers, kms_forwarding::via_service_header)) {
+            return access_denied("A forwarded principal must be signed, with its service");
+        }
+        if (!_config.trusted_services.contains(signer.arn) &&
+            (signer.role_arn.empty() || !_config.trusted_services.contains(signer.role_arn))) {
+            return access_denied("User: " + signer.arn +
+                                 " is not a service trusted to forward principals");
+        }
+        auto decoded = kms_forwarding::decode_principal(fwd);
+        if (!decoded || !kms_forwarding::valid_service_name(service)) {
+            return access_denied("The forwarded principal or service is malformed");
+        }
+        principal = std::move(*decoded);
+        via = std::string(service);
+        return std::nullopt;
+    }
+
+    [[nodiscard]] static auto access_denied(std::string message) -> aws_json::error {
+        aws_json::error e;
+        e.type = "AccessDeniedException";
+        e.message = std::move(message);
+        return e;
+    }
+
     /// Grant tokens this KMS made; any other is InvalidGrantTokenException,
     /// as on AWS. A valid token adds no authority (kms_grants.hpp).
     [[nodiscard]] static auto check_grant_tokens(const boost::json::object& in)
@@ -324,6 +426,11 @@ private:
             }
         }
         r.keys.emplace_back("kms:CallerAccount", std::vector<std::string>{ctx.principal.account});
+        if (!ctx.via_service.empty()) {
+            r.keys.emplace_back("kms:ViaService",
+                                std::vector<std::string>{ctx.via_service + "." + _config.region +
+                                                         ".amazonaws.com"});
+        }
         const auto d = _authorizer.authorize(ctx.principal, r);
         ctx.last_denial_explicit = !d.allowed && d.explicit_deny;
         if (d.allowed) {

@@ -42,6 +42,9 @@ inline constexpr std::string_view iam_evaluator = "iam.evaluator";
 /// The co-located virtual HSM as a PKCS#11 module (`pkcs11_provider`), for
 /// core's consumer wrapper (raft/pkcs11_module.hpp).
 inline constexpr std::string_view hsm_pkcs11 = "hsm.pkcs11";
+/// The KMS's consumer calls (`kms_endpoint`): what co-located Kinesis and
+/// DynamoDB wrap and unwrap their data keys with, as the end caller.
+inline constexpr std::string_view kms_client = "kms.client";
 }  // namespace interface_names
 
 /// One AWS JSON-protocol request, signed with SigV4 exactly as it would be
@@ -77,6 +80,49 @@ public:
 
     /// Thread-safe. After the provider stops, every call answers 503.
     [[nodiscard]] virtual auto call(const caller& who, const aws_json_request& request)
+        -> aws_json_response = 0;
+};
+
+/// One KMS call a consuming service makes for its own caller
+/// (kms-compatible-api Requirement 2.3): `GenerateDataKey` for a producer,
+/// `Decrypt` for a consumer, and so on.
+struct kms_request {
+    /// The operation without the target prefix ("GenerateDataKey").
+    std::string operation;
+    /// The request's JSON, as the AWS API takes it.
+    std::string body;
+    /// Who the consuming service is serving: the KMS authorizes this
+    /// principal, never the service's own identity, so a key policy that
+    /// lets a role use a key only through DynamoDB means the same here.
+    aws_auth::principal_context principal;
+    /// The consuming service ("kinesis", "dynamodb"): the KMS sets
+    /// `kms:ViaService` to this name, a dot, the region and
+    /// `.amazonaws.com` (`dynamodb.us-east-1.amazonaws.com`).
+    std::string via_service;
+    /// The end caller's address, for `aws:SourceIp`.
+    std::string source_ip;
+};
+
+/// The KMS as a consuming service reaches it: the co-located module's
+/// in-process client, or `kms_https_endpoint` (raft/kms_https_client.hpp)
+/// to a KMS on another cluster, behind one interface (Requirement 2.4).
+///
+/// Only the calls a service makes for its callers are taken: DescribeKey,
+/// Encrypt, Decrypt, ReEncrypt, GenerateDataKey and
+/// GenerateDataKeyWithoutPlaintext. Anything else is refused, so the
+/// interface is no way round the listener for key administration.
+class kms_endpoint {
+public:
+    kms_endpoint() = default;
+    kms_endpoint(const kms_endpoint&) = delete;
+    auto operator=(const kms_endpoint&) -> kms_endpoint& = delete;
+    kms_endpoint(kms_endpoint&&) = delete;
+    auto operator=(kms_endpoint&&) -> kms_endpoint& = delete;
+    virtual ~kms_endpoint() = default;
+
+    /// Thread-safe. The answer is the HTTP status and JSON body the
+    /// network API would give; after the provider stops, 503.
+    [[nodiscard]] virtual auto call(const caller& who, const kms_request& request)
         -> aws_json_response = 0;
 };
 

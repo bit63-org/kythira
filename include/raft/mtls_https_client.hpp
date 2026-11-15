@@ -32,6 +32,7 @@
 #include <string>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 namespace kythira::mtls {
 
@@ -47,6 +48,10 @@ struct client_config {
     /// proposal waits for its commit, so this exceeds the propose timeout.
     std::chrono::milliseconds timeout{7000};
     std::uint64_t max_body_bytes = std::uint64_t{16} << 20U;
+    /// Present `cert_path` and `key_path`. Off for a client that
+    /// authenticates otherwise (SigV4 to an AWS-style listener), which
+    /// still verifies the server against `ca_path`.
+    bool client_certificate = true;
 };
 
 /// One blocking HTTPS request per call, with this side's certificate:
@@ -63,6 +68,16 @@ public:
                                const std::string& target, std::string body,
                                std::string_view content_type, std::string_view agent) const
         -> std::optional<std::pair<unsigned, std::string>> {
+        return request(method, base_url, target, std::move(body), content_type, agent, {});
+    }
+
+    /// The same, with `headers` added to the request (`Host`,
+    /// `Content-Type` and `User-Agent` are set from the other arguments).
+    [[nodiscard]] auto request(
+        std::string_view method, std::string_view base_url, const std::string& target,
+        std::string body, std::string_view content_type, std::string_view agent,
+        const std::vector<std::pair<std::string, std::string>>& headers) const
+        -> std::optional<std::pair<unsigned, std::string>> {
         const auto e = parse(base_url);
         if (!e || e->tls == _config.plaintext) {
             return std::nullopt;  // a plaintext URL needs plaintext asked for, and the reverse
@@ -73,6 +88,9 @@ public:
             req.set(http::field::host, e->host + ":" + e->port);
             req.set(http::field::user_agent, agent);
             req.set(http::field::content_type, content_type);
+            for (const auto& [name, value] : headers) {
+                req.set(name, value);
+            }
             req.body() = std::move(body);
             req.prepare_payload();
             return e->tls ? exchange_tls(*e, req) : exchange_plain(*e, req);
@@ -178,12 +196,15 @@ private:
         ctx.set_options(ssl::context::default_workarounds | ssl::context::no_sslv2 |
                         ssl::context::no_sslv3 | ssl::context::no_tlsv1 | ssl::context::no_tlsv1_1);
         SSL_CTX_set_min_proto_version(ctx.native_handle(), TLS1_3_VERSION);
-        if (_config.ca_path.empty() || _config.cert_path.empty() || _config.key_path.empty()) {
-            return std::nullopt;  // members authenticate both ways, always
+        if (_config.ca_path.empty() || (_config.client_certificate &&
+                                        (_config.cert_path.empty() || _config.key_path.empty()))) {
+            return std::nullopt;  // the server is always verified; members both ways
         }
         ctx.load_verify_file(_config.ca_path);
-        ctx.use_certificate_chain_file(_config.cert_path);
-        ctx.use_private_key_file(_config.key_path, ssl::context::pem);
+        if (_config.client_certificate) {
+            ctx.use_certificate_chain_file(_config.cert_path);
+            ctx.use_private_key_file(_config.key_path, ssl::context::pem);
+        }
         ctx.set_verify_mode(ssl::verify_peer);
         boost::asio::io_context ioc;
         boost::asio::ip::tcp::resolver resolver(ioc);

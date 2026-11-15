@@ -48,6 +48,7 @@ inline constexpr std::string_view k_secret = "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAM
 inline constexpr std::string_view k_account = "111122223333";
 inline constexpr std::string_view k_other = "444455556666";
 inline const auto k_now = sv4::detail::parse_amz_date("20261115T120000Z").value();
+inline constexpr std::string_view k_service_arn = "arn:aws:iam::111122223333:user/kinesis-svc";
 
 using catalog_t = kms::kms_catalog_state_machine<>;
 
@@ -61,6 +62,10 @@ struct test_authorizer {
                                         "reader", az::static_role::read_only},
                                        {"AKIDOTHER", std::string(k_secret), std::string(k_other),
                                         "stranger", az::static_role::admin},
+                                       // A consuming service on another cluster, trusted
+                                       // to forward its callers (fixture::config()).
+                                       {"AKIDSVC", std::string(k_secret), std::string(k_account),
+                                        "kinesis-svc", az::static_role::read_only},
                                    },
                                    "aws",
                                    [] { return k_now; }};
@@ -155,7 +160,7 @@ struct fixture {
                                   [this](const std::vector<std::byte>& c) { return propose(c); },
                                   [this] { return now; }, std::chrono::minutes(5)};
     test_authorizer auth;
-    kms::front_end<test_authorizer> fe{kms::front_end_config{}, auth};
+    kms::front_end<test_authorizer> fe{config(), auth};
     kms::key_management_api<catalog_t> api{kms::api_deps<catalog_t>{
         .catalog =
             [this] { return std::shared_ptr<const catalog_t>(&sm, [](const catalog_t*) {}); },
@@ -204,6 +209,14 @@ struct fixture {
         grants.register_on(fe);
         crypto.register_on(fe);
         signing.register_on(fe);
+    }
+
+    /// The front end's settings: the defaults, with AKIDSVC's user trusted
+    /// to forward principals.
+    static auto config() -> kms::front_end_config {
+        kms::front_end_config c;
+        c.trusted_services = {std::string(k_service_arn)};
+        return c;
     }
 
     auto propose(const std::vector<std::byte>& c) -> kms::catalog_status {

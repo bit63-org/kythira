@@ -41,6 +41,7 @@
 #include <kythira/kms/kms_grants_api.hpp>
 #include <kythira/kms/kms_group_state_machine.hpp>
 #include <kythira/kms/kms_host.hpp>
+#include <kythira/kms/kms_in_process.hpp>
 #include <kythira/kms/kms_keys.hpp>
 #include <kythira/kms/kms_peer.hpp>
 #include <kythira/kms/kms_signing_api.hpp>
@@ -148,6 +149,7 @@ public:
     using jobs_type = kythira::kms::key_jobs<catalog_type>;
     using authorizer_type = kythira::aws_auth::static_or_iam_authorizer;
     using front_end_type = kythira::kms::front_end<authorizer_type>;
+    using client_type = kythira::kms::in_process_client<front_end_type>;
 
     kms_module() = default;
     kms_module(const kms_module&) = delete;
@@ -232,8 +234,11 @@ public:
         build_api();
     }
 
-    void publish(service_node::module_registry& /*registry*/) override {
-        // kms.client arrives with the published client (task 12b).
+    /// kms.client: co-located consumers' calls for their callers, through
+    /// the same front end as the listener (kms_in_process.hpp).
+    void publish(service_node::module_registry& registry) override {
+        registry.publish<service_node::kms_endpoint>(
+            std::string(service_node::interface_names::kms_client), _client);
     }
 
     void start(service_node::module_registry& registry) override {
@@ -331,6 +336,9 @@ public:
         }
         // Everything that refers to the host goes before it.
         _server.reset();
+        if (_client) {
+            _client->close();  // consumers stopped first; any late call answers 503
+        }
         _signing.reset();
         _crypto.reset();
         _grants.reset();
@@ -457,7 +465,9 @@ private:
         fc.limits.max_body_bytes = static_cast<std::size_t>(_opt.max_body_bytes);
         // Requirement 7.7: on static keys the static roles decide alone.
         fc.evaluate_grants = _opt.auth != kythira::aws_auth::auth_mode::static_keys;
+        fc.trusted_services.insert(_opt.trusted_services.begin(), _opt.trusted_services.end());
         _front_end = std::make_unique<front_end_type>(fc, *_authorizer);
+        _client = std::make_shared<client_type>(*_front_end);
         const auto catalog = [this] { return _host->catalog(); };
         const auto barrier = [this] { return _host->barrier(); };
         const auto propose = [this](const std::vector<std::byte>& c) { return _host->propose(c); };
@@ -727,6 +737,7 @@ private:
     std::unique_ptr<authorizer_type> _authorizer;
     std::shared_ptr<service_node::iam_evaluator> _iam;
     std::unique_ptr<front_end_type> _front_end;
+    std::shared_ptr<client_type> _client;
     std::unique_ptr<kythira::kms::key_management_api<catalog_type>> _api;
     std::unique_ptr<kythira::kms::grants_api<catalog_type>> _grants;
     std::unique_ptr<kythira::kms::crypto_api<catalog_type>> _crypto;
