@@ -550,6 +550,50 @@ BOOST_AUTO_TEST_CASE(aes_gcm_attributes_and_find) {
     BOOST_TEST(f().C_EncryptInit(h, &m, key) == CKR_KEY_HANDLE_INVALID);
 }
 
+BOOST_AUTO_TEST_CASE(session_cancel_ends_operations_and_implied_attributes_answer) {
+    node n;
+    socket_server a(n.layer);
+    loaded lib({a.cfg.socket_path});
+    const auto h = open_rw();
+    login_user(h);
+    const auto key = aes_key(h, false, false);
+    const auto [pub, priv] = ec_pair(h, false);
+
+    std::array<CK_BYTE, 12> iv{};
+    CK_GCM_PARAMS gcm{iv.data(), iv.size(), 96, nullptr, 0, 128};
+    CK_MECHANISM m{CKM_AES_GCM, &gcm, sizeof gcm};
+    BOOST_REQUIRE(f().C_EncryptInit(h, &m, key) == CKR_OK);
+    auto part = bytes_of("buffered");
+    CK_ULONG none = 0;
+    BOOST_REQUIRE(f().C_EncryptUpdate(h, part.data(), part.size(), nullptr, &none) == CKR_OK);
+    CK_OBJECT_CLASS cls = CKO_SECRET_KEY;
+    CK_ATTRIBUTE want{CKA_CLASS, &cls, sizeof cls};
+    BOOST_REQUIRE(f().C_FindObjectsInit(h, &want, 1) == CKR_OK);
+    BOOST_TEST(f().C_SessionCancel(h, CKF_ENCRYPT | CKF_FIND_OBJECTS) == CKR_OK);
+    // Both can start again, here and on the node.
+    BOOST_TEST(f().C_EncryptInit(h, &m, key) == CKR_OK);
+    BOOST_TEST(f().C_FindObjectsInit(h, &want, 1) == CKR_OK);
+    BOOST_TEST(f().C_SessionCancel(h, CKF_SIGN) == CKR_OK);  // none active
+    BOOST_TEST(f().C_SessionCancel(h, CKF_MESSAGE_ENCRYPT) == CKR_OPERATION_CANCEL_FAILED);
+
+    // Attributes every key has, answered though the key never stored them.
+    CK_BBOOL always = CK_TRUE;
+    CK_BBOOL copyable = CK_FALSE;
+    std::array<CK_ATTRIBUTE, 3> implied{{
+        {CKA_ALWAYS_AUTHENTICATE, &always, sizeof always},
+        {CKA_COPYABLE, &copyable, sizeof copyable},
+        {CKA_ALLOWED_MECHANISMS, nullptr, 0},
+    }};
+    BOOST_REQUIRE(f().C_GetAttributeValue(h, priv, implied.data(), implied.size()) == CKR_OK);
+    BOOST_TEST(always == CK_FALSE);
+    BOOST_TEST(copyable == CK_TRUE);
+    BOOST_TEST(implied[2].ulValueLen == 0U);
+    CK_ATTRIBUTE recover{CKA_VERIFY_RECOVER, nullptr, 0};
+    BOOST_TEST(f().C_GetAttributeValue(h, priv, &recover, 1) == CKR_ATTRIBUTE_TYPE_INVALID);
+    BOOST_REQUIRE(f().C_GetAttributeValue(h, pub, &recover, 1) == CKR_OK);
+    BOOST_TEST(recover.ulValueLen == 1U);
+}
+
 BOOST_AUTO_TEST_CASE(wrap_and_unwrap_move_a_key) {
     node n;
     socket_server a(n.layer);

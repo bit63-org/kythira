@@ -304,3 +304,27 @@ BOOST_AUTO_TEST_CASE(set_attributes_applies_every_rule) {
     BOOST_TEST(hsm::set_attributes(frozen, change(CKA_DECRYPT, true), who::so).error() ==
                CKR_ACTION_PROHIBITED);
 }
+
+BOOST_AUTO_TEST_CASE(rule_attributes_every_object_has_are_implied) {
+    using bytes = std::vector<std::uint8_t>;
+    const bytes yes{CK_TRUE};
+    const bytes no{CK_FALSE};
+    hsm::attribute_map priv;
+    priv.set_ulong(CKA_CLASS, CKO_PRIVATE_KEY);
+    BOOST_TEST((hsm::implied_attribute(priv, CKA_COPYABLE) == yes));
+    BOOST_TEST((hsm::implied_attribute(priv, CKA_DESTROYABLE) == yes));
+    BOOST_TEST((hsm::implied_attribute(priv, CKA_ALWAYS_AUTHENTICATE) == no));
+    BOOST_TEST((hsm::implied_attribute(priv, CKA_SIGN_RECOVER) == no));
+    BOOST_TEST((hsm::implied_attribute(priv, CKA_ALLOWED_MECHANISMS) == bytes{}));
+    BOOST_TEST(!hsm::implied_attribute(priv, CKA_VERIFY_RECOVER).has_value());
+    hsm::attribute_map pub;
+    pub.set_ulong(CKA_CLASS, CKO_PUBLIC_KEY);
+    BOOST_TEST((hsm::implied_attribute(pub, CKA_VERIFY_RECOVER) == no));
+    BOOST_TEST(!hsm::implied_attribute(pub, CKA_ALWAYS_AUTHENTICATE).has_value());
+    BOOST_TEST(!hsm::implied_attribute(pub, CKA_SIGN_RECOVER).has_value());
+    hsm::attribute_map data;
+    data.set_ulong(CKA_CLASS, CKO_DATA);
+    BOOST_TEST((hsm::implied_attribute(data, CKA_MODIFIABLE) == yes));
+    BOOST_TEST(!hsm::implied_attribute(data, CKA_ALLOWED_MECHANISMS).has_value());
+    BOOST_TEST(!hsm::implied_attribute(priv, CKA_VALUE).has_value());
+}

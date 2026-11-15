@@ -127,6 +127,7 @@ enum class op : std::uint32_t {
     generate_random = 46,
     get_mechanism_list = 47,
     get_mechanism_info = 48,
+    session_cancel = 49,
 };
 
 // --- Byte helpers ------------------------------------------------------------

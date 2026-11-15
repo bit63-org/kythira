@@ -53,6 +53,11 @@ struct tls_client_config {
     /// The CA the node's certificate chains to; the certificate must also
     /// name `host` (a DNS or IP SAN).
     std::string ca_path;
+    /// The OpenSSL library context the connection's TLS runs in; null for
+    /// the process default. libkythira_pkcs11.so passes its own, so the
+    /// host application's OpenSSL configuration (which may load
+    /// pkcs11-provider over this very library) never reaches it.
+    OSSL_LIB_CTX* libctx = nullptr;
 };
 
 /// One connection to a node.
@@ -94,8 +99,8 @@ public:
     [[nodiscard]] static auto tls(const tls_client_config& config,
                                   std::chrono::seconds timeout = default_timeout)
         -> std::unique_ptr<connection> {
-        std::unique_ptr<SSL_CTX, decltype(&SSL_CTX_free)> ctx(SSL_CTX_new(TLS_client_method()),
-                                                              &SSL_CTX_free);
+        std::unique_ptr<SSL_CTX, decltype(&SSL_CTX_free)> ctx(
+            SSL_CTX_new_ex(config.libctx, nullptr, TLS_client_method()), &SSL_CTX_free);
         if (!ctx || SSL_CTX_set_min_proto_version(ctx.get(), TLS1_3_VERSION) != 1 ||
             SSL_CTX_load_verify_locations(ctx.get(), config.ca_path.c_str(), nullptr) != 1 ||
             SSL_CTX_use_certificate_chain_file(ctx.get(), config.cert_path.c_str()) != 1 ||
@@ -399,6 +404,11 @@ public:
         req.u64(s).u64(max);
         return call<std::vector<CK_OBJECT_HANDLE>>(
             req, [](byte_reader& r) { return wire::get_ulongs(r); });
+    }
+    auto session_cancel(CK_SESSION_HANDLE s, CK_FLAGS flags) -> ck_result<void> {
+        auto req = wire::request(wire::op::session_cancel);
+        req.u64(s).u64(flags);
+        return call<void>(req);
     }
     auto find_objects_final(CK_SESSION_HANDLE s) -> ck_result<void> {
         return simple(wire::op::find_objects_final, s);

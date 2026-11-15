@@ -22,6 +22,7 @@
 //   unwrap and derive templates       apply_key_template           TEMPLATE_INCONSISTENT
 //   ALWAYS_SENSITIVE etc. at birth    set_origin_flags             -
 //   secure defaults                   apply_key_defaults           -
+//   attributes every object has       implied_attribute            -
 //
 // set_attributes() is C_SetAttributeValue: every change rule, in order.
 
@@ -30,6 +31,9 @@
 
 #include <algorithm>
 #include <array>
+#include <cstdint>
+#include <optional>
+#include <vector>
 
 namespace kythira::hsm {
 
@@ -293,6 +297,50 @@ inline void apply_key_defaults(attribute_map& key) {
     }
     if (!key.has(CKA_MODIFIABLE)) {
         key.set_bool(CKA_MODIFIABLE, true);
+    }
+}
+
+/// The value PKCS#11 gives an attribute the object does not store, for
+/// the attributes every object of its class has: C_GetAttributeValue
+/// answers with it rather than CKR_ATTRIBUTE_TYPE_INVALID. Consumers read
+/// these before they use a key (pkcs11-provider decides from them whether
+/// it may sign with one, pkcs11-tool reads CKA_ALWAYS_AUTHENTICATE), and
+/// the session layer already treats them so: an absent CKA_COPYABLE or
+/// CKA_DESTROYABLE allows the action. Nothing when the class has no such
+/// attribute.
+inline auto implied_attribute(const attribute_map& object, CK_ATTRIBUTE_TYPE type)
+    -> std::optional<std::vector<std::uint8_t>> {
+    std::vector<std::uint8_t> yes{CK_TRUE};
+    std::vector<std::uint8_t> no{CK_FALSE};
+    switch (type) {
+        case CKA_COPYABLE:
+        case CKA_DESTROYABLE:
+        case CKA_MODIFIABLE:
+            return yes;
+        default:
+            break;
+    }
+    const auto cls = object.get_ulong(CKA_CLASS).value_or(std::nullopt);
+    const bool is_key = cls == CKO_PUBLIC_KEY || cls == CKO_PRIVATE_KEY || cls == CKO_SECRET_KEY;
+    if (!is_key) {
+        return std::nullopt;
+    }
+    switch (type) {
+        case CKA_ALLOWED_MECHANISMS:  // empty: every mechanism the key fits
+        case CKA_START_DATE:
+        case CKA_END_DATE:
+            return std::vector<std::uint8_t>{};
+        case CKA_DERIVE:
+        case CKA_LOCAL:
+            return no;
+        case CKA_SIGN_RECOVER:
+            return cls == CKO_PUBLIC_KEY ? std::nullopt : std::optional(no);
+        case CKA_VERIFY_RECOVER:
+            return cls == CKO_PRIVATE_KEY ? std::nullopt : std::optional(no);
+        case CKA_ALWAYS_AUTHENTICATE:  // no context-specific login here
+            return cls == CKO_PRIVATE_KEY ? std::optional(no) : std::nullopt;
+        default:
+            return std::nullopt;
     }
 }
 

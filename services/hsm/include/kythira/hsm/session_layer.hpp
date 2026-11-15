@@ -761,6 +761,8 @@ public:
                     return unexpected(k.error());
                 }
                 v.value.emplace(k->view().begin(), k->view().end());
+            } else if (auto implied = implied_attribute(o->attributes, type)) {
+                v.value = std::move(*implied);
             } else {
                 v.rv = CKR_ATTRIBUTE_TYPE_INVALID;
             }
@@ -1148,6 +1150,28 @@ public:
             return unexpected(CKR_OPERATION_NOT_INITIALIZED);
         }
         (*s)->find.reset();
+        return {};
+    }
+
+    /// C_SessionCancel: ends the session's active operations that `flags`
+    /// names (CKF_SIGN, CKF_VERIFY, CKF_ENCRYPT, CKF_DECRYPT, CKF_DIGEST,
+    /// CKF_FIND_OBJECTS), wiping any input they buffered. Naming one that is
+    /// not active is not an error.
+    auto session_cancel(app_id app, CK_SESSION_HANDLE h, CK_FLAGS flags) -> ck_result<void> {
+        auto s = session_of(app, h);
+        if (!s) {
+            return unexpected(s.error());
+        }
+        const std::lock_guard op((*s)->op_mutex);
+        for (const auto kind : {op_kind::sign, op_kind::verify, op_kind::encrypt, op_kind::decrypt,
+                                op_kind::digest}) {
+            if ((flags & flag_of(kind)) != 0) {
+                (*s)->ops[static_cast<std::size_t>(kind)].reset();
+            }
+        }
+        if ((flags & CKF_FIND_OBJECTS) != 0) {
+            (*s)->find.reset();
+        }
         return {};
     }
 

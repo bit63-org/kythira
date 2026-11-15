@@ -2387,7 +2387,9 @@ jobs:
             vcpkg_cxx: g++-14
             vcpkg_ldflags: ''
             apt: g++-14
-            cmake_extra: ''
+            # A compile command for the opt-in PKCS#11 consumer test; its
+            # tools are not needed to configure.
+            cmake_extra: -DKYTHIRA_HSM_CONSUMER_TESTS=ON
           - variant: no-cloud
             defconfig: configs/no_cloud_defconfig
             # Not strict, as in config-variants: no_cloud_defconfig turns
