@@ -118,6 +118,33 @@ if(TARGET kythira_kms_module AND KYTHIRA_KMS_SOFTHSM2_LIBRARY  # module-hook
         LABELS "integration;kms;kms-module;node" TIMEOUT 400)
 endif()
 
+# Kinesis on the KMS inside one kythira_node (.kiro/specs/
+# kms-compatible-api/ task 15): IAM, Kinesis and the KMS over SoftHSM2 in
+# one process, a key policy denying a role that the stream's policy
+# allows. Its source lives with IAM's tests, which issue the test PKI.
+if(TARGET kythira_iam_module AND TARGET kythira_kinesis_module  # module-hook
+   AND TARGET kythira_kms_module AND TARGET iam_node AND TARGET kythira-iam  # module-hook
+   AND KYTHIRA_KMS_SOFTHSM2_LIBRARY AND KYTHIRA_KMS_SOFTHSM2_UTIL)  # module-hook
+    add_raft_completion_test(kythira_node_kms_kinesis_test
+        "${PROJECT_SOURCE_DIR}/services/iam/tests/kythira_node_kms_kinesis_test.cpp")
+    target_include_directories(kythira_node_kms_kinesis_test PRIVATE
+        "${PROJECT_SOURCE_DIR}/services/iam/tests")
+    target_link_libraries(kythira_node_kms_kinesis_test PRIVATE
+        kythira_iam kythira_test_support certificate_authority kythira_host_node_id)  # module-hook
+    target_compile_definitions(kythira_node_kms_kinesis_test PRIVATE
+        IAM_NODE_PATH="$<TARGET_FILE:iam_node>"  # module-hook
+        KYTHIRA_IAM_PATH="$<TARGET_FILE:kythira-iam>"  # module-hook
+        KYTHIRA_SOFTHSM2_LIBRARY="${KYTHIRA_KMS_SOFTHSM2_LIBRARY}"  # module-hook
+        KYTHIRA_SOFTHSM2_UTIL="${KYTHIRA_KMS_SOFTHSM2_UTIL}"  # module-hook
+        KYTHIRA_NODE_PATH="$<TARGET_FILE:kythira_node>")
+    add_dependencies(kythira_node_kms_kinesis_test kythira_node)
+    set_target_properties(kythira_node_kms_kinesis_test PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests")
+    set_tests_properties(kythira_node_kms_kinesis_test PROPERTIES
+        WORKING_DIRECTORY "${CMAKE_BINARY_DIR}/tests"
+        LABELS "integration;kms;kms-module;kinesis;node" TIMEOUT 600)
+endif()
+
 # Every compiled-in module on one three-node cluster (.kiro/specs/
 # service-colocation/ task 11, Requirement 10.1): each service's smoke test
 # against the same kythira_node processes. The test reads the module list
