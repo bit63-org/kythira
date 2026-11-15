@@ -54,6 +54,10 @@ struct hsm_options {
     std::uint32_t max_sessions{4096};
     /// scrypt cost of new PIN verifiers, as log2(N).
     std::uint8_t pin_log2_n{15};
+    /// Permit k = 1 at init and rekey (development only).
+    bool allow_single_share{false};
+    /// How long partial operator shares are held.
+    std::chrono::seconds unseal_timeout{600};
 
     // -- Raft, timing and logs -------------------------------------------------
     std::chrono::milliseconds tick_interval{5};

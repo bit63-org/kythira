@@ -32,10 +32,26 @@ if(TARGET raft_rocksdb_engine AND TARGET certificate_authority
         kythira_host_node_id    # KYTHIRA_NODE_ID_KIND
         Threads::Threads)
     target_compile_features(kythira_hsm_node_common PUBLIC cxx_std_23)
+    if(TARGET boost_json)
+        target_link_libraries(kythira_hsm_node_common PUBLIC boost_json)  # the admin API
+    endif()
 
     add_library(kythira_hsm_module STATIC hsm_node/hsm_module_registrar.cpp)
     target_link_libraries(kythira_hsm_module PUBLIC kythira_hsm_node_common)
     set_target_properties(kythira_hsm_module PROPERTIES JOB_POOL_COMPILE heavy_tu)
     set_property(GLOBAL APPEND PROPERTY KYTHIRA_NODE_MODULES kythira_hsm_module)
     set_property(GLOBAL APPEND PROPERTY KYTHIRA_NODE_MODULE_NAMES hsm)
+endif()
+
+# hsm_ctl (task 7): the operator's command line, one HTTPS request per
+# command to a node's operator API with the operator's certificate. It
+# needs only the HSM headers (the mutual-TLS client in mtls_client.hpp),
+# OpenSSL and Boost.JSON.
+if(TARGET boost_json)
+    find_package(Threads REQUIRED)
+    add_executable(hsm_ctl hsm_ctl/main.cpp)
+    target_link_libraries(hsm_ctl PRIVATE kythira_hsm boost_json Threads::Threads)
+    target_compile_features(hsm_ctl PRIVATE cxx_std_23)
+    set_target_properties(hsm_ctl PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
 endif()

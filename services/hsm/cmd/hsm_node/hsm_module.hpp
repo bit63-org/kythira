@@ -54,6 +54,8 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <condition_variable>
+#include <mutex>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -188,8 +190,11 @@ public:
         so.max_login_failures = _opt.max_login_failures;
         so.max_sessions = _opt.max_sessions;
         _layer = std::make_shared<kythira::hsm::session_layer>(*_host, _vault, so);
-        _admin = std::make_unique<admin_type>(*_host, _vault,
-                                              kythira::hsm::admin_policy{_opt.operators});
+        kythira::hsm::admin_policy policy;
+        policy.operators = _opt.operators;
+        policy.allow_single_share = _opt.allow_single_share;
+        policy.unseal_timeout = _opt.unseal_timeout;
+        _admin = std::make_unique<admin_type>(*_host, _vault, std::move(policy));
         _peer_policy.identities = _opt.peer_identities;
         _peer_policy.allow_plaintext = _opt.insecure_plaintext;
         _host->bootstrap();
@@ -213,6 +218,23 @@ public:
             }
         });
         _host->start();
+        // Seals this node once it applies a seal or a rekey, and drops
+        // expired partial shares. Its own thread, so a seal waiting for
+        // key uses in flight never holds up the Raft tick.
+        _warden = std::thread([this] {
+            std::unique_lock lock(_warden_mutex);
+            while (_driving.load(std::memory_order_acquire)) {
+                try {
+                    if (_admin->maintain()) {
+                        log(kythira::log_level::info,
+                            "hsm: sealed (the catalog was sealed or rekeyed)");
+                    }
+                } catch (const std::exception& e) {
+                    log(kythira::log_level::error, std::string("hsm: warden: ") + e.what());
+                }
+                _warden_wake.wait_for(lock, _opt.maintenance_interval);
+            }
+        });
 
         kythira::https::server_config http;
         http.bind_address = _opt.api_bind;
@@ -251,7 +273,14 @@ public:
         if (_host) {
             _host->stop();
         }
-        _driving.store(false, std::memory_order_release);
+        {
+            const std::scoped_lock lock(_warden_mutex);
+            _driving.store(false, std::memory_order_release);
+        }
+        _warden_wake.notify_all();
+        if (_warden.joinable()) {
+            _warden.join();
+        }
         if (_driver.joinable()) {
             _driver.join();
         }
@@ -393,6 +422,9 @@ private:
     std::unique_ptr<kythira::https::server> _server;
     std::atomic<bool> _driving{false};
     std::thread _driver;
+    std::mutex _warden_mutex;
+    std::condition_variable _warden_wake;
+    std::thread _warden;
     std::atomic<bool> _started{false};
 };
 

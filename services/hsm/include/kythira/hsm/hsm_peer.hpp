@@ -24,6 +24,7 @@
 
 #include <kythira/hsm/codec.hpp>
 #include <kythira/hsm/hsm_host.hpp>
+#include <kythira/hsm/mtls_client.hpp>
 
 #include <boost/asio/connect.hpp>
 #include <boost/asio/io_context.hpp>
@@ -211,27 +212,12 @@ template<typename HsmHost, typename ToText>
                                                          std::forward<ToText>(to_text)))};
 }
 
-struct peer_client_config {
-    /// This node's certificate chain and key, presented to the leader.
-    std::string cert_path;
-    std::string key_path;
-    /// The CA the members' certificates chain to.
-    std::string ca_path;
-    /// Dial plain HTTP (tests only, with the listener's allow_plaintext).
-    bool plaintext = false;
-    /// The whole exchange: dial, handshake, write, read. A forwarded
-    /// proposal waits for its commit, so this exceeds the propose timeout.
-    std::chrono::milliseconds timeout{7000};
-    std::uint64_t max_body_bytes = std::uint64_t{16} << 20U;
-};
-
 /// One blocking request per call to another member's listener. Every
 /// failure answers `unavailable`: the caller does not know whether a
 /// proposal took effect.
 class peer_client {
 public:
-    explicit peer_client(peer_client_config config) : _config(std::move(config)) {}
-
+    explicit peer_client(peer_client_config config) : _client(std::move(config)) {}
     /// Forward `command` to local group `group` on the member at `base_url`
     /// ("https://host:port").
     [[nodiscard]] auto propose(std::string_view base_url, std::uint64_t group,
@@ -251,161 +237,21 @@ public:
     }
 
 private:
-    struct endpoint {
-        bool tls = true;
-        std::string host;
-        std::string port;
-    };
-
-    /// "https://host:port" or "http://host:port", with "[v6]" hosts.
-    [[nodiscard]] static auto parse(std::string_view url) -> std::optional<endpoint> {
-        endpoint e;
-        if (url.starts_with("https://")) {
-            url.remove_prefix(8);
-        } else if (url.starts_with("http://")) {
-            e.tls = false;
-            url.remove_prefix(7);
-        } else {
-            return std::nullopt;
-        }
-        while (url.ends_with('/')) {
-            url.remove_suffix(1);
-        }
-        std::string_view host;
-        std::string_view port;
-        if (url.starts_with('[')) {
-            const auto close = url.find(']');
-            if (close == std::string_view::npos || close + 1 >= url.size() ||
-                url[close + 1] != ':') {
-                return std::nullopt;
-            }
-            host = url.substr(1, close - 1);
-            port = url.substr(close + 2);
-        } else {
-            const auto colon = url.rfind(':');
-            if (colon == std::string_view::npos) {
-                return std::nullopt;
-            }
-            host = url.substr(0, colon);
-            port = url.substr(colon + 1);
-        }
-        if (host.empty() || port.empty() ||
-            port.find_first_not_of("0123456789") != std::string_view::npos) {
-            return std::nullopt;
-        }
-        e.host = host;
-        e.port = port;
-        return e;
-    }
-
     [[nodiscard]] auto post(std::string_view base_url, const std::string& target,
                             std::string body) const -> forward_reply<std::string> {
-        const auto e = parse(base_url);
-        if (!e || e->tls == _config.plaintext) {
-            return {};  // a plaintext URL needs plaintext asked for, and the reverse
+        const auto res = _client.request("POST", base_url, target, std::move(body),
+                                         "application/octet-stream", "kythira-hsm-peer");
+        if (!res || res->first != 200) {
+            return {};
         }
         try {
-            namespace http = boost::beast::http;
-            http::request<http::string_body> req{http::verb::post, target, 11};
-            req.set(http::field::host, e->host + ":" + e->port);
-            req.set(http::field::user_agent, "kythira-hsm-peer");
-            req.set(http::field::content_type, "application/octet-stream");
-            req.body() = std::move(body);
-            req.prepare_payload();
-            const auto res = e->tls ? exchange_tls(*e, req) : exchange_plain(*e, req);
-            if (!res || res->first != 200) {
-                return {};
-            }
             return decode_forward_reply(res->second);
         } catch (const std::exception&) {
             return {};
         }
     }
 
-    template<typename Stream, typename Request>
-    [[nodiscard]] auto send(Stream& stream, const Request& req) const
-        -> std::optional<std::pair<unsigned, std::string>> {
-        namespace http = boost::beast::http;
-        boost::beast::error_code ec;
-        http::write(stream, req, ec);
-        if (ec) {
-            return std::nullopt;
-        }
-        boost::beast::flat_buffer buffer;
-        http::response_parser<http::string_body> parser;
-        parser.body_limit(_config.max_body_bytes);
-        http::read(stream, buffer, parser, ec);
-        if (ec) {
-            return std::nullopt;
-        }
-        auto res = parser.release();
-        return std::pair{res.result_int(), std::move(res.body())};
-    }
-
-    template<typename Request>
-    [[nodiscard]] auto exchange_plain(const endpoint& e, const Request& req) const
-        -> std::optional<std::pair<unsigned, std::string>> {
-        boost::asio::io_context ioc;
-        boost::asio::ip::tcp::resolver resolver(ioc);
-        boost::beast::tcp_stream stream(ioc);
-        stream.expires_after(_config.timeout);
-        boost::beast::error_code ec;
-        const auto endpoints = resolver.resolve(e.host, e.port, ec);
-        if (ec) {
-            return std::nullopt;
-        }
-        stream.connect(endpoints, ec);
-        if (ec) {
-            return std::nullopt;
-        }
-        auto out = send(stream, req);
-        (void)stream.socket().shutdown(boost::asio::ip::tcp::socket::shutdown_both, ec);
-        return out;
-    }
-
-    template<typename Request>
-    [[nodiscard]] auto exchange_tls(const endpoint& e, const Request& req) const
-        -> std::optional<std::pair<unsigned, std::string>> {
-        namespace ssl = boost::asio::ssl;
-        ssl::context ctx(ssl::context::tls_client);
-        ctx.set_options(ssl::context::default_workarounds | ssl::context::no_sslv2 |
-                        ssl::context::no_sslv3 | ssl::context::no_tlsv1 | ssl::context::no_tlsv1_1);
-        SSL_CTX_set_min_proto_version(ctx.native_handle(), TLS1_3_VERSION);
-        if (_config.ca_path.empty() || _config.cert_path.empty() || _config.key_path.empty()) {
-            return std::nullopt;  // members authenticate both ways, always
-        }
-        ctx.load_verify_file(_config.ca_path);
-        ctx.use_certificate_chain_file(_config.cert_path);
-        ctx.use_private_key_file(_config.key_path, ssl::context::pem);
-        ctx.set_verify_mode(ssl::verify_peer);
-        boost::asio::io_context ioc;
-        boost::asio::ip::tcp::resolver resolver(ioc);
-        boost::beast::ssl_stream<boost::beast::tcp_stream> stream(ioc, ctx);
-        if (SSL_set_tlsext_host_name(stream.native_handle(), e.host.c_str()) != 1) {
-            return std::nullopt;
-        }
-        stream.set_verify_callback(ssl::host_name_verification(e.host));
-        auto& lowest = boost::beast::get_lowest_layer(stream);
-        lowest.expires_after(_config.timeout);
-        boost::beast::error_code ec;
-        const auto endpoints = resolver.resolve(e.host, e.port, ec);
-        if (ec) {
-            return std::nullopt;
-        }
-        lowest.connect(endpoints, ec);
-        if (ec) {
-            return std::nullopt;
-        }
-        (void)stream.handshake(ssl::stream_base::client, ec);
-        if (ec) {
-            return std::nullopt;
-        }
-        auto out = send(stream, req);
-        (void)stream.shutdown(ec);
-        return out;
-    }
-
-    peer_client_config _config;
+    mtls_client _client;
 };
 
 }  // namespace kythira::hsm

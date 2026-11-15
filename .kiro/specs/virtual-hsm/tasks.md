@@ -209,10 +209,31 @@ task is one PR unless noted.
       with three nodes: one catalog leader, a new one after killing it,
       and the `kythira_hsm_*` metrics.
 
-- [ ] 7. Operator unseal, init, seal and rekey
+- [x] 7. Operator unseal, init, seal and rekey
   - `hsm_ctl init|unseal|seal|rekey|status`; partial shares in memory with
     timeout; rekey in one entry
   - _Requirements: 4.1, 4.3, 4.5-4.7_
+  - Done: the operator API gains `POST /v1/init`, `POST|DELETE
+    /v1/unseal`, `POST /v1/seal` and `POST /v1/rekey`, and `hsm_ctl` makes
+    each one request with the operator's certificate. Init generates the
+    MK, records its check value and answers the n shares once; no node is
+    left unsealed. `operator_unseal` (`unseal.hpp`) checks each share on
+    arrival (checksum, the catalog's k, n and check value, duplicates)
+    after a catalog barrier, holds the set in memory only, and drops it
+    once the first share is older than `KYTHIRA_HSM_UNSEAL_TIMEOUT_S`.
+    Seal is a catalog entry bumping a seal epoch; the vault records the
+    epoch and generation it unsealed under, and the module's warden seals
+    a node whose catalog has moved past either (`key_vault::enforce`), so
+    every node drops its keys within a maintenance pass. Rekey re-seals
+    every token key and carries the new mode, k and n in one entry (the
+    separate set-mode command is gone: a mode switch without a re-split
+    would strand the shares, requirement 4.5); the rekeying node takes the
+    new MK and the others seal. Init and rekey answer the shares even when
+    the commit is uncertain (503), since dropping them could lose every
+    key. k = 1 needs `KYTHIRA_HSM_ALLOW_SINGLE_SHARE`.
+    `kythira_node_cluster_test` runs init, unseal on all three nodes, a
+    token created through a follower and a cluster-wide seal; checked by
+    hand with `hsm_ctl` on three nodes, including a rekey to 3 of 5.
 
 - [ ] 8. Node unseal
   - Share sealing backends: key file, TPM 2.0, AWS KMS, Azure Key Vault,

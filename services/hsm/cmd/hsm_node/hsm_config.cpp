@@ -221,6 +221,12 @@ auto from_env(const env_fn& env) -> hsm_options {
     }
 
     o.allow_unlocked_memory = bool_opt(env, "KYTHIRA_HSM_ALLOW_UNLOCKED_MEMORY", false);
+    o.allow_single_share = bool_opt(env, "KYTHIRA_HSM_ALLOW_SINGLE_SHARE", false);
+    o.unseal_timeout = std::chrono::seconds{
+        u64_opt(env, "KYTHIRA_HSM_UNSEAL_TIMEOUT_S", static_cast<std::uint64_t>(600))};
+    if (o.unseal_timeout.count() == 0) {
+        throw fail("KYTHIRA_HSM_UNSEAL_TIMEOUT_S must be at least 1");
+    }
     o.max_login_failures = static_cast<std::uint32_t>(
         u64_opt(env, "KYTHIRA_HSM_MAX_LOGIN_FAILURES", o.max_login_failures));
     if (o.max_login_failures == 0) {
@@ -289,6 +295,10 @@ auto usage_text() -> std::string_view {
   KYTHIRA_HSM_ALLOW_UNLOCKED_MEMORY  start where key memory cannot be locked
                                      (development only; false)
   KYTHIRA_HSM_MAX_LOGIN_FAILURES     failed logins before a PIN locks (10)
+  KYTHIRA_HSM_ALLOW_SINGLE_SHARE     permit k = 1 at init and rekey
+                                     (development only)
+  KYTHIRA_HSM_UNSEAL_TIMEOUT_S       seconds partial operator shares are
+                                     held before they are discarded (600)
   KYTHIRA_HSM_MAX_SESSIONS           open PKCS#11 sessions on this node (4096)
   KYTHIRA_HSM_PIN_COST_LOG2          scrypt cost of new PIN verifiers, 10-20 (15)
   KYTHIRA_HSM_PROPOSE_TIMEOUT_MS     one proposal or read barrier (5000)
