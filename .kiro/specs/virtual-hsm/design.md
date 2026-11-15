@@ -101,11 +101,17 @@ flight fails; single-part calls retry once.
 
 ### Wire protocol
 
-Framed protobuf over TLS 1.3 with client certificates, or over a Unix
-socket. One request maps to one PKCS#11 call, so the server stays a thin
-dispatcher in front of the same code the in-process client calls. The
-client library links protobuf-lite and OpenSSL statically with a version
-script that exports only `C_GetFunctionList` and `C_GetInterface`.
+Length-framed requests over TLS 1.3 with client certificates, or over a
+Unix socket. One request maps to one PKCS#11 call, so the server stays a
+thin dispatcher in front of the same code the in-process client calls.
+The encoding is the module's own (`codec.hpp`, which the Raft commands
+use): big-endian integers and length-prefixed byte strings, mechanism
+parameters field by field. It was first planned as protobuf; with a few
+fixed fields per call, protobuf would add a code generator to the build
+and a library to link statically into every process that loads the
+client, for nothing the codec does not already do. The client library
+links OpenSSL statically with a version script that exports only
+`C_GetFunctionList` and `C_GetInterface`.
 
 ### Memory hygiene
 

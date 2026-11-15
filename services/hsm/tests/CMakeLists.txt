@@ -96,6 +96,14 @@ kythira_hsm_test(hsm_node_unseal_test hsm_node_unseal_test.cpp)
 set_tests_properties(hsm_node_unseal_test PROPERTIES
     LABELS "unit;hsm" TIMEOUT 60)
 
+# Task 9: the client wire protocol (every call through the dispatcher,
+# mechanism parameters field by field, malformed and forged requests
+# refused) and its listeners: the Unix socket's uid allow list and mutual
+# TLS identities.
+kythira_hsm_test(hsm_wire_test hsm_wire_test.cpp)
+set_tests_properties(hsm_wire_test PROPERTIES
+    LABELS "unit;hsm;hsm-module" TIMEOUT 120)
+
 add_test(NAME hsm_node_self_test COMMAND hsm_node --self-test)
 set_tests_properties(hsm_node_self_test PROPERTIES
     LABELS "unit;hsm;hsm-module" TIMEOUT 60)

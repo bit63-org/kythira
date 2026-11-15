@@ -19,8 +19,9 @@
 //               sealed HSM), the peer routes answer a member's certificate
 //               and refuse the operator's, and an outsider gets nothing;
 //               then init on one node, two of three shares on each node
-//               unseal it, a token is created on a follower, and one seal
-//               reaches every node.
+//               unseal it, a token is created on a follower, every node's
+//               PKCS#11 client listener names a client by its certificate,
+//               and one seal reaches every node.
 //
 // The services come from `kythira_node --help`, so a build with only some
 // modules runs only their checks (ci.yml's full builds have no ledger;
@@ -47,6 +48,8 @@
 #include <fcntl.h>
 #include <unistd.h>
 
+#include <algorithm>
+#include <array>
 #include <chrono>
 #include <csignal>
 #include <cstdint>
@@ -98,6 +101,7 @@ struct node_proc {
     std::uint16_t redis = 0;
     std::uint16_t ledger = 0;
     std::uint16_t hsm = 0;
+    std::uint16_t hsm_clients = 0;
     pid_t pid = -1;
 };
 
@@ -105,11 +109,11 @@ class node_cluster {
 public:
     explicit node_cluster(std::set<std::string> services) : services(std::move(services)) {
         _dir = raft::make_private_temp_directory(fs::temp_directory_path(), "kythira-node-all-");
-        const auto base = kythira::testing::free_port_block(24);
+        const auto base = kythira::testing::free_port_block(27);
         for (int i = 0; i < 3; ++i) {
             node_proc p;
             p.n = i + 1;
-            const auto b = static_cast<std::uint16_t>(base + 8 * i);
+            const auto b = static_cast<std::uint16_t>(base + 9 * i);
             p.raft = b;
             p.metrics = b + 1;
             p.iam = b + 2;
@@ -118,6 +122,7 @@ public:
             p.redis = b + 5;
             p.ledger = b + 6;
             p.hsm = b + 7;
+            p.hsm_clients = b + 8;
             nodes.push_back(p);
         }
         kythira::iam::testing::test_pki_options o;
@@ -231,6 +236,7 @@ public:
             "KYTHIRA_HSM_PEER_IDENTITIES=" + peer_identities(),
             std::string("KYTHIRA_HSM_OPERATORS=") + kythira::iam::testing::k_admin_uri,
             "KYTHIRA_HSM_ALLOW_UNLOCKED_MEMORY=true",
+            "KYTHIRA_HSM_CLIENT_LISTEN=127.0.0.1:" + std::to_string(p.hsm_clients),
             "PATH=/usr/bin:/bin",
         };
         const auto log = (dir / "node.log").string();
@@ -355,6 +361,52 @@ auto until(unsigned status, const std::function<std::optional<http_result>()>& c
         std::this_thread::sleep_for(250ms);
     }
     return r;
+}
+
+/// hello on a node's HSM client listener (the wire protocol of
+/// services/hsm/include/kythira/hsm/wire.hpp, spoken directly since a
+/// module test includes no other module): the identity the node
+/// authenticated `cert` as, or nothing when it did not answer CKR_OK.
+auto hsm_hello(std::uint16_t port, const kythira::iam::testing::test_pki_paths& pki,
+               const std::string& cert, const std::string& key) -> std::optional<std::string> {
+    try {
+        ssl::context ctx(ssl::context::tls_client);
+        ctx.load_verify_file(pki.ca.string());
+        ctx.set_verify_mode(ssl::verify_peer);
+        ctx.use_certificate_chain_file(cert);
+        ctx.use_private_key_file(key, ssl::context::pem);
+        asio::io_context ioc;
+        beast::ssl_stream<beast::tcp_stream> s(ioc, ctx);
+        beast::get_lowest_layer(s).expires_after(5s);
+        beast::get_lowest_layer(s).connect(
+            asio::ip::tcp::endpoint(asio::ip::make_address("127.0.0.1"), port));
+        s.handshake(ssl::stream_base::client);
+        // Length 5: version 1, op 1 (hello).
+        const std::array<std::uint8_t, 9> hello{0, 0, 0, 5, 1, 0, 0, 0, 1};
+        asio::write(s, asio::buffer(hello));
+        std::array<std::uint8_t, 4> header{};
+        asio::read(s, asio::buffer(header));
+        const std::size_t n = (std::size_t{header[0]} << 24U) | (std::size_t{header[1]} << 16U) |
+                              (std::size_t{header[2]} << 8U) | header[3];
+        if (n < 8 + 1 + 4 + 4 || n > 4096) {
+            return std::nullopt;
+        }
+        std::vector<std::uint8_t> body(n);
+        asio::read(s, asio::buffer(body));
+        // u64 CK_RV, u8 version, u32 frame limit, then the identity as a
+        // u32 length and its bytes.
+        if (std::any_of(body.begin(), body.begin() + 8, [](auto b) { return b != 0; })) {
+            return std::nullopt;
+        }
+        const std::size_t len = (std::size_t{body[13]} << 24U) | (std::size_t{body[14]} << 16U) |
+                                (std::size_t{body[15]} << 8U) | body[16];
+        if (17 + len != n) {
+            return std::nullopt;
+        }
+        return std::string(body.begin() + 17, body.end());
+    } catch (const std::exception&) {
+        return std::nullopt;
+    }
 }
 
 /// One RESP command on a fresh plaintext connection; the raw reply, or ""
@@ -661,6 +713,13 @@ BOOST_AUTO_TEST_CASE(every_compiled_in_service_on_one_cluster, *boost::unit_test
         auto token = admin(second, http::verb::post, "/v1/tokens", R"({"id": 1, "label": "ca"})");
         BOOST_REQUIRE(token.has_value());
         BOOST_TEST(token->status == 201U, token->body);
+        // Each node's client listener names a client by its certificate's
+        // URI SAN (the identity the catalog's bindings use).
+        for (const auto& p : c.nodes) {
+            const auto who = hsm_hello(p.hsm_clients, c.pki, c.pki.admin_cert.string(),
+                                       c.pki.admin_key.string());
+            BOOST_TEST(who.value_or("(no answer)") == kythira::iam::testing::k_admin_uri);
+        }
         // One seal reaches every node within a maintenance pass.
         auto sealed = admin(c.nodes.back(), http::verb::post, "/v1/seal");
         BOOST_REQUIRE(sealed.has_value());
@@ -672,6 +731,7 @@ BOOST_AUTO_TEST_CASE(every_compiled_in_service_on_one_cluster, *boost::unit_test
             BOOST_REQUIRE(st.has_value());
             BOOST_TEST(st->body.find(R"("sealed":true)") != std::string::npos, st->body);
         }
-        BOOST_TEST_MESSAGE("hsm: init, unseal on every node, a token, and a cluster-wide seal");
+        BOOST_TEST_MESSAGE(
+            "hsm: init, unseal on every node, a token, client listeners, and a cluster-wide seal");
     }
 }

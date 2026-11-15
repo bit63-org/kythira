@@ -261,10 +261,13 @@ task is one PR unless noted.
     GCP KMS through the existing cloud clients) share sealers behind
     `share_sealer`, chosen with `KYTHIRA_HSM_SHARE_SEALER`
 
-- [ ] 9. Wire protocol and remote access
-  - Framed protobuf protocol over TLS 1.3 with client certificates and
-    over a Unix socket with `SO_PEERCRED` allow list; identity-to-token
-    bindings; hidden tokens answer `CKR_TOKEN_NOT_PRESENT`
+- [x] 9. Wire protocol and remote access
+  - Framed protocol (the module's codec; design "Wire protocol" says why
+    not protobuf) over TLS 1.3 with client certificates and over a Unix
+    socket with an `SO_PEERCRED` allow list; identity-to-token bindings;
+    hidden tokens answer `CKR_TOKEN_NOT_PRESENT`
+  - `wire.hpp`, `wire_server.hpp`, `wire_client.hpp`; `hsm_wire_test`;
+    every node's client listener in `kythira_node_cluster_test`
   - _Requirements: 2.4, 8.1-8.3_
 
 - [ ] 10. `libkythira_pkcs11.so`

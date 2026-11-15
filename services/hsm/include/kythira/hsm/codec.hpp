@@ -21,6 +21,12 @@ namespace kythira::hsm {
 
 class byte_writer {
 public:
+    /// Room for `n` bytes, so a buffer that will hold a secret is not
+    /// reallocated (leaving a copy behind) while it is written.
+    auto reserve(std::size_t n) -> byte_writer& {
+        _out.reserve(n);
+        return *this;
+    }
     auto u8(std::uint8_t v) -> byte_writer& {
         _out.push_back(static_cast<std::byte>(v));
         return *this;
