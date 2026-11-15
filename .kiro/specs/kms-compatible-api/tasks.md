@@ -49,13 +49,21 @@ is one PR unless noted.
     "fuzz target" is a seeded mutation test (as DynamoDB's expression
     fuzz test is), so it runs in ctest and under the sanitizer legs.
 
-- [ ] 4. KMS catalog state machine
+- [x] 4. KMS catalog state machine
   - Keys, versions, aliases, policies, grants, tags, jobs; command format
     with a version byte; `Creating` and `PendingDeletion` states and
     tombstones; per-account key and alias limits
   - Property tests: replicas and snapshot restores agree; no key material
     can be represented in a command
   - _Requirements: 3.3-3.5, 6.1, 6.2, 8.1, 9.4, 13.4_
+  - Done: `kms_catalog.hpp`. Jobs are not records of their own: the
+    key's state, deletion time and next rotation time are the job, and
+    the catalog answers `creating_keys()`, `due_deletions(now)` and
+    `due_rotations(now)` for the leader. A rotation must name exactly the
+    next version, which makes a retried rotation a no-op. The codec has
+    no byte fields at all (integers and UTF-8 text), which is how "no key
+    material can be represented in a command" holds by construction; the
+    property test feeds random 32-byte keys to every text field.
 
 - [ ] 5. KMS service module and HSM binding
   - The module on the multi-raft host (module 7), `hsm.client` use for

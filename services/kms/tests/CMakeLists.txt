@@ -73,6 +73,16 @@ foreach(_kms_test IN ITEMS kms_ciphertext_test kms_ciphertext_fuzz_test)
         LABELS "unit;kms;kms-module" TIMEOUT 120)
 endforeach()
 
+# Task 4, Requirements 3.3-3.5, 6.1, 6.2, 8.1, 9.4 and 13.4: the catalog
+# state machine one command at a time, and random command streams on
+# replicas and a checkpoint-restored replica, with no field that can carry
+# key material.
+foreach(_kms_test IN ITEMS kms_catalog_test kms_catalog_property_test)
+    kythira_kms_test(${_kms_test} ${_kms_test}.cpp)
+    set_tests_properties(${_kms_test} PROPERTIES
+        LABELS "unit;kms;kms-module" TIMEOUT 120)
+endforeach()
+
 # Task 1: kms_node links and checks its model.
 add_test(NAME kms_node_self_test COMMAND kms_node --self-test)
 set_tests_properties(kms_node_self_test PROPERTIES

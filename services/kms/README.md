@@ -25,17 +25,19 @@ configuration `.github/workflows/kms-module.yml` checks.
 | `tools/kms-service-reference.json`, `tools/gen_kms_actions.py` | AWS's Service Authorization Reference for `kms` (v1.5, pinned) and the generator of `kms_actions.hpp`; `kms_actions_header_fresh` fails when stale | 2 |
 | `include/kythira/kms/kms_actions.hpp` | the `kms` action table for IAM (resources `key` and `alias`, every condition key), the operation-to-action map (with which operations write) and the static-key roles | 2 |
 | `include/kythira/kms/kms_ciphertext.hpp` | the symmetric ciphertext blob (version, key id, backing version, nonce, ciphertext, tag) and the AES-GCM additional data that binds the key ARN, the backing version and the canonical encryption context | 3 |
+| `include/kythira/kms/kms_catalog.hpp` | the catalog state machine: keys (Creating, Enabled, Disabled, PendingDeletion, then a tombstone), backing-key versions by HSM object id, aliases, policies, grants, tags, per-account counts and quota overrides, and the queries the leader's jobs run from (creations to finish, rotations and deletions due) | 4 |
+| `include/kythira/kms/kms_codec.hpp`, `kms_group.hpp` | the catalog's encoding (integers and UTF-8 text only, no byte fields, so no command can carry key material) and its engine plumbing (the HSM module's, copied: a module includes no other module) | 4 |
 | `cmd/kms_node/` | the daemon; a placeholder (`--help`, `--self-test`) until task 12 | 1 |
-| `tests/` | `kms_model_coverage` and its checker's fixture tests, `kms_model_header_fresh` (the header matches the model), `kms_model_test` (the tables validate requests), `kms_actions_test` and `kms_actions_header_fresh`, `kms_ciphertext_test` (tamper, wrong context, wrong key, over OpenSSL AES-GCM standing in for the HSM) and `kms_ciphertext_fuzz_test` (seeded mutations through the decoder), and `kms_node_self_test` | 1-3 |
+| `tests/` | `kms_model_coverage` and its checker's fixture tests, `kms_model_header_fresh` (the header matches the model), `kms_model_test` (the tables validate requests), `kms_actions_test` and `kms_actions_header_fresh`, `kms_ciphertext_test` (tamper, wrong context, wrong key, over OpenSSL AES-GCM standing in for the HSM) and `kms_ciphertext_fuzz_test` (seeded mutations through the decoder), `kms_catalog_test` and `kms_catalog_property_test` (replicas and a restored checkpoint agree; binary material is refused), and `kms_node_self_test` | 1-4 |
 
 The KMS cases of IAM's policy corpus (key policies, delegation,
 cross-account use, `kms:ViaService`, encryption context conditions) are in
 `services/iam/tests/corpus/evaluate/kms_key_policies.json`, where IAM's
 evaluator runs them.
 
-The catalog, HSM binding, the API, grants,
+The HSM binding, the API, grants,
 rotation, the daemon and the Kinesis and DynamoDB integrations follow in
-tasks 4 to 20 (`.kiro/specs/kms-compatible-api/tasks.md`).
+tasks 5 to 20 (`.kiro/specs/kms-compatible-api/tasks.md`).
 
 ## Core targets and variables used
 
