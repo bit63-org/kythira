@@ -224,7 +224,76 @@ vendor's tools.
 
 ## TPM and cloud KMS sealing
 
-Node unseal mode seals each member's share with a key file today. Sealing
-it under a TPM 2.0 or a cloud KMS key, so that a copied disk alone does not
-carry the share's key, is planned (task 8b of the spec) and will follow the
-KMS-compatible API's shared key provider.
+In node unseal mode each member's share is sealed at rest. By default the
+key is a file beside the data (`KYTHIRA_HSM_SHARE_KEY_FILE`), so a copy of
+the whole disk carries both. `KYTHIRA_HSM_SHARE_SEALER` puts the key
+somewhere a copied disk does not reach:
+
+| Sealer | The share's data key is wrapped by | Key id (`KYTHIRA_HSM_SHARE_KEY_ID`) |
+|---|---|---|
+| `file` | the key file (default) | (none) |
+| `aws-kms` | an AWS KMS key | key id, ARN or alias |
+| `pkcs11` | an RSA key on an external PKCS#11 token (YubiHSM 2, CloudHSM, SoftHSM2) | the key's label |
+| `azure-key-vault` | an Azure Key Vault or Managed HSM key | the key's URL |
+| `gcp-kms` | a GCP Cloud KMS key | `projects/.../cryptoKeys/<key>` |
+| `tpm2` | this machine's TPM 2.0, optionally bound to PCRs | `owner` (default) or a persistent handle |
+
+Every sealer but `file` works the same way: a fresh 256-bit data key seals
+the share with AES-256-GCM, and the key service wraps the data key, bound to
+the share's check value (an encryption context for AWS KMS, additional
+authenticated data for Cloud KMS, a digest wrapped beside the key for Key
+Vault and the TPM). The file stores the key id the service resolved (an
+AWS KMS ARN, a versioned Key Vault key), so moving an alias or rotating the
+key later does not strand a share. The `pkcs11` sealer cannot use the
+co-located HSM: its token opens only once the HSM is unsealed.
+
+A share that does not open, because the key service refuses or is
+unreachable, a PCR moved, or the file came from another sealer, reads as
+absent: the member asks its peers for `k` shares instead and logs why. With
+fewer than `k` members able to open their shares, the cluster needs
+operators (`hsm_ctl unseal`). A key service that refuses a seal fails `init`
+and `rekey` rather than leave a member without its share.
+
+Settings:
+
+- `aws-kms`: `KYTHIRA_HSM_SHARE_KMS_REGION` (required),
+  `KYTHIRA_HSM_SHARE_KMS_ENDPOINT` (host:port) and `KYTHIRA_HSM_SHARE_KMS_CA`;
+  credentials from `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` and
+  `AWS_SESSION_TOKEN`. The key policy must allow `kms:GenerateDataKey` and
+  `kms:Decrypt`, and can require the `kythira:hsm:share` encryption context
+  key.
+- `pkcs11`: `KYTHIRA_HSM_SHARE_PKCS11_URI`, a `pkcs11:` URI with
+  `module-path` and `pin-source`; `KYTHIRA_HSM_SHARE_PKCS11_OAEP` is
+  `sha256` (default) or `sha1` for tokens with SHA-1 OAEP only.
+- `azure-key-vault`: `KYTHIRA_HSM_SHARE_AZURE_ALGORITHM` is `RSA-OAEP-256`
+  (default, an RSA key) or `A256KW` (a Managed HSM's AES key). The identity
+  needs the `wrapKey` and `unwrapKey` key permissions (the Key Vault Crypto
+  User role). The token comes from `AZURE_ACCESS_TOKEN`, else a service
+  principal (`AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`,
+  and `AZURE_AUTHORITY_HOST` for a sovereign cloud), else the VM's managed
+  identity (`AZURE_CLIENT_ID` picks a user-assigned one).
+- `gcp-kms`: a symmetric `ENCRYPT_DECRYPT` key; the identity needs
+  `roles/cloudkms.cryptoKeyEncrypterDecrypter` on it. The token comes from
+  `GOOGLE_OAUTH_ACCESS_TOKEN`, else `GOOGLE_APPLICATION_CREDENTIALS` (a
+  service account key file), else the metadata server.
+  `KYTHIRA_HSM_SHARE_KMS_ENDPOINT` (an `https://` URL) reaches a private
+  endpoint.
+- `tpm2`: `KYTHIRA_HSM_SHARE_TPM2_TCTI` names the TPM
+  (`device:/dev/tpmrm0` by default; the node's user needs access to it,
+  usually the `tss` group), and `KYTHIRA_HSM_SHARE_TPM2_PCRS` the PCRs a
+  new seal is bound to, such as `sha256:0,2,4,7`. `owner` derives the
+  owner hierarchy's storage key again on every call, so nothing is
+  provisioned, but the owner hierarchy's authorization must be empty. A
+  bank the TPM has not allocated is refused, since a policy over it would
+  bind nothing. Commands run in sessions salted to the storage key, so the
+  data key never crosses the bus in the clear. Built when CMake finds
+  tpm2-tss (`libtss2-dev`); `KYTHIRA_HSM_TPM2=OFF` leaves it out.
+
+With PCRs bound, a firmware, boot loader or kernel update changes them and
+the member's share stops opening. The member then unseals from its peers,
+and the next `hsm_ctl rekey` seals new shares against the new values: roll
+updates one member at a time, and rekey after each wave.
+
+Changing a member's sealer takes effect at the next `init` or `rekey`; a
+share sealed by another sealer reads as absent until then.
+

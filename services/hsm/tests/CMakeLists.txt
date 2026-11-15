@@ -122,6 +122,30 @@ kythira_hsm_test(hsm_node_unseal_test hsm_node_unseal_test.cpp)
 set_tests_properties(hsm_node_unseal_test PROPERTIES
     LABELS "unit;hsm" TIMEOUT 60)
 
+# Task 8b: share sealers over core's KMS key providers (AWS KMS, PKCS#11),
+# and the Azure Key Vault and GCP Cloud KMS providers against fake clouds.
+kythira_hsm_test(hsm_share_sealers_test hsm_share_sealers_test.cpp)
+set_tests_properties(hsm_share_sealers_test PROPERTIES
+    LABELS "unit;hsm;hsm-module" TIMEOUT 120)
+kythira_hsm_test(hsm_cloud_kms_providers_test hsm_cloud_kms_providers_test.cpp)
+set_tests_properties(hsm_cloud_kms_providers_test PROPERTIES
+    LABELS "unit;hsm;hsm-module" TIMEOUT 120)
+
+# Task 8b: the TPM 2.0 sealer against swtpm, where tpm2-tss and swtpm are
+# installed (hsm-module.yml and the rocksdb clang-tidy variant install
+# libtss2-dev, swtpm and swtpm-tools).
+find_program(KYTHIRA_SWTPM swtpm)
+find_program(KYTHIRA_SWTPM_SETUP swtpm_setup)
+if(KYTHIRA_HSM_TPM2_FOUND AND KYTHIRA_SWTPM AND KYTHIRA_SWTPM_SETUP)
+    kythira_hsm_test(hsm_tpm2_sealer_test hsm_tpm2_sealer_test.cpp)
+    target_link_libraries(hsm_tpm2_sealer_test PRIVATE kythira_test_support)
+    set_tests_properties(hsm_tpm2_sealer_test PROPERTIES
+        LABELS "unit;hsm;hsm-module" TIMEOUT 120
+        ENVIRONMENT "TSS2_LOG=all+none")
+elseif(KYTHIRA_HSM_TPM2_FOUND)
+    message(STATUS "HSM: hsm_tpm2_sealer_test off (swtpm or swtpm_setup not found)")
+endif()
+
 # Task 9: the client wire protocol (every call through the dispatcher,
 # mechanism parameters field by field, malformed and forged requests
 # refused) and its listeners: the Unix socket's uid allow list and mutual

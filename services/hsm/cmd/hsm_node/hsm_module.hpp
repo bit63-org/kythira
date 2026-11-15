@@ -47,6 +47,10 @@
 #include <kythira/hsm/pkcs11_native_backend.hpp>
 #include <kythira/hsm/secure_arena.hpp>
 #include <kythira/hsm/session_layer.hpp>
+#include <kythira/hsm/share_sealers.hpp>
+#ifdef KYTHIRA_HSM_TPM2
+#include <kythira/hsm/tpm2_key_provider.hpp>
+#endif
 #include <kythira/hsm/wire_server.hpp>
 
 #include <raft/beast_https_server.hpp>
@@ -54,6 +58,10 @@
 #include <raft/console_logger.hpp>
 #include <raft/future_default.hpp>
 #include <raft/json_serializer.hpp>
+#include <raft/kms_key_provider_aws.hpp>
+#include <raft/kms_key_provider_azure.hpp>
+#include <raft/kms_key_provider_gcp.hpp>
+#include <raft/kms_key_provider_pkcs11.hpp>
 #include <raft/metrics.hpp>
 #include <raft/module_interfaces.hpp>
 #include <raft/module_registry.hpp>
@@ -308,7 +316,7 @@ public:
         _peer_policy.allow_plaintext = _opt.insecure_plaintext;
         // Node unseal (task 8): this node's share at rest, and init and
         // rekey handing share i to the i-th member in id order.
-        _sealer = std::make_unique<kythira::hsm::key_file_sealer>(_opt.share_key_file);
+        _sealer = make_share_sealer(_opt);
         _shares = std::make_unique<kythira::hsm::share_store>(_opt.data_dir / "shares", *_sealer);
         _node_unseal = std::make_unique<kythira::hsm::node_unseal>(_vault, *_shares);
         kythira::hsm::node_share_delivery delivery;
@@ -317,7 +325,16 @@ public:
             auto it = _opt.api_urls.begin();
             std::advance(it, static_cast<std::ptrdiff_t>(index));
             if (it->first == _opt.node_id) {
-                return _shares->put(share);
+                try {
+                    return _shares->put(share);
+                } catch (const std::exception& e) {
+                    // A KMS that refuses or is away (task 8b): nothing is
+                    // committed, and the operator retries.
+                    kythira::console_logger{_opt.log_level}.error(
+                        std::string("node unseal: this member's share sealer refused: ") +
+                        e.what());
+                    return false;
+                }
             }
             const auto bin = kythira::hsm::shamir_encode_binary(share);
             std::string body(reinterpret_cast<const char*>(bin.data()), bin.size());
@@ -533,6 +550,74 @@ public:
     }
 
 private:
+    /// This node's share sealer (task 8): the key file, or (task 8b) a key
+    /// the node's disk does not hold: a KMS key, a PKCS#11 token's, the
+    /// TPM's.
+    static auto make_share_sealer(const kythira::hsm_node::hsm_options& opt)
+        -> std::unique_ptr<kythira::hsm::share_sealer> {
+        namespace kp = kythira::kms_provider;
+        // Read once at startup: nothing in the process changes its
+        // environment.
+        const kp::env_lookup env = [](const char* var) {
+            const char* v = std::getenv(var);  // NOLINT(concurrency-mt-unsafe)
+            return v != nullptr ? std::string(v) : std::string();
+        };
+        const auto sealer = [&opt](kp::key_provider provider) {
+            return std::make_unique<kythira::hsm::kms_share_sealer>(
+                opt.share_sealer, std::move(provider), opt.share_key_id);
+        };
+#ifdef KYTHIRA_HSM_TPM2
+        if (opt.share_sealer == "tpm2") {
+            return sealer(
+                kp::key_provider(kythira::hsm::tpm2_key_provider(kythira::hsm::tpm2_config{
+                    .tcti = opt.share_tpm2_tcti, .pcrs = opt.share_tpm2_pcrs})));
+        }
+#endif
+        if (opt.share_sealer == "azure-key-vault") {
+            const std::chrono::milliseconds timeout{5000};
+            kp::azure_key_vault_config kc;
+            kc._algorithm = opt.share_azure_algorithm;
+            kc._ca_path = opt.share_kms_ca;
+            kc._timeout = timeout;
+            kc._token = kp::azure_default_token_source(
+                opt.share_key_id, env,
+                kp::cloud_detail::default_transport(opt.share_kms_ca, timeout));
+            return sealer(kp::key_provider(kp::azure_key_vault_provider(std::move(kc))));
+        }
+        if (opt.share_sealer == "gcp-kms") {
+            const std::chrono::milliseconds timeout{5000};
+            kp::gcp_kms_config kc;
+            kc._endpoint = opt.share_kms_endpoint;
+            kc._ca_path = opt.share_kms_ca;
+            kc._timeout = timeout;
+            kc._token = kp::gcp_default_token_source(
+                env, kp::cloud_detail::default_transport(opt.share_kms_ca, timeout));
+            return sealer(kp::key_provider(kp::gcp_kms_provider(std::move(kc))));
+        }
+        if (opt.share_sealer == "aws-kms") {
+            kp::aws_kms_config kc;
+            kc._region = opt.share_kms_region;
+            kc._endpoint = opt.share_kms_endpoint;
+            kc._ca_path = opt.share_kms_ca;
+            kc._credentials = [creds = kp::aws_kms_credentials{
+                                   env("AWS_ACCESS_KEY_ID"), env("AWS_SECRET_ACCESS_KEY"),
+                                   env("AWS_SESSION_TOKEN")}] { return creds; };
+            return sealer(kp::key_provider(kp::aws_kms_provider(std::move(kc))));
+        }
+        if (opt.share_sealer == "pkcs11") {
+            kp::pkcs11_kms_config kc;
+            kc.token = kythira::pkcs11::uri::parse(opt.share_pkcs11_uri);
+            kc.oaep = opt.share_pkcs11_oaep == "sha1" ? kythira::pkcs11::hash_algorithm::sha1
+                                                      : kythira::pkcs11::hash_algorithm::sha256;
+            auto token = kc.token;
+            return sealer(kp::key_provider(
+                kp::pkcs11_kms_provider(std::move(kc), [token]() -> kythira::pkcs11::module {
+                    return kythira::pkcs11::module::load(token);
+                })));
+        }
+        return std::make_unique<kythira::hsm::key_file_sealer>(opt.share_key_file);
+    }
+
     auto make_raft_config(Host& host, const service_node::group_space& space) -> raft_config {
         const auto raft_dir = _opt.data_dir / "raft";
         raft_config cfg{

@@ -93,9 +93,32 @@ struct hsm_options {
     std::string iam_region{"local"};
     std::chrono::milliseconds iam_cache{10000};
     /// Node unseal (task 8): how this node's share is sealed at rest
-    /// ("file") and, for "file", the key's path (default data_dir/share.key).
+    /// ("file"; "aws-kms", "pkcs11", "azure-key-vault", "gcp-kms" or "tpm2",
+    /// task 8b) and, for "file", the key's
+    /// path (default data_dir/share.key).
     std::string share_sealer{"file"};
     std::filesystem::path share_key_file;
+    /// The key a KMS sealer wraps share data keys under: an AWS KMS key id,
+    /// ARN or alias; a PKCS#11 RSA key's label; an Azure key's URL; a GCP
+    /// crypto key's resource name; a TPM's "owner" or persistent handle.
+    std::string share_key_id;
+    /// aws-kms: the region, and the endpoint (host:port, default AWS's)
+    /// with the CA its certificate chains to (default the system store).
+    /// gcp-kms takes the endpoint as an https:// URL; both clouds take
+    /// the CA.
+    std::string share_kms_region;
+    std::string share_kms_endpoint;
+    std::string share_kms_ca;
+    /// pkcs11: the token, a pkcs11: URI naming the library (module-path),
+    /// the token and its PIN source; and RSA-OAEP's hash for new seals.
+    std::string share_pkcs11_uri;
+    std::string share_pkcs11_oaep{"sha256"};
+    /// azure-key-vault: Key Vault's wrapping algorithm for new seals.
+    std::string share_azure_algorithm{"RSA-OAEP-256"};
+    /// tpm2: tpm2-tss's TCTI for the TPM, and the PCRs new seals are bound
+    /// to ("sha256:0,2,4,7"; empty binds none).
+    std::string share_tpm2_tcti{"device:/dev/tpmrm0"};
+    std::string share_tpm2_pcrs;
 
     // -- Raft, timing and logs -------------------------------------------------
     std::chrono::milliseconds tick_interval{5};

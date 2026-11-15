@@ -132,6 +132,7 @@ jobs:
             if timeout 300 sudo apt-get update -q \
                  && timeout 600 sudo apt-get install -y --no-install-recommends \
                  clang-18 cmake ninja-build libfiu-dev softhsm2 \
+                 libtss2-dev swtpm swtpm-tools \
                  autoconf autoconf-archive automake libtool mold; then
               exit 0
             fi

@@ -402,8 +402,15 @@ private:
         if (!share) {
             return peer_answer{400, "not a share"};
         }
-        return store.put(*share) ? peer_answer{200, "stored"}
-                                 : peer_answer{409, "a share of this key is already held"};
+        try {
+            return store.put(*share) ? peer_answer{200, "stored"}
+                                     : peer_answer{409, "a share of this key is already held"};
+        } catch (const std::exception& e) {
+            // The sealer refused (a KMS away, task 8b): the share is not
+            // held, so the delivering member commits nothing.
+            return peer_answer{503,
+                               std::string("this member could not seal the share: ") + e.what()};
+        }
     }
     if (bytes.size() != 8) {
         return peer_answer{400, "expected an 8-byte check value"};

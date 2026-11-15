@@ -216,12 +216,71 @@ auto from_env(const env_fn& env) -> hsm_options {
         throw fail("KYTHIRA_NODE_ID: " + id.error());
     }
     o.data_dir = get_required(env, "KYTHIRA_HSM_DATA_DIR");
-    o.share_sealer = env("KYTHIRA_HSM_SHARE_SEALER").value_or("file");
-    if (o.share_sealer != "file") {
-        throw fail("KYTHIRA_HSM_SHARE_SEALER must be \"file\"");
-    }
+    o.share_sealer = get_opt(env, "KYTHIRA_HSM_SHARE_SEALER", "file");
     o.share_key_file =
         env("KYTHIRA_HSM_SHARE_KEY_FILE").value_or((o.data_dir / "share.key").string());
+    o.share_key_id = get_opt(env, "KYTHIRA_HSM_SHARE_KEY_ID");
+    o.share_kms_region = get_opt(env, "KYTHIRA_HSM_SHARE_KMS_REGION");
+    o.share_kms_endpoint = get_opt(env, "KYTHIRA_HSM_SHARE_KMS_ENDPOINT");
+    o.share_kms_ca = get_opt(env, "KYTHIRA_HSM_SHARE_KMS_CA");
+    o.share_pkcs11_uri = get_opt(env, "KYTHIRA_HSM_SHARE_PKCS11_URI");
+    o.share_pkcs11_oaep = get_opt(env, "KYTHIRA_HSM_SHARE_PKCS11_OAEP", "sha256");
+    if (o.share_sealer == "aws-kms") {
+        if (o.share_key_id.empty() || o.share_kms_region.empty()) {
+            throw fail(
+                "KYTHIRA_HSM_SHARE_SEALER=aws-kms needs KYTHIRA_HSM_SHARE_KEY_ID and "
+                "KYTHIRA_HSM_SHARE_KMS_REGION");
+        }
+    } else if (o.share_sealer == "pkcs11") {
+        // The co-located HSM cannot seal its own share: the token it would
+        // use opens only once the HSM is unsealed.
+        if (o.share_key_id.empty() ||
+            o.share_pkcs11_uri.find("module-path=") == std::string::npos) {
+            throw fail(
+                "KYTHIRA_HSM_SHARE_SEALER=pkcs11 needs KYTHIRA_HSM_SHARE_KEY_ID and a "
+                "KYTHIRA_HSM_SHARE_PKCS11_URI naming its library (module-path=)");
+        }
+        if (o.share_pkcs11_oaep != "sha256" && o.share_pkcs11_oaep != "sha1") {
+            throw fail("KYTHIRA_HSM_SHARE_PKCS11_OAEP must be sha256 or sha1");
+        }
+    } else if (o.share_sealer == "azure-key-vault") {
+        if (!o.share_key_id.starts_with("https://") ||
+            o.share_key_id.find("/keys/") == std::string::npos) {
+            throw fail(
+                "KYTHIRA_HSM_SHARE_SEALER=azure-key-vault needs KYTHIRA_HSM_SHARE_KEY_ID, the "
+                "key's URL (https://<vault>.vault.azure.net/keys/<name>)");
+        }
+        o.share_azure_algorithm = get_opt(env, "KYTHIRA_HSM_SHARE_AZURE_ALGORITHM", "RSA-OAEP-256");
+        if (o.share_azure_algorithm != "RSA-OAEP-256" && o.share_azure_algorithm != "A256KW") {
+            throw fail("KYTHIRA_HSM_SHARE_AZURE_ALGORITHM must be RSA-OAEP-256 or A256KW");
+        }
+    } else if (o.share_sealer == "gcp-kms") {
+        if (!o.share_key_id.starts_with("projects/") ||
+            o.share_key_id.find("/cryptoKeys/") == std::string::npos) {
+            throw fail(
+                "KYTHIRA_HSM_SHARE_SEALER=gcp-kms needs KYTHIRA_HSM_SHARE_KEY_ID, the crypto "
+                "key's name (projects/<p>/locations/<l>/keyRings/<r>/cryptoKeys/<k>)");
+        }
+    } else if (o.share_sealer == "tpm2") {
+#ifdef KYTHIRA_HSM_TPM2
+        if (o.share_key_id.empty()) {
+            o.share_key_id = "owner";
+        }
+        o.share_tpm2_tcti = get_opt(env, "KYTHIRA_HSM_SHARE_TPM2_TCTI", "device:/dev/tpmrm0");
+        o.share_tpm2_pcrs = get_opt(env, "KYTHIRA_HSM_SHARE_TPM2_PCRS");
+        if (o.share_key_id != "owner" && !o.share_key_id.starts_with("0x81")) {
+            throw fail(
+                "KYTHIRA_HSM_SHARE_KEY_ID for tpm2 is owner (default) or a persistent handle "
+                "(0x81xxxxxx)");
+        }
+#else
+        throw fail("KYTHIRA_HSM_SHARE_SEALER=tpm2: this build has no TPM support (tpm2-tss)");
+#endif
+    } else if (o.share_sealer != "file") {
+        throw fail(
+            "KYTHIRA_HSM_SHARE_SEALER must be file, aws-kms, pkcs11, azure-key-vault, gcp-kms "
+            "or tpm2");
+    }
 
     o.insecure_plaintext = bool_opt(env, "KYTHIRA_HSM_INSECURE_PLAINTEXT", false);
     o.api_urls = id_map("KYTHIRA_HSM_API_URLS", get_required(env, "KYTHIRA_HSM_API_URLS"));
@@ -434,9 +493,39 @@ auto usage_text() -> std::string_view {
                                      region (local); _CACHE_MS how long a
                                      decision is kept (10000)
   KYTHIRA_HSM_SHARE_SEALER           how this node's node-unseal share is
-                                     sealed at rest: file (default)
+                                     sealed at rest: file (default), aws-kms,
+                                     pkcs11 (an external token),
+                                     azure-key-vault, gcp-kms or tpm2
   KYTHIRA_HSM_SHARE_KEY_FILE         the file sealer's key, created 0600 on
                                      first use (data dir/share.key)
+  KYTHIRA_HSM_SHARE_KEY_ID           aws-kms: the KMS key (id, ARN or alias);
+                                     pkcs11: the RSA key's label;
+                                     azure-key-vault: the key's URL;
+                                     gcp-kms: projects/.../cryptoKeys/<k>;
+                                     tpm2: owner (default) or 0x81xxxxxx
+  KYTHIRA_HSM_SHARE_KMS_REGION       aws-kms: the region (required); _ENDPOINT
+                                     host:port (AWS's); _CA its CA (system);
+                                     credentials from AWS_ACCESS_KEY_ID,
+                                     AWS_SECRET_ACCESS_KEY, AWS_SESSION_TOKEN
+                                     (_ENDPOINT and _CA also serve gcp-kms,
+                                     an https:// URL, and _CA azure-key-vault)
+  KYTHIRA_HSM_SHARE_AZURE_ALGORITHM  azure-key-vault: RSA-OAEP-256 (default)
+                                     or A256KW (a Managed HSM's AES key);
+                                     token from AZURE_ACCESS_TOKEN, else
+                                     AZURE_TENANT_ID + AZURE_CLIENT_ID +
+                                     AZURE_CLIENT_SECRET, else the managed
+                                     identity
+                                     gcp-kms: token from
+                                     GOOGLE_OAUTH_ACCESS_TOKEN, else
+                                     GOOGLE_APPLICATION_CREDENTIALS (a
+                                     service account key), else the
+                                     metadata server
+  KYTHIRA_HSM_SHARE_TPM2_TCTI        tpm2: the TPM (device:/dev/tpmrm0)
+  KYTHIRA_HSM_SHARE_TPM2_PCRS        tpm2: PCRs new seals are bound to, e.g.
+                                     sha256:0,2,4,7 (none)
+  KYTHIRA_HSM_SHARE_PKCS11_URI       pkcs11: pkcs11:token=...;module-path=...
+                                     ?pin-source=... (required)
+  KYTHIRA_HSM_SHARE_PKCS11_OAEP      pkcs11: sha256 (default) or sha1
   KYTHIRA_HSM_MAX_SESSIONS           open PKCS#11 sessions on this node (4096)
   KYTHIRA_HSM_PIN_COST_LOG2          scrypt cost of new PIN verifiers, 10-20 (15)
   KYTHIRA_HSM_PROPOSE_TIMEOUT_MS     one proposal or read barrier (5000)
