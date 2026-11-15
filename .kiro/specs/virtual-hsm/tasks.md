@@ -19,7 +19,9 @@ task is one PR unless noted.
     includer. `ci_full_defconfig` and its copies turn the module on;
     `ci_no_hsm_defconfig` and `hsm-module.yml` prove the module-off build
     has no HSM target or test. `docker/` and `pkcs11/`'s target arrive with
-    the tasks that fill them (11 and 10).
+    the tasks that fill them (11 and 10). Task 12 moved the headers to the top-level
+    `third_party/pkcs11/`, included through core's `<raft/pkcs11.hpp>`,
+    since core's consumer wrapper needs them.
 
 - [x] 2. Shamir secret sharing and share encoding
   - GF(2^8) split and combine, share format with checksum and MK check
@@ -302,6 +304,25 @@ task is one PR unless noted.
     lookup); documented YubiHSM 2 / CloudHSM common subset; consumer tests
     against SoftHSM2; `hsm_ctl migrate`
   - _Requirements: 9.1-9.4_
+  - [x] 12a. The wrapper: `include/raft/pkcs11_uri.hpp` (RFC 7512 parse,
+    text form without the PIN, pin-value and pin-source) and
+    `include/raft/pkcs11_module.hpp` (a `backend` interface;
+    `function_list_backend` dlopens any library; `session` offers only
+    the common subset, `unrestricted()` the rest for operator tools);
+    `pkcs11_native_backend.hpp` binds it in process, with CK_INFO and
+    token strings shared with `libkythira_pkcs11.so` so one URI matches
+    both. The common subset, checked against the YubiHSM 2 and CloudHSM
+    SDK 5 documentation, turned out narrower than the design first said:
+    no AES-GCM and no standard AES wrap (design.md corrected), so it is
+    EC/RSA key pairs, digest signing (ECDSA, PKCS#1 v1.5, PSS) and
+    RSA-OAEP decryption, with verification and encryption in software.
+    Key generation states every usage attribute, because SoftHSM2 turns
+    on the ones left out. SoftHSM2 2.6's OAEP takes SHA-1 only, so SHA-1
+    is allowed for OAEP and refused for signing. Tests: `pkcs11_uri_test`
+    (core) and `hsm_pkcs11_module_test` (one scenario in process, through
+    the dlopen'd library and on SoftHSM2, which `hsm-module.yml` now
+    installs).
+  - [ ] 12b. `hsm_ctl migrate`, against SoftHSM2.
 
 - [ ] 13. Consumers
   - Cluster CA signing key on a token; Kinesis `pkcs11` key provider; IAM

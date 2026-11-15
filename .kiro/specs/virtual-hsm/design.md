@@ -37,8 +37,16 @@ exposes the same calls. This is what makes Requirement 9 a configuration
 change: the consumer cannot tell a YubiHSM from the virtual HSM, so it
 cannot come to depend on anything only the virtual HSM does. The cost is
 that consumers are limited to the PKCS#11 subset both YubiHSM 2 and
-CloudHSM implement; that subset covers ECDSA and RSA signing, AES-GCM
-and AES key wrap, which is all the three consumers need.
+CloudHSM implement. Checked against both vendors' documentation when the
+wrapper was built (task 12), that subset is EC (P-256, P-384) and RSA
+(2048-4096) key pairs, signing a caller-computed digest with CKM_ECDSA,
+CKM_RSA_PKCS or CKM_RSA_PKCS_PSS, and RSA-OAEP decryption; verification
+and encryption run in software on the public key. AES-GCM and standard
+AES key wrap are not in it (the YubiHSM 2 has neither; CloudHSM picks the
+GCM IV itself and wraps with vendor mechanisms), so a consumer that needs
+symmetric encryption keeps its data key in software and protects it with
+RSA-OAEP on the token (envelope encryption). That covers the CA, Kinesis
+and IAM.
 
 ### Two key layers under the master key
 
@@ -137,6 +145,7 @@ and the docs say so.
 | `unseal.hpp` | same | operator and node unseal, share sealing backends |
 | `hsm_module.hpp` | same | the service module: groups, listeners, admin API |
 | `native_client.hpp` | same | in-process client used by co-located modules |
+| `pkcs11_native_backend.hpp` | same | the wrapper's in-process backend over `native_client` |
 | `libkythira_pkcs11` | `services/hsm/pkcs11/` | the PKCS#11 v3.0 library |
 | `kythira::pkcs11::module` | `include/raft/pkcs11_module.hpp` (core) | consumer wrapper: dlopen or native, URI lookup |
 | `hsm_ctl` | `services/hsm/cmd/hsm_ctl/` | init, unseal, seal, rekey, tokens, migrate |
@@ -145,7 +154,9 @@ and the docs say so.
 The consumer wrapper lives in core because the CA (core), Kinesis and IAM
 (modules) all use it and it has no HSM dependency: it speaks PKCS#11 to
 whatever module it is given. The PKCS#11 headers come from the OASIS
-PKCS#11 v3.0 distribution and are vendored unchanged.
+PKCS#11 v3.0 distribution and are vendored unchanged; they live in the
+top-level `third_party/pkcs11/` (included through `<raft/pkcs11.hpp>`)
+because core's wrapper needs them too.
 
 ## Error handling
 

@@ -1,7 +1,7 @@
 // Copyright (c) 2026 Clark Rawlins
 // SPDX-License-Identifier: Apache-2.0
 
-// The vendored OASIS PKCS#11 v3.0 headers (services/hsm/third_party/pkcs11/)
+// The vendored OASIS PKCS#11 v3.0 headers (third_party/pkcs11/)
 // through <kythira/hsm/pkcs11.hpp>: they compile as C++23 under the platform
 // macros that header defines, declare version 3.0, and carry the pieces of
 // the 3.0 interface libkythira_pkcs11.so will export (task 10). A header
