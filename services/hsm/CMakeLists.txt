@@ -10,17 +10,14 @@
 # target and helper used here already exists. The core targets and variables
 # this file and its subdirectories use are listed in README.md.
 
-# The module's headers, as <kythira/hsm/...>, and the vendored OASIS headers,
-# which only <kythira/hsm/pkcs11.hpp> includes. Header-only for now. OpenSSL
+# The module's headers, as <kythira/hsm/...>; the vendored OASIS headers
+# come with kythira_core_headers (core's <raft/pkcs11.hpp>). OpenSSL
 # for every mechanism (KYTHIRA_BUILD_HSM requires it), and its TLS library
 # for forwarding between members (hsm_peer.hpp).
 set(KYTHIRA_HSM_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}")
 set(KYTHIRA_HSM_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/include")
 add_library(kythira_hsm INTERFACE)
 target_include_directories(kythira_hsm INTERFACE "${KYTHIRA_HSM_INCLUDE_DIR}")
-# SYSTEM: third-party headers, kept out of the warning flags and clang-tidy.
-target_include_directories(kythira_hsm SYSTEM INTERFACE
-    "${CMAKE_CURRENT_SOURCE_DIR}/third_party/pkcs11")
 target_link_libraries(kythira_hsm INTERFACE kythira_core_headers OpenSSL::SSL OpenSSL::Crypto)
 target_compile_features(kythira_hsm INTERFACE cxx_std_23)
 

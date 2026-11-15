@@ -1000,6 +1000,10 @@ endif()
 
 # Include directories
 include_directories(${CMAKE_SOURCE_DIR}/include)
+# The OASIS PKCS#11 v3.0 headers, vendored unchanged and included only
+# through <raft/pkcs11.hpp> (the consumer wrapper, raft/pkcs11_module.hpp,
+# and the virtual HSM). SYSTEM: third-party, kept out of the warning flags.
+include_directories(SYSTEM ${CMAKE_SOURCE_DIR}/third_party/pkcs11)
 
 # The public core headers as a target (.kiro/specs/redis-gateway-module/
 # Requirement 4.3). Core itself still relies on the include_directories()
@@ -1010,6 +1014,10 @@ target_include_directories(kythira_core_headers INTERFACE
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<BUILD_INTERFACE:${CMAKE_BINARY_DIR}/generated>
     $<INSTALL_INTERFACE:include>
+)
+target_include_directories(kythira_core_headers SYSTEM INTERFACE
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/third_party/pkcs11>
+    $<INSTALL_INTERFACE:include/kythira/third_party/pkcs11>
 )
 
 # HTTP/2 for the core HTTPS server (beast_https_server.hpp,
@@ -2325,6 +2333,10 @@ install(TARGETS network_simulator
 install(DIRECTORY include/
     DESTINATION include
     FILES_MATCHING PATTERN "*.hpp"
+)
+# <raft/pkcs11.hpp> includes the vendored OASIS headers by name.
+install(DIRECTORY third_party/pkcs11/
+    DESTINATION include/kythira/third_party/pkcs11
 )
 
 install(EXPORT network_simulator_targets

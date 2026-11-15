@@ -5314,6 +5314,18 @@ set_tests_properties(jwt_unit_test PROPERTIES
     LABELS "unit;jose;jwt;oidc;iam"
 )
 
+# Virtual HSM spec task 12: RFC 7512 PKCS#11 URIs and the DER helpers of
+# the consumer wrapper (raft/pkcs11_uri.hpp, raft/pkcs11_module.hpp); the
+# wrapper against real modules is services/hsm's hsm_pkcs11_module_test.
+add_executable(pkcs11_uri_test pkcs11_uri_test.cpp)
+target_link_libraries(pkcs11_uri_test PRIVATE Boost::unit_test_framework ${CMAKE_DL_LIBS})
+target_compile_features(pkcs11_uri_test PRIVATE cxx_std_23)
+add_test(NAME pkcs11_uri_test COMMAND pkcs11_uri_test)
+set_tests_properties(pkcs11_uri_test PROPERTIES
+    TIMEOUT 30
+    LABELS "unit;pkcs11"
+)
+
 # IAM spec task 1: the OIDC issuer's signing-key rotation planner and its
 # ca_state_machine commands and snapshot checks.
 add_executable(oidc_issuer_unit_test oidc_issuer_unit_test.cpp)

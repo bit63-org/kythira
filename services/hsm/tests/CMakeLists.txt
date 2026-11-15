@@ -118,6 +118,30 @@ add_dependencies(hsm_pkcs11_library_test kythira_pkcs11)
 set_tests_properties(hsm_pkcs11_library_test PROPERTIES
     LABELS "unit;hsm;hsm-module" TIMEOUT 120)
 
+# Task 12, Requirements 9.1, 9.2 and 9.4: core's consumer wrapper
+# (raft/pkcs11_module.hpp) on three backends: in process, the library
+# dlopen'd, and SoftHSM2 standing in for an external module. SoftHSM2's
+# case is compiled in when its library and softhsm2-util are found
+# (hsm-module.yml installs them; Debian and Ubuntu ship the library under
+# lib/softhsm/).
+kythira_hsm_test(hsm_pkcs11_module_test hsm_pkcs11_module_test.cpp)
+target_compile_definitions(hsm_pkcs11_module_test PRIVATE
+    KYTHIRA_PKCS11_LIBRARY="$<TARGET_FILE:kythira_pkcs11>")
+find_library(KYTHIRA_SOFTHSM2_LIBRARY NAMES softhsm2 PATH_SUFFIXES softhsm)
+find_program(KYTHIRA_SOFTHSM2_UTIL softhsm2-util)
+if(KYTHIRA_SOFTHSM2_LIBRARY AND KYTHIRA_SOFTHSM2_UTIL)
+    message(STATUS "hsm_pkcs11_module_test: SoftHSM2 at ${KYTHIRA_SOFTHSM2_LIBRARY}")
+    target_compile_definitions(hsm_pkcs11_module_test PRIVATE
+        KYTHIRA_SOFTHSM2_LIBRARY="${KYTHIRA_SOFTHSM2_LIBRARY}"
+        KYTHIRA_SOFTHSM2_UTIL="${KYTHIRA_SOFTHSM2_UTIL}")
+else()
+    message(STATUS "hsm_pkcs11_module_test: no SoftHSM2; its external-module case is left out")
+endif()
+target_link_libraries(hsm_pkcs11_module_test PRIVATE ${CMAKE_DL_LIBS})
+add_dependencies(hsm_pkcs11_module_test kythira_pkcs11)
+set_tests_properties(hsm_pkcs11_module_test PROPERTIES
+    LABELS "unit;hsm;hsm-module" TIMEOUT 300)
+
 # Task 10b, Requirement 5.6: the library under real consumers, each run
 # by services/hsm/pkcs11/tests/consumers.sh against a node this test
 # serves. The tools are installed only by hsm-module.yml's consumers job,

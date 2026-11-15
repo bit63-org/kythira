@@ -36,6 +36,7 @@
 #include "pkcs11_config.hpp"
 
 #include <kythira/hsm/attributes.hpp>
+#include <kythira/hsm/client_types.hpp>
 #include <kythira/hsm/pkcs11.hpp>
 #include <kythira/hsm/wire.hpp>
 #include <kythira/hsm/wire_client.hpp>
@@ -74,11 +75,9 @@ using hsm::unexpected;
 using hsm::wire_client;
 using bytes = std::vector<std::uint8_t>;
 
-constexpr CK_VERSION library_version{1, 0};
-constexpr std::string_view manufacturer = "Kythira";
-// CK_TOKEN_INFO's model is 16 bytes: with the manufacturer "Kythira",
-// "virtual HSM" says the token is software (requirement 5.7).
-constexpr std::string_view model = "virtual HSM";
+constexpr CK_VERSION library_version = hsm::client_library_version;
+constexpr std::string_view manufacturer = hsm::client_manufacturer;
+constexpr std::string_view model = hsm::client_token_model;
 
 /// Blank-padded, as PKCS#11 info strings are.
 void pad(CK_UTF8CHAR* dst, std::size_t n, std::string_view s) {
@@ -443,7 +442,7 @@ public:
             return rv;
         }
         pad(info->slotDescription, sizeof info->slotDescription,
-            std::string(model) + " slot " + std::to_string(slot));
+            hsm::client_slot_description(slot));
         pad(info->manufacturerID, sizeof info->manufacturerID, manufacturer);
         // Not CKF_HW_SLOT: this is software (requirement 5.7).
         info->flags = CKF_TOKEN_PRESENT;
@@ -463,10 +462,7 @@ public:
         pad(info->label, sizeof info->label, t->label);
         pad(info->manufacturerID, sizeof info->manufacturerID, manufacturer);
         pad(info->model, sizeof info->model, model);
-        std::array<char, 17> serial{};
-        std::snprintf(serial.data(), serial.size(), "%016llx",
-                      static_cast<unsigned long long>(slot));
-        pad(info->serialNumber, sizeof info->serialNumber, serial.data());
+        pad(info->serialNumber, sizeof info->serialNumber, hsm::client_token_serial(slot));
         info->flags = t->flags | CKF_RNG | CKF_LOGIN_REQUIRED;
         info->ulMaxSessionCount = CK_EFFECTIVELY_INFINITE;
         info->ulSessionCount = t->session_count;
@@ -1563,7 +1559,7 @@ CK_RV C_GetInfo(CK_INFO_PTR info) {
     info->cryptokiVersion = kythira::hsm::cryptoki_version;
     pad(info->manufacturerID, sizeof info->manufacturerID, manufacturer);
     info->flags = 0;
-    pad(info->libraryDescription, sizeof info->libraryDescription, "Kythira virtual HSM client");
+    pad(info->libraryDescription, sizeof info->libraryDescription, hsm::client_library_description);
     info->libraryVersion = library_version;
     return CKR_OK;
 }

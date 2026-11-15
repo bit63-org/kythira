@@ -40,6 +40,8 @@ on:
     paths:
       - "services/hsm/**"
       - "services/README.md"
+      - "include/raft/pkcs11*.hpp"
+      - "third_party/pkcs11/**"
       - "cmake/kythira_test_helpers.cmake"
       - "cmake/Kconfig.cmake"
       - "scripts/check_module_boundaries.py"
@@ -56,6 +58,8 @@ on:
     paths:
       - "services/hsm/**"
       - "services/README.md"
+      - "include/raft/pkcs11*.hpp"
+      - "third_party/pkcs11/**"
       - "cmake/kythira_test_helpers.cmake"
       - "cmake/Kconfig.cmake"
       - "scripts/check_module_boundaries.py"
@@ -117,7 +121,7 @@ jobs:
           for attempt in 1 2 3; do
             if timeout 300 sudo apt-get update -q \
                  && timeout 600 sudo apt-get install -y --no-install-recommends \
-                 clang-18 cmake ninja-build libfiu-dev \
+                 clang-18 cmake ninja-build libfiu-dev softhsm2 \
                  autoconf autoconf-archive automake libtool mold; then
               exit 0
             fi

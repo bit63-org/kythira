@@ -75,12 +75,41 @@ Applications load `libkythira_pkcs11.so` (`pkcs11/README.md`), which speaks
 this protocol to the nodes `KYTHIRA_PKCS11_CONF` lists and fails over between
 them.
 
+## Kythira's own consumers, and moving to hardware
+
+Kythira services that use a key (the CA, Kinesis, IAM) go through core's
+`kythira::pkcs11::module` (`include/raft/pkcs11_module.hpp`), which finds a
+token and a key by RFC 7512 URI, `pkcs11:token=ca;object=issuing?pin-source=/run/secrets/pin&module-path=/usr/lib/libkythira_pkcs11.so`.
+Beside the HSM in one process it binds to the HSM directly
+(`pkcs11_native_backend.hpp`); otherwise it dlopens the URI's
+`module-path`. Pointing that at `yubihsm_pkcs11.so`, CloudHSM's library or
+SoftHSM2 needs no code change, because the wrapper lets a consumer use only
+what the YubiHSM 2 and AWS CloudHSM (Client SDK 5) libraries both
+implement:
+
+| Operation | Mechanism | Keys |
+|---|---|---|
+| generate a key pair | `CKM_EC_KEY_PAIR_GEN` | P-256, P-384 |
+| generate a key pair | `CKM_RSA_PKCS_KEY_PAIR_GEN` | 2048, 3072, 4096 bits, e = 65537 |
+| sign a SHA-256/384/512 digest | `CKM_ECDSA` | EC |
+| sign a SHA-256/384/512 digest | `CKM_RSA_PKCS` (DigestInfo built by the wrapper) | RSA |
+| sign a SHA-256/384/512 digest | `CKM_RSA_PKCS_PSS` (MGF1 with the same hash, salt = hash length) | RSA |
+| decrypt | `CKM_RSA_PKCS_OAEP` (SHA-1 or SHA-2, MGF1 with the same hash) | RSA |
+
+Verifying and encrypting use the public key in software. Not in the subset:
+AES-GCM (the YubiHSM 2 has none and CloudHSM chooses the IV itself),
+standard AES key wrap (both use vendor wrap mechanisms), HMAC (their
+secret-key types differ) and the hashing sign mechanisms such as
+`CKM_ECDSA_SHA256`. Labels of at most 40 bytes and ids of at most 2 bytes
+keep the YubiHSM 2 from storing them in a separate meta object.
+`hsm_pkcs11_module_test` runs one consumer scenario in process, through
+`libkythira_pkcs11.so` and on SoftHSM2.
+
 ## What is here
 
 | Path | What | Task |
 |---|---|---|
-| `third_party/pkcs11/` | the OASIS PKCS#11 v3.0 headers, unchanged, with their licence and checksums (`third_party/pkcs11/README.md`) | 1 |
-| `include/kythira/hsm/pkcs11.hpp` | the only way Kythira code includes PKCS#11: the five platform macros, then `pkcs11.h` | 1 |
+| `include/kythira/hsm/pkcs11.hpp` | PKCS#11 for the module: core's `<raft/pkcs11.hpp>` (the five platform macros, then the OASIS v3.0 headers vendored unchanged in the top-level `third_party/pkcs11/`, with their licence and checksums) and the Cryptoki version | 1, 12 |
 | `include/kythira/hsm/shamir.hpp` | Shamir sharing over GF(2^8) (constant-time arithmetic, AES polynomial), the share format (version, `k`, `n`, index, check value, checksum) and its `khs1-` text form | 2 |
 | `include/kythira/hsm/secret_bytes.hpp` | a move-only byte buffer in the secure arena, wiped on release, and `constant_time_equal` | 2, 3 |
 | `include/kythira/hsm/secure_arena.hpp` | locked (`mlock`), `MADV_DONTDUMP` and `MADV_WIPEONFORK` key memory wiped on release; `harden_process()` (`PR_SET_DUMPABLE=0`, `RLIMIT_CORE=0`); `prepare_key_memory()`, where a lock failure is a startup error unless explicitly allowed | 3 |
@@ -96,6 +125,7 @@ them.
 | `include/kythira/hsm/hsm_store.hpp` | the interface the session layer reads and proposes through: this replica's catalog and token groups, proposals, and the read-index barrier | 6 |
 | `include/kythira/hsm/session_layer.hpp` | PKCS#11 applications, logins, sessions, session objects and multi-part operations on this node; a read-index round before every use of a token key; opened keys cached by handle and version | 6 |
 | `include/kythira/hsm/native_client.hpp` | the in-process PKCS#11 client co-located modules use, authorized by the catalog's bindings like any other | 6 |
+| `include/kythira/hsm/pkcs11_native_backend.hpp` | core's `kythira::pkcs11::backend` over a `native_client`, so a co-located module uses the HSM through the same wrapper as an external module; CK_INFO and token strings match `libkythira_pkcs11.so` (`client_types.hpp`) | 12 |
 | `include/kythira/hsm/object_import.hpp` | builds objects from a `C_CreateObject` template, an unwrapped key or a derived value: RSA, EC and Ed25519 keys from their components, secret keys, data objects (value sealed) and X.509 certificates (value public) | 6 |
 | `include/kythira/hsm/hsm_group_state_machine.hpp` | the one state machine type multi_raft builds for every HSM group: the catalog on `c/`, token `t` on `t/<t>/`; never splits | 6 |
 | `include/kythira/hsm/hsm_host.hpp` | `hsm_store` on the node's multi-raft host: the catalog and every token group on every member, created and destroyed from the catalog; proposals and read-index rounds forwarded from a follower to the leader | 6 |
@@ -111,7 +141,7 @@ them.
 | `cmd/hsm_node/hsm_module.hpp`, `hsm_config.*`, `hsm_module_registrar.cpp` | the service module (`KYTHIRA_SERVICES=hsm` in `kythira_node`): RocksDB-backed groups on the node's transport, one HTTPS listener for the operator API and the members' forwarding routes, the PKCS#11 client listener and socket, the session layer published as `hsm.session_layer`; configuration from `KYTHIRA_HSM_*` (`usage_text()` lists it) | 6 |
 | `cmd/hsm_ctl/` | `hsm_ctl status|init|unseal|seal|rekey`: one request to a node's operator API with the operator's certificate; init and rekey print each share once | 7 |
 | `cmd/hsm_node/main.cpp` | `hsm_node`, the stand-alone daemon: `kythira_node` with only the HSM module (the same `KYTHIRA_NODE_*` and `KYTHIRA_HSM_*` settings, Raft listener, metrics and health endpoint), in the module's `kythira_node` group space and data directory so a cluster moves between layouts in place; `--self-test [--allow-unlocked-memory]` prepares key memory and exits. Where RocksDB, OpenSSL or the Beast transport is missing it is the self-test only | 1, 3, 11 |
-| `tests/` | `hsm_pkcs11_headers_test` (the vendored headers' version, ABI types and 3.0 function table) and `hsm_node_self_test`; `hsm_node_cluster_test` (three `hsm_node` processes: the token group's leader killed during key generation and the catalog's leader killed during rekeys, then every replica agreeing on whole key pairs that all still sign and verify; and no key value, PIN or share in any member's data directory after a rekey), `hsm_node_help` and `hsm_node_refuses_other_services`; `docker/hsm_chaos_test` (the docker-chaos scenario, `docker-hsm-chaos-tests`: three members from `docker/hsm-chaos-compose.yml`, stand-alone and co-located beside Redis, under Docker and rootless Podman, with the token leader killed and partitioned during key generation and the catalog leader killed during rekeys); `hsm_test_cluster.hpp` holds the scenarios both run; `hsm_shamir_test` (split and combine properties, encoding and every refusal); `hsm_secure_arena_test` (smaps flags, wiping, lock failures under a real zero `RLIMIT_MEMLOCK`, hardening); `hsm_mechanisms_test` (published vectors, round trips, tampering, exclusions); `hsm_attribute_policy_test` (one test per rule); `hsm_key_store_test` (both state machines, persistence, the no-plaintext scan); `hsm_session_layer_test` (the vault, bindings, session states, replicated PIN counters, read-index checks against a destroy or narrowing elsewhere, the key cache, sealing, multi-part operations); `hsm_object_import_test` (create, copy, wrap and unwrap rules, ECDH on both sides, the RFC 5869 HKDF vector); `hsm_host_test` (three members on the in-process fabric: groups on every member, forwarding, a destroy seen everywhere, a partitioned member answering `CKR_DEVICE_ERROR`, a leader change, deleted token ids); `hsm_peer_test` (the wire format, membership, refusals before the host is asked, mutual TLS against a real listener, plaintext only when both sides ask); `hsm_admin_test` (operators only, status, tokens sealed under the master key, bindings, refusals, init, unseal, a seal reaching another node, rekey keeping tokens and retiring old shares, shares answered when a commit is uncertain); `hsm_unseal_test` (k shares and no fewer, checks on arrival, expiry, the vault sealing after a seal or rekey); `hsm_node_unseal_test` (the owner-only key file, shares bound to their key and never overwritten, pruning, k needed and bad peer answers skipped, member-only routes, init and rekey delivering one share per member before committing); `hsm_wire_test` (every call through the dispatcher, mechanism parameters, malformed and forged requests refused, the socket's allow list, TLS identities, connection and frame limits); `hsm_pkcs11_library_test` (`libkythira_pkcs11.so` through `dlopen`: interfaces, sessions and logins, the length query, AES-GCM, attribute rules, find, wrap and unwrap, failover, many threads, the configuration file); `hsm_pkcs11_consumers_test` (pkcs11-tool, OpenSSL's pkcs11-provider with a TLS handshake, p11-kit and GnuTLS, Go's crypto11, Java's SunPKCS11 and pkcs11test against a served node; opt-in, `pkcs11/README.md`); `hsm_test_pki.hpp` issues the TLS tests' certificates; `hsm_test_node.hpp` and `hsm_test_store.hpp` are the shared fixtures | 1-11 |
+| `tests/` | `hsm_pkcs11_headers_test` (the vendored headers' version, ABI types and 3.0 function table) and `hsm_node_self_test`; `hsm_node_cluster_test` (three `hsm_node` processes: the token group's leader killed during key generation and the catalog's leader killed during rekeys, then every replica agreeing on whole key pairs that all still sign and verify; and no key value, PIN or share in any member's data directory after a rekey), `hsm_node_help` and `hsm_node_refuses_other_services`; `docker/hsm_chaos_test` (the docker-chaos scenario, `docker-hsm-chaos-tests`: three members from `docker/hsm-chaos-compose.yml`, stand-alone and co-located beside Redis, under Docker and rootless Podman, with the token leader killed and partitioned during key generation and the catalog leader killed during rekeys); `hsm_test_cluster.hpp` holds the scenarios both run; `hsm_shamir_test` (split and combine properties, encoding and every refusal); `hsm_secure_arena_test` (smaps flags, wiping, lock failures under a real zero `RLIMIT_MEMLOCK`, hardening); `hsm_mechanisms_test` (published vectors, round trips, tampering, exclusions); `hsm_attribute_policy_test` (one test per rule); `hsm_key_store_test` (both state machines, persistence, the no-plaintext scan); `hsm_session_layer_test` (the vault, bindings, session states, replicated PIN counters, read-index checks against a destroy or narrowing elsewhere, the key cache, sealing, multi-part operations); `hsm_object_import_test` (create, copy, wrap and unwrap rules, ECDH on both sides, the RFC 5869 HKDF vector); `hsm_host_test` (three members on the in-process fabric: groups on every member, forwarding, a destroy seen everywhere, a partitioned member answering `CKR_DEVICE_ERROR`, a leader change, deleted token ids); `hsm_peer_test` (the wire format, membership, refusals before the host is asked, mutual TLS against a real listener, plaintext only when both sides ask); `hsm_admin_test` (operators only, status, tokens sealed under the master key, bindings, refusals, init, unseal, a seal reaching another node, rekey keeping tokens and retiring old shares, shares answered when a commit is uncertain); `hsm_unseal_test` (k shares and no fewer, checks on arrival, expiry, the vault sealing after a seal or rekey); `hsm_node_unseal_test` (the owner-only key file, shares bound to their key and never overwritten, pruning, k needed and bad peer answers skipped, member-only routes, init and rekey delivering one share per member before committing); `hsm_wire_test` (every call through the dispatcher, mechanism parameters, malformed and forged requests refused, the socket's allow list, TLS identities, connection and frame limits); `hsm_pkcs11_library_test` (`libkythira_pkcs11.so` through `dlopen`: interfaces, sessions and logins, the length query, AES-GCM, attribute rules, find, wrap and unwrap, failover, many threads, the configuration file); `hsm_pkcs11_consumers_test` (pkcs11-tool, OpenSSL's pkcs11-provider with a TLS handshake, p11-kit and GnuTLS, Go's crypto11, Java's SunPKCS11 and pkcs11test against a served node; opt-in, `pkcs11/README.md`); `hsm_pkcs11_module_test` (core's consumer wrapper on three backends, in process, `libkythira_pkcs11.so` and SoftHSM2: every common-subset key pair, lookup by URI, every signature scheme and hash verified in software, RSA-OAEP, the refusals); `hsm_test_pki.hpp` issues the TLS tests' certificates; `hsm_test_node.hpp` and `hsm_test_store.hpp` are the shared fixtures | 1-12 |
 | `pkcs11/` | `libkythira_pkcs11.so`, the PKCS#11 client library, as its own target: the entry points, the configuration file, failover, the exported-symbol map (`pkcs11/README.md`) | 10 |
 | `docker/` | the chaos image (`hsm-chaos/Dockerfile`: `hsm_node` and `kythira_node`) and `hsm-chaos-compose.yml`, three members addressed by service name in either layout | 11 |
 
@@ -125,7 +155,7 @@ package to export.
 
 | From core | Used for |
 |---|---|
-| `kythira_core_headers` | `include/` and `generated/`, through `kythira_hsm` |
+| `kythira_core_headers` | `include/` and `generated/`, and the vendored OASIS PKCS#11 headers (`third_party/pkcs11/`, as `<raft/pkcs11.hpp>`), through `kythira_hsm`; `raft/pkcs11_module.hpp` and `raft/pkcs11_uri.hpp` for the consumer wrapper |
 | `OpenSSL::Crypto` | every mechanism, through `kythira_hsm` |
 | `kythira_test_pch` | the guard the tests are entered under, and what the C++ tests link |
 | `kythira_test_support` | `tests/` and `tests/docker_chaos/` on the docker-chaos scenario's include path (`test_ports.hpp`, `os_faults.hpp`) |
