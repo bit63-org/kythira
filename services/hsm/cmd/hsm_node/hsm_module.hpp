@@ -30,6 +30,7 @@
 #include <kythira/hsm/hsm_host.hpp>
 #include <kythira/hsm/hsm_peer.hpp>
 #include <kythira/hsm/key_vault.hpp>
+#include <kythira/hsm/node_unseal.hpp>
 #include <kythira/hsm/secure_arena.hpp>
 #include <kythira/hsm/session_layer.hpp>
 
@@ -195,8 +196,29 @@ public:
         policy.allow_single_share = _opt.allow_single_share;
         policy.unseal_timeout = _opt.unseal_timeout;
         _admin = std::make_unique<admin_type>(*_host, _vault, std::move(policy));
+        _admin->set_seal_hook([layer = _layer] { layer->seal(); });
         _peer_policy.identities = _opt.peer_identities;
         _peer_policy.allow_plaintext = _opt.insecure_plaintext;
+        // Node unseal (task 8): this node's share at rest, and init and
+        // rekey handing share i to the i-th member in id order.
+        _sealer = std::make_unique<kythira::hsm::key_file_sealer>(_opt.share_key_file);
+        _shares = std::make_unique<kythira::hsm::share_store>(_opt.data_dir / "shares", *_sealer);
+        _node_unseal = std::make_unique<kythira::hsm::node_unseal>(_vault, *_shares);
+        kythira::hsm::node_share_delivery delivery;
+        delivery.members = _opt.api_urls.size();
+        delivery.deliver = [this](std::size_t index, const kythira::hsm::shamir_share& share) {
+            auto it = _opt.api_urls.begin();
+            std::advance(it, static_cast<std::ptrdiff_t>(index));
+            if (it->first == _opt.node_id) {
+                return _shares->put(share);
+            }
+            const auto bin = kythira::hsm::shamir_encode_binary(share);
+            std::string body(reinterpret_cast<const char*>(bin.data()), bin.size());
+            const bool stored = _peers->deliver_share(it->second, body);
+            OPENSSL_cleanse(body.data(), body.size());
+            return stored;
+        };
+        _admin->set_node_share_delivery(std::move(delivery));
         _host->bootstrap();
     }
 
@@ -229,6 +251,7 @@ public:
                         log(kythira::log_level::info,
                             "hsm: sealed (the catalog was sealed or rekeyed)");
                     }
+                    try_node_unseal();
                 } catch (const std::exception& e) {
                     log(kythira::log_level::error, std::string("hsm: warden: ") + e.what());
                 }
@@ -286,6 +309,9 @@ public:
         }
         if (_raft) {
             _raft->stop();
+        }
+        if (_layer) {
+            _layer->seal();  // the key cache and session objects too
         }
         _vault.seal();
         _admin.reset();
@@ -354,6 +380,53 @@ private:
         return cfg;
     }
 
+    /// In node mode, a sealed node collects shares from the others, at
+    /// most every five seconds so an unreachable quorum is not hammered.
+    void try_node_unseal() {
+        const auto now = std::chrono::steady_clock::now();
+        if (!_vault.sealed() || now < _next_node_unseal) {
+            return;
+        }
+        const auto c = _host->catalog();
+        if (!c || c->mode != kythira::hsm::unseal_mode::node_shares) {
+            return;
+        }
+        _next_node_unseal = now + std::chrono::seconds{5};
+        if (!_host->catalog_barrier()) {
+            return;  // the check value must be current, or old shares would be asked for
+        }
+        std::vector<kythira::hsm::node_unseal::fetch_fn> peers;
+        for (const auto& [id, url] : _opt.api_urls) {
+            if (id == _opt.node_id) {
+                continue;
+            }
+            peers.emplace_back([this, url](std::span<const std::uint8_t, 8> check)
+                                   -> std::optional<kythira::hsm::secret_bytes> {
+                auto body = _peers->request_share(url, check);
+                if (!body) {
+                    return std::nullopt;
+                }
+                kythira::hsm::secret_bytes bin(std::span<const std::uint8_t>(
+                    reinterpret_cast<const std::uint8_t*>(body->data()), body->size()));
+                OPENSSL_cleanse(body->data(), body->size());
+                return bin;
+            });
+        }
+        const auto outcome = _node_unseal->attempt(_host->catalog(), peers);
+        if (outcome == kythira::hsm::node_unseal_outcome::unsealed) {
+            log(kythira::log_level::info, "hsm: unsealed with shares from the other members");
+        } else if (outcome != _last_node_unseal) {
+            log(kythira::log_level::warning,
+                std::string("hsm: node unseal: ") +
+                    (outcome == kythira::hsm::node_unseal_outcome::no_local_share
+                         ? "this node holds no share of the current master key"
+                     : outcome == kythira::hsm::node_unseal_outcome::too_few_shares
+                         ? "fewer than k members answered; staying sealed"
+                         : "the shares did not rebuild the master key"));
+        }
+        _last_node_unseal = outcome;
+    }
+
     [[nodiscard]] auto url_of(const kythira::host_node_id& id) const -> std::string {
         const auto it = _opt.api_urls.find(id);
         return it == _opt.api_urls.end() ? std::string() : it->second;
@@ -378,6 +451,15 @@ private:
         res.set(http::field::server, "kythira-hsm");
         const kythira::hsm::peer_caller caller{ctx.tls, ctx.client_verified, ctx.client_uri_sans,
                                                ctx.client_dns_sans};
+        if (auto share = kythira::hsm::serve_share_peer(*_shares, _peer_policy, caller,
+                                                        std::string_view(req.method_string()),
+                                                        target, req.body())) {
+            res.result(share->status);
+            res.set(http::field::content_type, "application/octet-stream");
+            res.body() = std::move(share->body);
+            res.prepare_payload();
+            return res;
+        }
         if (auto peer = kythira::hsm::serve_peer(
                 *_host, _peer_policy, caller, std::string_view(req.method_string()), target,
                 req.body(),
@@ -412,6 +494,11 @@ private:
 
     hsm_options _opt;
     kythira::hsm::key_vault _vault;
+    std::unique_ptr<kythira::hsm::share_sealer> _sealer;
+    std::unique_ptr<kythira::hsm::share_store> _shares;
+    std::unique_ptr<kythira::hsm::node_unseal> _node_unseal;
+    std::chrono::steady_clock::time_point _next_node_unseal{};
+    kythira::hsm::node_unseal_outcome _last_node_unseal{kythira::hsm::node_unseal_outcome::idle};
     std::shared_ptr<typename group_sm::context> _ctx;
     std::unique_ptr<raft_host> _raft;
     std::unique_ptr<hsm_host> _host;

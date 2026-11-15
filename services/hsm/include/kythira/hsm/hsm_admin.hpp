@@ -25,8 +25,9 @@
 //
 //   POST   /v1/init    {"mode":"operator"|"node","k":K,"n":N}
 //                      generate the master key, record its check value
-//                      and hand out its n shares, once; no node is left
-//                      unsealed, each is unsealed with k shares
+//                      and hand out its n shares, once: to the operator,
+//                      or in node mode one to each member (n must be the
+//                      member count; task 8); no node is left unsealed
 //   POST   /v1/unseal  {"share":"khs1-..."}  one operator's share for this
 //                      node; held in memory until k arrive or the timeout
 //   DELETE /v1/unseal  discard the shares held on this node
@@ -66,6 +67,7 @@
 #include <chrono>
 #include <cstdint>
 #include <exception>
+#include <functional>
 #include <optional>
 #include <set>
 #include <string>
@@ -83,6 +85,16 @@ struct admin_policy {
     bool allow_single_share = false;
     /// How long partial operator shares are held (requirement 4.3).
     std::chrono::seconds unseal_timeout{std::chrono::minutes{10}};
+};
+
+/// How init and rekey hand node-mode shares to the members (task 8).
+struct node_share_delivery {
+    /// The members, in the order shares are handed out (share i + 1 to
+    /// member i); n must equal this.
+    std::size_t members = 0;
+    /// Stores `share` on member `index` (this node included); false when
+    /// it could not.
+    std::function<bool(std::size_t index, const shamir_share& share)> deliver;
 };
 
 struct admin_request {
@@ -129,13 +141,28 @@ public:
           _policy(std::move(policy)),
           _unseal(vault, _policy.unseal_timeout) {}
 
+    /// Enables node mode at init and rekey: how share i reaches member i.
+    void set_node_share_delivery(node_share_delivery delivery) { _delivery = std::move(delivery); }
+
     /// Run periodically: seals this node when the catalog was sealed or
     /// rekeyed since it unsealed, and drops expired partial shares. True
     /// when it sealed.
     auto maintain() -> bool {
         _unseal.expire();
-        return _vault->enforce(_host->catalog());
+        if (!_vault->enforce(_host->catalog())) {
+            return false;
+        }
+        if (_on_seal) {
+            _on_seal();  // the vault is sealed; drop what was opened with it
+        }
+        return true;
     }
+
+    /// Called whenever this node seals (the seal route, or maintain()
+    /// finding the catalog sealed or rekeyed), in place of sealing the
+    /// vault alone: the module passes session_layer::seal, which also
+    /// wipes the key cache and session objects (requirement 4.7).
+    void set_seal_hook(std::function<void()> hook) { _on_seal = std::move(hook); }
 
     [[nodiscard]] auto handle(const admin_request& req) -> admin_response {
         if (!is_operator(req)) {
@@ -270,6 +297,7 @@ private:
     /// A fresh master key, its shares and its check value.
     struct fresh_key {
         secret_bytes mk;
+        std::vector<shamir_share> raw;
         std::vector<std::string> shares;
         std::array<std::uint8_t, 8> check{};
     };
@@ -287,8 +315,35 @@ private:
         for (const auto& share : *shares) {
             out.shares.push_back(shamir_encode_text(share));
         }
+        out.raw = std::move(*shares);
         out.check = key_check_value(out.mk.view());
         return out;
+    }
+
+    /// In node mode, share i to the i-th member, every one before the
+    /// catalog entry is proposed (task 8): an error answer when that
+    /// cannot be done, so nothing is committed.
+    auto deliver(const fresh_key& key, const split_parameters& split)
+        -> std::optional<admin_response> {
+        if (split.mode != unseal_mode::node_shares) {
+            return std::nullopt;
+        }
+        if (!_delivery.deliver) {
+            return error(400, "bad_request", "node unseal is not available on this node");
+        }
+        if (split.n != _delivery.members) {
+            return error(400, "bad_request",
+                         "node unseal gives each member one share: n must be " +
+                             std::to_string(_delivery.members));
+        }
+        for (std::size_t i = 0; i < key.raw.size(); ++i) {
+            if (!_delivery.deliver(i, key.raw[i])) {
+                return error(503, "unavailable",
+                             "member " + std::to_string(i + 1) +
+                                 " could not take its share; nothing was committed");
+            }
+        }
+        return std::nullopt;
     }
 
     /// The answer carrying new shares: `status` 200 when the entry
@@ -297,11 +352,15 @@ private:
                             std::uint32_t generation, const std::vector<std::string>& shares)
         -> admin_response {
         boost::json::object o;
-        boost::json::array list;
-        for (const auto& s : shares) {
-            list.emplace_back(s);
+        if (split.mode == unseal_mode::operator_shares) {
+            boost::json::array list;
+            for (const auto& s : shares) {
+                list.emplace_back(s);
+            }
+            o["shares"] = std::move(list);
+        } else {
+            o["delivered"] = shares.size();  // one to each member, kept by none here
         }
-        o["shares"] = std::move(list);
         o["mode"] = split.mode == unseal_mode::operator_shares ? "operator" : "node";
         o["k"] = split.k;
         o["n"] = split.n;
@@ -309,7 +368,7 @@ private:
         if (status != 200) {
             o["error"] = "unavailable";
             o["message"] =
-                "the entry's commit is uncertain: keep these shares, and use them if the "
+                "the entry's commit is uncertain: the shares are current if the "
                 "status shows generation " +
                 std::to_string(generation);
         }
@@ -330,6 +389,9 @@ private:
             return error(409, "already_initialized", "the HSM is already initialized");
         }
         auto key = fresh(*split);
+        if (auto refused = deliver(key, *split)) {
+            return std::move(*refused);
+        }
         const auto rv =
             propose(make_initialize_command(split->mode, split->k, split->n, key.check));
         if (rv == CKR_FUNCTION_REJECTED) {
@@ -390,7 +452,11 @@ private:
         }
         // This node at once; the others when they apply the entry.
         _unseal.reset();
-        _vault->seal();
+        if (_on_seal) {
+            _on_seal();
+        } else {
+            _vault->seal();
+        }
         return ok(200, boost::json::object{{"sealed", true}});
     }
 
@@ -409,6 +475,12 @@ private:
             return error(400, "bad_request", why);
         }
         auto key = fresh(*split);
+        if (_vault->sealed()) {
+            return error(503, "sealed", "this node is sealed");
+        }
+        if (auto refused = deliver(key, *split)) {
+            return std::move(*refused);
+        }
         const auto tokens = _host->tokens();
         auto entry = _vault->with_master_key([&](std::span<const std::uint8_t> old_mk) {
             return prepare_rekey(old_mk, key.mk.view(), key.check, *split, *c, tokens);
@@ -566,6 +638,8 @@ private:
     key_vault* _vault;
     admin_policy _policy;
     operator_unseal _unseal;
+    std::function<void()> _on_seal;
+    node_share_delivery _delivery;
 };
 
 }  // namespace kythira::hsm

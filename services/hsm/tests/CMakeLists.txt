@@ -90,6 +90,11 @@ set_tests_properties(hsm_admin_test PROPERTIES
 kythira_hsm_test(hsm_unseal_test hsm_unseal_test.cpp)
 set_tests_properties(hsm_unseal_test PROPERTIES
     LABELS "unit;hsm" TIMEOUT 60)
+# Task 8a: node unseal (key-file sealer, share store, collection from
+# peers, the share routes, init and rekey delivering shares).
+kythira_hsm_test(hsm_node_unseal_test hsm_node_unseal_test.cpp)
+set_tests_properties(hsm_node_unseal_test PROPERTIES
+    LABELS "unit;hsm" TIMEOUT 60)
 
 add_test(NAME hsm_node_self_test COMMAND hsm_node --self-test)
 set_tests_properties(hsm_node_self_test PROPERTIES
