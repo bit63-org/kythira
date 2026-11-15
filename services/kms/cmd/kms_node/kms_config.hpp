@@ -64,6 +64,10 @@ struct kms_options {
     std::string region{"us-east-1"};
     std::string partition{"aws"};
 
+    // -- Audit (Requirement 13) ----------------------------------------------------
+    /// Where request records go: stderr, off or file:<path>.
+    std::string audit{"stderr"};
+
     // -- The backing store (Requirement 4) -------------------------------------
     /// "hsm" for the co-located virtual HSM, else the path of a PKCS#11
     /// library (an external HSM, or the virtual HSM's client library).

@@ -42,6 +42,7 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <chrono>
 #include <exception>
 #include <functional>
 #include <map>
@@ -135,9 +136,18 @@ struct call_context {
         return authorize_fn(std::move(r));
     }
 
+    /// The key the request acted on (its ARN), for the audit record: the
+    /// last key-scoped authorization asked.
+    std::string audited_key_arn;
+    /// The grant that allowed the request, if one did.
+    std::string audited_grant_id;
+
     /// A live grant allowed what IAM refused without an explicit deny
     /// (kms_grants.hpp): the request is authorized.
-    auto allow_by_grant() -> void { authorized = true; }
+    auto allow_by_grant(std::string grant_id) -> void {
+        authorized = true;
+        audited_grant_id = std::move(grant_id);
+    }
 
     /// `arn:<partition>:kms:<region>:<account>:key/<id>`.
     [[nodiscard]] auto key_arn(std::string_view account, std::string_view key_id) const
@@ -177,7 +187,52 @@ namespace front_end_detail {
     return {};
 }
 
+/// The access key id an Authorization header claims, or nothing. Only
+/// characters an access key id can hold are kept, so a forged header
+/// cannot put arbitrary text in the audit trail.
+[[nodiscard]] inline auto claimed_access_key(std::string_view authorization) -> std::string {
+    constexpr std::string_view marker = "Credential=";
+    const auto at = authorization.find(marker);
+    if (at == std::string_view::npos) {
+        return {};
+    }
+    auto rest = authorization.substr(at + marker.size());
+    rest = rest.substr(0, std::min(rest.find('/'), std::size_t{128}));
+    for (const char c : rest) {
+        if (std::isalnum(static_cast<unsigned char>(c)) == 0) {
+            return {};
+        }
+    }
+    return std::string(rest);
+}
+
 }  // namespace front_end_detail
+
+/// What the front end saw of one request, for the audit trail and the
+/// metrics (Requirements 13.1 and 13.2). No key material and no
+/// encryption context value: only the context's keys.
+struct request_record {
+    std::string operation;  ///< empty when the target named none
+    std::string request_id;
+    /// Who: the signer, or the caller a trusted service forwarded; empty
+    /// when authentication failed.
+    std::optional<aws_auth::principal_context> principal;
+    std::string access_key_id;  ///< the signer's, when known
+    std::string via_service;
+    std::string source_ip;
+    std::string user_agent;
+    std::string key_arn;
+    std::string grant_id;
+    std::vector<std::string> context_keys;
+    unsigned status = 0;
+    std::string error_type;  ///< empty on success
+    std::string error_message;
+    bool read_only = false;
+    std::chrono::system_clock::time_point time;
+    std::chrono::microseconds duration{0};
+};
+
+using request_observer = std::function<void(const request_record&)>;
 
 template<aws_auth::aws_request_authorizer Authorizer> class front_end {
 public:
@@ -210,41 +265,19 @@ public:
 
     [[nodiscard]] auto config() const -> const front_end_config& { return _config; }
 
+    /// Called once per request after its answer is made, on the
+    /// request's thread. Set before serving.
+    void set_observer(request_observer o) { _observer = std::move(o); }
+
     [[nodiscard]] auto handle(const front_end_request& req) -> aws_json::http_response {
-        const auto target = front_end_detail::header_value(req, "x-amz-target");
-        const auto content_type = front_end_detail::header_value(req, "content-type");
-        const aws_json::http_request_view view{req.method, req.path, content_type, target,
-                                               req.body};
-        constexpr auto json = aws_json::body_encoding::json;
-        auto id = _codec.new_request_id();
-
-        const auto* op = _codec.resolve_target(view);
-        if (op == nullptr) {
-            auto parsed = _codec.parse(view);
-            return _codec.respond(parsed ? unknown_operation() : parsed.error(), id, json);
-        }
-
-        sigv4::service_rules rules;
-        rules.service = "kms";
-        rules.protocol = sigv4::error_protocol::json;
-        if (!_config.region.empty()) {
-            rules.regions = {_config.region};
-        }
-        const sigv4::request sreq{req.method, req.path, req.query, req.headers, req.body};
-        const auto who = _authorizer.authenticate(sreq, rules);
-        if (!who) {
-            aws_json::error e;
-            e.status = static_cast<unsigned>(who.error().http_status);
-            e.type = who.error().code;
-            e.message = who.error().message;
-            return _codec.respond(e, id, json);
-        }
-        auto principal = *who;
-        std::string via;
-        if (auto bad = forwarded(*who, req, principal, via)) {
-            return _codec.respond(*bad, id, json);
-        }
-        return run(req, view, *op, std::move(principal), std::move(via), id);
+        request_record rec;
+        rec.time = std::chrono::system_clock::now();
+        rec.source_ip = req.source_ip;
+        rec.user_agent = std::string(front_end_detail::header_value(req, "user-agent"));
+        const auto start = std::chrono::steady_clock::now();
+        auto res = handle_impl(req, rec);
+        observe(rec, res, start);
+        return res;
     }
 
     /// A consuming service's call for its caller (`kms.client` in process,
@@ -257,8 +290,75 @@ public:
                                            aws_auth::principal_context principal,
                                            std::string via_service, std::string source_ip)
         -> aws_json::http_response {
+        request_record rec;
+        rec.time = std::chrono::system_clock::now();
+        rec.operation = std::string(operation);
+        rec.source_ip = source_ip;
+        rec.via_service = via_service;
+        rec.principal = principal;
+        rec.access_key_id = principal.access_key_id;
+        const auto start = std::chrono::steady_clock::now();
+        auto res = service_call_impl(operation, std::move(body), std::move(principal),
+                                     std::move(via_service), std::move(source_ip), rec);
+        observe(rec, res, start);
+        return res;
+    }
+
+private:
+    [[nodiscard]] auto handle_impl(const front_end_request& req, request_record& rec)
+        -> aws_json::http_response {
+        const auto target = front_end_detail::header_value(req, "x-amz-target");
+        const auto content_type = front_end_detail::header_value(req, "content-type");
+        const aws_json::http_request_view view{req.method, req.path, content_type, target,
+                                               req.body};
         constexpr auto json = aws_json::body_encoding::json;
         auto id = _codec.new_request_id();
+        rec.request_id = id;
+
+        const auto* op = _codec.resolve_target(view);
+        if (op == nullptr) {
+            auto parsed = _codec.parse(view);
+            return _codec.respond(parsed ? unknown_operation() : parsed.error(), id, json);
+        }
+        rec.operation = std::string(op->name);
+
+        sigv4::service_rules rules;
+        rules.service = "kms";
+        rules.protocol = sigv4::error_protocol::json;
+        if (!_config.region.empty()) {
+            rules.regions = {_config.region};
+        }
+        const sigv4::request sreq{req.method, req.path, req.query, req.headers, req.body};
+        const auto who = _authorizer.authenticate(sreq, rules);
+        if (!who) {
+            // CloudTrail names the key a refused signature claimed.
+            rec.access_key_id = front_end_detail::claimed_access_key(
+                front_end_detail::header_value(req, "authorization"));
+            aws_json::error e;
+            e.status = static_cast<unsigned>(who.error().http_status);
+            e.type = who.error().code;
+            e.message = who.error().message;
+            return _codec.respond(e, id, json);
+        }
+        auto principal = *who;
+        rec.access_key_id = who->access_key_id;
+        rec.principal = principal;
+        std::string via;
+        if (auto bad = forwarded(*who, req, principal, via)) {
+            return _codec.respond(*bad, id, json);
+        }
+        rec.principal = principal;
+        rec.via_service = via;
+        return run(req, view, *op, std::move(principal), std::move(via), id, rec);
+    }
+
+    [[nodiscard]] auto service_call_impl(std::string_view operation, std::string body,
+                                         aws_auth::principal_context principal,
+                                         std::string via_service, std::string source_ip,
+                                         request_record& rec) -> aws_json::http_response {
+        constexpr auto json = aws_json::body_encoding::json;
+        auto id = _codec.new_request_id();
+        rec.request_id = id;
         if (!kms_forwarding::is_service_operation(operation)) {
             return _codec.respond(
                 unsupported(std::string(operation) + " is not taken through a service"), id, json);
@@ -281,15 +381,69 @@ public:
         if (op == nullptr) {
             return _codec.respond(unknown_operation(), id, json);
         }
-        return run(req, view, *op, std::move(principal), std::move(via_service), id);
+        return run(req, view, *op, std::move(principal), std::move(via_service), id, rec);
     }
 
-private:
+    /// Fills in the record from the answer and hands it to the observer.
+    void observe(request_record& rec, const aws_json::http_response& res,
+                 std::chrono::steady_clock::time_point start) const {
+        if (!_observer) {
+            return;
+        }
+        rec.status = res.status;
+        rec.duration = std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - start);
+        if (const auto* acts = find_operation_actions(rec.operation)) {
+            rec.read_only = !acts->writes;
+        }
+        if (res.status != 200) {
+            boost::system::error_code ec;
+            const auto v = boost::json::parse(res.body, ec);
+            if (!ec && v.is_object()) {
+                if (const auto* t = v.as_object().if_contains("__type");
+                    t != nullptr && t->is_string()) {
+                    const std::string_view type(t->get_string());
+                    rec.error_type = std::string(type.substr(type.find('#') + 1));
+                }
+                for (const char* k : {"message", "Message"}) {
+                    if (const auto* m = v.as_object().if_contains(k);
+                        m != nullptr && m->is_string()) {
+                        rec.error_message = std::string(m->get_string());
+                    }
+                }
+            }
+        }
+        try {
+            _observer(rec);
+        } catch (const std::exception&) {
+            // An audit or metrics failure never changes the answer.
+        }
+    }
+
+    /// The encryption context keys a request carries (never the values).
+    static void collect_context_keys(const boost::json::object& in, request_record& rec) {
+        for (const char* member :
+             {"EncryptionContext", "SourceEncryptionContext", "DestinationEncryptionContext"}) {
+            const auto* c = in.if_contains(member);
+            if (c == nullptr || !c->is_object()) {
+                continue;
+            }
+            for (const auto& kv : c->get_object()) {
+                const std::string k(kv.key());
+                if (std::find(rec.context_keys.begin(), rec.context_keys.end(), k) ==
+                    rec.context_keys.end()) {
+                    rec.context_keys.push_back(k);
+                }
+            }
+        }
+    }
+
     /// Dispatches an authenticated request to its handler as `principal`.
     template<typename Operation>
     [[nodiscard]] auto run(const front_end_request& req, const aws_json::http_request_view& view,
                            const Operation& op, aws_auth::principal_context principal,
-                           std::string via, std::string& id) -> aws_json::http_response {
+                           std::string via, std::string& id, request_record& rec)
+        -> aws_json::http_response {
         constexpr auto json = aws_json::body_encoding::json;
         const auto h = _handlers.find(op.name);
         if (h == _handlers.end()) {
@@ -306,6 +460,7 @@ private:
         if (!parsed) {
             return _codec.respond(parsed.error(), id, json);
         }
+        collect_context_keys(parsed->input, rec);
         if (auto bad = check_grant_tokens(parsed->input)) {
             return _codec.respond(*bad, id, json);
         }
@@ -328,6 +483,21 @@ private:
             return denied;
         };
 
+        // Whatever the handler answers, the record names the key and grant
+        // it reached.
+        struct record_keys {
+            call_context& ctx;
+            request_record& rec;
+            record_keys(call_context& c, request_record& r) : ctx(c), rec(r) {}
+            record_keys(const record_keys&) = delete;
+            auto operator=(const record_keys&) -> record_keys& = delete;
+            record_keys(record_keys&&) = delete;
+            auto operator=(record_keys&&) -> record_keys& = delete;
+            ~record_keys() {
+                rec.key_arn = ctx.audited_key_arn;
+                rec.grant_id = ctx.audited_grant_id;
+            }
+        } const keep(ctx, rec);
         try {
             auto out = h->second(ctx, parsed->input);
             if (!out) {
@@ -425,6 +595,9 @@ private:
                 r.resource_account = std::string(parts->account);
             }
         }
+        if (r.resource.find(":key/") != std::string::npos) {
+            ctx.audited_key_arn = r.resource;
+        }
         r.keys.emplace_back("kms:CallerAccount", std::vector<std::string>{ctx.principal.account});
         if (!ctx.via_service.empty()) {
             r.keys.emplace_back("kms:ViaService",
@@ -450,6 +623,7 @@ private:
     Authorizer& _authorizer;
     aws_json::codec _codec;
     std::map<std::string, front_end_handler, std::less<>> _handlers;
+    request_observer _observer;
 };
 
 }  // namespace kythira::kms

@@ -204,6 +204,10 @@ is one PR unless noted.
   - CloudTrail-shaped audit records through IAM's audit sink, Prometheus
     metrics, per-account request quotas with operator overrides
   - _Requirements: 13.1-13.3_
+  - Done: audit records and metrics (`kms_audit.hpp`, `KYTHIRA_KMS_AUDIT`),
+    on core's bounded audit log (`raft/audit_log.hpp`), the queue IAM's
+    authorizer and the HSM write through; context keys only, never
+    values. Open: quotas.
 
 - [ ] 15. Kinesis integration
   - `kythira` `kms_key_provider` over `kms.client` with the caller's

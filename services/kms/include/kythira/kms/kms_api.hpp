@@ -364,8 +364,8 @@ protected:
         if (!denied || ctx.last_denial_explicit || !ctx.grants_apply) {
             return denied;
         }
-        if (find_grant(c, key, ctx.principal, op, context)) {
-            ctx.allow_by_grant();
+        if (auto g = find_grant(c, key, ctx.principal, op, context)) {
+            ctx.allow_by_grant(g->grant_id);
             return std::nullopt;
         }
         return denied;
