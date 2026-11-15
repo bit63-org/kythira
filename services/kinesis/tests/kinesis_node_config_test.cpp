@@ -334,3 +334,43 @@ BOOST_AUTO_TEST_CASE(channel_delivery_settings) {
     vars["KINESIS_CHANNEL_MAX_DELAY_MS"] = "900001";
     BOOST_TEST(refused_naming(vars, "KINESIS_CHANNEL_MAX_DELAY_MS"));
 }
+
+// KMS task 15 (Requirements 11.1 and 11.7): KINESIS_KMS=kythira, and a
+// previous provider whose data keys the node still opens after a move.
+BOOST_AUTO_TEST_CASE(the_kythira_provider_and_a_previous_one) {
+    auto vars = node_vars();
+    vars["KINESIS_KMS"] = "kythira";
+    auto o = kn::from_env(kn::composite_env(lookup(vars)));
+    BOOST_TEST(o._kms == "kythira");
+    BOOST_TEST(o._kms_previous == "off");
+    BOOST_TEST(o._kms_caller_ttl.count() == 300'000);
+
+    // A move from local still needs local's passphrase.
+    vars["KINESIS_KMS_PREVIOUS"] = "local";
+    BOOST_CHECK_THROW((void)kn::from_env(kn::composite_env(lookup(vars))), std::invalid_argument);
+    vars["KINESIS_KMS_PASSPHRASE"] = "a passphrase of some length";
+    o = kn::from_env(kn::composite_env(lookup(vars)));
+    BOOST_TEST(o._kms_previous == "local");
+    BOOST_TEST(o._kms_passphrase == "a passphrase of some length");
+
+    // The previous provider is another one, and a known one.
+    for (const std::string_view bad : {"kythira", "vault"}) {
+        BOOST_TEST_CONTEXT("previous '" << bad << "'") {
+            vars["KINESIS_KMS_PREVIOUS"] = std::string(bad);
+            BOOST_CHECK_THROW((void)kn::from_env(kn::composite_env(lookup(vars))),
+                              std::invalid_argument);
+        }
+    }
+
+    // One KINESIS_KMS_ENDPOINT cannot name both AWS's KMS and a remote
+    // Kythira one.
+    vars["KINESIS_KMS_PREVIOUS"] = "aws";
+    o = kn::from_env(kn::composite_env(lookup(vars)));
+    BOOST_TEST(o._kms_previous == "aws");
+    vars["KINESIS_KMS_ENDPOINT"] = "kms.example.com:443";
+    BOOST_CHECK_THROW((void)kn::from_env(kn::composite_env(lookup(vars))), std::invalid_argument);
+
+    vars.erase("KINESIS_KMS_ENDPOINT");
+    vars["KINESIS_KMS_CALLER_TTL_MS"] = "0";
+    BOOST_CHECK_THROW((void)kn::from_env(kn::composite_env(lookup(vars))), std::invalid_argument);
+}

@@ -98,9 +98,12 @@ struct gateway {
     kin::front_end<allow_all> fe{kin::front_end_config{}, auth};
     std::unique_ptr<kin::kinesis_service<kin::local_stream_cluster>> service;
 
-    gateway(kin::local_stream_cluster& cluster, kin::key_provider kms) {
+    gateway(kin::local_stream_cluster& cluster, kin::key_provider kms)
+        : gateway(cluster, config_with(std::move(kms))) {}
+
+    gateway(kin::local_stream_cluster& cluster, kin::kinesis_service_config config) {
         service = std::make_unique<kin::kinesis_service<kin::local_stream_cluster>>(
-            cluster, config_with(std::move(kms)));
+            cluster, std::move(config));
         service->register_with(fe);
     }
 
@@ -605,4 +608,105 @@ BOOST_AUTO_TEST_CASE(a_plaintext_data_key_is_never_replicated) {
     BOOST_TEST(state.find(rec._data_keys[0]._wrapped) != std::string::npos);
     BOOST_TEST(state.find(needle) == std::string::npos);
     BOOST_TEST(!f.on_disk(needle));
+}
+
+// KMS task 15 (Requirement 11.7): each data key records the provider that
+// wrapped it, and a node that moves to another provider still opens the
+// old keys with KINESIS_KMS_PREVIOUS; keys from before the tag are the
+// previous provider's.
+BOOST_AUTO_TEST_CASE(a_node_that_moves_provider_still_opens_older_keys) {
+    fixture f;  // its gateway predates the tag: its keys are untagged
+    (void)f.gw.ok("CreateStream", {{"StreamName", "s"}, {"ShardCount", 1}});
+    (void)f.gw.ok("StartStreamEncryption",
+                  {{"StreamName", "s"}, {"EncryptionType", "KMS"}, {"KeyId", "alias/aws/kinesis"}});
+    (void)f.gw.ok("PutRecord",
+                  {{"StreamName", "s"}, {"PartitionKey", "old"}, {"Data", b64("under-local")}});
+    BOOST_TEST(f.record("s")._data_keys.at(0)._provider.empty());
+
+    // The moved node: a new provider (another passphrase stands in for
+    // Kythira's KMS), with local as the previous one.
+    auto moved_config =
+        config_with(kin::key_provider(kin::local_kms_provider("another passphrase")));
+    moved_config._kms_name = "kythira";
+    moved_config._kms_previous.emplace(
+        "local", kin::key_provider(kin::local_kms_provider("correct horse battery")));
+    moved_config._kms_untagged = "local";
+    gateway moved(f.cluster, std::move(moved_config));
+    using rows = std::vector<std::vector<std::string>>;
+    BOOST_TEST((moved.read_all("s") == rows{{"old", b64("under-local"), "KMS"}}));
+    // Writes stay under the stream's key until it is started with another.
+    (void)moved.ok("PutRecord",
+                   {{"StreamName", "s"}, {"PartitionKey", "still"}, {"Data", b64("still-local")}});
+    BOOST_TEST(f.record("s")._data_keys.size() == 1U);
+
+    // Starting it again, even with the same key, makes a data key the new
+    // provider wraps, and says so.
+    (void)moved.ok(
+        "StartStreamEncryption",
+        {{"StreamName", "s"}, {"EncryptionType", "KMS"}, {"KeyId", "alias/aws/kinesis"}});
+    const auto rec = f.record("s");
+    BOOST_REQUIRE(rec._data_keys.size() == 2U);
+    BOOST_TEST(rec._data_keys.at(1)._provider == "kythira");
+    (void)moved.ok("PutRecord",
+                   {{"StreamName", "s"}, {"PartitionKey", "new"}, {"Data", b64("under-new")}});
+    // Now the same key again changes nothing.
+    (void)moved.ok(
+        "StartStreamEncryption",
+        {{"StreamName", "s"}, {"EncryptionType", "KMS"}, {"KeyId", "alias/aws/kinesis"}});
+    BOOST_TEST(f.record("s")._data_keys.size() == 2U);
+    const rows all{{"old", b64("under-local"), "KMS"},
+                   {"still", b64("still-local"), "KMS"},
+                   {"new", b64("under-new"), "KMS"}};
+    BOOST_TEST((moved.read_all("s") == all));
+
+    // A node with the new provider but no previous one cannot open the
+    // old keys, and says which provider it lacks.
+    auto bare_config =
+        config_with(kin::key_provider(kin::local_kms_provider("another passphrase")));
+    bare_config._kms_name = "kythira";
+    bare_config._kms_untagged = "local";
+    gateway bare(f.cluster, std::move(bare_config));
+    const auto it = bare.ok("GetShardIterator", {{"StreamName", "s"},
+                                                 {"ShardId", "shardId-000000000000"},
+                                                 {"ShardIteratorType", "TRIM_HORIZON"}});
+    const auto r = bare.call("GetRecords", {{"ShardIterator", it.at("ShardIterator")}});
+    BOOST_TEST(r.status == 400U);
+    BOOST_TEST(type_of(r) == "KMSNotFoundException");
+    BOOST_TEST(r.body.find("local") != std::string::npos);
+}
+
+// The tag changes the encoding only once a key names a provider, so a
+// node not yet upgraded reads everything written before then.
+BOOST_AUTO_TEST_CASE(the_provider_tag_keeps_older_encodings) {
+    kin::stream_record rec;
+    rec._id = 7;
+    rec._account = std::string(k_account);
+    rec._name = "s";
+    rec._encryption = kin::encryption_type::kms;
+    rec._key_id = "k";
+    rec._data_keys = {{._generation = 1, ._key_id = "arn:a", ._wrapped = "w"}};
+    auto bytes = kin::encode_stream_record(rec);
+    BOOST_TEST(std::to_integer<int>(bytes.at(0)) == 1);
+    BOOST_TEST((kin::decode_stream_record(bytes) == rec));
+    rec._data_keys.push_back(
+        {._generation = 2, ._key_id = "arn:b", ._wrapped = "x", ._provider = "kythira"});
+    bytes = kin::encode_stream_record(rec);
+    BOOST_TEST(std::to_integer<int>(bytes.at(0)) == 2);
+    BOOST_TEST((kin::decode_stream_record(bytes) == rec));
+
+    kin::set_encryption_command start{
+        ._account = std::string(k_account),
+        ._name = "s",
+        ._id = 7,
+        ._encryption = kin::encryption_type::kms,
+        ._key_id = "k",
+        ._data_key = kin::data_key_record{._generation = 0, ._key_id = "arn:k", ._wrapped = "w"}};
+    auto cmd = kin::encode_command(start);
+    BOOST_TEST(std::to_integer<int>(cmd.at(0)) == 1);
+    BOOST_TEST((kin::encode_command(kin::decode_command(cmd)) == cmd));
+    start._data_key->_provider = "aws";
+    cmd = kin::encode_command(start);
+    BOOST_TEST(std::to_integer<int>(cmd.at(0)) == 2);
+    const auto back = std::get<kin::set_encryption_command>(kin::decode_command(cmd));
+    BOOST_TEST(back._data_key->_provider == "aws");
 }

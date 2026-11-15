@@ -378,6 +378,20 @@ void read_kinesis_side(const reader& r, node_options& o) {
         o._kms != "kythira") {
         fail("KINESIS_KMS must be off, local, aws, pkcs11 or kythira");
     }
+    o._kms_previous = r.opt("KINESIS_KMS_PREVIOUS", "off");
+    if (o._kms_previous != "off" && o._kms_previous != "local" && o._kms_previous != "aws" &&
+        o._kms_previous != "pkcs11" && o._kms_previous != "kythira") {
+        fail("KINESIS_KMS_PREVIOUS must be off, local, aws, pkcs11 or kythira");
+    }
+    if (o._kms_previous != "off" && o._kms_previous == o._kms) {
+        fail("KINESIS_KMS_PREVIOUS must differ from KINESIS_KMS");
+    }
+    const auto uses = [&o](std::string_view name) {
+        return o._kms == name || o._kms_previous == name;
+    };
+    if (uses("aws") && uses("kythira") && r.set("KINESIS_KMS_ENDPOINT")) {
+        fail("KINESIS_KMS_ENDPOINT cannot serve both aws and kythira");
+    }
     o._kms_ca = r.opt("KINESIS_KMS_CA", "");
     o._kms_caller_ttl = r.ms("KINESIS_KMS_CALLER_TTL_MS", "300000");
     if (o._kms_caller_ttl.count() < 1) {
@@ -386,12 +400,14 @@ void read_kinesis_side(const reader& r, node_options& o) {
     if (r.set("KINESIS_KMS_PASSPHRASE") && r.set("KINESIS_KMS_PASSPHRASE_FILE")) {
         fail("set KINESIS_KMS_PASSPHRASE or KINESIS_KMS_PASSPHRASE_FILE, not both");
     }
-    if (o._kms == "local") {
+    if (uses("local")) {
         o._kms_passphrase = r.set("KINESIS_KMS_PASSPHRASE_FILE")
                                 ? read_secret_file(r.required("KINESIS_KMS_PASSPHRASE_FILE"))
                                 : r.opt("KINESIS_KMS_PASSPHRASE", "");
         if (o._kms_passphrase.size() < 16) {
-            fail("KINESIS_KMS=local needs KINESIS_KMS_PASSPHRASE (or _FILE) of at least 16 bytes");
+            fail(
+                "KINESIS_KMS(_PREVIOUS)=local needs KINESIS_KMS_PASSPHRASE (or _FILE) of at least "
+                "16 bytes");
         }
     }
     o._kms_region = r.opt("KINESIS_KMS_REGION", o._region.c_str());
@@ -399,7 +415,7 @@ void read_kinesis_side(const reader& r, node_options& o) {
     if (!o._kms_endpoint.empty() && !kinesis::split_host_port(o._kms_endpoint)) {
         fail("KINESIS_KMS_ENDPOINT: '" + o._kms_endpoint + "' is not host:port");
     }
-    if (o._kms == "pkcs11") {
+    if (uses("pkcs11")) {
         o._kms_pkcs11_uri = r.required("KINESIS_KMS_PKCS11_URI");
         try {
             const auto u = pkcs11::uri::parse(o._kms_pkcs11_uri);
@@ -628,6 +644,7 @@ auto describe(const node_options& o) -> std::string {
         << (o._kms == "aws" ? " region=" + o._kms_region +
                                   (o._kms_endpoint.empty() ? "" : " endpoint=" + o._kms_endpoint)
                             : std::string())
+        << (o._kms_previous != "off" ? " previous=" + o._kms_previous : std::string())
         << (o._kms == "pkcs11" ? " token=" + pkcs11::uri::parse(o._kms_pkcs11_uri).to_string() +
                                      " oaep=" + o._kms_pkcs11_oaep
                                : std::string())
@@ -705,6 +722,8 @@ auto usage() -> std::string {
            "  KINESIS_KMS_REGION               aws: KMS region (default: KINESIS_REGION)\n"
            "  KINESIS_KMS_ENDPOINT             aws: KMS host:port (default: AWS); kythira: a\n"
            "                                   KMS on another cluster, over HTTPS\n"
+           "  KINESIS_KMS_PREVIOUS             a provider whose data keys this node still opens\n"
+           "                                   after a move (off)\n"
            "  KINESIS_KMS_CA                   kythira over HTTPS: the CA its listener chains to\n"
            "  KINESIS_KMS_CALLER_TTL_MS        kythira: how long a caller's KMS answer stands\n"
            "                                   (300000)\n"

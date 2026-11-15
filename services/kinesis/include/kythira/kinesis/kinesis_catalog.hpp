@@ -29,6 +29,7 @@
 
 #include <kythira/kinesis/kinesis_hash.hpp>
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <map>
@@ -249,6 +250,12 @@ struct data_key_record {
     std::uint32_t _generation = 0;
     std::string _key_id{};
     std::string _wrapped{};
+    /// The key provider that wrapped it (`KINESIS_KMS`: local, aws, pkcs11
+    /// or kythira), so a node that moves to another provider still opens
+    /// it with the old one. Empty for a key written before the tag
+    /// existed (stream record version 1): `KINESIS_KMS_PREVIOUS` if set,
+    /// else the node's provider.
+    std::string _provider{};
     friend auto operator==(const data_key_record&, const data_key_record&) -> bool = default;
 };
 
@@ -517,10 +524,16 @@ inline auto decode_shard_entry(codec::reader& r) -> shard_entry {
     return s;
 }
 
-inline constexpr std::uint8_t stream_record_version = 1;
+/// 2 added each data key's provider (KMS task 15). A record is written as
+/// version 1 unless one of its keys names a provider, so a node not yet
+/// upgraded keeps reading snapshots until one does; version 1 still reads.
+inline constexpr std::uint8_t stream_record_version = 2;
 
 inline auto encode(codec::writer& w, const stream_record& s) -> void {
-    w.u8(stream_record_version).u64(s._id).str(s._account).str(s._name);
+    const bool tagged = std::any_of(s._data_keys.begin(), s._data_keys.end(),
+                                    [](const data_key_record& k) { return !k._provider.empty(); });
+    const std::uint8_t version = tagged ? stream_record_version : 1;
+    w.u8(version).u64(s._id).str(s._account).str(s._name);
     w.u8(static_cast<std::uint8_t>(s._status)).u8(static_cast<std::uint8_t>(s._mode));
     w.u32(s._retention_hours).i64(s._created_ms).u32(s._next_ordinal);
     w.u32(static_cast<std::uint32_t>(s._shards.size()));
@@ -547,6 +560,9 @@ inline auto encode(codec::writer& w, const stream_record& s) -> void {
     w.u32(static_cast<std::uint32_t>(s._data_keys.size()));
     for (const auto& k : s._data_keys) {
         w.u32(k._generation).str(k._key_id).str(k._wrapped);
+        if (version >= 2) {
+            w.str(k._provider);
+        }
     }
     w.u32(static_cast<std::uint32_t>(s._consumers.size()));
     for (const auto& c : s._consumers) {
@@ -562,7 +578,8 @@ inline auto encode(codec::writer& w, const stream_record& s) -> void {
 }
 
 inline auto decode_stream_record(codec::reader& r) -> stream_record {
-    if (r.u8() != stream_record_version) {
+    const auto version = r.u8();
+    if (version != 1 && version != stream_record_version) {
         throw kinesis_codec_error("kinesis codec: unknown stream record version");
     }
     stream_record s;
@@ -605,6 +622,9 @@ inline auto decode_stream_record(codec::reader& r) -> stream_record {
         k._generation = r.u32();
         k._key_id = r.str();
         k._wrapped = r.str();
+        if (version >= 2) {
+            k._provider = r.str();
+        }
         s._data_keys.push_back(std::move(k));
     }
     const auto consumers = r.u32();

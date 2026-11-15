@@ -193,6 +193,29 @@ A sealed record whose tag fails is corruption, not a key problem, and gets
   arguments above, or with a third, the caller (`kms_caller`), for a
   provider that authorizes each one.
 
+## Moving to another provider
+
+Each data key records the provider that wrapped it (`local`, `aws`,
+`pkcs11` or `kythira`). A node that moves to another provider sets
+`KINESIS_KMS_PREVIOUS` to the old one, with the old one's settings
+(its passphrase, region or token), and keeps opening the old keys:
+
+- records sealed before the move read as before;
+- a stream keeps writing under its current key, through the old
+  provider, until `StartStreamEncryption` names a key again (the same
+  key re-keys here, where it otherwise changes nothing). The new data
+  key is the new provider's, and says so;
+- keys written before the tag existed are the previous provider's when
+  `KINESIS_KMS_PREVIOUS` is set, else this node's own;
+- a node that lacks the provider a key names answers
+  `KMSNotFoundException`, naming it.
+
+The tag changes the stored encoding (stream record and command version
+2) only once a key names a provider, so a node not yet upgraded reads
+the catalog and the log until the first tagged key. Upgrade every node
+before starting encryption with a tagged provider. Every node of a
+stream's cluster needs the providers its keys name.
+
 ## Not yet checked against AWS
 
 Each of these is our reading of AWS's documentation. None has been checked
@@ -210,7 +233,7 @@ Clark's go.
 
 ## Tests
 
-`kinesis_encryption_test` has 7 cases:
+`kinesis_encryption_test` has 10 cases:
 
 - the local provider, with its bindings, refusals and type erasure;
 - sealed records opening only in their shard, under their key and
@@ -225,7 +248,14 @@ Clark's go.
 - the refusals and the error mapping;
 - the AWS adapter against a fake KMS: signature checks, request shape and
   error mapping;
-- the encryption entries and data keys surviving the codec.
+- the encryption entries and data keys surviving the codec;
+- no plaintext data key in a snapshot or a segment file;
+- a node that moves from `local` to another provider: old keys open
+  through `KINESIS_KMS_PREVIOUS`, writes stay under the old key until
+  re-keyed, the same key re-keys, the new key is tagged, and a node without the previous
+  provider answers `KMSNotFoundException`;
+- the tag leaving the version 1 encoding of untagged records and
+  commands unchanged.
 
 `kinesis_kms_kythira_test` runs the `kythira` provider against a fake
 `kms.client` with per-principal permissions: the caller and
