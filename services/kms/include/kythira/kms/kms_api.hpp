@@ -361,12 +361,15 @@ protected:
         -> std::optional<aws_json::error> {
         const std::string op = r.action.starts_with("kms:") ? r.action.substr(4) : r.action;
         auto denied = ctx.authorize(std::move(r));
-        if (!denied || ctx.last_denial_explicit || !ctx.grants_apply) {
+        if (!denied) {
+            return ctx.admit_key(key.spec);
+        }
+        if (ctx.last_denial_explicit || !ctx.grants_apply) {
             return denied;
         }
         if (auto g = find_grant(c, key, ctx.principal, op, context)) {
             ctx.allow_by_grant(g->grant_id);
-            return std::nullopt;
+            return ctx.admit_key(key.spec);
         }
         return denied;
     }

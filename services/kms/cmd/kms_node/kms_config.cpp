@@ -7,6 +7,7 @@
 #include <fstream>
 #include <iterator>
 #include <map>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <set>
@@ -155,6 +156,52 @@ auto id_map(const char* name, const std::string& text)
     return out;
 }
 
+/// `account=value,...` with each account twelve digits.
+auto per_account(const std::string& name, const std::string& text, const std::string& shape)
+    -> std::map<std::string, std::string> {
+    std::map<std::string, std::string> out;
+    for (const auto& item : list_of(text)) {
+        const auto eq = item.find('=');
+        const auto account = item.substr(0, eq);
+        const bool digits =
+            account.size() == 12 && account.find_first_not_of("0123456789") == std::string::npos;
+        if (eq == std::string::npos || !digits || eq + 1 == item.size()) {
+            throw fail(name + ": expected account=" + shape + ", got '" + item + "'");
+        }
+        out[account] = item.substr(eq + 1);
+    }
+    return out;
+}
+
+auto quotas_of(const std::string& name, const std::string& text) -> kythira::kms::shared_quotas {
+    const auto q = kythira::kms::parse_shared_quotas(text);
+    if (!q) {
+        throw fail(name + ": expected symmetric:rsa:ecc requests per second, got '" + text + "'");
+    }
+    return *q;
+}
+
+/// "keys:aliases", each a positive count.
+auto limits_of(const std::string& text) -> std::optional<kythira::kms::account_limits> {
+    const auto colon = text.find(':');
+    if (colon == std::string::npos) {
+        return std::nullopt;
+    }
+    const auto count = [](const std::string& t) -> std::uint32_t {
+        if (t.empty() || t.size() > 9 || t.find_first_not_of("0123456789") != std::string::npos) {
+            return 0;
+        }
+        return static_cast<std::uint32_t>(std::stoul(t));
+    };
+    kythira::kms::account_limits l;
+    l.max_keys = count(text.substr(0, colon));
+    l.max_aliases = count(text.substr(colon + 1));
+    if (l.max_keys == 0 || l.max_aliases == 0) {
+        return std::nullopt;
+    }
+    return l;
+}
+
 }  // namespace
 
 auto composite_env(env_fn env) -> env_fn {
@@ -253,6 +300,29 @@ auto from_env(const env_fn& env) -> kms_options {
     }
     o.region = get_opt(env, "KYTHIRA_KMS_REGION", o.region);
     o.partition = get_opt(env, "KYTHIRA_KMS_PARTITION", o.partition);
+    const auto throttling = get_opt(env, "KYTHIRA_KMS_THROTTLING", "on");
+    if (throttling != "on" && throttling != "off") {
+        throw fail("KYTHIRA_KMS_THROTTLING must be on or off");
+    }
+    o.throttling = throttling == "on";
+    if (const auto q = get_opt(env, "KYTHIRA_KMS_QUOTAS"); !q.empty()) {
+        o.quotas.defaults = quotas_of("KYTHIRA_KMS_QUOTAS", q);
+    }
+    for (const auto& [account, q] :
+         per_account("KYTHIRA_KMS_ACCOUNT_QUOTAS", get_opt(env, "KYTHIRA_KMS_ACCOUNT_QUOTAS"),
+                     "symmetric:rsa:ecc")) {
+        o.quotas.accounts[account] = quotas_of("KYTHIRA_KMS_ACCOUNT_QUOTAS", q);
+    }
+    for (const auto& [account, l] :
+         per_account("KYTHIRA_KMS_ACCOUNT_LIMITS", get_opt(env, "KYTHIRA_KMS_ACCOUNT_LIMITS"),
+                     "keys:aliases")) {
+        const auto limits = limits_of(l);
+        if (!limits) {
+            throw fail("KYTHIRA_KMS_ACCOUNT_LIMITS: expected account=keys:aliases, got '" +
+                       account + "=" + l + "'");
+        }
+        o.account_limits[account] = *limits;
+    }
     o.audit = get_opt(env, "KYTHIRA_KMS_AUDIT", o.audit);
     if (o.audit != "stderr" && o.audit != "off" &&
         (!o.audit.starts_with("file:") || o.audit.size() == 5)) {
@@ -354,6 +424,15 @@ auto usage_text() -> std::string_view {
                                      kms:ViaService); none by default
   KYTHIRA_KMS_REGION                 the region in key ARNs and SigV4 (us-east-1)
   KYTHIRA_KMS_PARTITION              the partition in ARNs (aws)
+  KYTHIRA_KMS_THROTTLING             on|off (on): AWS's per-account request
+                                     quotas, answering ThrottlingException
+  KYTHIRA_KMS_QUOTAS                 symmetric:rsa:ecc shared cryptographic
+                                     requests per second per account
+                                     (100000:1000:1000, AWS's in us-east-1)
+  KYTHIRA_KMS_ACCOUNT_QUOTAS         account=symmetric:rsa:ecc,... per account
+  KYTHIRA_KMS_ACCOUNT_LIMITS         account=keys:aliases,... raised (or
+                                     lowered) key and alias counts
+                                     (AWS's 100000 keys, 50000 aliases)
   KYTHIRA_KMS_AUDIT                  where request records (CloudTrail-shaped
                                      JSON lines) go: stderr (default), off, or
                                      file:<path>

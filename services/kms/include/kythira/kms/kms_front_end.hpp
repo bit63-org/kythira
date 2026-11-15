@@ -30,6 +30,7 @@
 #include <kythira/kms/kms_actions.hpp>
 #include <kythira/kms/kms_errors.hpp>
 #include <kythira/kms/kms_grants.hpp>
+#include <kythira/kms/kms_quotas.hpp>
 #include <kythira/kms/model/kms_model.hpp>
 
 #include <raft/aws_json_protocol.hpp>
@@ -46,6 +47,7 @@
 #include <exception>
 #include <functional>
 #include <map>
+#include <memory>
 #include <optional>
 #include <set>
 #include <stdexcept>
@@ -141,6 +143,24 @@ struct call_context {
     std::string audited_key_arn;
     /// The grant that allowed the request, if one did.
     std::string audited_grant_id;
+
+    /// Admits a shared cryptographic operation by its key's type
+    /// (kms_quotas.hpp); unset when no quotas apply.
+    std::function<bool(key_spec)> admit_key_fn;
+    bool key_admitted = false;
+
+    /// Counts the request against the quota of the first key it
+    /// authorizes: ThrottlingException when that quota is spent.
+    [[nodiscard]] auto admit_key(key_spec spec) -> std::optional<aws_json::error> {
+        if (key_admitted || !admit_key_fn) {
+            return std::nullopt;
+        }
+        key_admitted = true;
+        if (admit_key_fn(spec)) {
+            return std::nullopt;
+        }
+        return kms_error("ThrottlingException", "Rate exceeded");
+    }
 
     /// A live grant allowed what IAM refused without an explicit deny
     /// (kms_grants.hpp): the request is authorized.
@@ -268,6 +288,10 @@ public:
     /// Called once per request after its answer is made, on the
     /// request's thread. Set before serving.
     void set_observer(request_observer o) { _observer = std::move(o); }
+
+    /// Applies AWS's request quotas (kms_quotas.hpp). Set before serving;
+    /// none by default.
+    void set_quotas(std::shared_ptr<request_quotas> q) { _quotas = std::move(q); }
 
     [[nodiscard]] auto handle(const front_end_request& req) -> aws_json::http_response {
         request_record rec;
@@ -464,6 +488,9 @@ private:
         if (auto bad = check_grant_tokens(parsed->input)) {
             return _codec.respond(*bad, id, json);
         }
+        if (_quotas && !_quotas->admit_operation(principal.account, op.name, parsed->input)) {
+            return _codec.respond(kms_error("ThrottlingException", "Rate exceeded"), id, json);
+        }
 
         call_context ctx;
         ctx.operation = op.name;
@@ -475,6 +502,11 @@ private:
         ctx.via_service = std::move(via);
         const auto* acts = find_operation_actions(op.name);
         ctx.replica_read_ok = acts != nullptr && !acts->writes;
+        if (_quotas) {
+            ctx.admit_key_fn = [q = _quotas.get(), &ctx](key_spec spec) {
+                return q->admit_key_use(ctx.principal.account, ctx.operation, spec);
+            };
+        }
         ctx.authorize_fn = [this, &ctx, &req](aws_auth::authz_request r) {
             auto denied = check(ctx, req, std::move(r));
             if (!denied) {
@@ -624,6 +656,7 @@ private:
     aws_json::codec _codec;
     std::map<std::string, front_end_handler, std::less<>> _handlers;
     request_observer _observer;
+    std::shared_ptr<request_quotas> _quotas;
 };
 
 }  // namespace kythira::kms
