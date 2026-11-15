@@ -139,4 +139,28 @@ add_test(NAME hsm_node_self_test COMMAND hsm_node --self-test)
 set_tests_properties(hsm_node_self_test PROPERTIES
     LABELS "unit;hsm;hsm-module" TIMEOUT 60)
 
+# Task 11, Requirements 2.1 and 13.5: hsm_node is kythira_node with only the
+# HSM module. Three of them, with the token group's leader killed during
+# key generation and the catalog's leader killed during rekeys: every
+# replica agrees and every key still works afterwards.
+if(KYTHIRA_HSM_NODE_DAEMON)
+    add_test(NAME hsm_node_help COMMAND hsm_node --help)
+    set_tests_properties(hsm_node_help PROPERTIES
+        PASS_REGULAR_EXPRESSION "KYTHIRA_HSM_API_LISTEN"
+        LABELS "unit;hsm;hsm-module" TIMEOUT 30)
+    add_test(NAME hsm_node_refuses_other_services COMMAND hsm_node)
+    set_tests_properties(hsm_node_refuses_other_services PROPERTIES
+        ENVIRONMENT "KYTHIRA_SERVICES=hsm,iam;KYTHIRA_NODE_ID=1;KYTHIRA_NODE_DATA_DIR=${CMAKE_CURRENT_BINARY_DIR}/refuses;KYTHIRA_NODE_INSECURE_PLAINTEXT=1"
+        PASS_REGULAR_EXPRESSION "hsm_node runs only the HSM"
+        LABELS "unit;hsm;hsm-module" TIMEOUT 30)
+
+    kythira_hsm_test(hsm_node_cluster_test hsm_node_cluster_test.cpp)
+    target_link_libraries(hsm_node_cluster_test PRIVATE boost_json kythira_test_support)
+    target_compile_definitions(hsm_node_cluster_test PRIVATE
+        HSM_NODE_PATH="$<TARGET_FILE:hsm_node>")
+    add_dependencies(hsm_node_cluster_test hsm_node)
+    set_tests_properties(hsm_node_cluster_test PROPERTIES
+        LABELS "integration;hsm;hsm-module" TIMEOUT 600)
+endif()
+
 kythira_scale_test_timeouts()

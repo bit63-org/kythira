@@ -1,16 +1,9 @@
 # Copyright (c) 2026 Clark Rawlins
 # SPDX-License-Identifier: Apache-2.0
 
-# The HSM module's composition root (.kiro/specs/virtual-hsm/). hsm_node is a
-# placeholder until task 11 makes it the daemon (the HSM module alone in a
-# node, .kiro/specs/service-colocation/). Like the other module daemons it
-# runs from the build tree and is in no install target.
-
-add_executable(hsm_node hsm_node/main.cpp)
-target_link_libraries(hsm_node PRIVATE kythira_hsm)
-target_compile_features(hsm_node PRIVATE cxx_std_23)
-set_target_properties(hsm_node PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+# The HSM module's composition roots (.kiro/specs/virtual-hsm/). Like the
+# other module daemons they run from the build tree and are in no install
+# target.
 
 # The HSM module for kythira_node (task 6e): its configuration and its
 # registrar, linked whole-archive through KYTHIRA_NODE_MODULES
@@ -41,6 +34,34 @@ if(TARGET raft_rocksdb_engine AND TARGET certificate_authority
     set_target_properties(kythira_hsm_module PROPERTIES JOB_POOL_COMPILE heavy_tu)
     set_property(GLOBAL APPEND PROPERTY KYTHIRA_NODE_MODULES kythira_hsm_module)
     set_property(GLOBAL APPEND PROPERTY KYTHIRA_NODE_MODULE_NAMES hsm)
+endif()
+
+# hsm_node (task 11): kythira_node with only the HSM module, where the
+# module and kythira_node's stack can both be built (a future backend,
+# Boost, OpenSSL, the Beast transport; not a coverage build, as for
+# kythira_node). Elsewhere it is the self-test only, so the target, its
+# flags and the module boundary are exercised wherever the HSM builds.
+add_executable(hsm_node hsm_node/main.cpp)
+target_compile_features(hsm_node PRIVATE cxx_std_23)
+set_target_properties(hsm_node PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+set(KYTHIRA_HSM_NODE_DAEMON OFF PARENT_SCOPE)
+if(TARGET kythira_hsm_node_common AND TARGET boost_json AND NOT ENABLE_COVERAGE
+   AND KYTHIRA_FUTURE_BACKEND_AVAILABLE AND Boost_FOUND AND OpenSSL_FOUND)
+    target_link_libraries(hsm_node PRIVATE
+        kythira_hsm_node_common
+        kythira_core_headers
+        boost_json
+        OpenSSL::SSL
+        OpenSSL::Crypto)
+    target_compile_definitions(hsm_node PRIVATE KYTHIRA_HSM_NODE_DAEMON=1)
+    set_target_properties(hsm_node PROPERTIES JOB_POOL_COMPILE heavy_tu)
+    set(KYTHIRA_HSM_NODE_DAEMON ON PARENT_SCOPE)
+    message(STATUS "hsm_node: the daemon (kythira_node with only the HSM module)")
+else()
+    target_link_libraries(hsm_node PRIVATE kythira_hsm)
+    message(STATUS "hsm_node: self-test only (the daemon needs the HSM module, a future "
+                   "backend, Boost, OpenSSL and a non-coverage build)")
 endif()
 
 # hsm_ctl (task 7): the operator's command line, one HTTPS request per
