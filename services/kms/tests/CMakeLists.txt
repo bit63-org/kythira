@@ -187,7 +187,8 @@ set_tests_properties(kms_node_self_test PROPERTIES
 # IAM modules where built). Three of them with mutual TLS, static
 # authentication and SoftHSM2 as the shared HSM: keys made through any
 # member are seen by all, ciphertexts cross members, only members reach
-# the peer paths, and two members carry on without the third.
+# the peer paths, and two members carry on without the third. Task 18 adds
+# the AWS client suites against the same cluster.
 if(KYTHIRA_KMS_NODE_DAEMON)
     add_test(NAME kms_node_help COMMAND kms_node --help)
     set_tests_properties(kms_node_help PROPERTIES
@@ -210,6 +211,9 @@ if(KYTHIRA_KMS_NODE_DAEMON)
             httplib::httplib boost_json OpenSSL::SSL OpenSSL::Crypto kythira_test_support)
         target_compile_definitions(kms_node_cluster_test PRIVATE
             KMS_NODE_PATH="$<TARGET_FILE:kms_node>"
+            # Task 18: the AWS client suites (clients/requirements.txt).
+            KYTHIRA_PYTHON3="${Python3_EXECUTABLE}"
+            KMS_CLIENTS_SCRIPT="${CMAKE_CURRENT_SOURCE_DIR}/clients/kms_clients.py"
             KYTHIRA_SOFTHSM2_LIBRARY="${KYTHIRA_KMS_SOFTHSM2_LIBRARY}"
             KYTHIRA_SOFTHSM2_UTIL="${KYTHIRA_KMS_SOFTHSM2_UTIL}")
         add_dependencies(kms_node_cluster_test kms_node)

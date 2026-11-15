@@ -16,6 +16,9 @@
 //   * a member the others cannot reach is not needed: with one member
 //     stopped the other two still create keys, and the stopped member
 //     catches up when it is back.
+//   * boto3, the AWS CLI v2 and the AWS Encryption SDK work against the
+//     cluster, their calls spread over its members (task 18,
+//     clients/kms_clients.py).
 
 #define BOOST_TEST_MODULE kms_node_cluster_test
 
@@ -56,6 +59,12 @@
 #endif
 #ifndef KYTHIRA_SOFTHSM2_LIBRARY
 #define KYTHIRA_SOFTHSM2_LIBRARY "/usr/lib/softhsm/libsofthsm2.so"
+#endif
+#ifndef KYTHIRA_PYTHON3
+#define KYTHIRA_PYTHON3 "python3"
+#endif
+#ifndef KMS_CLIENTS_SCRIPT
+#define KMS_CLIENTS_SCRIPT "kms_clients.py"
 #endif
 #ifndef KYTHIRA_SOFTHSM2_UTIL
 #define KYTHIRA_SOFTHSM2_UTIL "softhsm2-util"
@@ -278,6 +287,12 @@ public:
     [[nodiscard]] auto tls(std::size_t i) const -> const kythira::kms::test::test_pki::files& {
         return _members[i].tls;
     }
+    /// Member i's KMS API, as an AWS client is pointed at it.
+    [[nodiscard]] auto api_url(std::size_t i) const -> std::string {
+        return "https://localhost:" + std::to_string(_members[i].api);
+    }
+    [[nodiscard]] auto dir() const -> const fs::path& { return _dir; }
+    [[nodiscard]] auto ca_path() const -> std::string { return pki.ca_path(); }
 
 private:
     auto client(std::size_t i, const kythira::kms::test::test_pki::files* cert) const
@@ -462,6 +477,31 @@ BOOST_FIXTURE_TEST_CASE(a_managed_key_is_made_once_through_any_member, process_c
     const auto keys = call(2, "ListKeys", "{}");
     BOOST_REQUIRE(keys.status == 200);
     BOOST_TEST(keys.body.at("Keys").as_array().size() == 1U);
+}
+
+// Task 18 (Requirement 14.2): boto3, the AWS CLI v2 and the AWS
+// Encryption SDK against the cluster, spread over its members
+// (clients/kms_clients.py). CI installs all three;
+// KYTHIRA_KMS_CLIENTS_SKIP=cli (say) leaves one out on a machine without it.
+BOOST_FIXTURE_TEST_CASE(aws_clients_work_against_the_cluster, process_cluster) {
+    // Ready: the catalog has a leader that takes writes.
+    BOOST_REQUIRE_EQUAL(call(0, "ListKeys", "{}").status, 200);
+    std::string endpoints;
+    for (std::size_t i = 0; i < 3; ++i) {
+        endpoints += (i == 0 ? "" : ",") + api_url(i);
+    }
+    const char* skip = std::getenv("KYTHIRA_KMS_CLIENTS_SKIP");  // NOLINT(concurrency-mt-unsafe)
+    const auto out = dir() / "clients.log";
+    const auto command =
+        std::string("AWS_ACCESS_KEY_ID=") + std::string(k_akid) +
+        " AWS_SECRET_ACCESS_KEY=" + std::string(k_secret) +
+        " AWS_CONFIG_FILE=/dev/null AWS_SHARED_CREDENTIALS_FILE=/dev/null " + KYTHIRA_PYTHON3 +
+        " " + KMS_CLIENTS_SCRIPT + " --endpoints " + endpoints + " --ca " + ca_path() +
+        (skip != nullptr && *skip != '\0' ? " --skip " + std::string(skip) : std::string()) + " >" +
+        out.string() + " 2>&1";
+    const int rc = std::system(command.c_str());  // NOLINT(concurrency-mt-unsafe)
+    BOOST_TEST_MESSAGE(slurp(out));
+    BOOST_TEST(rc == 0, "the client suites failed:\n" << slurp(out));
 }
 
 BOOST_FIXTURE_TEST_CASE(only_members_reach_the_peer_paths, process_cluster) {

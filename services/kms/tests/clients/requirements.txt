@@ -1,0 +1,8 @@
+# Copyright (c) 2026 Clark Rawlins
+# SPDX-License-Identifier: Apache-2.0
+
+# The client suites of kms_clients.py (KMS task 18). The AWS CLI v2 is not
+# on PyPI; GitHub's ubuntu runners carry it.
+boto3==1.44.3
+cryptography==50.0.1
+aws-encryption-sdk==4.0.7
