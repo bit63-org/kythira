@@ -3,8 +3,10 @@
 
 # The virtual HSM's container scenario (.kiro/specs/virtual-hsm/ task 11b,
 # Requirement 13.6): three members from
-# services/hsm/docker/hsm-chaos-compose.yml, stand-alone (hsm_node) and
-# co-located (kythira_node with the HSM and Redis modules), under kills and
+# services/hsm/docker/hsm-chaos-compose.yml, stand-alone (hsm_node),
+# co-located (kythira_node with the HSM and Redis modules) and with
+# encrypted services (kythira_node with the HSM, the KMS, DynamoDB and
+# Kinesis; .kiro/specs/kms-compatible-api/ task 19), under kills and
 # partitions, driven by hsm_chaos_test (docker-hsm-chaos-tests).
 #
 # Like every container scenario it is not registered in CTest: it needs
@@ -20,8 +22,13 @@ find_package(Threads REQUIRED)
 
 add_docker_chaos_scenario_test(hsm_chaos_test "${CMAKE_CURRENT_SOURCE_DIR}/hsm_chaos_test.cpp")
 target_include_directories(hsm_chaos_test PRIVATE "${KYTHIRA_HSM_SOURCE_DIR}/tests")
-# kythira_test_support: tests/test_ports.hpp, for the published ports.
-target_link_libraries(hsm_chaos_test PRIVATE kythira_hsm kythira_test_support boost_json)
+# kythira_test_support: tests/test_ports.hpp, for the published ports;
+# httplib: the encrypted-services case's KMS, DynamoDB and Kinesis calls.
+target_link_libraries(hsm_chaos_test PRIVATE kythira_hsm kythira_test_support boost_json
+    httplib::httplib)
+# The encrypted-services case speaks HTTPS to kythira_node (SSLClient), so
+# httplib's TLS half must be compiled in; no target this links carries it.
+target_compile_definitions(hsm_chaos_test PRIVATE CPPHTTPLIB_OPENSSL_SUPPORT)
 set_target_properties(hsm_chaos_test PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests/docker_chaos")
 
@@ -31,7 +38,19 @@ set(_HSM_CHAOS_COMPOSE_FILE "${KYTHIRA_HSM_SOURCE_DIR}/docker/hsm-chaos-compose.
 
 # The co-located layout runs the HSM beside Redis; without the Redis module
 # in kythira_node only the stand-alone case could run, so the target says so.
+# The encrypted-services case needs the KMS, DynamoDB and Kinesis modules
+# too, and is left out (with a message) in a build without one of them.
 get_property(_hsm_chaos_modules GLOBAL PROPERTY KYTHIRA_NODE_MODULE_NAMES)
+set(_hsm_chaos_filter)
+foreach(_m kms dynamodb kinesis)
+    if(NOT "${_m}" IN_LIST _hsm_chaos_modules)
+        set(_hsm_chaos_filter "--run_test=!encrypted_services_in_kythira_node")
+    endif()
+endforeach()
+if(_hsm_chaos_filter)
+    message(STATUS "docker-hsm-chaos-tests: the encrypted-services case needs the kms, "
+                   "dynamodb and kinesis modules in kythira_node; left out")
+endif()
 
 if(_RUNTIME_EXE AND "redis" IN_LIST _hsm_chaos_modules)
     add_custom_target(docker-hsm-chaos-image
@@ -54,7 +73,7 @@ if(_RUNTIME_EXE AND "redis" IN_LIST _hsm_chaos_modules)
                 KYTHIRA_HSM_CHAOS_COMPOSE_FILE=${_HSM_CHAOS_COMPOSE_FILE}
                 KYTHIRA_HSM_CHAOS_COLOCATE=redis
                 $<TARGET_FILE:hsm_chaos_test>
-                --log_level=message
+                --log_level=message ${_hsm_chaos_filter}
         DEPENDS docker-hsm-chaos-image hsm_chaos_test
         COMMENT "Running the virtual HSM chaos container scenario (runtime: ${CONTAINER_RUNTIME})"
         WORKING_DIRECTORY "${KYTHIRA_IMAGE_CONTEXT}"

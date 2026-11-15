@@ -277,11 +277,31 @@ is one PR unless noted.
     differential fixtures, waiting on the maintainer's approval of the
     AWS spend.
 
-- [ ] 19. docker-chaos and plaintext scan
+- [x] 19. docker-chaos and plaintext scan
   - A scenario killing and partitioning KMS and HSM nodes under encrypted
     DynamoDB and Kinesis writes, on Docker and rootless Podman; no lost
     acknowledged writes; the plaintext scan over every data directory
   - _Requirements: 14.5_
+  - Done as the third layout of the HSM's container scenario
+    (`services/hsm/tests/docker/hsm_chaos_test.cpp`,
+    `encrypted_services_in_kythira_node`; module boundaries keep KMS tests
+    from the HSM's test harness): kythira_node with hsm,kms,dynamodb,kinesis,
+    the KMS's keys on the co-located token. An encrypted table, an encrypted
+    stream and GenerateDataKey/Encrypt callers run while the HSM catalog's
+    leader is SIGKILLed (then started and unsealed) and another member is
+    disconnected and rejoined; every acknowledged item and record reads
+    back. The members' data directories are then copied out and searched
+    for every data key and plaintext the KMS saw (none may appear) and for
+    item and record values (none outside DynamoDB's Raft logs).
+  - Found and fixed: on static keys the KMS refused DynamoDB's own calls
+    as the account root (no static key names the root), so no replica
+    could open a table key and their apply loops halted;
+    `front_end_config::admit_consumer_root` admits a co-located consumer's
+    root calls on that account's keys (task 20 documents the exception to
+    Requirement 7.7).
+  - For task 20's honest limits: DynamoDB seals a value when it applies
+    the write, so its Raft log holds writes in the clear until compaction
+    (Kinesis seals before proposing); item keys stay in the clear.
 
 - [ ] 20. Documentation
   - `doc/kms.md` (deployment in both layouts, the AWS CLI walkthrough,

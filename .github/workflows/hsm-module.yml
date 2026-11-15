@@ -39,6 +39,8 @@ on:
     branches: [main]
     paths:
       - "services/hsm/**"
+      # The chaos scenario's encrypted-services layout runs the KMS.
+      - "services/kms/**"
       - "services/README.md"
       - "include/raft/pkcs11*.hpp"
       - "include/raft/certificate_authority*.hpp"
@@ -60,6 +62,8 @@ on:
     # Keep in step with the push list above.
     paths:
       - "services/hsm/**"
+      # The chaos scenario's encrypted-services layout runs the KMS.
+      - "services/kms/**"
       - "services/README.md"
       - "include/raft/pkcs11*.hpp"
       - "include/raft/certificate_authority*.hpp"
@@ -400,11 +404,14 @@ jobs:
         run: ctest --test-dir build -R '^hsm_node_(self_test|help|refuses_other_services|cluster_test)$' --output-on-failure --no-tests=error
 
   # Task 11b, Requirement 13.6: the docker-chaos scenario
-  # (services/hsm/tests/docker/hsm_chaos_test.cpp) in both layouts,
+  # (services/hsm/tests/docker/hsm_chaos_test.cpp) in its layouts,
   # stand-alone hsm_node and kythira_node with the HSM beside Redis, under
   # Docker and rootless Podman: leader kills during key generation and
-  # rekey, and a partitioned leader. Same configuration and vcpkg tree as
-  # the cluster job.
+  # rekey, and a partitioned leader. Its third layout is the KMS's
+  # (.kiro/specs/kms-compatible-api/ task 19, Requirement 14.5): the HSM,
+  # the KMS, DynamoDB and Kinesis in kythira_node, encrypted writes under
+  # a kill and a partition, and the plaintext scan. Same configuration and
+  # vcpkg tree as the cluster job.
   container:
     name: HSM chaos in containers (${{ matrix.runtime }})
     runs-on: ubuntu-24.04
@@ -509,7 +516,7 @@ jobs:
             -DCMAKE_PREFIX_PATH=${{ github.workspace }}/vcpkg_installed/x64-linux
 
       # Builds hsm_node, kythira_node and the scenario, stages the
-      # kythira-hsm-chaos image and runs both layouts.
+      # kythira-hsm-chaos image and runs every layout.
       - name: docker-hsm-chaos-tests
         run: cmake --build build --target docker-hsm-chaos-tests -j"$(nproc)"
 

@@ -45,8 +45,10 @@ VOLUME /data
 USER 10001:10001
 
 # Raft (mutual TLS), the operator API (HTTPS) and the PKCS#11 client
-# listener (mutual TLS). Configuration is entirely by environment; see
+# listener (mutual TLS); in the encrypted-services layout also the KMS,
+# DynamoDB and Kinesis APIs (TLS). Configuration is entirely by
+# environment; see
 # `hsm_node --help`.
-EXPOSE 7100 9443 9444
+EXPOSE 7100 9443 9444 8443 8000 4567
 
 ENTRYPOINT ["/usr/local/bin/hsm_node"]
