@@ -400,8 +400,15 @@ public:
         if (!_store->hosts(slot)) {
             return unexpected(CKR_DEVICE_ERROR);
         }
+        // A token initialized through another member may not have reached
+        // this replica yet: only a caught-up replica says it is not.
         if (!_store->token_record_of(slot)) {
-            return unexpected(CKR_TOKEN_NOT_RECOGNIZED);
+            if (auto b = _store->read_barrier(slot); !b) {
+                return unexpected(b.error());
+            }
+            if (!_store->token_record_of(slot)) {
+                return unexpected(CKR_TOKEN_NOT_RECOGNIZED);
+            }
         }
         const bool rw = (flags & CKF_RW_SESSION) != 0;
         const std::lock_guard lock(_mutex);
@@ -1632,6 +1639,12 @@ private:
     /// in the token's group, which decides (in log order) whether the PIN
     /// is locked.
     auto verify_pin(std::uint64_t token, pin_user who, std::string_view pin) -> ck_result<void> {
+        // The verifier and the lock as the group has them now: a PIN
+        // changed or locked through another member must not be checked
+        // against this replica's older copy.
+        if (auto b = _store->read_barrier(token); !b) {
+            return unexpected(b.error());
+        }
         auto rec = _store->token_record_of(token);
         if (!rec) {
             return unexpected(CKR_TOKEN_NOT_RECOGNIZED);

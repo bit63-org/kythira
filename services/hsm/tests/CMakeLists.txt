@@ -67,6 +67,15 @@ kythira_hsm_test(hsm_object_import_test hsm_object_import_test.cpp)
 set_tests_properties(hsm_object_import_test PROPERTIES
     LABELS "unit;hsm;hsm-module" TIMEOUT 120)
 
+# Task 6c: the store on multi_raft, three members on the in-process fabric:
+# token groups on every member, follower forwarding of proposals and
+# read-index rounds, destroys seen everywhere, partitions answering
+# CKR_DEVICE_ERROR.
+kythira_hsm_test(hsm_host_test hsm_host_test.cpp)
+target_link_libraries(hsm_host_test PRIVATE kythira_test_support)
+set_tests_properties(hsm_host_test PROPERTIES
+    LABELS "integration;hsm;hsm-module" TIMEOUT 300)
+
 add_test(NAME hsm_node_self_test COMMAND hsm_node --self-test)
 set_tests_properties(hsm_node_self_test PROPERTIES
     LABELS "unit;hsm;hsm-module" TIMEOUT 60)
