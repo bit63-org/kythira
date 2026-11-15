@@ -21,11 +21,24 @@ task is one PR unless noted.
     has no HSM target or test. `docker/` and `pkcs11/`'s target arrive with
     the tasks that fill them (11 and 10).
 
-- [ ] 2. Shamir secret sharing and share encoding
+- [x] 2. Shamir secret sharing and share encoding
   - GF(2^8) split and combine, share format with checksum and MK check
     value, property tests (any `k` rebuild, `k - 1` reveal nothing
     testable, corruption rejected)
   - _Requirements: 4.1, 4.2, 13.1_
+  - Done: `<kythira/hsm/shamir.hpp>`. Field arithmetic is branch-free over
+    the AES polynomial, so timing does not depend on secret bytes. A
+    share is version, `k`, `n`, index, length, bytes, an 8-byte MK check
+    value (HMAC-SHA256 of a fixed label under the MK) and a 4-byte
+    SHA-256 checksum; the text form is `khs1-` plus hex, whitespace and
+    case ignored. The checksum is checked before any field is trusted, so
+    a typo is `bad_checksum`; shares from different splits are
+    `mixed_shares` or, when `k`/`n` happen to match, `check_value_mismatch`
+    after combining. `k = 1` needs `allow_single` (the development flag).
+    "`k - 1` reveal nothing" is tested as: for a fixed set of `k - 1`
+    shares, every one of the 256 possible values of the next share yields
+    a different, valid secret. The secure arena of task 3 replaces
+    `secret_bytes`' heap storage.
 
 - [ ] 3. Secure memory
   - `secure_arena` (mlock, `MADV_DONTDUMP`, zeroize), `PR_SET_DUMPABLE`
