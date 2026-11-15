@@ -149,6 +149,7 @@
 #include <aws/s3/model/GetObjectRequest.h>
 #include <aws/s3/model/ListObjectsV2Request.h>
 #include <aws/s3/model/PutObjectRequest.h>
+#include <aws/s3/model/ServerSideEncryption.h>
 
 #include <memory>
 #include <optional>
@@ -364,6 +365,17 @@ public:
         return send_put(bucket, key, bytes, std::nullopt);
     }
 
+    /// @brief PUT one object, unconditionally, with server-side encryption
+    ///        under the KMS key `kms_key_id` (an id, ARN or alias; empty
+    ///        is the account's `aws/s3` key). S3 does the encryption.
+    [[nodiscard]] auto put_object_sse_kms(const std::string& bucket, const std::string& key,
+                                          std::string_view bytes,
+                                          const std::string& kms_key_id) const -> put_result {
+        fiu_do_on("raft/aws/s3/put_object",
+                  throw std::runtime_error("chaos: raft/aws/s3/put_object " + key););
+        return send_put(bucket, key, bytes, std::nullopt, kms_key_id);
+    }
+
     /// @brief PUT one object only if `pre` holds, throwing
     ///        `object_precondition_failed` when the service rejects it.
     ///
@@ -481,13 +493,20 @@ public:
 
 private:
     [[nodiscard]] auto send_put(const std::string& bucket, const std::string& key,
-                                std::string_view bytes,
-                                const std::optional<precondition>& pre) const -> put_result {
+                                std::string_view bytes, const std::optional<precondition>& pre,
+                                const std::optional<std::string>& sse_kms_key = std::nullopt) const
+        -> put_result {
         Aws::S3::Model::PutObjectRequest req;
         req.SetBucket(aws_s3_detail::to_aws(bucket));
         req.SetKey(aws_s3_detail::to_aws(key));
         req.SetContentType(k_content_type);
         req.SetContentMD5(aws_s3_detail::content_md5_base64(bytes));
+        if (sse_kms_key) {
+            req.SetServerSideEncryption(Aws::S3::Model::ServerSideEncryption::aws_kms);
+            if (!sse_kms_key->empty()) {
+                req.SetSSEKMSKeyId(aws_s3_detail::to_aws(*sse_kms_key));
+            }
+        }
 
         auto body = Aws::MakeShared<Aws::StringStream>(k_allocation_tag);
         body->write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
@@ -520,8 +539,10 @@ private:
         const auto& result = outcome.GetResult();
         return put_result{
             aws_s3_detail::from_aws(result.GetETag()),
-            aws_s3_detail::reported_digest(result.GetChecksumCRC64NVME(), result.GetETag(),
-                                           /*md5_etag_fallback=*/!_cfg.endpoint_override.empty())};
+            aws_s3_detail::reported_digest(
+                result.GetChecksumCRC64NVME(), result.GetETag(),
+                // An SSE-KMS object's ETag is not its MD5.
+                /*md5_etag_fallback=*/!sse_kms_key && !_cfg.endpoint_override.empty())};
     }
 
     auto send_delete(const std::string& bucket, const std::string& key,

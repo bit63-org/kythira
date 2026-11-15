@@ -56,9 +56,14 @@
 ///
 /// Deviations: the rebuild holds the table in memory, so a point-in-time
 /// or incremental export of a table larger than the catalog leader's memory
-/// fails; `S3SseAlgorithm` and `S3SseKmsKeyId` are recorded and reported
-/// but Kythira's stores apply no server-side encryption of their own; and
-/// without zlib (`export_formats.hpp`) data files are written uncompressed.
+/// fails; and without zlib (`export_formats.hpp`) data files are written uncompressed.
+///
+/// With `S3SseAlgorithm=KMS` every object of the export goes under the KMS
+/// key `S3SseKmsKeyId` names (`alias/aws/s3` when none): an AWS S3 bucket
+/// encrypts it itself, and a Kythira store gets it sealed under a data key
+/// from the table's key provider (`bucket_sse.hpp`), which an import from
+/// that store opens. A key the provider refuses fails the export or import
+/// with `KMSAccessDenied`. `AES256` is S3's default and asks nothing more.
 ///
 /// ## Imports
 ///
@@ -83,6 +88,7 @@
 
 #include <kythira/dynamodb/backend.hpp>
 #include <kythira/dynamodb/backup.hpp>
+#include <kythira/dynamodb/bucket_sse.hpp>
 #include <kythira/dynamodb/catalog.hpp>
 #include <kythira/dynamodb/errors.hpp>
 #include <kythira/dynamodb/export_formats.hpp>
@@ -1375,6 +1381,11 @@ public:
     void set_store(std::shared_ptr<backup_store> store) { _store = std::move(store); }
     /// How encrypted tables' point-in-time archives are opened (KMS task 17).
     void set_archive_keys(archive_key_source keys) { _archive_keys = std::move(keys); }
+    /// The data keys of objects under `S3SseKmsKeyId` (`bucket_sse.hpp`),
+    /// for a table's account and partition.
+    using object_key_source =
+        std::function<object_key_service(const std::string& account, const std::string& partition)>;
+    void set_object_keys(object_key_source keys) { _object_keys = std::move(keys); }
     void set_buckets(bucket_resolver buckets) { _buckets = std::move(buckets); }
     /// Look at the store on the next pass, whatever the interval.
     void poke() { _poked.store(true); }
@@ -1436,6 +1447,26 @@ private:
     }
 
     void run(export_record& r) {
+        try {
+            run_export(r);
+        } catch (const bucket_sse_error& e) {
+            fail(r, "KMSAccessDenied", e.what());
+        }
+    }
+
+    /// The bucket seen through the export's `S3SseKmsKeyId`, or the
+    /// import's (opening objects an export sealed).
+    [[nodiscard]] auto sse_bucket(std::shared_ptr<backup_store> bucket, const std::string& name,
+                                  const std::string& table_arn, std::string key_id) const
+        -> std::shared_ptr<backup_store> {
+        const auto [account, partition] = arn_account_partition(table_arn);
+        auto keys = _object_keys ? _object_keys(account, partition.empty() ? "aws" : partition)
+                                 : object_key_service{};
+        return std::make_shared<kms_sealed_bucket>(std::move(bucket), name, std::move(key_id),
+                                                   std::move(keys));
+    }
+
+    void run_export(export_record& r) {
         namespace ed = export_detail;
         const auto d = _backend.describe(r.table_name);
         if (!d || d->table_id != r.table_id) {
@@ -1449,6 +1480,11 @@ private:
         if (!bucket) {
             fail(r, "S3NoSuchBucket", "S3 bucket " + r.bucket + " is not mapped to a store");
             return;
+        }
+        if (r.sse_algorithm == "KMS") {
+            bucket = sse_bucket(
+                std::move(bucket), r.bucket, r.table_arn,
+                r.sse_kms_key_id.empty() ? std::string(k_default_s3_kms_key) : r.sse_kms_key_id);
         }
         const auto root = ed::export_root(r.prefix, r.id);
         const bool ion = r.format == "ION";
@@ -1634,6 +1670,14 @@ private:
     }
 
     void run(import_record& r) {
+        try {
+            run_import(r);
+        } catch (const bucket_sse_error& e) {
+            fail(r, "KMSAccessDenied", e.what());
+        }
+    }
+
+    void run_import(import_record& r) {
         namespace ed = export_detail;
         const auto d = _backend.describe(r.table_name);
         if (!d || d->table_id != r.table_id) {
@@ -1655,6 +1699,7 @@ private:
             fail(r, "S3NoSuchBucket", "S3 bucket " + r.bucket + " is not mapped to a store");
             return;
         }
+        bucket = sse_bucket(std::move(bucket), r.bucket, r.table_arn, {});
         auto keys = bucket->list(r.key_prefix);
         std::erase_if(keys, [](const std::string& k) { return k.empty() || k.ends_with("/"); });
         std::ranges::sort(keys);
@@ -1741,6 +1786,7 @@ private:
     bucket_resolver _buckets;
     export_import_worker_options _options;
     archive_key_source _archive_keys;
+    object_key_source _object_keys;
     std::atomic<bool> _poked{true};
     std::chrono::steady_clock::time_point _next_list{};
 };

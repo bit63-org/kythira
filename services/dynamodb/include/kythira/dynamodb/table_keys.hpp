@@ -331,6 +331,44 @@ public:
                                    kms_provider::kms_caller{._principal = &who});
     }
 
+    /// A fresh data key under `key_id` for one object of an export
+    /// (`S3SseKmsKeyId`, `bucket_sse.hpp`), asked as `account`'s root: the
+    /// export runs on the catalog leader after the request has gone.
+    [[nodiscard]] auto generate_object_key(const std::string& key_id,
+                                           const kms_provider::encryption_context& context,
+                                           std::string_view account,
+                                           std::string_view partition) const
+        -> kms_provider::generated_data_key {
+        const auto who = root_of(account, partition);
+        return _config.provider.generate_data_key(key_id, context,
+                                                  kms_provider::kms_caller{._principal = &who});
+    }
+
+    /// The data key `wrapped` holds, for an object sealed by
+    /// `generate_object_key`: asked of this node's provider, then of each
+    /// previous one (the object does not say which wrapped it). Throws
+    /// the first provider's `kms_error` when none opens it.
+    [[nodiscard]] auto decrypt_object_key(const std::string& key_id, const std::string& wrapped,
+                                          const kms_provider::encryption_context& context,
+                                          std::string_view account,
+                                          std::string_view partition) const
+        -> kms_provider::data_key_bytes {
+        const auto who = root_of(account, partition);
+        const kms_provider::kms_caller as{._principal = &who};
+        try {
+            return _config.provider.decrypt_data_key(key_id, wrapped, context, as);
+        } catch (const kms_provider::kms_error&) {
+            for (const auto& entry : _config.previous) {
+                try {
+                    return entry.second.decrypt_data_key(key_id, wrapped, context, as);
+                } catch (const kms_provider::kms_error&) {
+                    // the next one may have wrapped it
+                }
+            }
+            throw;
+        }
+    }
+
     /// The `SSESpecification` a request names: the customer key it asks
     /// for, or nothing for the owned key. Checked as DynamoDB checks it.
     [[nodiscard]] auto requested(const boost::json::object* spec) const

@@ -359,6 +359,38 @@ BOOST_AUTO_TEST_CASE(stores_keep_what_they_are_given) {
     BOOST_CHECK_THROW(files.put("../escape", "x"), std::invalid_argument);
 }
 
+namespace {
+
+/// An object store that encrypts under a KMS key itself, as S3 does.
+struct sse_object_store : kythira::mock_object_store {
+    mutable std::vector<std::pair<std::string, std::string>> sse_puts;
+    [[nodiscard]] auto put_object_sse_kms(const std::string& bucket, const std::string& key,
+                                          std::string_view bytes,
+                                          const std::string& kms_key_id) const
+        -> kythira::put_result {
+        sse_puts.emplace_back(key, kms_key_id);
+        return put_object(bucket, key, bytes);
+    }
+};
+
+}  // namespace
+
+BOOST_AUTO_TEST_CASE(only_a_store_that_encrypts_itself_takes_a_kms_put) {
+    auto plain = std::make_shared<kythira::mock_object_store>();
+    ddb::object_backup_store<kythira::mock_object_store> objects(plain, "bkt", "ddb/");
+    BOOST_TEST(!objects.put_sse_kms("k", "v", "alias/aws/s3"));
+    BOOST_TEST(!objects.get("k").has_value());
+    ddb::memory_backup_store memory;
+    BOOST_TEST(!memory.put_sse_kms("k", "v", "alias/aws/s3"));
+
+    auto s3 = std::make_shared<sse_object_store>();
+    ddb::object_backup_store<sse_object_store> encrypting(s3, "bkt", "ddb/");
+    BOOST_TEST(encrypting.put_sse_kms("k", "v", "alias/mine"));
+    BOOST_TEST(encrypting.get("k").value_or("") == "v");
+    BOOST_TEST((s3->sse_puts ==
+                std::vector<std::pair<std::string, std::string>>{{"ddb/k", "alias/mine"}}));
+}
+
 BOOST_AUTO_TEST_CASE(restored_descriptors_round_trip) {
     ddb::table_descriptor d;
     d.name = "copy";

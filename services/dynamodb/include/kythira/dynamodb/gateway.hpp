@@ -1339,7 +1339,7 @@ public:
             // Backups and point-in-time archives of encrypted tables are
             // sealed under keys derived from their table keys (KMS task 17).
             archive_key_source archive_keys = [this](const table_descriptor& d) {
-                auto key = _keys.open(d);
+                auto key = _keys.open(d, _config.front.partition);
                 auto out = std::make_shared<const archive_key>(key);
                 OPENSSL_cleanse(key.data(), key.size());
                 return out;
@@ -1348,6 +1348,12 @@ public:
             _pitr_worker.set_archive_keys(archive_keys);
             _job_worker.set_archive_keys(archive_keys);
         }
+        // Exports with S3SseKmsKeyId, and imports of what they wrote
+        // (Requirement 12.9); an AWS S3 bucket needs no provider.
+        _job_worker.set_object_keys(
+            [this](const std::string& account, const std::string& partition) {
+                return object_keys_of(_keys, account, partition);
+            });
         _ready.store(true);
         _stopping = false;
         _sweeper_thread = std::thread([this] { sweep_loop(); });
