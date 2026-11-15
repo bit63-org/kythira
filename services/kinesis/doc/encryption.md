@@ -83,8 +83,9 @@ one.
 
 ## Key providers
 
-`kinesis_kms.hpp` defines the `kms_key_provider` concept. A provider needs
-two calls:
+Core's `raft/kms_key_provider.hpp` defines the `kms_key_provider` concept,
+which DynamoDB shares; the providers live beside it in `include/raft/`
+(they began in this module). A provider needs two calls:
 
 - `generate_data_key(key_id, context)`;
 - `decrypt_data_key(key_id, wrapped, context)`.
@@ -119,7 +120,7 @@ A sealed record whose tag fails is corruption, not a key problem, and gets
     to the wrapped key, so it does not unwrap under another id or for
     another stream;
   - a node with a different passphrase answers `KMSInvalidStateException`.
-- **`aws`**: `aws_kms_provider` in `kinesis_kms_aws.hpp`. It talks to AWS
+- **`aws`**: `aws_kms_provider` in `raft/kms_key_provider_aws.hpp`. It talks to AWS
   KMS directly over the JSON 1.1 protocol, signed with SigV4, so it needs
   no AWS SDK component:
   - it calls `GenerateDataKey` (`AES_256`) and `Decrypt`, with the
@@ -131,7 +132,7 @@ A sealed record whose tag fails is corruption, not a key problem, and gets
   - credentials come from `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` and
     `AWS_SESSION_TOKEN`, read at startup.
 
-- **`pkcs11`**: `pkcs11_kms_provider` in `kinesis_kms_pkcs11.hpp`. Data
+- **`pkcs11`**: `pkcs11_kms_provider` in `raft/kms_key_provider_pkcs11.hpp`. Data
   keys are protected by a key pair on a PKCS#11 token: the co-located
   virtual HSM (`services/hsm/`), or any library such as a YubiHSM 2,
   CloudHSM or SoftHSM2:
@@ -157,7 +158,7 @@ A sealed record whose tag fails is corruption, not a key problem, and gets
     (the module restarted, the HSM failed over) opens a new session and
     tries once more.
 
-- **`kythira`**: `kythira_kms_provider` in `kinesis_kms_kythira.hpp`,
+- **`kythira`**: `kythira_kms_provider` in `raft/kms_key_provider_kythira.hpp`,
   Kythira's own KMS (`services/kms/`, `.kiro/specs/kms-compatible-api/`
   task 15). It is the default in a `kythira_node` that runs the KMS
   module, unless `KINESIS_KMS` says otherwise:
