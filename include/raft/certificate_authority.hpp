@@ -16,7 +16,9 @@
 
 #include <chrono>
 #include <cstdint>
+#include <functional>
 #include <memory>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -53,6 +55,16 @@ struct ca_options {
     distinguished_name subject{.common_name = "Kythira Test Root CA"};
     key_algorithm algorithm{key_algorithm::ecdsa_p256};
     std::chrono::seconds validity{std::chrono::hours(24 * 365)};
+};
+
+/// A CA key that signs somewhere else, such as on a PKCS#11 token
+/// (raft/pkcs11_ca_key.hpp): `certificate_authority::from_external` uses it
+/// for every certificate and CRL, and never holds the private key.
+struct external_ca_key {
+    /// Signs `digest`, the SHA-384 of what is signed for a P-384 key and its
+    /// SHA-256 otherwise, and returns the signature as X.509 carries it: a
+    /// DER ECDSA-Sig-Value for an EC key, the PKCS#1 v1.5 signature for RSA.
+    std::function<std::vector<std::uint8_t>(std::span<const std::uint8_t> digest)> sign;
 };
 
 /// Options controlling leaf certificate issuance. See `certificate_authority::issue`.
@@ -168,6 +180,22 @@ public:
     [[nodiscard]] static auto from_existing(std::string ca_cert_pem, std::string ca_key_pem)
         -> certificate_authority;
 
+    /// Constructs a `certificate_authority` whose root key signs elsewhere
+    /// (`external_ca_key`); `ca_cert_pem` holds its public half. Every
+    /// signature is checked against that certificate, and a first CRL is
+    /// signed here, so a key that is not the certificate's fails now with
+    /// `std::invalid_argument`. EC (P-256, P-384) and RSA keys.
+    [[nodiscard]] static auto from_external(std::string ca_cert_pem, external_ca_key key)
+        -> certificate_authority;
+
+    /// A self-signed root certificate (PEM) for the key whose public half is
+    /// `public_key_pem` (SubjectPublicKeyInfo), signed through `key`: how a
+    /// CA whose key was made on a token gets its certificate. `options`
+    /// gives the subject and validity; its algorithm is unused.
+    [[nodiscard]] static auto make_external_root(const ca_options& options,
+                                                 const std::string& public_key_pem,
+                                                 const external_ca_key& key) -> std::string;
+
     /// Exports this instance's own root CA certificate and private key as
     /// PEM (in `pem_material::certificate_pem`/`private_key_pem`; `chain_pem`
     /// and `serial` are unused and left default). For callers that need to
@@ -178,7 +206,9 @@ public:
     /// later reconstructs an equivalent instance via `from_existing()`.
     /// Ordinary callers SHOULD NOT need this: `certificate_authority`
     /// otherwise deliberately never exposes its own private key
-    /// (Requirement 1.3) — reach for `issue()`/`sign_csr()` instead.
+    /// (Requirement 1.3) — reach for `issue()`/`sign_csr()` instead. A CA
+    /// made with `from_external()` has no private key to export and throws
+    /// `std::logic_error`.
     [[nodiscard]] auto export_root_material() const -> pem_material;
 
 private:

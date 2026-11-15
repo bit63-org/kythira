@@ -29,6 +29,35 @@ auto certificate_authority::from_existing(std::string ca_cert_pem, std::string c
         std::make_unique<impl>(std::move(ca_cert_pem), std::move(ca_key_pem)));
 }
 
+auto certificate_authority::from_external(std::string ca_cert_pem, external_ca_key key)
+    -> certificate_authority {
+    certificate_authority ca(std::make_unique<impl>(ca_cert_pem, std::move(key)));
+    // A first signature, checked against the certificate: a key that is not
+    // the certificate's fails here rather than at the first issuance.
+    (void)ca.crl_pem();
+    return ca;
+}
+
+auto certificate_authority::make_external_root(const ca_options& options,
+                                               const std::string& public_key_pem,
+                                               const external_ca_key& key) -> std::string {
+    if (!key.sign) {
+        throw std::invalid_argument("certificate_authority::make_external_root: no signer");
+    }
+    auto bio = detail::make_bio();
+    BIO_write(bio.get(), public_key_pem.data(), static_cast<int>(public_key_pem.size()));
+    detail::evp_pkey_ptr pub(PEM_read_bio_PUBKEY(bio.get(), nullptr, nullptr, nullptr));
+    if (!pub) {
+        throw std::invalid_argument(
+            "certificate_authority::make_external_root: unparseable public key PEM");
+    }
+    auto cert = detail::build_unsigned_root(options, pub.get(),
+                                            certificate_serial::from_u64(detail::random_serial()));
+    const auto placeholder = detail::placeholder_key_for(pub.get());
+    detail::sign_cert_externally(cert.get(), pub.get(), placeholder.get(), key);
+    return detail::serialize_cert(cert.get());
+}
+
 auto certificate_authority::root_certificate_pem() const -> const std::string& {
     return _impl->root_pem;
 }
@@ -67,6 +96,11 @@ auto certificate_authority::crl_pem() const -> std::string {
 }
 
 auto certificate_authority::export_root_material() const -> pem_material {
+    if (_impl->external) {
+        throw std::logic_error(
+            "certificate_authority::export_root_material: the CA key signs externally and is "
+            "not here to export");
+    }
     pem_material out;
     out.certificate_pem = _impl->root_pem;
     out.private_key_pem = detail::serialize_key(_impl->ca_key.get());

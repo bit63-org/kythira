@@ -360,6 +360,24 @@ task is one PR unless noted.
     the PIN apply exactly as for a network client. Tests:
     `kinesis_kms_pkcs11_test` (a software token) and the envelope cases
     of `hsm_pkcs11_module_test` (native, the .so and SoftHSM2).
+  - [x] 13b. The cluster CA's root key on a token: core
+    `certificate_authority::from_external` takes an `external_ca_key`
+    (sign a SHA-256, or SHA-384 for P-384, digest) and signs every
+    certificate and CRL through it, checking each signature against the
+    CA certificate; `make_external_root` self-signs a root for a token
+    key. OpenSSL has no setter for a CRL's inner AlgorithmIdentifier, so
+    a throwaway local key of the same type signs first and its signature
+    is replaced. `include/raft/pkcs11_signing_key.hpp` is a token signing
+    key (EC P-256/P-384 or RSA PKCS#1 v1.5, reopening a lost session once)
+    and its public key as PEM. `ca_cluster_node --ca-key-uri` (or
+    `CA_CLUSTER_CA_KEY_URI`): the bootstrapping node makes the root on the
+    token and the log records `pkcs11:` and the key's URI without library
+    or PIN where the sealed key would be; a leader signs on the token, a
+    node without the flag exits rather than lead, and a token that cannot
+    sign yet is retried. Tests: `hsm_pkcs11_module_test` (the CA on every
+    signing key type, native, the .so and SoftHSM2) and
+    `hsm_ca_cluster_test` (three nodes on one SoftHSM2 token across a
+    leader kill).
 
 - [ ] 14. Audit, metrics and IAM authorization
   - Audit log with optional ledger sink; metrics per 11.3; `hsm:` actions

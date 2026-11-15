@@ -446,7 +446,9 @@ inline void put_serial(boost::json::object& obj, const certificate_serial& seria
 }  // namespace ca_state_machine_detail
 
 /// Encodes a `bootstrap_ca` command. `encrypted_ca_key_pem` SHALL already be
-/// the output of `encrypt_ca_private_key()` — never a plaintext key.
+/// the output of `encrypt_ca_private_key()` — never a plaintext key — or,
+/// for a root key kept on a PKCS#11 token, `pkcs11:` and the key's URI
+/// without its library or PIN (ca_cluster_node --ca-key-uri).
 [[nodiscard]] inline auto encode_bootstrap_ca_command(std::string root_cert_pem,
                                                       std::string encrypted_ca_key_pem)
     -> std::vector<std::byte> {

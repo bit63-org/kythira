@@ -29,6 +29,7 @@ target_link_libraries(ca_cluster_node PRIVATE
     OpenSSL::SSL
     OpenSSL::Crypto
     kythira_host_node_id   # KYTHIRA_NODE_ID_KIND
+    ${CMAKE_DL_LIBS}       # --ca-key-uri dlopens a PKCS#11 library
 )
 
 # --oidc-publish-url (iam-compatible-auth Requirement 1.9) writes through the

@@ -10,6 +10,7 @@
 #include <raft/oidc_issuer.hpp>
 #include <raft/oidc_publisher.hpp>
 #include <raft/oidc_token.hpp>
+#include <raft/pkcs11_uri.hpp>
 #include <raft/tcp_rpc.hpp>
 
 #include "oidc_publish_store.hpp"
@@ -66,6 +67,11 @@ struct ca_cluster_node_config {
     std::vector<ca_cluster_peer_info> peers;
     std::string unseal_key_file;
     bool bootstrap_ca{false};
+    // --ca-key-uri: the CA's root key on a PKCS#11 token (virtual-hsm task
+    // 13b), instead of a key sealed under the unseal key into the Raft log.
+    // One URI names the library (module-path), token, PIN and key. Every
+    // node needs it, since whichever leads signs.
+    std::string ca_key_uri;
     std::string auth_token;
     // Set when the token came from --auth-token, which leaves it readable in
     // /proc/<pid>/cmdline and `ps` output; main() warns about it.
@@ -336,7 +342,7 @@ namespace detail {
         << "                       --data-dir <path> --unseal-key-file <path>\n"
         << "                       --peers <id>:<rpc_host>:<rpc_port>@<http_address>[,...]\n"
         << "                       [--rpc-address <addr>] [--http-address <addr>]\n"
-        << "                       [--bootstrap-ca]\n"
+        << "                       [--bootstrap-ca] [--ca-key-uri <pkcs11 URI>]\n"
         << "                       [--tls-cert <path> --tls-key <path>] [--peer-tls-ca <path>]\n"
         << "                       [--rpc-tls-cert <path> --rpc-tls-key <path>]\n"
         << "                       [--allow-plaintext-rpc] [--allow-plaintext-http]\n"
@@ -396,6 +402,8 @@ namespace detail {
             saw_unseal_key_file = true;
         } else if (arg == "--bootstrap-ca") {
             cfg.bootstrap_ca = true;
+        } else if (arg == "--ca-key-uri") {
+            cfg.ca_key_uri = next();
         } else if (arg == "--auth-token") {
             cfg.auth_token = next();
             cfg.auth_token_from_argv = true;
@@ -537,6 +545,28 @@ namespace detail {
     }
     if (cfg.unseal_key_file.empty()) {
         usage_error("--unseal-key-file (or $CA_CLUSTER_UNSEAL_KEY_FILE) is required");
+    }
+    if (cfg.ca_key_uri.empty()) {
+        cfg.ca_key_uri = env_or("CA_CLUSTER_CA_KEY_URI", "");
+    }
+    if (!cfg.ca_key_uri.empty()) {
+        try {
+            const auto u = kythira::pkcs11::uri::parse(cfg.ca_key_uri);
+            if (!u.module_path) {
+                usage_error("--ca-key-uri needs module-path= (the PKCS#11 library)");
+            }
+            if (!u.token && !u.serial) {
+                usage_error("--ca-key-uri needs token= or serial=");
+            }
+            if (!u.object && !u.id) {
+                usage_error("--ca-key-uri needs object= or id= (the CA key)");
+            }
+            if (!u.pin_source && !u.pin_value) {
+                usage_error("--ca-key-uri needs pin-source= (or pin-value=)");
+            }
+        } catch (const kythira::pkcs11::uri_error& e) {
+            usage_error(std::string("--ca-key-uri: ") + e.what());
+        }
     }
     if (cfg.auth_token.empty()) {
         cfg.auth_token = env_or("CA_SERVICE_AUTH_TOKEN", "");

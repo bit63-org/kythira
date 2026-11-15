@@ -24,8 +24,11 @@
 #include <kythira/hsm/pkcs11_native_backend.hpp>
 #include <kythira/hsm/wire_server.hpp>
 
+#include <raft/certificate_authority.hpp>
+#include <raft/certificate_provider.hpp>
 #include <raft/pkcs11_envelope.hpp>
 #include <raft/pkcs11_module.hpp>
+#include <raft/pkcs11_signing_key.hpp>
 #include <raft/pkcs11_uri.hpp>
 
 #include <boost/test/unit_test.hpp>
@@ -34,6 +37,7 @@
 #include <openssl/core_names.h>
 #include <openssl/evp.h>
 #include <openssl/param_build.h>
+#include <openssl/pem.h>
 #include <openssl/rand.h>
 #include <openssl/rsa.h>
 #include <openssl/x509.h>
@@ -62,6 +66,7 @@
 
 namespace hsm = kythira::hsm;
 namespace p11 = kythira::pkcs11;
+namespace rt = raft::testing;
 using namespace kythira::hsm::test;  // NOLINT(google-build-using-namespace)
 
 namespace {
@@ -184,6 +189,76 @@ auto rv_of(const std::function<void()>& f) -> CK_RV {
 using hashes = std::vector<p11::hash_algorithm>;
 const hashes k_all_oaep{p11::hash_algorithm::sha1, p11::hash_algorithm::sha256,
                         p11::hash_algorithm::sha384, p11::hash_algorithm::sha512};
+
+/// PEM text as OpenSSL objects, for checking signatures.
+auto x509_of(const std::string& pem) -> std::unique_ptr<X509, decltype(&X509_free)> {
+    std::unique_ptr<BIO, decltype(&BIO_free)> bio(
+        BIO_new_mem_buf(pem.data(), static_cast<int>(pem.size())), &BIO_free);
+    return {PEM_read_bio_X509(bio.get(), nullptr, nullptr, nullptr), &X509_free};
+}
+auto crl_of(const std::string& pem) -> std::unique_ptr<X509_CRL, decltype(&X509_CRL_free)> {
+    std::unique_ptr<BIO, decltype(&BIO_free)> bio(
+        BIO_new_mem_buf(pem.data(), static_cast<int>(pem.size())), &BIO_free);
+    return {PEM_read_bio_X509_CRL(bio.get(), nullptr, nullptr, nullptr), &X509_CRL_free};
+}
+
+/// The cluster CA with its key on the token (raft/pkcs11_signing_key.hpp,
+/// task 13b): a root made through the key, then certificates and a CRL
+/// signed by it, each checked against the root; a key that is not the
+/// root's is refused at once.
+void ca_on_token(const p11::module& m, const p11::uri& base, const std::string& pin) {
+    for (const std::string label : {"ec256", "ec384", "rsa2048"}) {
+        BOOST_TEST_CONTEXT("CA key " << label) {
+            auto key_uri = base;
+            key_uri.object = label;
+            key_uri.pin_value = pin;
+            const p11::signing_key key(key_uri, [&m] { return m; });
+            const auto root = rt::certificate_authority::make_external_root(
+                rt::ca_options{.subject = {.common_name = "Token CA " + label}},
+                p11::public_key_pem(key.public_key()), key.as_ca_key());
+            auto ca = rt::certificate_authority::from_external(root, key.as_ca_key());
+            BOOST_TEST(ca.root_certificate_pem() == root);
+            const auto root_x509 = x509_of(root);
+            BOOST_REQUIRE(root_x509);
+            EVP_PKEY* root_key = X509_get0_pubkey(root_x509.get());
+            BOOST_TEST(X509_verify(root_x509.get(), root_key) == 1);
+
+            rt::leaf_certificate_options lo;
+            lo.dns_names = {"node1.example"};
+            const auto csr = rt::generate_key_and_csr(lo);
+            rt::csr_signing_options so;
+            so.dns_names = {"node1.example"};
+            so.server_auth = true;
+            const auto signed_leaf = ca.sign_csr(csr.csr_pem, so);
+            BOOST_TEST(X509_verify(x509_of(signed_leaf.certificate_pem).get(), root_key) == 1);
+
+            rt::leaf_certificate_options io;
+            io.dns_names = {"node2.example"};
+            const auto issued = ca.issue(io);
+            BOOST_TEST(X509_verify(x509_of(issued.certificate_pem).get(), root_key) == 1);
+            ca.revoke(issued);
+            const auto crl = crl_of(ca.crl_pem());
+            BOOST_REQUIRE(crl);
+            BOOST_TEST(X509_CRL_verify(crl.get(), root_key) == 1);
+            BOOST_TEST(sk_X509_REVOKED_num(X509_CRL_get_REVOKED(crl.get())) == 1);
+            BOOST_CHECK_THROW((void)ca.export_root_material(), std::logic_error);
+
+            auto other_uri = key_uri;
+            other_uri.object = label == "ec256" ? "ec384" : "ec256";
+            const p11::signing_key other(other_uri, [&m] { return m; });
+            BOOST_CHECK_THROW(
+                (void)rt::certificate_authority::from_external(root, other.as_ca_key()),
+                std::invalid_argument);
+        }
+    }
+    // A decryption key does not sign.
+    auto dec = base;
+    dec.object = "rsa-dec";
+    dec.pin_value = pin;
+    const p11::signing_key not_signing(dec, [&m] { return m; });
+    const auto d = digest(p11::hash_algorithm::sha256, "x");
+    BOOST_TEST(rv_of([&] { (void)not_signing.sign_digest(d); }) != CKR_OK);
+}
 
 /// `token_uri` names a token whose user PIN is `pin`; `oaep` are the
 /// hashes its RSA-OAEP takes.
@@ -373,6 +448,8 @@ void consumer_scenario(const p11::module& m, const std::string& token_uri, const
         BOOST_TEST(verifies(
             again.public_key(key), p11::signature_scheme::ecdsa, p11::hash_algorithm::sha256, d,
             again.sign_digest(key, p11::signature_scheme::ecdsa, p11::hash_algorithm::sha256, d)));
+
+        ca_on_token(m, base, pin);
 
         // No token by that name; a library that is not this one.
         BOOST_TEST(rv_of([&] { (void)m.open(p11::uri::parse("pkcs11:token=nobody"), pin); }) ==
