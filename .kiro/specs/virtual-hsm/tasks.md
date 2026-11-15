@@ -172,9 +172,25 @@ task is one PR unless noted.
       other failure answers `CKR_DEVICE_ERROR`, since the entry may
       have committed. `C_Login` and `C_OpenSession` on a token this
       replica has not seen initialized now pass a read barrier first.
-  - [ ] 6d. `hsm_module`: the forwarder over the node's peers, the admin
-    API (init, unseal, seal, status, tokens), and the `kythira_node`
-    registrar
+  - [x] 6d. Forwarding between members over the network, and the
+    operator API
+    - Done: `hsm_peer.hpp` carries `hsm_host`'s forwarder as
+      `POST /v1/peer/propose/<group>` and `/v1/peer/read-index/<group>`
+      on the module's listener. A proposal can change any token, so
+      `serve_peer` answers only a verified certificate whose URI or DNS
+      SAN is a member's, and refuses before the host is asked;
+      `peer_client` presents this node's certificate, requires TLS 1.3
+      and checks the leader's certificate against the members' CA and
+      the host dialled. Every client failure answers `unavailable`, so
+      the member never resends a proposal that may have committed.
+      Plaintext works only when both sides ask for it (tests).
+      `hsm_admin.hpp` is the operator API: status, and creating,
+      deleting, binding and unbinding tokens; only the configured
+      operator identities may call it. Init, unseal, seal and rekey stay
+      with task 7.
+  - [ ] 6e. `hsm_module`: configuration, the listener, the network
+    forwarder, the in-process interface for co-located modules, and the
+    `kythira_node` registrar with the composite cluster test
 
 - [ ] 7. Operator unseal, init, seal and rekey
   - `hsm_ctl init|unseal|seal|rekey|status`; partial shares in memory with
