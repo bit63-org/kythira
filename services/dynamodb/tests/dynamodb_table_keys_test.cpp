@@ -22,6 +22,7 @@
 
 #include <kythira/dynamodb/backup.hpp>
 #include <kythira/dynamodb/catalog.hpp>
+#include <kythira/dynamodb/pitr.hpp>
 #include <kythira/dynamodb/item_sealing.hpp>
 #include <kythira/dynamodb/table_key_providers.hpp>
 #include <kythira/dynamodb/table_key_refresh.hpp>
@@ -198,6 +199,13 @@ struct keyed_fixture : fixture {
         return fake_provider(kms).decrypt_data_key(s.key_arn, s.wrapped,
                                                    ddb::table_key_context(name, s.account),
                                                    kp::kms_caller{._principal = &root.p});
+    }
+
+    /// Archive keys as the gateway makes them (KMS task 17).
+    [[nodiscard]] auto archive_keys() -> ddb::archive_key_source {
+        return [this](const ddb::table_descriptor& d) {
+            return std::make_shared<const ddb::archive_key>(keys.open(d));
+        };
     }
 
     struct aws_principal {
@@ -469,6 +477,7 @@ BOOST_AUTO_TEST_CASE(a_restored_table_gets_a_key_of_its_own) {
     auto store = std::make_shared<ddb::memory_backup_store>();
     ddb::backup_api<ddb::local_backend<>> backups{f.backend, store};
     ddb::backup_worker<ddb::local_backend<>> worker{f.backend, store};
+    worker.set_archive_keys(f.archive_keys());
     backups.set_table_keys(&f.keys);
     backups.register_with(*f.fe);
     BOOST_REQUIRE(f.call("CreateTable",
@@ -721,6 +730,112 @@ BOOST_AUTO_TEST_CASE(change_records_of_an_encrypted_table_are_sealed) {
         BOOST_TEST(bytes.find("hunter2") == std::string::npos, e.path());
     }
     BOOST_TEST(files > 0U);
+}
+
+BOOST_AUTO_TEST_CASE(backups_of_an_encrypted_table_are_sealed) {
+    keyed_fixture f;
+    f.without_throttling();
+    auto ring = std::make_shared<ddb::table_key_ring>();
+    f.backend.set_sealer(ddb::item_sealer(ring));
+    ddb::table_key_refresher<ddb::local_backend<>> refresher(f.backend, f.keys, ring);
+    auto store = std::make_shared<ddb::memory_backup_store>();
+    ddb::backup_api<ddb::local_backend<>> backups{f.backend, store};
+    ddb::backup_worker<ddb::local_backend<>> worker{f.backend, store};
+    backups.set_table_keys(&f.keys);
+    backups.register_with(*f.fe);
+    BOOST_REQUIRE(f.call("CreateTable", create_body("src")).status == 200U);
+    BOOST_TEST(refresher.pass(true, 1) == 1U);
+    BOOST_REQUIRE(f.call("PutItem", R"({"TableName":"src","Item":{"pk":{"S":"a"},)"
+                                    R"("secret":{"S":"hunter2"}}})")
+                      .status == 200U);
+    const auto b = f.ok("CreateBackup", R"({"TableName":"src","BackupName":"nightly"})");
+    const std::string arn(b.at("BackupDetails").at("BackupArn").as_string());
+
+    // Without a way to open the table key, nothing is written in the clear.
+    BOOST_CHECK_THROW((void)worker.pass(), std::runtime_error);
+    worker.set_archive_keys(f.archive_keys());
+    worker.poke();
+    BOOST_REQUIRE(worker.pass() == 1U);
+    std::size_t sealed = 0;
+    for (const auto& key : store->list("backups/")) {
+        if (key.find("/data/") == std::string::npos) {
+            continue;
+        }
+        const auto body = store->get(key);
+        BOOST_REQUIRE(body.has_value());
+        BOOST_TEST(body->find("hunter2") == std::string::npos);
+        sealed += ddb::is_sealed_archive(*body) ? 1 : 0;
+    }
+    BOOST_TEST(sealed == 1U);
+
+    // A restore opens it, also after the source table is gone.
+    BOOST_REQUIRE(f.call("DeleteTable", R"({"TableName":"src"})").status == 200U);
+    auto r = f.call("RestoreTableFromBackup",
+                    R"({"TargetTableName":"dst","BackupArn":")" + arn + R"("})");
+    BOOST_REQUIRE_MESSAGE(r.status == 200U, r.type() + ": " + r.message());
+    BOOST_TEST(refresher.pass(true, 2) == 1U);
+    (void)worker.pass();
+    r = f.call("GetItem", R"({"TableName":"dst","Key":{"pk":{"S":"a"}}})");
+    BOOST_REQUIRE_MESSAGE(r.status == 200U, r.type() + ": " + r.message());
+    BOOST_TEST(r.body.at("Item").at("secret").at("S").as_string() == "hunter2");
+}
+
+BOOST_AUTO_TEST_CASE(point_in_time_archives_of_an_encrypted_table_are_sealed) {
+    keyed_fixture f;
+    f.without_throttling();
+    auto ring = std::make_shared<ddb::table_key_ring>();
+    f.backend.set_sealer(ddb::item_sealer(ring));
+    ddb::table_key_refresher<ddb::local_backend<>> refresher(f.backend, f.keys, ring);
+    auto store = std::make_shared<ddb::memory_backup_store>();
+    ddb::pitr_api<ddb::local_backend<>> pitr{f.backend, store};
+    ddb::pitr_worker_options options;
+    options.latest_lag_ms = 0;
+    ddb::pitr_worker<ddb::local_backend<>> worker{f.backend, store, options};
+    worker.set_archive_keys(f.archive_keys());
+    pitr.set_table_keys(&f.keys);
+    pitr.register_with(*f.fe);
+    pitr.on_changed([&] { worker.poke(); });
+    BOOST_REQUIRE(f.call("CreateTable", create_body("src")).status == 200U);
+    BOOST_TEST(refresher.pass(true, 1) == 1U);
+    BOOST_REQUIRE(f.call("PutItem", R"({"TableName":"src","Item":{"pk":{"S":"a"},)"
+                                    R"("secret":{"S":"in-the-base"}}})")
+                      .status == 200U);
+    BOOST_REQUIRE(f.call("UpdateContinuousBackups",
+                         R"({"TableName":"src","PointInTimeRecoverySpecification":)"
+                         R"({"PointInTimeRecoveryEnabled":true}})")
+                      .status == 200U);
+    f.clock_ms += 1000;
+    (void)worker.pass();
+    f.clock_ms += 1000;
+    BOOST_REQUIRE(f.call("PutItem", R"({"TableName":"src","Item":{"pk":{"S":"b"},)"
+                                    R"("secret":{"S":"in-the-log"}}})")
+                      .status == 200U);
+    f.clock_ms += 1000;
+    worker.poke();
+    (void)worker.pass();
+
+    std::size_t sealed = 0;
+    for (const auto& key : store->list("")) {
+        const auto body = store->get(key);
+        BOOST_REQUIRE(body.has_value());
+        BOOST_TEST(body->find("in-the-") == std::string::npos, key);
+        sealed += ddb::is_sealed_archive(*body) ? 1 : 0;
+    }
+    BOOST_TEST(sealed >= 2U);  // the base's data and a log object
+
+    auto r =
+        f.call("RestoreTableToPointInTime", R"({"SourceTableName":"src","TargetTableName":"dst",)"
+                                            R"("UseLatestRestorableTime":true})");
+    BOOST_REQUIRE_MESSAGE(r.status == 200U, r.type() + ": " + r.message());
+    BOOST_TEST(refresher.pass(true, 2) == 1U);
+    (void)worker.pass();
+    for (const auto& [pk, v] : std::initializer_list<std::pair<const char*, const char*>>{
+             {"a", "in-the-base"}, {"b", "in-the-log"}}) {
+        r = f.call("GetItem",
+                   std::string(R"({"TableName":"dst","Key":{"pk":{"S":")") + pk + R"("}}})");
+        BOOST_REQUIRE_MESSAGE(r.status == 200U, r.type() + ": " + r.message());
+        BOOST_TEST(r.body.at("Item").at("secret").at("S").as_string() == v);
+    }
 }
 
 BOOST_AUTO_TEST_CASE(the_settings_are_checked) {

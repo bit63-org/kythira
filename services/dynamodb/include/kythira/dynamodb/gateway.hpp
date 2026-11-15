@@ -1335,6 +1335,19 @@ public:
                                                          : kinesis_sink_from_env());
         _publisher.set_region(_config.front.region);
         _key_watch.inaccessible_after_ms = _config.kms_inaccessible_after_ms;
+        if (_keys.configured()) {
+            // Backups and point-in-time archives of encrypted tables are
+            // sealed under keys derived from their table keys (KMS task 17).
+            archive_key_source archive_keys = [this](const table_descriptor& d) {
+                auto key = _keys.open(d);
+                auto out = std::make_shared<const archive_key>(key);
+                OPENSSL_cleanse(key.data(), key.size());
+                return out;
+            };
+            _backup_worker.set_archive_keys(archive_keys);
+            _pitr_worker.set_archive_keys(archive_keys);
+            _job_worker.set_archive_keys(archive_keys);
+        }
         _ready.store(true);
         _stopping = false;
         _sweeper_thread = std::thread([this] { sweep_loop(); });

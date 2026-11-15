@@ -238,9 +238,44 @@ inline constexpr std::uint64_t k_day_ms = 86'400'000;
 /// `upto_ms` (`on_record` with each, as `record_line` wrote it), in the
 /// order written. Throws when no base ended by `base_by_ms`, or when an
 /// object the base or the log names is missing or damaged.
+/// The object that names a sealed archive's table key (KMS task 17): the
+/// table's descriptor when it was archived, encoded.
+[[nodiscard]] inline auto key_object(const std::string& archive) -> std::string {
+    return archive + "table.bin";
+}
+
+/// The key that opens `archive`'s objects: none when it was never sealed.
+[[nodiscard]] inline auto archive_sealing(backup_store& store, const std::string& archive,
+                                          const archive_key_source& keys)
+    -> std::shared_ptr<const archive_key> {
+    const auto text = store.get(key_object(archive));
+    if (!text) {
+        return nullptr;
+    }
+    const auto d = decode_table_descriptor(*text);
+    if (!d) {
+        throw std::runtime_error("archive object " + key_object(archive) + " is damaged");
+    }
+    return archive_key_of(keys, *d);
+}
+
+/// Seals `archive`'s objects under `d`'s table key, recording which key in
+/// the archive so a restore opens them after the table is gone. None for a
+/// table that is not sealed.
+[[nodiscard]] inline auto seal_archive(backup_store& store, const std::string& archive,
+                                       const table_descriptor& d, const archive_key_source& keys)
+    -> std::shared_ptr<const archive_key> {
+    auto k = archive_key_of(keys, d);
+    if (k) {
+        store.put(key_object(archive), encode_table_descriptor(d));
+    }
+    return k;
+}
+
 template<typename OnItem, typename OnRecord>
 void replay(backup_store& store, std::uint64_t table_id, std::uint64_t base_by_ms,
-            std::uint64_t upto_ms, OnItem on_item, OnRecord on_record) {
+            std::uint64_t upto_ms, OnItem on_item, OnRecord on_record,
+            const archive_key_source& keys = {}) {
     std::set<std::uint64_t> archives;
     for (const auto& key : store.list(table_prefix(table_id))) {
         if (const auto owner = archive_of(key)) {
@@ -262,20 +297,25 @@ void replay(backup_store& store, std::uint64_t table_id, std::uint64_t base_by_m
                                  std::to_string(table_id) + " ended by " +
                                  std::to_string(base_by_ms));
     }
+    const auto sealing = archive_sealing(store, archive, keys);
     for (const auto& o : base->objects) {
-        backup_detail::read_object(store, o, [&](std::string_view line) {
-            on_item(boost::json::parse(line).as_object().at("Item").as_object());
-        });
+        backup_detail::read_object(
+            store, o,
+            [&](std::string_view line) {
+                on_item(boost::json::parse(line).as_object().at("Item").as_object());
+            },
+            sealing.get());
     }
     for (const auto& [n, key] : log_objects(store, archive)) {
         if (n < base->log_from) {
             continue;
         }
-        const auto body = store.get(key);
-        if (!body) {
+        auto stored = store.get(key);
+        if (!stored) {
             throw std::runtime_error("archive object " + key + " is missing");
         }
-        std::string_view rest(*body);
+        const auto body = backup_detail::open_object(key, std::move(*stored), sealing.get());
+        std::string_view rest(body);
         while (!rest.empty()) {
             const auto nl = rest.find('\n');
             const auto line = rest.substr(0, nl);
@@ -539,6 +579,8 @@ public:
         : _backend(backend), _store(std::move(store)), _options(options) {}
 
     void set_store(std::shared_ptr<backup_store> store) { _store = std::move(store); }
+    /// How encrypted tables' archives are sealed and opened (KMS task 17).
+    void set_archive_keys(archive_key_source keys) { _archive_keys = std::move(keys); }
     /// Sweep for orphaned archives on the next pass.
     void poke() { _poked.store(true); }
 
@@ -675,7 +717,9 @@ private:
         if (!lines.empty()) {
             // A pass whose progress never reached the catalog is redone
             // under the same number, from the same cursors.
-            _store->put(pitr_detail::log_key(archive, next.next_object), lines);
+            const auto key = pitr_detail::log_key(archive, next.next_object);
+            const auto sealing = pitr_detail::seal_archive(*_store, archive, d, _archive_keys);
+            _store->put(key, sealing ? sealing->seal(key, lines) : lines);
             ++next.next_object;
         }
         next.cursors = cursor_list(cursors.begin(), cursors.end());
@@ -692,9 +736,11 @@ private:
         b.start_ms = _backend.now_ms();
         b.log_from = log_from;
         const auto prefix = pd::base_prefix(archive, b.start_ms);
+        const auto sealing = pd::seal_archive(*_store, archive, d, _archive_keys);
         auto got = backup_detail::write_items(
             _backend, *_store, d.table_id, prefix + "data/",
-            [&](std::size_t n) { return prefix + "data/" + pd::digits(n, 6) + ".json"; });
+            [&](std::size_t n) { return prefix + "data/" + pd::digits(n, 6) + ".json"; },
+            sealing.get());
         b.objects = std::move(got.objects);
         b.items = got.items;
         b.end_ms = std::max(_backend.now_ms(), b.start_ms);
@@ -760,14 +806,16 @@ private:
             }
             bd::restore_put(_backend, d, std::move(*parsed));
         };
-        pitr_detail::replay(*_store, d.restore.source_table_id, d.restore.point_ms,
-                            d.restore.point_ms, put_line, [&](const boost::json::object& rec) {
-                                if (const auto* image = rec.if_contains("NewImage")) {
-                                    put_line(image->as_object());
-                                } else {
-                                    remove(d, rec.at("Keys").as_object());
-                                }
-                            });
+        pitr_detail::replay(
+            *_store, d.restore.source_table_id, d.restore.point_ms, d.restore.point_ms, put_line,
+            [&](const boost::json::object& rec) {
+                if (const auto* image = rec.if_contains("NewImage")) {
+                    put_line(image->as_object());
+                } else {
+                    remove(d, rec.at("Keys").as_object());
+                }
+            },
+            _archive_keys);
         bd::finish_restore(_backend, d);
     }
 
@@ -795,6 +843,7 @@ private:
     Backend& _backend;
     std::shared_ptr<backup_store> _store;
     pitr_worker_options _options;
+    archive_key_source _archive_keys;
     std::atomic<bool> _poked{true};
     std::chrono::steady_clock::time_point _next_sweep{};
 };

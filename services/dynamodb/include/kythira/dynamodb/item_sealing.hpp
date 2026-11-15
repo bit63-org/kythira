@@ -38,6 +38,7 @@
 #include <openssl/crypto.h>
 #include <openssl/evp.h>
 #include <openssl/params.h>
+#include <openssl/rand.h>
 
 #include <array>
 #include <cstddef>
@@ -279,6 +280,120 @@ private:
     item_sealing_detail::key32 _encrypt{};
     item_sealing_detail::key32 _nonce{};
 };
+
+/// What starts a sealed archive object (a backup's or a point-in-time
+/// archive's): a NUL, which no JSON object starts with, then "KDA1".
+inline constexpr std::string_view k_sealed_archive_magic{"\0KDA1", 5};
+
+/// Seals archive objects of one table under a key derived from its table
+/// key (KMS task 17, purpose `kythira-dynamodb-archive`). One node writes
+/// each object once, so the nonce is random. The associated data is the
+/// object's key in its store, so an object does not open under another
+/// name.
+class archive_key {
+public:
+    explicit archive_key(const table_key_bytes& table_key) {
+        item_sealing_detail::key32 prk{};
+        std::memcpy(prk.data(), table_key.data(), prk.size());
+        _key = item_sealing_detail::expand(prk, "kythira-dynamodb-archive");
+        OPENSSL_cleanse(prk.data(), prk.size());
+    }
+    archive_key(const archive_key&) = delete;
+    archive_key(archive_key&&) = delete;
+    auto operator=(const archive_key&) -> archive_key& = delete;
+    auto operator=(archive_key&&) -> archive_key& = delete;
+    ~archive_key() { OPENSSL_cleanse(_key.data(), _key.size()); }
+
+    [[nodiscard]] auto seal(std::string_view object, std::string_view clear) const -> std::string {
+        namespace d = item_sealing_detail;
+        std::array<unsigned char, d::k_nonce_len> nonce{};
+        if (RAND_bytes(nonce.data(), static_cast<int>(nonce.size())) != 1) {
+            throw std::runtime_error("dynamodb archive sealing: RAND_bytes failed");
+        }
+        std::string out(k_sealed_archive_magic);
+        out.append(reinterpret_cast<const char*>(nonce.data()), nonce.size());
+        d::cipher_ctx c;
+        int len = 0;
+        if (EVP_EncryptInit_ex(c.ctx, EVP_aes_256_gcm(), nullptr, nullptr, nullptr) != 1 ||
+            EVP_CIPHER_CTX_ctrl(c.ctx, EVP_CTRL_GCM_SET_IVLEN, static_cast<int>(nonce.size()),
+                                nullptr) != 1 ||
+            EVP_EncryptInit_ex(c.ctx, nullptr, nullptr, _key.data(), nonce.data()) != 1 ||
+            EVP_EncryptUpdate(c.ctx, nullptr, &len,
+                              reinterpret_cast<const unsigned char*>(object.data()),
+                              static_cast<int>(object.size())) != 1) {
+            throw std::runtime_error("dynamodb archive sealing: AES-GCM setup failed");
+        }
+        const auto at = out.size();
+        out.resize(at + clear.size() + d::k_tag_len);
+        auto* dst = reinterpret_cast<unsigned char*>(out.data() + at);
+        int total = 0;
+        if (!clear.empty()) {
+            if (EVP_EncryptUpdate(c.ctx, dst, &len,
+                                  reinterpret_cast<const unsigned char*>(clear.data()),
+                                  static_cast<int>(clear.size())) != 1) {
+                throw std::runtime_error("dynamodb archive sealing: AES-GCM encrypt failed");
+            }
+            total = len;
+        }
+        if (EVP_EncryptFinal_ex(c.ctx, dst + total, &len) != 1 ||
+            EVP_CIPHER_CTX_ctrl(c.ctx, EVP_CTRL_GCM_GET_TAG, static_cast<int>(d::k_tag_len),
+                                dst + clear.size()) != 1) {
+            throw std::runtime_error("dynamodb archive sealing: AES-GCM finish failed");
+        }
+        return out;
+    }
+
+    [[nodiscard]] auto open(std::string_view object, std::string_view sealed) const -> std::string {
+        namespace d = item_sealing_detail;
+        const auto head = k_sealed_archive_magic.size() + d::k_nonce_len;
+        if (sealed.size() < head + d::k_tag_len || !sealed.starts_with(k_sealed_archive_magic)) {
+            throw sealed_value_error("dynamodb: a sealed archive object is malformed");
+        }
+        const auto* nonce =
+            reinterpret_cast<const unsigned char*>(sealed.data() + k_sealed_archive_magic.size());
+        const auto body = sealed.substr(head);
+        const auto n = body.size() - d::k_tag_len;
+        d::cipher_ctx c;
+        int len = 0;
+        if (EVP_DecryptInit_ex(c.ctx, EVP_aes_256_gcm(), nullptr, nullptr, nullptr) != 1 ||
+            EVP_CIPHER_CTX_ctrl(c.ctx, EVP_CTRL_GCM_SET_IVLEN, static_cast<int>(d::k_nonce_len),
+                                nullptr) != 1 ||
+            EVP_DecryptInit_ex(c.ctx, nullptr, nullptr, _key.data(), nonce) != 1 ||
+            EVP_DecryptUpdate(c.ctx, nullptr, &len,
+                              reinterpret_cast<const unsigned char*>(object.data()),
+                              static_cast<int>(object.size())) != 1) {
+            throw std::runtime_error("dynamodb archive sealing: AES-GCM setup failed");
+        }
+        std::string out(n, '\0');
+        auto* dst = reinterpret_cast<unsigned char*>(out.data());
+        int total = 0;
+        if (n > 0) {
+            if (EVP_DecryptUpdate(c.ctx, dst, &len,
+                                  reinterpret_cast<const unsigned char*>(body.data()),
+                                  static_cast<int>(n)) != 1) {
+                throw sealed_value_error("dynamodb: a sealed archive object does not open");
+            }
+            total = len;
+        }
+        std::array<unsigned char, d::k_tag_len> tag{};
+        std::memcpy(tag.data(), body.data() + n, d::k_tag_len);
+        if (EVP_CIPHER_CTX_ctrl(c.ctx, EVP_CTRL_GCM_SET_TAG, static_cast<int>(d::k_tag_len),
+                                tag.data()) != 1 ||
+            EVP_DecryptFinal_ex(c.ctx, dst + total, &len) != 1) {
+            OPENSSL_cleanse(out.data(), out.size());
+            throw sealed_value_error("dynamodb: a sealed archive object does not open");
+        }
+        return out;
+    }
+
+private:
+    item_sealing_detail::key32 _key{};
+};
+
+/// Whether an archive object is sealed.
+[[nodiscard]] inline auto is_sealed_archive(std::string_view body) -> bool {
+    return body.starts_with(k_sealed_archive_magic);
+}
 
 /// Whether a stored value is sealed.
 [[nodiscard]] inline auto is_sealed_value(std::string_view v) -> bool {
