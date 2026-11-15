@@ -96,7 +96,7 @@ public:
         }
         g->key_id = k->record.key_id;
         g->issuing_account = ctx.principal.account;
-        g->for_aws_resource = k->record.manager == key_manager::aws;
+        g->for_aws_resource = service_managed(k->record.manager);
 
         auto r = key_request(ctx, **c, *k, "CreateGrant");
         r.keys.emplace_back("kms:GrantOperations", g->operations);
@@ -162,7 +162,7 @@ public:
         auto r = key_request(ctx, **c, *k, "ListGrants");
         r.keys.emplace_back(
             "kms:GrantIsForAWSResource",
-            std::vector<std::string>{k->record.manager == key_manager::aws ? "true" : "false"});
+            std::vector<std::string>{service_managed(k->record.manager) ? "true" : "false"});
         if (auto denied = ctx.authorize(std::move(r))) {
             return *denied;
         }
@@ -320,7 +320,7 @@ public:
         auto r = key_request(ctx, **c, *k, "RevokeGrant");
         r.keys.emplace_back(
             "kms:GrantIsForAWSResource",
-            std::vector<std::string>{k->record.manager == key_manager::aws ? "true" : "false"});
+            std::vector<std::string>{service_managed(k->record.manager) ? "true" : "false"});
         if (auto denied = ctx.authorize(std::move(r))) {
             return *denied;
         }

@@ -176,6 +176,9 @@ template<typename Catalog> struct api_deps {
     /// Makes an AWS managed key on first use (ensure_managed_key); empty:
     /// none is made.
     std::function<key_result(std::string_view, const managed_service&)> ensure_managed;
+    /// Makes a consuming service's owned key on first use
+    /// (ensure_owned_key); empty: none is made.
+    std::function<key_result(std::string_view, const managed_service&)> ensure_owned = {};
 };
 
 /// What every KMS operation shares: reading the request, resolving the key
@@ -234,16 +237,37 @@ protected:
     /// account that does not exist yet, makes it (Requirement 10.1).
     /// @returns whether a key was made, so the caller reads the catalog
     ///          again; the failure's exception when making it failed.
+    ///
+    /// Likewise, when it names the owned key of the service the call came
+    /// through (`alias/aws/<service>/owned`) and that key does not exist
+    /// yet, makes it (Requirement 10.3).
     template<typename Catalog>
     [[nodiscard]] static auto make_managed_if_named(const call_context& ctx, const Catalog& c,
                                                     const boost::json::object& in,
                                                     std::string_view member,
-                                                    const managed_fn& ensure)
+                                                    const managed_fn& ensure,
+                                                    const managed_fn& ensure_owned = {})
         -> aws_json::result<bool> {
+        std::string_view name = str(in, member).value_or("");
+        if (const auto owned = owned_service_of(name)) {
+            if (!ensure_owned || owned->name != ctx.via_service ||
+                find_owned_key(c, ctx.principal.account, owned->name)) {
+                return false;
+            }
+            key_result made;
+            try {
+                made = ensure_owned(ctx.principal.account, *owned);
+            } catch (const std::exception&) {
+                return dependency_timeout();
+            }
+            if (!made.ok()) {
+                return outcome_error(made, "the owned key of " + std::string(owned->display));
+            }
+            return true;
+        }
         if (!ensure) {
             return false;
         }
-        std::string_view name = str(in, member).value_or("");
         if (name.starts_with("arn:")) {
             const auto parts = parse_kms_arn(name);
             if (!parts || parts->partition != ctx.partition || parts->region != ctx.region ||
@@ -268,6 +292,12 @@ protected:
         return true;
     }
 
+    /// Whether `k` is an owned key the request may not see: every key
+    /// owned by a service other than the one the call came through.
+    [[nodiscard]] static auto hidden_owned(const call_context& ctx, const key_record& k) -> bool {
+        return k.manager == key_manager::owned && !owned_by(k, ctx.via_service);
+    }
+
     /// The key `member` names: a key id or key ARN, and with `alias_ok`
     /// an alias name or alias ARN.
     template<typename Catalog>
@@ -275,6 +305,18 @@ protected:
                                       const boost::json::object& in, std::string_view member,
                                       bool alias_ok) -> aws_json::result<resolved> {
         const auto text = str(in, member).value_or("");
+        if (const auto owned = owned_service_of(text)) {
+            // Only the owning service names its owned key, in the
+            // caller's own account; no one else learns it exists.
+            auto k = owned->name == ctx.via_service
+                         ? find_owned_key(c, ctx.principal.account, owned->name)
+                         : std::nullopt;
+            if (!k) {
+                return not_found("Alias " + ctx.alias_arn(ctx.principal.account, text) +
+                                 " is not found.");
+            }
+            return resolved{std::move(*k), false, {}};
+        }
         std::string account = ctx.principal.account;
         std::string key_id;
         bool by_alias = false;
@@ -305,7 +347,7 @@ protected:
             by_alias = true;
         }
         const auto k = c.key(key_id);
-        if (!k || k->account != account) {
+        if (!k || k->account != account || hidden_owned(ctx, *k)) {
             return not_found("Key '" + ctx.key_arn(account, key_id) + "' does not exist");
         }
         return resolved{*k, by_alias, by_alias ? std::string(name) : std::string()};
@@ -359,6 +401,16 @@ protected:
                                                     aws_auth::authz_request r,
                                                     const encryption_context* context = nullptr)
         -> std::optional<aws_json::error> {
+        if (key.manager == key_manager::owned) {
+            // The owning service's own authority (Requirement 10.3): no
+            // key policy or grant decides, and no one else sees the key.
+            if (!owned_by(key, ctx.via_service)) {
+                return not_found("Key '" + r.resource + "' does not exist");
+            }
+            ctx.authorized = true;
+            ctx.audited_key_arn = r.resource;
+            return ctx.admit_key(key.spec);
+        }
         const std::string op = r.action.starts_with("kms:") ? r.action.substr(4) : r.action;
         auto denied = ctx.authorize(std::move(r));
         if (!denied) {
@@ -959,7 +1011,7 @@ public:
         if (k->record.state == key_state::creating) {
             return invalid_state(key_label(ctx, k->record) + " is still being created");
         }
-        if (k->record.manager == key_manager::aws) {
+        if (service_managed(k->record.manager)) {
             return unsupported("The key policy of an AWS managed key cannot be changed");
         }
         auto out =
@@ -1049,7 +1101,7 @@ public:
         if (auto bad = rotatable(ctx, key)) {
             return *bad;
         }
-        if (key.manager == key_manager::aws) {
+        if (service_managed(key.manager)) {
             return unsupported("AWS rotates its managed keys itself");
         }
         if (auto bad = usable_state(ctx, key)) {
@@ -1178,7 +1230,7 @@ private:
         if (auto bad = rotatable(ctx, key)) {
             return *bad;
         }
-        if (key.manager == key_manager::aws) {
+        if (service_managed(key.manager)) {
             return unsupported("AWS rotates its managed keys itself");
         }
         if (auto bad = usable_state(ctx, key)) {
@@ -1328,7 +1380,8 @@ private:
         if (!c) {
             return c;
         }
-        const auto made = make_managed_if_named(ctx, **c, in, member, _d.ensure_managed);
+        const auto made =
+            make_managed_if_named(ctx, **c, in, member, _d.ensure_managed, _d.ensure_owned);
         if (!made) {
             return made.error();
         }
@@ -1373,7 +1426,7 @@ private:
         // Every simple write changes the key, which no customer may do to
         // an AWS managed key (Requirement 10.2). With IAM its policy
         // already refuses; with static keys this is what does.
-        if (k->record.manager == key_manager::aws) {
+        if (service_managed(k->record.manager)) {
             return unsupported("This operation is not allowed on an AWS managed key");
         }
         if (acted != nullptr) {
@@ -1396,7 +1449,7 @@ private:
             {"KeyUsage", usage_name(k.usage)},
             {"KeyState", state_name(k.state)},
             {"Origin", "AWS_KMS"},
-            {"KeyManager", k.manager == key_manager::aws ? "AWS" : "CUSTOMER"},
+            {"KeyManager", service_managed(k.manager) ? "AWS" : "CUSTOMER"},
             {"CustomerMasterKeySpec", spec},
             {"KeySpec", spec},
             {"MultiRegion", false},

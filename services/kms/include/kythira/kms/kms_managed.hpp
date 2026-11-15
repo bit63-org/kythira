@@ -21,6 +21,17 @@
 // alias, made last, is what makes the key visible under its name. A
 // derived id whose creation failed is tombstoned like any other, so the
 // next attempt number derives the next id.
+//
+// Owned keys (Requirement 10.3): a consuming service's key for resources
+// that name no KMS key, one per account and service, as DynamoDB encrypts
+// a table under an AWS owned key by default. The service names it as
+// `alias/aws/<service>/owned` in a call it makes through kms.client (or
+// forwards as a trusted service); the operations resolve that name to the
+// key's derived id, making the key on first use.
+// No alias exists, the key is listed in no account, and it answers only
+// its own service: any other request, from the account itself included,
+// finds no such key. Its use is the service's own authority, so no key
+// policy is evaluated for it (the policy it carries refuses everyone).
 
 #include <kythira/kms/kms_catalog.hpp>
 #include <kythira/kms/kms_keys.hpp>
@@ -56,6 +67,14 @@ inline constexpr std::string_view k_managed_alias_prefix = "alias/aws/";
 
 /// How many derived ids are tried before giving up.
 inline constexpr unsigned k_managed_attempts = 8;
+
+/// What follows the service in an owned key's name. The services that may
+/// hold an owned key are those with a managed key.
+inline constexpr std::string_view k_owned_suffix = "/owned";
+
+/// The service whose owned key `name` (`alias/aws/<service>/owned`) names,
+/// or nothing.
+[[nodiscard]] inline auto owned_service_of(std::string_view name) -> std::optional<managed_service>;
 
 /// The service `alias` (`alias/aws/<service>`) is the managed key of, or
 /// nothing.
@@ -189,6 +208,113 @@ template<typename Catalog>
             return {};
         }
         return {key_outcome::catalog, s};
+    }
+    return {key_outcome::catalog, catalog_status::rejected};
+}
+
+[[nodiscard]] inline auto owned_service_of(std::string_view name)
+    -> std::optional<managed_service> {
+    if (!name.starts_with(k_managed_alias_prefix) || !name.ends_with(k_owned_suffix)) {
+        return std::nullopt;
+    }
+    const auto service =
+        name.substr(k_managed_alias_prefix.size(),
+                    name.size() - k_managed_alias_prefix.size() - k_owned_suffix.size());
+    for (const auto& s : k_managed_services) {
+        if (s.name == service) {
+            return s;
+        }
+    }
+    return std::nullopt;
+}
+
+/// The name a service gives its owned key in a request.
+[[nodiscard]] inline auto owned_key_name(std::string_view service) -> std::string {
+    return std::string(k_managed_alias_prefix) + std::string(service) + std::string(k_owned_suffix);
+}
+
+/// An owned key's description: which service owns it.
+[[nodiscard]] inline auto owned_description(std::string_view service) -> std::string {
+    return "kythira:owned:" + std::string(service);
+}
+
+/// Whether `k` is the owned key of `service`.
+[[nodiscard]] inline auto owned_by(const key_record& k, std::string_view service) -> bool {
+    return k.manager == key_manager::owned && !service.empty() &&
+           k.description == owned_description(service);
+}
+
+/// The key id of `service`'s owned key in `account` on try `attempt`.
+[[nodiscard]] inline auto owned_key_id(std::string_view account, std::string_view service,
+                                       unsigned attempt) -> std::string {
+    // A label of its own, so it never collides with the managed key's.
+    return managed_key_id(std::string(account) + "\x01owned", service, attempt);
+}
+
+/// `service`'s owned key in `account`, if it was made: the first derived
+/// id not tombstoned.
+template<typename Catalog>
+[[nodiscard]] auto find_owned_key(const Catalog& c, std::string_view account,
+                                  std::string_view service) -> std::optional<key_record> {
+    for (unsigned attempt = 0; attempt < k_managed_attempts; ++attempt) {
+        const auto id = owned_key_id(account, service, attempt);
+        if (c.tombstoned(id)) {
+            continue;
+        }
+        auto k = c.key(id);
+        if (k && k->account == account && owned_by(*k, service)) {
+            return k;
+        }
+        return std::nullopt;
+    }
+    return std::nullopt;
+}
+
+/// `service`'s owned key in `account`, made unless it exists.
+template<typename Catalog>
+[[nodiscard]] auto ensure_owned_key(const managed_deps<Catalog>& d, std::string_view account,
+                                    const managed_service& service) -> key_result {
+    for (unsigned attempt = 0; attempt < k_managed_attempts; ++attempt) {
+        auto c = d.catalog();
+        if (!c) {
+            return {key_outcome::unavailable, catalog_status::ok};
+        }
+        const auto id = owned_key_id(account, service.name, attempt);
+        if (c->tombstoned(id)) {
+            continue;
+        }
+        if (!c->key(id)) {
+            key_record k;
+            k.key_id = id;
+            k.account = std::string(account);
+            k.description = owned_description(service.name);
+            k.manager = key_manager::owned;
+            k.policy = R"({"Version":"2012-10-17","Statement":[{"Sid":"Owned by )" +
+                       std::string(service.display) +
+                       R"(","Effect":"Deny","Principal":{"AWS":"*"},"Action":"kms:*",)"
+                       R"("Resource":"*"}]})";
+            const auto made = d.create_key(k, {});
+            const bool raced =
+                made.outcome == key_outcome::catalog && made.status == catalog_status::rejected;
+            if (!made.ok() && !raced) {
+                return made;
+            }
+            c = d.catalog();
+            if (!c) {
+                return {key_outcome::unavailable, catalog_status::ok};
+            }
+        }
+        const auto k = c->key(id);
+        if (!k) {
+            continue;  // tombstoned by a creation that failed
+        }
+        if (k->account != account || !owned_by(*k, service.name)) {
+            return {key_outcome::catalog, catalog_status::rejected};
+        }
+        if (k->state == key_state::creating) {
+            return {key_outcome::catalog, catalog_status::invalid_state};
+        }
+        return {};
     }
     return {key_outcome::catalog, catalog_status::rejected};
 }
