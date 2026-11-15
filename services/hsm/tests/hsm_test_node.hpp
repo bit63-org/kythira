@@ -70,12 +70,12 @@ inline const CK_MECHANISM k_sha256{CKM_SHA256, nullptr, 0};
 struct node {
     hsm::test::direct_store store;
     hsm::key_vault vault;
-    hsm::session_layer layer{store, vault, options()};
+    hsm::session_layer layer;
     hsm::secret_bytes mk{32};
     std::unique_ptr<hsm::native_client> client;
     CK_SESSION_HANDLE session = 0;
 
-    node() {
+    explicit node(hsm::session_options o = options()) : layer(store, vault, std::move(o)) {
         BOOST_REQUIRE(hsm::generate_random(mk.span()).has_value());
         const auto check = hsm::key_check_value(mk.view());
         BOOST_REQUIRE(propose_catalog(hsm::make_initialize_command(

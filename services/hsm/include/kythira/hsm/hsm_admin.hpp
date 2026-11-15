@@ -54,6 +54,7 @@
 // only way to the new master key, so dropping them would lose every key.
 // The status's generation says which set is current.
 
+#include <kythira/hsm/audit.hpp>
 #include <kythira/hsm/catalog_state_machine.hpp>
 #include <kythira/hsm/hsm_host.hpp>
 #include <kythira/hsm/key_store.hpp>
@@ -165,7 +166,38 @@ public:
     /// wipes the key cache and session objects (requirement 4.7).
     void set_seal_hook(std::function<void()> hook) { _on_seal = std::move(hook); }
 
+    /// Receives an event for every request that changes something (init,
+    /// unseal, seal, rekey, tokens and bindings) and every refused caller
+    /// (task 14); never a share or a request body.
+    void set_audit_hook(audit_hook hook) { _audit = std::move(hook); }
+
     [[nodiscard]] auto handle(const admin_request& req) -> admin_response {
+        const auto started = std::chrono::steady_clock::now();
+        auto res = handle_unaudited(req);
+        if (_audit && (req.method != "GET" || res.status == 403)) {
+            audit_event e;
+            e.action = admin_action(req);
+            e.identity = req.identities.empty() ? std::string() : req.identities.front();
+            for (const auto& id : req.identities) {
+                if (_policy.operators.contains(id)) {
+                    e.identity = id;
+                    break;
+                }
+            }
+            e.token = token_of(req.path);
+            e.rv = res.status >= 200 && res.status < 300 ? CKR_OK
+                   : res.status == 403                   ? CKR_USER_NOT_LOGGED_IN
+                                                         : CKR_FUNCTION_FAILED;
+            e.http_status = res.status;
+            e.elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - started);
+            _audit(e);
+        }
+        return res;
+    }
+
+private:
+    [[nodiscard]] auto handle_unaudited(const admin_request& req) -> admin_response {
         if (!is_operator(req)) {
             return error(403, "forbidden", "the caller is not an HSM operator");
         }
@@ -181,6 +213,50 @@ public:
         }
     }
 
+    /// The audit action a request names.
+    [[nodiscard]] static auto admin_action(const admin_request& req) -> std::string_view {
+        const auto& p = req.path;
+        const bool del = req.method == "DELETE";
+        if (p == "/v1/init") {
+            return "init";
+        }
+        if (p == "/v1/unseal") {
+            return del ? "unseal_reset" : "unseal";
+        }
+        if (p == "/v1/seal") {
+            return "seal";
+        }
+        if (p == "/v1/rekey") {
+            return "rekey";
+        }
+        if (p == "/v1/tokens") {
+            return req.method == "GET" ? "list_tokens" : "create_token";
+        }
+        if (p.find("/bindings/") != std::string::npos) {
+            return del ? "unbind" : "bind";
+        }
+        if (p.starts_with("/v1/tokens/")) {
+            return "delete_token";
+        }
+        return p == "/v1/status" ? "status" : "admin";
+    }
+
+    /// The token a /v1/tokens/N... path names.
+    [[nodiscard]] static auto token_of(std::string_view path) -> std::optional<std::uint64_t> {
+        constexpr std::string_view prefix = "/v1/tokens/";
+        if (!path.starts_with(prefix)) {
+            return std::nullopt;
+        }
+        path.remove_prefix(prefix.size());
+        std::uint64_t id = 0;
+        const auto [end, ec] = std::from_chars(path.data(), path.data() + path.size(), id);
+        if (ec != std::errc{} || (end != path.data() + path.size() && *end != '/')) {
+            return std::nullopt;
+        }
+        return id;
+    }
+
+public:
 private:
     [[nodiscard]] auto is_operator(const admin_request& req) const -> bool {
         for (const auto& id : req.identities) {
@@ -645,6 +721,7 @@ private:
     key_vault* _vault;
     admin_policy _policy;
     operator_unseal _unseal;
+    audit_hook _audit;
     std::function<void()> _on_seal;
     node_share_delivery _delivery;
 };

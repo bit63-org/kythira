@@ -45,6 +45,7 @@
 // work, as they need no key.
 
 #include <kythira/hsm/attribute_policy.hpp>
+#include <kythira/hsm/audit.hpp>
 #include <kythira/hsm/attributes.hpp>
 #include <kythira/hsm/client_types.hpp>
 #include <kythira/hsm/hsm_store.hpp>
@@ -60,6 +61,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -70,6 +72,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -86,6 +89,11 @@ struct session_options {
     std::size_t max_cached_keys = 1024;
     /// Fresh random handles tried when a new token object's is taken.
     int handle_attempts = 8;
+    /// Receives an event per audited call (audit.hpp); none when empty.
+    audit_hook audit;
+    /// A counted operation is logged on its first call and then once in
+    /// this many.
+    std::uint64_t audit_sample_every = 1000;
 };
 
 inline constexpr CK_ULONG min_pin_length = 4;
@@ -225,7 +233,7 @@ private:
 class session_layer {
 public:
     session_layer(hsm_store& store, key_vault& vault, session_options options = {})
-        : _store(&store), _vault(&vault), _opt(options) {}
+        : _store(&store), _vault(&vault), _opt(std::move(options)) {}
 
     session_layer(const session_layer&) = delete;
     auto operator=(const session_layer&) -> session_layer& = delete;
@@ -330,6 +338,22 @@ public:
     /// session may be open on the token on this node.
     auto init_token(app_id app, CK_SLOT_ID slot, std::string_view so_pin, std::string_view label)
         -> ck_result<void> {
+        const auto t0 = audit_clock::now();
+        auto r = init_token_unaudited(app, slot, so_pin, label);
+        if (_opt.audit) {
+            audit_event e;
+            e.action = "init_token";
+            e.identity = identity_of(app).value_or("");
+            e.token = slot;
+            e.label = std::string(label);
+            emit(std::move(e), rv_of(r), t0);
+        }
+        return r;
+    }
+
+private:
+    auto init_token_unaudited(app_id app, CK_SLOT_ID slot, std::string_view so_pin,
+                              std::string_view label) -> ck_result<void> {
         if (auto r = check_slot(app, slot); !r) {
             return unexpected(r.error());
         }
@@ -368,6 +392,7 @@ public:
         return {};
     }
 
+public:
     // -- Sessions ------------------------------------------------------------
 
     auto open_session(app_id app, CK_SLOT_ID slot, CK_FLAGS flags) -> ck_result<CK_SESSION_HANDLE> {
@@ -461,6 +486,17 @@ public:
 
     auto login(app_id app, CK_SESSION_HANDLE h, CK_USER_TYPE user, std::string_view pin)
         -> ck_result<void> {
+        const auto t0 = audit_clock::now();
+        auto r = login_unaudited(app, h, user, pin);
+        if (_opt.audit) {
+            emit(audit_base(user == CKU_SO ? "login_so" : "login", app, h), rv_of(r), t0);
+        }
+        return r;
+    }
+
+private:
+    auto login_unaudited(app_id app, CK_SESSION_HANDLE h, CK_USER_TYPE user, std::string_view pin)
+        -> ck_result<void> {
         if (user == CKU_CONTEXT_SPECIFIC) {
             return unexpected(CKR_OPERATION_NOT_INITIALIZED);
         }
@@ -507,6 +543,7 @@ public:
         return {};
     }
 
+public:
     auto logout(app_id app, CK_SESSION_HANDLE h) -> ck_result<void> {
         const std::lock_guard lock(_mutex);
         auto s = find_locked(app, h);
@@ -521,6 +558,17 @@ public:
 
     /// C_InitPIN: the SO sets the user PIN, which also unlocks it.
     auto init_pin(app_id app, CK_SESSION_HANDLE h, std::string_view pin) -> ck_result<void> {
+        const auto t0 = audit_clock::now();
+        auto r = init_pin_unaudited(app, h, pin);
+        if (_opt.audit) {
+            emit(audit_base("init_pin", app, h), rv_of(r), t0);
+        }
+        return r;
+    }
+
+private:
+    auto init_pin_unaudited(app_id app, CK_SESSION_HANDLE h, std::string_view pin)
+        -> ck_result<void> {
         auto ctx = context(app, h);
         if (!ctx) {
             return unexpected(ctx.error());
@@ -534,10 +582,22 @@ public:
         return store_pin(ctx->token, pin_user::user, pin);
     }
 
+public:
     /// C_SetPIN: the logged-in user's PIN, or the user PIN in a public
     /// session. A wrong old PIN counts as a failed login.
     auto set_pin(app_id app, CK_SESSION_HANDLE h, std::string_view old_pin,
                  std::string_view new_pin) -> ck_result<void> {
+        const auto t0 = audit_clock::now();
+        auto r = set_pin_unaudited(app, h, old_pin, new_pin);
+        if (_opt.audit) {
+            emit(audit_base("set_pin", app, h), rv_of(r), t0);
+        }
+        return r;
+    }
+
+private:
+    auto set_pin_unaudited(app_id app, CK_SESSION_HANDLE h, std::string_view old_pin,
+                           std::string_view new_pin) -> ck_result<void> {
         auto ctx = context(app, h);
         if (!ctx) {
             return unexpected(ctx.error());
@@ -555,12 +615,22 @@ public:
         return store_pin(ctx->token, who, new_pin);
     }
 
+public:
     // -- Objects -------------------------------------------------------------
 
     /// C_GenerateKey. A token object (CKA_TOKEN true) is generated, sealed
     /// and proposed here; a session object stays in this node's memory.
     auto generate_key(app_id app, CK_SESSION_HANDLE h, const CK_MECHANISM& mechanism,
                       const attribute_map& tmpl) -> ck_result<CK_OBJECT_HANDLE> {
+        const auto t0 = audit_clock::now();
+        auto r = generate_key_unaudited(app, h, mechanism, tmpl);
+        audit_created("generate_key", app, h, r, tmpl, mechanism.mechanism, t0);
+        return r;
+    }
+
+private:
+    auto generate_key_unaudited(app_id app, CK_SESSION_HANDLE h, const CK_MECHANISM& mechanism,
+                                const attribute_map& tmpl) -> ck_result<CK_OBJECT_HANDLE> {
         auto ctx = context(app, h);
         if (!ctx) {
             return unexpected(ctx.error());
@@ -613,11 +683,31 @@ public:
         return unexpected(CKR_DEVICE_ERROR);
     }
 
+public:
     /// C_GenerateKeyPair: both objects in one entry when either is a token
     /// object (a token key pair whose public half is a session object is
-    /// still generated once, here).
+    /// still generated once, here). The event names the private key.
     auto generate_key_pair(app_id app, CK_SESSION_HANDLE h, const CK_MECHANISM& mechanism,
                            const attribute_map& public_tmpl, const attribute_map& private_tmpl)
+        -> ck_result<std::pair<CK_OBJECT_HANDLE, CK_OBJECT_HANDLE>> {
+        const auto t0 = audit_clock::now();
+        auto r = generate_key_pair_unaudited(app, h, mechanism, public_tmpl, private_tmpl);
+        if (_opt.audit) {
+            auto e = audit_base("generate_key_pair", app, h);
+            e.mechanism = mechanism.mechanism;
+            e.label = label_in(private_tmpl);
+            if (r) {
+                e.object = r->second;
+            }
+            emit(std::move(e), rv_of(r), t0);
+        }
+        return r;
+    }
+
+private:
+    auto generate_key_pair_unaudited(app_id app, CK_SESSION_HANDLE h, const CK_MECHANISM& mechanism,
+                                     const attribute_map& public_tmpl,
+                                     const attribute_map& private_tmpl)
         -> ck_result<std::pair<CK_OBJECT_HANDLE, CK_OBJECT_HANDLE>> {
         auto ctx = context(app, h);
         if (!ctx) {
@@ -699,9 +789,20 @@ public:
         return unexpected(CKR_DEVICE_ERROR);
     }
 
+public:
     /// C_DestroyObject. For a token object it returns once the destroy has
     /// committed, after which no node uses the key (requirement 3.5).
     auto destroy_object(app_id app, CK_SESSION_HANDLE h, CK_OBJECT_HANDLE object)
+        -> ck_result<void> {
+        const auto t0 = audit_clock::now();
+        auto label = _opt.audit ? label_of(app, h, object) : std::string();
+        auto r = destroy_object_unaudited(app, h, object);
+        audit_object("destroy_object", app, h, object, std::move(label), rv_of(r), t0);
+        return r;
+    }
+
+private:
+    auto destroy_object_unaudited(app_id app, CK_SESSION_HANDLE h, CK_OBJECT_HANDLE object)
         -> ck_result<void> {
         auto ctx = context(app, h);
         if (!ctx) {
@@ -733,6 +834,7 @@ public:
         return {};
     }
 
+public:
     /// C_GetAttributeValue. A secret key's CKA_VALUE is read from its
     /// material when the key is extractable and not sensitive; private key
     /// components are never shown.
@@ -775,6 +877,16 @@ public:
     /// update entry naming the version it read, retried on a race.
     auto set_attribute_value(app_id app, CK_SESSION_HANDLE h, CK_OBJECT_HANDLE object,
                              const attribute_map& changes) -> ck_result<void> {
+        const auto t0 = audit_clock::now();
+        auto label = _opt.audit ? label_of(app, h, object) : std::string();
+        auto r = set_attribute_value_unaudited(app, h, object, changes);
+        audit_object("set_attribute_value", app, h, object, std::move(label), rv_of(r), t0);
+        return r;
+    }
+
+private:
+    auto set_attribute_value_unaudited(app_id app, CK_SESSION_HANDLE h, CK_OBJECT_HANDLE object,
+                                       const attribute_map& changes) -> ck_result<void> {
         auto ctx = context(app, h);
         if (!ctx) {
             return unexpected(ctx.error());
@@ -842,10 +954,20 @@ public:
         return unexpected(CKR_DEVICE_ERROR);
     }
 
+public:
     /// C_CreateObject: a key, data object or certificate from the caller's
     /// template (object_import.hpp). Secret parts are sealed for a token
     /// object and never kept in the record.
     auto create_object(app_id app, CK_SESSION_HANDLE h, const attribute_map& tmpl)
+        -> ck_result<CK_OBJECT_HANDLE> {
+        const auto t0 = audit_clock::now();
+        auto r = create_object_unaudited(app, h, tmpl);
+        audit_created("create_object", app, h, r, tmpl, std::nullopt, t0);
+        return r;
+    }
+
+private:
+    auto create_object_unaudited(app_id app, CK_SESSION_HANDLE h, const attribute_map& tmpl)
         -> ck_result<CK_OBJECT_HANDLE> {
         auto ctx = context(app, h);
         if (!ctx) {
@@ -876,12 +998,22 @@ public:
         return store_new_object(*ctx, std::move(*o), *token);
     }
 
+public:
     /// C_CopyObject: the object with the template's changes, which may only
     /// be CKA_TOKEN, CKA_PRIVATE, CKA_MODIFIABLE, CKA_DESTROYABLE,
     /// CKA_LABEL, CKA_ID, and the one-way CKA_SENSITIVE and
     /// CKA_EXTRACTABLE moves.
     auto copy_object(app_id app, CK_SESSION_HANDLE h, CK_OBJECT_HANDLE object,
                      const attribute_map& tmpl) -> ck_result<CK_OBJECT_HANDLE> {
+        const auto t0 = audit_clock::now();
+        auto r = copy_object_unaudited(app, h, object, tmpl);
+        audit_created("copy_object", app, h, r, tmpl, std::nullopt, t0);
+        return r;
+    }
+
+private:
+    auto copy_object_unaudited(app_id app, CK_SESSION_HANDLE h, CK_OBJECT_HANDLE object,
+                               const attribute_map& tmpl) -> ck_result<CK_OBJECT_HANDLE> {
         auto ctx = context(app, h);
         if (!ctx) {
             return unexpected(ctx.error());
@@ -953,11 +1085,29 @@ public:
         return store_new_object(*ctx, std::move(copy), *token);
     }
 
+public:
     /// C_WrapKey: the key's value or PKCS#8 encrypted under the wrapping
     /// key, after a read-index round and every wrap rule (CKA_WRAP,
     /// CKA_EXTRACTABLE, CKA_WRAP_WITH_TRUSTED, CKA_WRAP_TEMPLATE).
+    /// The event names the key wrapped.
     auto wrap_key(app_id app, CK_SESSION_HANDLE h, const CK_MECHANISM& mechanism,
                   CK_OBJECT_HANDLE wrapping_key, CK_OBJECT_HANDLE key) -> ck_result<bytes> {
+        const auto t0 = audit_clock::now();
+        auto r = wrap_key_unaudited(app, h, mechanism, wrapping_key, key);
+        if (_opt.audit) {
+            auto e = audit_base("wrap_key", app, h);
+            e.object = key;
+            e.label = label_of(app, h, key);
+            e.mechanism = mechanism.mechanism;
+            emit(std::move(e), rv_of(r), t0);
+        }
+        return r;
+    }
+
+private:
+    auto wrap_key_unaudited(app_id app, CK_SESSION_HANDLE h, const CK_MECHANISM& mechanism,
+                            CK_OBJECT_HANDLE wrapping_key, CK_OBJECT_HANDLE key)
+        -> ck_result<bytes> {
         auto ctx = context(app, h);
         if (!ctx) {
             return unexpected(ctx.error());
@@ -989,11 +1139,23 @@ public:
         return kythira::hsm::wrap(mechanism, *w->key, value->view());
     }
 
+public:
     /// C_UnwrapKey: a new key from wrapped bytes, under the unwrapping
     /// key's CKA_UNWRAP_TEMPLATE.
     auto unwrap_key(app_id app, CK_SESSION_HANDLE h, const CK_MECHANISM& mechanism,
                     CK_OBJECT_HANDLE unwrapping_key, std::span<const std::uint8_t> wrapped,
                     const attribute_map& tmpl) -> ck_result<CK_OBJECT_HANDLE> {
+        const auto t0 = audit_clock::now();
+        auto r = unwrap_key_unaudited(app, h, mechanism, unwrapping_key, wrapped, tmpl);
+        audit_created("unwrap_key", app, h, r, tmpl, mechanism.mechanism, t0);
+        return r;
+    }
+
+private:
+    auto unwrap_key_unaudited(app_id app, CK_SESSION_HANDLE h, const CK_MECHANISM& mechanism,
+                              CK_OBJECT_HANDLE unwrapping_key,
+                              std::span<const std::uint8_t> wrapped, const attribute_map& tmpl)
+        -> ck_result<CK_OBJECT_HANDLE> {
         auto ctx = context(app, h);
         if (!ctx) {
             return unexpected(ctx.error());
@@ -1036,10 +1198,21 @@ public:
         return store_new_object(*ctx, std::move(*o), *token);
     }
 
+public:
     /// C_DeriveKey: a secret key (or, for CKM_HKDF_DATA, a data object)
     /// from the base key, under its CKA_DERIVE_TEMPLATE.
     auto derive_key(app_id app, CK_SESSION_HANDLE h, const CK_MECHANISM& mechanism,
                     CK_OBJECT_HANDLE base_key, const attribute_map& tmpl)
+        -> ck_result<CK_OBJECT_HANDLE> {
+        const auto t0 = audit_clock::now();
+        auto r = derive_key_unaudited(app, h, mechanism, base_key, tmpl);
+        audit_created("derive_key", app, h, r, tmpl, mechanism.mechanism, t0);
+        return r;
+    }
+
+private:
+    auto derive_key_unaudited(app_id app, CK_SESSION_HANDLE h, const CK_MECHANISM& mechanism,
+                              CK_OBJECT_HANDLE base_key, const attribute_map& tmpl)
         -> ck_result<CK_OBJECT_HANDLE> {
         auto ctx = context(app, h);
         if (!ctx) {
@@ -1088,6 +1261,7 @@ public:
         return store_new_object(*ctx, std::move(*o), *token);
     }
 
+public:
     auto find_objects_init(app_id app, CK_SESSION_HANDLE h, const attribute_map& tmpl)
         -> ck_result<void> {
         auto s = session_of(app, h);
@@ -1187,9 +1361,22 @@ public:
 
     /// C_SignInit, C_VerifyInit, C_EncryptInit, C_DecryptInit: the key must
     /// exist, be visible and allow the operation now; it is checked again
-    /// when the operation runs.
+    /// when the operation runs. Counted per client, token, key and kind,
+    /// and sampled into the audit log (audit.hpp).
     auto operation_init(app_id app, CK_SESSION_HANDLE h, op_kind kind,
                         const CK_MECHANISM& mechanism, CK_OBJECT_HANDLE key) -> ck_result<void> {
+        const auto t0 = audit_clock::now();
+        auto r = operation_init_unaudited(app, h, kind, mechanism, key);
+        if (_opt.audit && kind != op_kind::digest) {
+            audit_counted(app, h, kind, mechanism.mechanism, key, rv_of(r), t0);
+        }
+        return r;
+    }
+
+private:
+    auto operation_init_unaudited(app_id app, CK_SESSION_HANDLE h, op_kind kind,
+                                  const CK_MECHANISM& mechanism, CK_OBJECT_HANDLE key)
+        -> ck_result<void> {
         auto s = session_of(app, h);
         if (!s) {
             return unexpected(s.error());
@@ -1231,6 +1418,7 @@ public:
         return {};
     }
 
+public:
     auto digest_init(app_id app, CK_SESSION_HANDLE h, const CK_MECHANISM& mechanism)
         -> ck_result<void> {
         return operation_init(app, h, op_kind::digest, mechanism, CK_INVALID_HANDLE);
@@ -1342,6 +1530,114 @@ public:
 
 private:
     using secure_buffer = std::vector<std::uint8_t, secure_allocator<std::uint8_t>>;
+    using audit_clock = std::chrono::steady_clock;
+
+    template<typename T> [[nodiscard]] static auto rv_of(const ck_result<T>& r) -> CK_RV {
+        return r ? CKR_OK : r.error();
+    }
+
+    [[nodiscard]] static auto label_in(const attribute_map& t) -> std::string {
+        const auto v = t.bytes(CKA_LABEL);
+        return v ? std::string(v->begin(), v->end()) : std::string();
+    }
+
+    /// An object's label as `app` sees it through `h`; empty when it has
+    /// none or cannot be read.
+    [[nodiscard]] auto label_of(app_id app, CK_SESSION_HANDLE h, CK_OBJECT_HANDLE object) const
+        -> std::string {
+        const auto ctx = context(app, h);
+        if (!ctx) {
+            return {};
+        }
+        const auto o = lookup(*ctx, object);
+        return o ? label_in(o->attributes) : std::string();
+    }
+
+    /// An event for a call through session `h`, naming its token when the
+    /// session exists.
+    [[nodiscard]] auto audit_base(std::string_view action, app_id app, CK_SESSION_HANDLE h) const
+        -> audit_event {
+        audit_event e;
+        e.action = action;
+        e.identity = identity_of(app).value_or("");
+        const std::lock_guard lock(_mutex);
+        if (const auto it = _sessions.find(h); it != _sessions.end() && it->second->app == app) {
+            e.token = it->second->token;
+        }
+        return e;
+    }
+
+    void emit(audit_event e, CK_RV rv, audit_clock::time_point started) const {
+        e.rv = rv;
+        e.elapsed =
+            std::chrono::duration_cast<std::chrono::microseconds>(audit_clock::now() - started);
+        _opt.audit(e);
+    }
+
+    void audit_object(std::string_view action, app_id app, CK_SESSION_HANDLE h,
+                      CK_OBJECT_HANDLE object, std::string label, CK_RV rv,
+                      audit_clock::time_point started) const {
+        if (!_opt.audit) {
+            return;
+        }
+        auto e = audit_base(action, app, h);
+        e.object = object;
+        e.label = std::move(label);
+        emit(std::move(e), rv, started);
+    }
+
+    void audit_created(std::string_view action, app_id app, CK_SESSION_HANDLE h,
+                       const ck_result<CK_OBJECT_HANDLE>& r, const attribute_map& tmpl,
+                       std::optional<CK_MECHANISM_TYPE> mechanism,
+                       audit_clock::time_point started) const {
+        if (!_opt.audit) {
+            return;
+        }
+        auto e = audit_base(action, app, h);
+        if (r) {
+            e.object = *r;
+        }
+        e.label = label_in(tmpl);
+        e.mechanism = mechanism;
+        emit(std::move(e), rv_of(r), started);
+    }
+
+    /// Counts an operation's start; logs the first call, then one in
+    /// audit_sample_every with the calls since the last, and every refusal.
+    void audit_counted(app_id app, CK_SESSION_HANDLE h, op_kind kind, CK_MECHANISM_TYPE mechanism,
+                       CK_OBJECT_HANDLE key, CK_RV rv, audit_clock::time_point started) {
+        static constexpr std::array<std::string_view, 5> names{"sign", "verify", "encrypt",
+                                                               "decrypt", "digest"};
+        auto e = audit_base(names.at(static_cast<std::size_t>(kind)), app, h);
+        e.object = key;
+        e.mechanism = mechanism;
+        if (rv == CKR_OK) {
+            const std::lock_guard lock(_audit_mutex);
+            if (_op_counts.size() >= max_op_counts) {
+                _op_counts.clear();  // forget keys long destroyed; counts restart
+            }
+            auto& c = _op_counts[{e.identity, e.token.value_or(0), key, kind}];
+            ++c.calls;
+            const auto every = std::max<std::uint64_t>(_opt.audit_sample_every, 1);
+            e.logged = c.calls == 1 || c.calls % every == 0;
+            if (e.logged) {
+                e.calls = c.calls - c.logged;
+                c.logged = c.calls;
+            } else {
+                e.calls = 1;
+            }
+        }
+        if (e.logged) {
+            e.label = label_of(app, h, key);
+        }
+        emit(std::move(e), rv, started);
+    }
+
+    struct op_count {
+        std::uint64_t calls = 0;
+        std::uint64_t logged = 0;  // calls already reported
+    };
+    static constexpr std::size_t max_op_counts = 65536;
 
     struct operation {
         mechanism_copy mechanism;
@@ -1910,6 +2206,10 @@ private:
 
     mutable std::mutex _cache_mutex;
     std::map<std::pair<std::uint64_t, std::uint64_t>, cached_key> _cache;
+
+    std::mutex _audit_mutex;
+    std::map<std::tuple<std::string, std::uint64_t, CK_OBJECT_HANDLE, op_kind>, op_count>
+        _op_counts;
 };
 
 }  // namespace kythira::hsm

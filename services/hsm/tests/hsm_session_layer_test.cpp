@@ -5,13 +5,15 @@
 // the session layer and the native client over a store applied to
 // directly: applications, bindings, sessions and logins, replicated PIN
 // counters, token and session objects, the read-index check before every
-// use, the key cache, multi-part operations and sealing.
+// use, the key cache, multi-part operations and sealing; and task 14's
+// audit events.
 
 #define BOOST_TEST_MODULE hsm_session_layer_test
 #include <boost/test/unit_test.hpp>
 
 #include "hsm_test_node.hpp"
 
+#include <kythira/hsm/audit_json.hpp>
 #include <kythira/hsm/key_store.hpp>
 #include <kythira/hsm/key_vault.hpp>
 #include <kythira/hsm/native_client.hpp>
@@ -22,8 +24,11 @@
 #include <array>
 #include <cstdint>
 #include <memory>
+#include <mutex>
+#include <optional>
 #include <ostream>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace hsm = kythira::hsm;
@@ -627,4 +632,104 @@ BOOST_AUTO_TEST_CASE(no_plaintext_key_reaches_the_store) {
                 !contains(std::span(reinterpret_cast<const std::uint8_t*>(v.data()), v.size())));
             return true;
         });
+}
+
+// Task 14 (Requirement 11.1): logins, object creation, attribute changes
+// and destruction each give an event naming the client, token, object and
+// label and the result; signing is counted and sampled; no event carries a
+// PIN.
+BOOST_AUTO_TEST_CASE(calls_are_audited_and_signing_sampled) {
+    std::mutex mu;
+    std::vector<hsm::audit_event> events;
+    auto o = options();
+    o.audit_sample_every = 2;
+    o.audit = [&](const hsm::audit_event& e) {
+        const std::scoped_lock lock(mu);
+        events.push_back(e);
+    };
+    node n(o);
+    auto& c = *n.client;
+    const auto take = [&] {
+        const std::scoped_lock lock(mu);
+        return std::exchange(events, {});
+    };
+    // The fixture's setup: init_token, SO login, init_pin, user login.
+    auto setup = take();
+    BOOST_REQUIRE(setup.size() == 4U);
+    BOOST_TEST(setup[0].action == "init_token");
+    BOOST_TEST(setup[0].label == "alpha");
+    BOOST_TEST(setup[1].action == "login_so");
+    BOOST_TEST(setup[2].action == "init_pin");
+    BOOST_TEST(setup[3].action == "login");
+    for (const auto& e : setup) {
+        BOOST_TEST(e.identity == "app-a");
+        BOOST_TEST((e.token == std::optional<std::uint64_t>(k_token)));
+        BOOST_TEST(e.rv == CKR_OK);
+        const auto line = hsm::audit_line(e, 1);
+        BOOST_TEST(line.find(k_user_pin) == std::string::npos);
+        BOOST_TEST(line.find(k_so_pin) == std::string::npos);
+    }
+
+    BOOST_REQUIRE(rv(c.logout(n.session)) == CKR_OK);
+    BOOST_TEST(rv(c.login(n.session, CKU_USER, "wrong-pin")) == CKR_PIN_INCORRECT);
+    BOOST_REQUIRE(rv(c.login(n.session, CKU_USER, k_user_pin)) == CKR_OK);
+    auto logins = take();
+    BOOST_REQUIRE(logins.size() == 2U);
+    BOOST_TEST(logins[0].rv == CKR_PIN_INCORRECT);
+    BOOST_TEST(hsm::audit_line(logins[0], 1).find(R"("result":"error")") != std::string::npos);
+    BOOST_TEST(logins[1].rv == CKR_OK);
+
+    hsm::attribute_map pub;
+    pub.set_bool(CKA_TOKEN, true);
+    pub.set_bytes(CKA_EC_PARAMS, k_p256);
+    pub.set_bool(CKA_VERIFY, true);
+    hsm::attribute_map priv;
+    priv.set_bool(CKA_TOKEN, true);
+    priv.set_bool(CKA_SIGN, true);
+    priv.set_bytes(CKA_LABEL, data("signer"));
+    const auto pair = c.generate_key_pair(n.session, k_ec_gen, pub, priv);
+    BOOST_REQUIRE(pair.has_value());
+    auto made = take();
+    BOOST_REQUIRE(made.size() == 1U);
+    BOOST_TEST(made[0].action == "generate_key_pair");
+    BOOST_TEST((made[0].object == std::optional<CK_OBJECT_HANDLE>(pair->second)));
+    BOOST_TEST(made[0].label == "signer");
+    BOOST_TEST((made[0].mechanism == std::optional<CK_MECHANISM_TYPE>(CKM_EC_KEY_PAIR_GEN)));
+
+    // Four signatures: the first and every second are logged, standing for
+    // the calls since the last; verification is counted on its own.
+    for (int i = 0; i < 4; ++i) {
+        BOOST_REQUIRE(n.sign(pair->second, "msg").has_value());
+    }
+    auto signs = take();
+    BOOST_REQUIRE(signs.size() == 4U);
+    std::vector<std::uint64_t> logged_calls;
+    for (const auto& e : signs) {
+        BOOST_TEST(e.action == "sign");
+        BOOST_TEST((e.object == std::optional<CK_OBJECT_HANDLE>(pair->second)));
+        if (e.logged) {
+            BOOST_TEST(e.label == "signer");
+            logged_calls.push_back(e.calls);
+        }
+    }
+    BOOST_TEST(logged_calls == (std::vector<std::uint64_t>{1, 1, 2}),
+               boost::test_tools::per_element());
+    // A refused start is always logged.
+    BOOST_TEST(rv(c.sign_init(n.session, k_ecdsa, pair->first)) == CKR_KEY_FUNCTION_NOT_PERMITTED);
+    auto refused = take();
+    BOOST_REQUIRE(refused.size() == 1U);
+    BOOST_TEST(refused[0].logged);
+    BOOST_TEST(refused[0].rv == CKR_KEY_FUNCTION_NOT_PERMITTED);
+
+    hsm::attribute_map rename;
+    rename.set_bytes(CKA_LABEL, data("renamed"));
+    BOOST_REQUIRE(rv(c.set_attribute_value(n.session, pair->second, rename)) == CKR_OK);
+    BOOST_REQUIRE(rv(c.destroy_object(n.session, pair->second)) == CKR_OK);
+    auto changed = take();
+    BOOST_REQUIRE(changed.size() == 2U);
+    BOOST_TEST(changed[0].action == "set_attribute_value");
+    BOOST_TEST(changed[0].label == "signer");
+    BOOST_TEST(changed[1].action == "destroy_object");
+    BOOST_TEST(changed[1].label == "renamed");
+    BOOST_TEST((changed[1].object == std::optional<CK_OBJECT_HANDLE>(pair->second)));
 }

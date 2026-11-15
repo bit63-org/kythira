@@ -26,6 +26,7 @@
 /// caller implements with whatever lock guards it: `iam_node`'s Raft node,
 /// or a front end's replica.
 
+#include <raft/audit_log.hpp>
 #include <raft/aws_request_authorizer.hpp>
 #include <raft/sigv4_verifier.hpp>
 
@@ -39,19 +40,15 @@
 
 #include <boost/json.hpp>
 
-#include <atomic>
 #include <chrono>
-#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
-#include <deque>
 #include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
 #include <string_view>
-#include <thread>
 #include <utility>
 #include <vector>
 
@@ -60,89 +57,9 @@ namespace kythira::iam {
 /// Runs `body` with the state machine held stable for reading.
 using state_reader = std::function<void(const std::function<void(const iam_state_machine&)>&)>;
 
-/// The audit trail of decisions: a bounded queue and one writer thread.
-class audit_log {
-public:
-    using sink = std::function<void(std::string_view line)>;
-
-    explicit audit_log(sink out, std::size_t capacity = 8192)
-        : _out(std::move(out)), _capacity(capacity), _writer([this] { run(); }) {}
-
-    audit_log(const audit_log&) = delete;
-    auto operator=(const audit_log&) -> audit_log& = delete;
-    audit_log(audit_log&&) = delete;
-    auto operator=(audit_log&&) -> audit_log& = delete;
-
-    ~audit_log() {
-        {
-            const std::lock_guard lock(_mu);
-            _stopping = true;
-        }
-        _cv.notify_one();
-        _writer.join();
-    }
-
-    /// Queues a line, or counts it as dropped when the queue is full.
-    void post(std::string line) {
-        {
-            const std::lock_guard lock(_mu);
-            if (_queue.size() >= _capacity) {
-                _dropped.fetch_add(1, std::memory_order_relaxed);
-                return;
-            }
-            _queue.push_back(std::move(line));
-        }
-        _cv.notify_one();
-    }
-
-    /// Lines dropped because the queue was full.
-    [[nodiscard]] auto dropped() const noexcept -> std::uint64_t {
-        return _dropped.load(std::memory_order_relaxed);
-    }
-
-    /// Blocks until every queued line has reached the sink (tests, shutdown).
-    void flush() {
-        std::unique_lock lock(_mu);
-        _idle_cv.wait(lock, [&] { return _queue.empty() && !_writing; });
-    }
-
-private:
-    void run() {
-        std::uint64_t reported = 0;
-        std::unique_lock lock(_mu);
-        for (;;) {
-            _cv.wait(lock, [&] { return _stopping || !_queue.empty(); });
-            if (_queue.empty() && _stopping) {
-                return;
-            }
-            auto batch = std::move(_queue);
-            _queue.clear();
-            _writing = true;
-            lock.unlock();
-            for (const auto& line : batch) {
-                _out(line);
-            }
-            if (const auto d = dropped(); d != reported) {
-                _out(R"({"audit":"dropped","lines":)" + std::to_string(d - reported) + "}");
-                reported = d;
-            }
-            lock.lock();
-            _writing = false;
-            _idle_cv.notify_all();
-        }
-    }
-
-    sink _out;
-    std::size_t _capacity;
-    std::mutex _mu;
-    std::condition_variable _cv;
-    std::condition_variable _idle_cv;
-    std::deque<std::string> _queue;
-    bool _stopping = false;
-    bool _writing = false;
-    std::atomic<std::uint64_t> _dropped{0};
-    std::thread _writer;  // last: starts once the rest is built
-};
+/// The audit trail of decisions: a bounded queue and one writer thread
+/// (raft/audit_log.hpp).
+using audit_log = kythira::audit_log;
 
 namespace detail {
 

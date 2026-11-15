@@ -410,6 +410,32 @@ task is one PR unless noted.
   - Audit log with optional ledger sink; metrics per 11.3; `hsm:` actions
     on token ARNs when IAM is present
   - _Requirements: 8.4, 11.1-11.3_
+  - [x] 14a. The audit log and metrics: the session layer reports every
+    login, PIN change, token initialization, object creation, attribute
+    change, destruction and wrap as an `audit_event`
+    (`include/kythira/hsm/audit.hpp`), counts signing, verification,
+    encryption and decryption per client, token, key and operation and
+    reports the first call and one in every `KYTHIRA_HSM_AUDIT_SAMPLE_EVERY`
+    (1000) with the calls it stands for, and reports every refusal; the
+    operator API reports every change and every refusal, and the module
+    the vault sealing and a node unseal. Events name who, the token, the
+    object's handle and label, the mechanism and the result, never a key,
+    PIN, share or data. `cmd/hsm_node/hsm_audit.hpp` formats each as one
+    JSON line (`audit_json.hpp`) and queues it on the bounded
+    `kythira::audit_log` (moved from IAM to `include/raft/audit_log.hpp`,
+    which now also hands batches and appends a dropped-lines record) for
+    stderr, `file:PATH` or `off` (`KYTHIRA_HSM_AUDIT`), and, with
+    `KYTHIRA_HSM_AUDIT_LEDGER_URL`, a verifiable ledger
+    (`audit_ledger.hpp`: one transaction per batch, one document per line,
+    the table made on first use, lines kept while the ledger is down and a
+    `ledger_dropped` document recording any gap). Every event, sampled or
+    not, feeds the metrics: operations by action, mechanism and result,
+    latency, failed logins, refusals for a locked PIN, audit lines
+    dropped and ledger lines pending, beside the host's replica lag and
+    read-index wait. Tests: `hsm_audit_test`, and audit cases in
+    `hsm_session_layer_test` and `hsm_admin_test`.
+  - [ ] 14b. `hsm:` actions on token ARNs when IAM is co-located or
+    reachable (Requirement 8.4).
 
 - [ ] 15. Documentation
   - `services/hsm/README.md` and `doc/hsm.md` opening with the threat model
