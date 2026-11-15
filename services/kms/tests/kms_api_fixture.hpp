@@ -178,6 +178,8 @@ struct fixture {
         .rotate = [this](std::string_view id, kms::rotation_type t) { return jobs.rotate(id, t); },
         .ensure_managed = [this](std::string_view account,
                                  const kms::managed_service& s) { return ensure(account, s); },
+        .ensure_owned = [this](std::string_view account,
+                               const kms::managed_service& s) { return ensure_owned(account, s); },
     }};
 
     kms::grants_api<catalog_t> grants{kms::api_deps<catalog_t>{
@@ -199,6 +201,8 @@ struct fixture {
         .hsm = [this] { return hsm_bound ? hsm : nullptr; },
         .ensure_managed = [this](std::string_view account,
                                  const kms::managed_service& s) { return ensure(account, s); },
+        .ensure_owned = [this](std::string_view account,
+                               const kms::managed_service& s) { return ensure_owned(account, s); },
     }};
 
     kms::signing_api<catalog_t> signing{kms::crypto_deps<catalog_t>{
@@ -227,7 +231,16 @@ struct fixture {
 
     /// Makes an AWS managed key as the module does (kms_managed.hpp).
     auto ensure(std::string_view account, const kms::managed_service& s) -> kms::key_result {
-        const kms::managed_deps<catalog_t> d{
+        return kms::ensure_managed_key(managed(), account, s);
+    }
+
+    /// Makes a service's owned key as the module does.
+    auto ensure_owned(std::string_view account, const kms::managed_service& s) -> kms::key_result {
+        return kms::ensure_owned_key(managed(), account, s);
+    }
+
+    auto managed() -> kms::managed_deps<catalog_t> {
+        return kms::managed_deps<catalog_t>{
             .catalog =
                 [this] {
                     return leaderless
@@ -242,7 +255,6 @@ struct fixture {
             .partition = "aws",
             .region = "us-east-1",
         };
-        return kms::ensure_managed_key(d, account, s);
     }
 
     auto propose(const std::vector<std::byte>& c) -> kms::catalog_status {

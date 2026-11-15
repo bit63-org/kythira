@@ -108,7 +108,16 @@ enum class key_state : std::uint8_t {
 enum class key_manager : std::uint8_t {
     customer = 1,
     aws = 2,
+    /// A consuming service's owned key (Requirement 10.3): listed in no
+    /// account and used only by that service (kms_managed.hpp).
+    owned = 3,
 };
+
+/// Whether a service manages `m`, not the customer: AWS managed and owned
+/// keys refuse every change a customer could ask for.
+[[nodiscard]] constexpr auto service_managed(key_manager m) noexcept -> bool {
+    return m != key_manager::customer;
+}
 
 enum class rotation_type : std::uint8_t {
     initial = 0,
@@ -307,7 +316,7 @@ struct key_record {
         k.usage =
             detail::enum_in(r.u8(), key_usage::encrypt_decrypt, key_usage::generate_verify_mac);
         k.state = detail::enum_in(r.u8(), key_state::creating, key_state::pending_deletion);
-        k.manager = detail::enum_in(r.u8(), key_manager::customer, key_manager::aws);
+        k.manager = detail::enum_in(r.u8(), key_manager::customer, key_manager::owned);
         k.creation_ms = r.u64();
         k.deletion_ms = r.u64();
         k.pending_window_days = r.u32();
@@ -1002,7 +1011,7 @@ private:
         k.spec = detail::enum_in(r.u8(), key_spec::symmetric_default, key_spec::hmac_512);
         k.usage =
             detail::enum_in(r.u8(), key_usage::encrypt_decrypt, key_usage::generate_verify_mac);
-        k.manager = detail::enum_in(r.u8(), key_manager::customer, key_manager::aws);
+        k.manager = detail::enum_in(r.u8(), key_manager::customer, key_manager::owned);
         k.creation_ms = r.u64();
         k.policy = r.str();
         const auto tags = detail::get_map(r);
@@ -1026,7 +1035,10 @@ private:
         }
         k.state = key_state::creating;
         put_key(batch, k);
-        put(batch, account_key_index(k.account, k.key_id), {});
+        if (k.manager != key_manager::owned) {
+            // An owned key is listed in no account (Requirement 10.3).
+            put(batch, account_key_index(k.account, k.key_id), {});
+        }
         for (const auto& [tk, tv] : tags) {
             put(batch, key_child_prefix('t', k.key_id) + tk, tv);
         }
@@ -1046,8 +1058,8 @@ private:
         }
         k->state = key_state::enabled;
         k->current_version = 1;
-        if (k->manager == key_manager::aws) {
-            // AWS managed keys rotate every year, set here so no command
+        if (service_managed(k->manager)) {
+            // AWS managed and owned keys rotate every year, set here so no command
             // a customer could send turns it on or off (Requirement 10.2).
             k->rotation_enabled = true;
             k->rotation_period_days = k_managed_rotation_days;
@@ -1072,7 +1084,7 @@ private:
         if (k->state != key_state::enabled && k->state != key_state::disabled) {
             return catalog_status::invalid_state;
         }
-        if (k->manager == key_manager::aws) {
+        if (service_managed(k->manager)) {
             return catalog_status::rejected;  // AWS managed keys stay enabled
         }
         k->state = enabled ? key_state::enabled : key_state::disabled;
@@ -1091,7 +1103,7 @@ private:
         if (k->state == key_state::creating || k->state == key_state::pending_deletion) {
             return catalog_status::invalid_state;
         }
-        if (k->manager == key_manager::aws) {
+        if (service_managed(k->manager)) {
             return catalog_status::rejected;  // AWS's description, not the customer's
         }
         k->description = std::move(description);
@@ -1126,7 +1138,7 @@ private:
         if (!k) {
             return catalog_status::not_found;
         }
-        if (k->manager == key_manager::aws) {
+        if (service_managed(k->manager)) {
             return catalog_status::rejected;  // AWS managed keys are never deleted
         }
         if (k->state != key_state::enabled && k->state != key_state::disabled) {
@@ -1238,7 +1250,7 @@ private:
         if (!k) {
             return catalog_status::not_found;
         }
-        if (!is_symmetric(k->spec) || k->manager == key_manager::aws) {
+        if (!is_symmetric(k->spec) || service_managed(k->manager)) {
             return catalog_status::rejected;
         }
         if (k->state != key_state::enabled && k->state != key_state::disabled) {
@@ -1355,7 +1367,7 @@ private:
             return catalog_status::not_found;
         }
         if (k->state == key_state::creating || k->state == key_state::pending_deletion ||
-            k->manager == key_manager::aws) {
+            service_managed(k->manager)) {
             return catalog_status::invalid_state;
         }
         auto merged = tags(id);
@@ -1379,7 +1391,7 @@ private:
             return catalog_status::not_found;
         }
         if (k->state == key_state::creating || k->state == key_state::pending_deletion ||
-            k->manager == key_manager::aws) {
+            service_managed(k->manager)) {
             return catalog_status::invalid_state;
         }
         for (const auto& n : names) {

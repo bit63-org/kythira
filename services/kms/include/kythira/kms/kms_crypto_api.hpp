@@ -66,6 +66,9 @@ template<typename Catalog> struct crypto_deps {
     /// Makes an AWS managed key on first use (ensure_managed_key); empty:
     /// none is made.
     std::function<key_result(std::string_view, const managed_service&)> ensure_managed;
+    /// Makes a consuming service's owned key on first use
+    /// (ensure_owned_key); empty: none is made.
+    std::function<key_result(std::string_view, const managed_service&)> ensure_owned = {};
 };
 
 /// Plaintext bytes that are wiped when they go.
@@ -775,7 +778,8 @@ private:
         if (!c) {
             return c;
         }
-        const auto made = make_managed_if_named(ctx, **c, in, member, _d.ensure_managed);
+        const auto made =
+            make_managed_if_named(ctx, **c, in, member, _d.ensure_managed, _d.ensure_owned);
         if (!made) {
             return made.error();
         }

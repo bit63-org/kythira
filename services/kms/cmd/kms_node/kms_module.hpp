@@ -536,6 +536,11 @@ private:
                                       const kythira::kms::managed_service& s) {
             return kythira::kms::ensure_managed_key(mdeps, account, s);
         };
+        // Consuming services' owned keys, likewise (Requirement 10.3).
+        deps.ensure_owned = [mdeps](std::string_view account,
+                                    const kythira::kms::managed_service& s) {
+            return kythira::kms::ensure_owned_key(mdeps, account, s);
+        };
         _api = std::make_unique<kythira::kms::key_management_api<catalog_type>>(deps);
         _grants = std::make_unique<kythira::kms::grants_api<catalog_type>>(deps);
         const kythira::kms::crypto_deps<catalog_type> cdeps{
@@ -543,6 +548,7 @@ private:
             .barrier = barrier,
             .hsm = [this] { return store(); },
             .ensure_managed = deps.ensure_managed,
+            .ensure_owned = deps.ensure_owned,
         };
         _crypto = std::make_unique<kythira::kms::crypto_api<catalog_type>>(cdeps);
         _signing = std::make_unique<kythira::kms::signing_api<catalog_type>>(cdeps);

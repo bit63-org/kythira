@@ -7,6 +7,10 @@
 // customer change is allowed; they rotate every year; and making one is
 // idempotent, survives a failed attempt, and finishes a key another member
 // made but did not alias.
+//
+// Requirement 10.3: owned keys. A consuming service's
+// alias/aws/<service>/owned is made on first use in the caller's account,
+// answers only that service, and is listed and visible nowhere else.
 
 #define BOOST_TEST_MODULE kms_managed_test
 
@@ -32,6 +36,27 @@ auto managed_id(std::string_view service, unsigned attempt = 0) -> std::string {
 
 auto describe(fixture& f, std::string_view key) -> reply {
     return f.call("DescribeKey", kid(key));
+}
+
+/// The account's root, as a consuming service forwards its caller.
+auto account_root(std::string_view account) -> kythira::aws_auth::principal_context {
+    kythira::aws_auth::principal_context p;
+    p.type = kythira::aws_auth::principal_type::root;
+    p.account = std::string(account);
+    p.arn = "arn:aws:iam::" + std::string(account) + ":root";
+    p.userid = std::string(account);
+    return p;
+}
+
+/// `op` through `service` for `account`'s root, as kms.client calls.
+auto via(fixture& f, std::string_view service, std::string_view op, const std::string& body,
+         std::string_view account = k_account) -> reply {
+    return fixture::answer(
+        f.fe.handle_service_call(op, body, account_root(account), std::string(service), "::1"));
+}
+
+auto owned_id(std::string_view service, std::string_view account = k_account) -> std::string {
+    return kms::owned_key_id(account, service, 0);
 }
 
 }  // namespace
@@ -189,4 +214,92 @@ BOOST_AUTO_TEST_CASE(derived_ids_are_stable_and_distinct) {
     const auto id = managed_id("kinesis");
     BOOST_TEST(id.size() == 36U);
     BOOST_TEST(id[14] == '8');  // UUID version 8
+}
+
+BOOST_AUTO_TEST_CASE(a_service_owned_key_is_made_on_first_use) {
+    fixture f;
+    const auto name = kms::owned_key_name("dynamodb");
+    BOOST_TEST(name == "alias/aws/dynamodb/owned");
+    const auto e =
+        via(f, "dynamodb", "GenerateDataKey", R"({"KeyId":")" + name + R"(","KeySpec":"AES_256"})");
+    BOOST_REQUIRE_MESSAGE(e.status == 200U, e.type() + ": " + e.message());
+    BOOST_TEST(e.str("KeyId") == fixture::arn(owned_id("dynamodb")));
+    const auto k = f.sm.key(owned_id("dynamodb"));
+    BOOST_REQUIRE(k.has_value());
+    BOOST_TEST((k->manager == kms::key_manager::owned));
+    BOOST_TEST(k->rotation_enabled);
+
+    // The same key again, by name or id, and it opens what it made.
+    const auto again =
+        via(f, "dynamodb", "Encrypt", R"({"KeyId":")" + name + R"(","Plaintext":"aGk="})");
+    BOOST_REQUIRE_MESSAGE(again.status == 200U, again.type());
+    BOOST_TEST(again.str("KeyId") == fixture::arn(owned_id("dynamodb")));
+    const auto d = via(f, "dynamodb", "Decrypt",
+                       R"({"CiphertextBlob":")" + again.str("CiphertextBlob") + R"("})");
+    BOOST_REQUIRE_MESSAGE(d.status == 200U, d.type());
+    BOOST_TEST(d.str("Plaintext") == "aGk=");
+    const auto md = via(f, "dynamodb", "DescribeKey", kid(owned_id("dynamodb")));
+    BOOST_REQUIRE(md.status == 200U);
+    BOOST_TEST(md.str("KeyMetadata", "KeyManager") == "AWS");
+
+    // Each account has its own.
+    const auto other =
+        via(f, "dynamodb", "Encrypt", R"({"KeyId":")" + name + R"(","Plaintext":"aGk="})", k_other);
+    BOOST_REQUIRE_MESSAGE(other.status == 200U, other.type());
+    BOOST_TEST(other.str("KeyId").find(owned_id("dynamodb", k_other)) != std::string::npos);
+    BOOST_TEST(owned_id("dynamodb") != owned_id("dynamodb", k_other));
+    BOOST_TEST(owned_id("dynamodb") != managed_id("dynamodb"));
+}
+
+BOOST_AUTO_TEST_CASE(an_owned_key_answers_only_its_own_service) {
+    fixture f;
+    const auto name = kms::owned_key_name("dynamodb");
+    const auto e =
+        via(f, "dynamodb", "Encrypt", R"({"KeyId":")" + name + R"(","Plaintext":"aGk="})");
+    BOOST_REQUIRE(e.status == 200U);
+    const auto blob = R"({"CiphertextBlob":")" + e.str("CiphertextBlob") + R"("})";
+    const auto id = owned_id("dynamodb");
+
+    // Another service: no such key, by name, id or ciphertext.
+    BOOST_TEST(
+        via(f, "kinesis", "Encrypt", R"({"KeyId":")" + name + R"(","Plaintext":"aGk="})").type() ==
+        "NotFoundException");
+    BOOST_TEST(via(f, "kinesis", "DescribeKey", kid(id)).type() == "NotFoundException");
+    BOOST_TEST(via(f, "kinesis", "Decrypt", blob).status != 200U);
+    // Kinesis naming it does not make Kinesis's own owned key either.
+    BOOST_TEST(!f.sm.key(owned_id("kinesis")).has_value());
+
+    // The account itself, directly: not listed, not visible, not usable,
+    // and no change to it is allowed.
+    BOOST_TEST(f.call("ListKeys", "{}").body.at("Keys").as_array().empty());
+    BOOST_TEST(describe(f, id).type() == "NotFoundException");
+    BOOST_TEST(describe(f, name).type() == "NotFoundException");
+    BOOST_TEST(f.call("Decrypt", blob).status != 200U);
+    for (const auto& [op, body] : std::initializer_list<std::pair<const char*, std::string>>{
+             {"DisableKey", kid(id)},
+             {"ScheduleKeyDeletion", kid(id)},
+             {"DisableKeyRotation", kid(id)},
+             {"GetKeyPolicy", R"({"KeyId":")" + id + R"(","PolicyName":"default"})"},
+             {"CreateAlias", R"({"AliasName":"alias/mine","TargetKeyId":")" + id + R"("})"},
+             {"CreateGrant", R"({"KeyId":")" + id +
+                                 R"(","GranteePrincipal":"arn:aws:iam::111122223333:root",)"
+                                 R"("Operations":["Decrypt"]})"},
+         }) {
+        const auto r = f.call(op, body);
+        BOOST_TEST(r.status != 200U, op << " was allowed");
+    }
+    // The catalog refuses the changes too, whoever asks.
+    BOOST_TEST((kms::service_managed(kms::key_manager::owned)));
+    BOOST_TEST(via(f, "dynamodb", "Decrypt", blob).status == 200U);
+}
+
+BOOST_AUTO_TEST_CASE(owned_names_of_unknown_services_are_not_found) {
+    fixture f;
+    BOOST_TEST(!kms::owned_service_of("alias/aws/s3/owned").has_value());
+    BOOST_TEST(!kms::owned_service_of("alias/aws//owned").has_value());
+    BOOST_TEST(!kms::owned_service_of("alias/aws/dynamodb").has_value());
+    BOOST_TEST(kms::owned_service_of("alias/aws/kinesis/owned")->name == "kinesis");
+    BOOST_TEST(
+        via(f, "s3", "Encrypt", R"({"KeyId":"alias/aws/s3/owned","Plaintext":"aGk="})").type() ==
+        "NotFoundException");
 }
