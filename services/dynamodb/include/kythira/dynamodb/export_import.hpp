@@ -1695,6 +1695,7 @@ private:
             c.gsis = gsis;
             c.log_changes = d->logs_changes();
             c.stream_ms = d->stream_label();
+            c.sealed = d->seals_items();
             c.region = d->region;
             if (_backend.write(c).outcome == item_result::status::ok) {
                 ++r.imported_items;

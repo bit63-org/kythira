@@ -42,6 +42,7 @@
 #include <kythira/dynamodb/expr_eval.hpp>
 #include <kythira/dynamodb/global_index.hpp>
 #include <kythira/dynamodb/item_codec.hpp>
+#include <kythira/dynamodb/item_sealing.hpp>
 #include <kythira/dynamodb/key_layout.hpp>
 #include <kythira/dynamodb/local_index.hpp>
 
@@ -140,6 +141,11 @@ struct item_command {
         /// that stamp is newer than the item's own, AWS's last-writer-wins
         /// rule; otherwise nothing changes.
         replicate = 12,
+        /// Background re-sealing of a table that gained a key (KMS task
+        /// 16): the value at engine key `target` (an item, an LSI or a GSI
+        /// entry) is stored sealed if it is still clear. Nothing else
+        /// changes: no version, no change record. Always written sealed.
+        reseal = 13,
     };
 
     kind op = kind::put;
@@ -182,6 +188,11 @@ struct item_command {
     std::string region;
     /// `replicate`: the other replica deleted the item.
     bool replica_delete = false;
+    /// The table's item values are sealed under its table key (KMS task
+    /// 16, `item_sealing.hpp`): the item, its LSI entries, or (`index_put`)
+    /// the GSI entry are stored sealed. The proposer sets it from the
+    /// table's descriptor, so every replica seals the same writes.
+    bool sealed = false;
 
     friend auto operator==(const item_command&, const item_command&) -> bool = default;
 };
@@ -193,9 +204,10 @@ struct item_command {
 }
 
 /// The engine key a command is routed by: the item's base key, or an
-/// index command's target. Nothing when a key attribute is missing.
+/// index or re-seal command's target. Nothing when a key attribute is
+/// missing.
 [[nodiscard]] inline auto command_key(const item_command& c) -> std::optional<std::string> {
-    if (is_index_op(c.op)) {
+    if (is_index_op(c.op) || c.op == item_command::kind::reseal) {
         return c.target;
     }
     return base_item_key(c.table_id, c.schema, c.payload);
@@ -240,7 +252,10 @@ namespace item_sm_detail {
 /// the region and `replicate` (task 22). A command without change log
 /// fields is still written as 2, and one without a region as 3, so
 /// replicas not yet upgraded keep applying writes to other tables.
-inline constexpr std::uint8_t k_command_format_version = 4;
+///
+/// Version 5 adds a trailing flags byte (`sealed`, KMS task 16); a command
+/// that seals nothing is still written as 4 or lower.
+inline constexpr std::uint8_t k_command_format_version = 5;
 inline constexpr std::uint8_t k_result_format_version = 1;
 
 inline void put_u64(std::string& out, std::uint64_t v) {
@@ -307,11 +322,15 @@ inline void put_schema(std::string& out, const key_schema& s) {
 [[nodiscard]] inline auto encode_item_command(const item_command& c) -> std::string {
     using namespace item_sm_detail;
     std::string out;
+    const bool sealed = c.sealed || c.op == item_command::kind::reseal;
     const bool regional =
-        !c.region.empty() || c.replica_delete || c.op == item_command::kind::replicate;
+        sealed || !c.region.empty() || c.replica_delete || c.op == item_command::kind::replicate;
     const bool logged = regional || c.log_changes || c.ttl_delete || c.written_ms != 0 ||
                         c.stream_ms != 0 || c.op == item_command::kind::trim_change_log;
-    out.push_back(static_cast<char>(regional ? k_command_format_version : logged ? 3 : 2));
+    out.push_back(static_cast<char>(sealed     ? k_command_format_version
+                                    : regional ? 4
+                                    : logged   ? 3
+                                               : 2));
     out.push_back(static_cast<char>(c.op));
     put_u64(out, c.table_id);
     put_schema(out, c.schema);
@@ -336,6 +355,9 @@ inline void put_schema(std::string& out, const key_schema& s) {
     }
     if (regional) {
         detail::put_bytes(out, c.region);
+    }
+    if (sealed) {
+        out.push_back('\1');
     }
     return out;
 }
@@ -366,8 +388,9 @@ enum class item_command_status : std::uint8_t {
     if (op == 0) {
         return item_command_status::malformed;
     }
-    // trim_change_log came in version 3, replicate in 4.
-    const auto last = version >= 4   ? item_command::kind::replicate
+    // trim_change_log came in version 3, replicate in 4, reseal in 5.
+    const auto last = version >= 5   ? item_command::kind::reseal
+                      : version >= 4 ? item_command::kind::replicate
                       : version >= 3 ? item_command::kind::trim_change_log
                                      : item_command::kind::index_mark;
     if (op > static_cast<std::uint8_t>(last)) {
@@ -435,6 +458,16 @@ enum class item_command_status : std::uint8_t {
             return item_command_status::malformed;
         }
         c.region = std::move(*region);
+    }
+    if (version >= 5) {
+        const auto flags = r.byte();
+        if (!flags || *flags > 1) {
+            return item_command_status::malformed;
+        }
+        c.sealed = (*flags & 1U) != 0;
+        if (c.op == item_command::kind::reseal && !c.sealed) {
+            return item_command_status::malformed;
+        }
     }
     if (!r.done()) {
         return item_command_status::malformed;
@@ -572,6 +605,11 @@ public:
         _fetch = std::move(fetch);
     }
 
+    /// How this group seals and opens item values (KMS task 16): the
+    /// node's table key ring. Without one, a sealed write or a sealed
+    /// value throws `table_key_unavailable`.
+    auto set_sealer(item_sealer sealer) -> void { _sealer = std::move(sealer); }
+
     // -- persistent_state_machine ------------------------------------------
 
     auto open(engine_type& engine, const kythira::key_range& range) -> void {
@@ -596,9 +634,17 @@ public:
             return {};
         }
         kythira::write_batch batch;
-        auto out = stage(entry, batch);
-        commit_staged(batch, index);
-        return out;
+        try {
+            auto out = stage(entry, batch);
+            commit_staged(batch, index);
+            return out;
+        } catch (...) {
+            // A table key not yet on this node (or any other failure):
+            // nothing reached the engine, and the halted group retries the
+            // entry from scratch.
+            discard_staged();
+            throw;
+        }
     }
 
     // -- persistent_staged_state_machine --------------------------------------
@@ -621,6 +667,8 @@ public:
             _staged_trim = std::max(_staged_trim, c.written_ms);
         } else if (is_index_op(c.op)) {
             result = index_write(c, batch);
+        } else if (c.op == item_command::kind::reseal) {
+            reseal(c, batch);
         } else {
             result = write_item(c, batch, &_staged_changes);
         }
@@ -686,7 +734,8 @@ public:
         -> kythira::txn_validation {
         const auto c = decode_entry(entry);
         if (c.op == item_command::kind::drop_table_step ||
-            c.op == item_command::kind::trim_change_log || is_index_op(c.op)) {
+            c.op == item_command::kind::trim_change_log || is_index_op(c.op) ||
+            c.op == item_command::kind::reseal) {
             throw std::invalid_argument(
                 "dynamo_item_state_machine: a drop step or index write in a transaction");
         }
@@ -1200,7 +1249,7 @@ public:
         }
         engine().scan(kythira::column_family::data, mine, direction,
                       [&](std::string_view k, std::string_view v) {
-                          auto it = decode_item(v);
+                          auto it = decode_item(_sealer.load(k, v));
                           if (!it) {
                               throw kythira::persistent_storage_error(
                                   "dynamo_item_state_machine: corrupt item");
@@ -1289,12 +1338,22 @@ private:
         return out;
     }
 
+    /// `reseal`: see the command. A value that is gone, or sealed already
+    /// (by a client's write since the worker read it), stays as it is.
+    auto reseal(const item_command& c, kythira::write_batch& batch) const -> void {
+        const auto v = read_value(kythira::column_family::data, c.target);
+        if (!v || is_sealed_value(*v)) {
+            return;
+        }
+        batch.put(kythira::column_family::data, c.target, _sealer.store(true, c.target, *v));
+    }
+
     [[nodiscard]] auto load(const std::string& key) const -> std::optional<item> {
         const auto v = read_value(kythira::column_family::data, key);
         if (!v) {
             return std::nullopt;
         }
-        auto it = decode_item(*v);
+        auto it = decode_item(_sealer.load(key, *v));
         if (!it) {
             throw kythira::persistent_storage_error("dynamo_item_state_machine: corrupt item");
         }
@@ -1507,6 +1566,7 @@ private:
             case item_command::kind::index_ack:
             case item_command::kind::index_mark:
             case item_command::kind::trim_change_log:
+            case item_command::kind::reseal:
                 break;
         }
 
@@ -1535,7 +1595,8 @@ private:
         const bool keep_versions = !c.gsis.empty() || stamp.has_value();
         if (next) {
             r.version = load_version(*key) + 1;
-            batch.put(kythira::column_family::data, *key, encode_item(*next));
+            batch.put(kythira::column_family::data, *key,
+                      _sealer.store(c.sealed, *key, encode_item(*next)));
             batch.put(kythira::column_family::meta, *key, encode_meta(r.version, stamp));
         } else if (old) {
             batch.erase(kythira::column_family::data, *key);
@@ -1701,7 +1762,8 @@ private:
         item_sm_detail::put_u64(v, c.version);
         batch.put(kythira::column_family::meta, c.target, std::move(v));
         if (c.op == item_command::kind::index_put) {
-            batch.put(kythira::column_family::data, c.target, encode_item(c.payload));
+            batch.put(kythira::column_family::data, c.target,
+                      _sealer.store(c.sealed, c.target, encode_item(c.payload)));
         } else {
             batch.erase(kythira::column_family::data, c.target);
         }
@@ -1787,7 +1849,8 @@ private:
             }
         }
         for (auto& [k, entry] : after) {
-            batch.put(kythira::column_family::data, k, encode_item(entry));
+            batch.put(kythira::column_family::data, k,
+                      _sealer.store(c.sealed, k, encode_item(entry)));
         }
         if (total == 0) {
             batch.erase(kythira::column_family::meta, size_key);
@@ -2071,6 +2134,7 @@ private:
     mutable size_cache _sizes;
     /// The node's change record store (task 15), or none.
     kythira::segment_store* _log = nullptr;
+    item_sealer _sealer;
     change_log_fetcher _fetch;
     std::optional<change_log_state> _log_state;
     /// The change records of the open batch, appended at commit.

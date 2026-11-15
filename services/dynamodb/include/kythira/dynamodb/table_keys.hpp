@@ -309,6 +309,28 @@ public:
         }
     }
 
+    /// The table key of `d`, unwrapped by the provider that wrapped it, for
+    /// the replicas of its groups (KMS task 16). Asked as the table's
+    /// account: no request is in hand, as when AWS's DynamoDB opens a
+    /// table key under the grant it made at `CreateTable`. Throws
+    /// `kms_error` when the provider refuses or cannot answer.
+    [[nodiscard]] auto open(const table_descriptor& d, std::string_view partition = "aws") const
+        -> kms_provider::data_key_bytes {
+        const auto* p = provider_named(d.sse.provider);
+        if (p == nullptr) {
+            throw kms_provider::kms_error(kms_provider::kms_failure::unavailable,
+                                          "the table's key was wrapped by the " + d.sse.provider +
+                                              " key provider, which this node does not have (set "
+                                              "KYTHIRA_DYNAMODB_KMS_PREVIOUS=" +
+                                              d.sse.provider + ")");
+        }
+        const auto account = d.sse.account.empty() ? table_account(d.name, "") : d.sse.account;
+        const auto who = root_of(account, partition);
+        return p->decrypt_data_key(d.sse.key_arn, d.sse.wrapped,
+                                   table_key_context(client_table_name(d.name), account),
+                                   kms_provider::kms_caller{._principal = &who});
+    }
+
     /// The `SSESpecification` a request names: the customer key it asks
     /// for, or nothing for the owned key. Checked as DynamoDB checks it.
     [[nodiscard]] auto requested(const boost::json::object* spec) const
@@ -363,10 +385,15 @@ private:
         if (customer) {
             return ctx.principal;
         }
+        return root_of(account, ctx.partition);
+    }
+
+    [[nodiscard]] static auto root_of(std::string_view account, std::string_view partition)
+        -> aws_auth::principal_context {
         aws_auth::principal_context root;
         root.type = aws_auth::principal_type::root;
         root.account = std::string(account);
-        root.arn = "arn:" + (ctx.partition.empty() ? std::string("aws") : ctx.partition) +
+        root.arn = "arn:" + (partition.empty() ? std::string("aws") : std::string(partition)) +
                    ":iam::" + std::string(account) + ":root";
         root.userid = std::string(account);
         return root;

@@ -250,6 +250,12 @@ public:
 
     auto now_ms() -> std::uint64_t { return _clock(); }
 
+    /// How the item group seals and opens item values (KMS task 16).
+    auto set_sealer(item_sealer sealer) -> void {
+        const std::lock_guard lock(_mu);
+        _items.set_sealer(std::move(sealer));
+    }
+
     /// The capacity buckets (task 12): one process, so exact.
     auto throttler() -> capacity_throttler& { return _throttler; }
 

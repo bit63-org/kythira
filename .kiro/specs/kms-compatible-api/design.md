@@ -121,12 +121,24 @@ state machine:
   (fetched from the KMS when it first applies a command for the table,
   cached until the table's key changes).
 - Item values are sealed when written to the engine and opened when read.
-  The nonce is derived (HKDF over the table key, the group id, the item
-  key and the log index of the write), so every replica writes the same
-  bytes and snapshots stay identical; a nonce is never reused because a
-  log index is unique per write within a group. The nonce is stored with
-  the sealed value, so a value moved by a split or merge, or restored from
-  a backup, opens without knowing where it was written.
+  The nonce is derived, not random: HMAC-SHA256, under a nonce key
+  HKDF-expanded from the table key, of the key space id, the engine key
+  and the clear value. Every replica writes the same bytes and snapshots
+  stay identical, and a nonce repeats only for the same value at the same
+  key, where the ciphertext repeats with it (deterministic authenticated
+  encryption, SIV-style). The log index the first draft used is not known
+  where a transaction stages its writes, and a split or merge restarts
+  nothing that this construction depends on. The nonce is stored with
+  the sealed value, so a value moved by a split or merge opens without
+  knowing where it was written. Whether a write is sealed travels in the
+  command (`item_command::sealed`, set from the table's descriptor by
+  the proposer), so replicas agree even while their key rings differ.
+- A replica never calls the key provider in apply: it asks the node's key
+  ring, and a miss throws, which halts the group (the default
+  application failure policy) until the gateway's refresher on that node
+  has fetched the key; the group then retries the entry on its next
+  heartbeat. The refresher opens keys as the table's account, the
+  standing a request-less background call has.
 - Item keys (partition and sort key bytes) stay in the clear because the
   engine orders by them; GSI and LSI keys likewise. The documentation says
   so, and a table that needs its keys hidden must use opaque key values.
@@ -134,15 +146,18 @@ state machine:
   per-purpose keys derived from the table key, with a random nonce, since
   they are written once by one node.
 
-`INACCESSIBLE_ENCRYPTION_CREDENTIALS`: a replica that cannot unwrap the
-table key refuses data commands for the table. The catalog leader, which
-already watches tables, marks the table inaccessible when unwraps fail
-for longer than a threshold and back when they succeed.
+`INACCESSIBLE_ENCRYPTION_CREDENTIALS`: the catalog leader opens each
+sealed table's key every minute and marks the table inaccessible when
+that has failed for ten minutes (`set_sse` with `done`: the key's health
+only, and only while the table is under the same wrapped key), and back
+when it opens. The gateway refuses data-plane calls for an inaccessible
+table; a replica that lacks the key halts its group as above.
 
 Upgrade: a format bump marks sealed values; old values without the marker
 read as plaintext. `UpdateTable` with `SSESpecification` on an existing
 table starts a background job that rewrites each item sealed, through the
-log, like the existing bulk jobs, and the table shows `UPDATING` in
+log (a `reseal` entry per engine key, which seals the value if it is
+still clear and changes nothing else), and the table shows `UPDATING` in
 `SSEDescription.Status` until it ends.
 
 ### One key provider interface for both consumers

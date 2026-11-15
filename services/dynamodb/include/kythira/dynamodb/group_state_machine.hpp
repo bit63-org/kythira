@@ -68,6 +68,14 @@ public:
         }
     }
 
+    /// How the item group this opens seals item values (KMS task 16).
+    auto set_sealer(item_sealer sealer) -> void {
+        _sealer = std::move(sealer);
+        if (_items) {
+            _items->set_sealer(_sealer);
+        }
+    }
+
     auto open(engine_type& engine, const kythira::key_range& range) -> void {
         if (is_catalog(range)) {
             _catalog.emplace();
@@ -77,6 +85,7 @@ public:
             _items.emplace();
             _catalog.reset();
             _items->set_change_log(_log, _fetch);
+            _items->set_sealer(_sealer);
             _items->open(engine, range);
         }
     }
@@ -218,6 +227,7 @@ private:
     std::optional<items_type> _items;
     kythira::segment_store* _log = nullptr;
     typename items_type::change_log_fetcher _fetch;
+    item_sealer _sealer;
 };
 
 static_assert(kythira::persistent_staged_state_machine<dynamo_group_state_machine<>>);

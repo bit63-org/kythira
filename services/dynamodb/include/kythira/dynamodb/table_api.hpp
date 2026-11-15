@@ -1797,6 +1797,12 @@ public:
         c.op = catalog_command::kind::set_sse;
         c.table = *current;
         c.table.sse = std::move(*sse);
+        if (current->sse.kind == sse_kind::none) {
+            // Its items so far are clear: the catalog leader's worker
+            // re-seals them through the log (`table_key_refresh.hpp`), and
+            // the table shows UPDATING until it has (Requirement 12.10).
+            c.table.sse.status = sse_status::updating;
+        }
         c.now_ms = _backend.now_ms();
         const auto r = _backend.catalog(c);
         if (!r.ok()) {

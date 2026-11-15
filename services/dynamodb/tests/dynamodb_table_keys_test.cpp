@@ -22,7 +22,9 @@
 
 #include <kythira/dynamodb/backup.hpp>
 #include <kythira/dynamodb/catalog.hpp>
+#include <kythira/dynamodb/item_sealing.hpp>
 #include <kythira/dynamodb/table_key_providers.hpp>
+#include <kythira/dynamodb/table_key_refresh.hpp>
 #include <kythira/dynamodb/table_keys.hpp>
 
 #include <raft/kms_key_provider.hpp>
@@ -517,6 +519,162 @@ auto refusal(std::map<std::string, std::string> vars) -> std::string {
 }
 
 }  // namespace
+
+BOOST_AUTO_TEST_CASE(items_of_an_encrypted_table_are_sealed_on_disk) {
+    keyed_fixture f;
+    auto ring = std::make_shared<ddb::table_key_ring>();
+    f.backend.set_sealer(ddb::item_sealer(ring));
+    ddb::table_key_refresher<ddb::local_backend<>> refresher(f.backend, f.keys, ring);
+    BOOST_REQUIRE(f.call("CreateTable", create_body("vault")).status == 200U);
+    {
+        // The table's key is not on the node yet: the write fails with
+        // nothing written, and the key is now wanted.
+        const auto r = f.call("PutItem", R"({"TableName":"vault","Item":{"pk":{"S":"a"},)"
+                                         R"("secret":{"S":"hunter2"}}})");
+        BOOST_TEST(r.status == 500U);
+        BOOST_TEST(!ring->wanted().empty());
+    }
+    // A pass with nothing asked for fetches nothing; one with a key wanted
+    // fetches it, as the table's account.
+    BOOST_TEST(refresher.pass(false, 1) == 1U);
+    BOOST_TEST(ring->wanted().empty());
+    BOOST_TEST(refresher.pass(false, 2) == 0U);
+    BOOST_TEST(f.kms->calls.back().op == "Decrypt");
+    BOOST_TEST(f.kms->calls.back().principal == "arn:aws:iam::111122223333:root");
+
+    auto r = f.call("PutItem", R"({"TableName":"vault","Item":{"pk":{"S":"a"},)"
+                               R"("secret":{"S":"hunter2"}}})");
+    BOOST_REQUIRE_MESSAGE(r.status == 200U, r.type() + ": " + r.message());
+    std::size_t sealed = 0;
+    f.engine.scan(kythira::column_family::data, ddb::prefix_range("t/"),
+                  kythira::scan_direction::forward, [&](std::string_view, std::string_view v) {
+                      BOOST_TEST(v.find("hunter2") == std::string_view::npos);
+                      sealed += ddb::is_sealed_value(v) ? 1 : 0;
+                      return true;
+                  });
+    BOOST_TEST(sealed == 1U);
+    r = f.call("GetItem", R"({"TableName":"vault","Key":{"pk":{"S":"a"}}})");
+    BOOST_TEST(r.body.at("Item").at("secret").at("S").as_string() == "hunter2");
+    r = f.call("Scan", R"({"TableName":"vault"})");
+    BOOST_TEST(r.body.at("Count").as_int64() == 1);
+
+    // A table with no key stays clear.
+    const ddb::table_keys none;
+    f.tables.set_table_keys(&none);
+    BOOST_REQUIRE(f.call("CreateTable", create_body("open")).status == 200U);
+    BOOST_REQUIRE(f.call("PutItem", R"({"TableName":"open","Item":{"pk":{"S":"b"},)"
+                                    R"("note":{"S":"in the clear"}}})")
+                      .status == 200U);
+    bool clear = false;
+    f.engine.scan(kythira::column_family::data, ddb::prefix_range("t/"),
+                  kythira::scan_direction::forward, [&](std::string_view, std::string_view v) {
+                      clear = clear || v.find("in the clear") != std::string_view::npos;
+                      return true;
+                  });
+    BOOST_TEST(clear);
+
+    // A provider that refuses: the table is reported as failing from the
+    // first refusal on, until a pass opens it.
+    auto other = std::make_shared<ddb::table_key_ring>();
+    ddb::table_key_refresher<ddb::local_backend<>> second(f.backend, f.keys, other);
+    f.kms->disabled.insert(std::string(k_arn_prefix) + "owned");
+    BOOST_TEST(second.pass(true, 100) == 0U);
+    BOOST_TEST(second.failing().at(f.backend.describe("vault")->table_id) == 100U);
+    BOOST_TEST(second.pass(true, 200) == 0U);
+    BOOST_TEST(second.failing().at(f.backend.describe("vault")->table_id) == 100U);
+    BOOST_TEST(second.last_error(f.backend.describe("vault")->table_id).find("disabled") !=
+               std::string::npos);
+    f.kms->disabled.clear();
+    BOOST_TEST(second.pass(true, 300) == 1U);
+    BOOST_TEST(second.failing().empty());
+}
+
+BOOST_AUTO_TEST_CASE(a_table_whose_key_stays_unusable_goes_inaccessible_and_back) {
+    keyed_fixture f;
+    auto ring = std::make_shared<ddb::table_key_ring>();
+    f.backend.set_sealer(ddb::item_sealer(ring));
+    ddb::table_key_watch<ddb::local_backend<>> watch(f.backend, f.keys, ring);
+    watch.check_interval_ms = 0;
+    watch.inaccessible_after_ms = 1000;
+    BOOST_REQUIRE(f.call("CreateTable",
+                         create_body("tab", R"({"Enabled":true,"KMSMasterKeyId":"alias/mine"})"))
+                      .status == 200U);
+    // A pass puts the key on the node, so the table serves.
+    BOOST_TEST(watch.pass(1) == 0U);
+    BOOST_REQUIRE(f.call("PutItem", R"({"TableName":"tab","Item":{"pk":{"S":"a"}}})").status ==
+                  200U);
+
+    f.kms->disabled.insert(std::string(k_arn_prefix) + "mine");
+    BOOST_TEST(watch.pass(10) == 0U);  // failing, not for long enough
+    BOOST_TEST((f.sse_of("tab").status == ddb::sse_status::enabled));
+    BOOST_TEST(watch.pass(1010) == 1U);
+    BOOST_TEST((f.sse_of("tab").status == ddb::sse_status::inaccessible));
+    BOOST_TEST(f.sse_of("tab").inaccessible_ms == 1010U);
+    auto r = f.call("GetItem", R"({"TableName":"tab","Key":{"pk":{"S":"a"}}})");
+    BOOST_TEST(r.status == 400U);
+    BOOST_TEST(r.type().find("ValidationException") != std::string::npos);
+    BOOST_TEST(r.message().find("KMS key access denied") != std::string::npos);
+    BOOST_TEST(watch.pass(2000) == 0U);  // stays so, no new date
+
+    f.kms->disabled.clear();
+    BOOST_TEST(watch.pass(3000) == 1U);
+    BOOST_TEST((f.sse_of("tab").status == ddb::sse_status::enabled));
+    BOOST_TEST(f.sse_of("tab").inaccessible_ms == 0U);
+    r = f.call("GetItem", R"({"TableName":"tab","Key":{"pk":{"S":"a"}}})");
+    BOOST_TEST(r.status == 200U);
+
+    // A verdict on a key the table has left changes nothing.
+    auto d = *f.backend.describe("tab");
+    ddb::catalog_command c;
+    c.op = ddb::catalog_command::kind::set_sse;
+    c.table = d;
+    c.table.sse.wrapped = "another wrapped key";
+    c.table.sse.status = ddb::sse_status::inaccessible;
+    c.done = true;
+    BOOST_REQUIRE(f.backend.catalog(c).ok());
+    BOOST_TEST((f.sse_of("tab") == d.sse));
+}
+
+BOOST_AUTO_TEST_CASE(a_clear_table_that_gains_a_key_is_resealed) {
+    keyed_fixture f;
+    auto ring = std::make_shared<ddb::table_key_ring>();
+    f.backend.set_sealer(ddb::item_sealer(ring));
+    const ddb::table_keys none;
+    f.tables.set_table_keys(&none);
+    BOOST_REQUIRE(f.call("CreateTable", create_body("old")).status == 200U);
+    for (const auto* pk : {"a", "b", "c"}) {
+        BOOST_REQUIRE(f.call("PutItem", std::string(R"({"TableName":"old","Item":{"pk":{"S":")") +
+                                            pk + R"("},"v":{"S":"plain-)" + pk + R"("}}})")
+                          .status == 200U);
+    }
+    const auto clear_values = [&] {
+        std::size_t n = 0;
+        f.engine.scan(kythira::column_family::data, ddb::prefix_range("t/"),
+                      kythira::scan_direction::forward, [&](std::string_view, std::string_view v) {
+                          n += ddb::is_sealed_value(v) ? 0 : 1;
+                          return true;
+                      });
+        return n;
+    };
+    BOOST_TEST(clear_values() == 3U);
+
+    f.tables.set_table_keys(&f.keys);
+    auto r = f.call("UpdateTable", R"({"TableName":"old","SSESpecification":)"
+                                   R"({"Enabled":true,"KMSMasterKeyId":"alias/mine"}})");
+    BOOST_REQUIRE_MESSAGE(r.status == 200U, r.type() + ": " + r.message());
+    BOOST_TEST(r.body.at("TableDescription").at("SSEDescription").at("Status").as_string() ==
+               "UPDATING");
+    BOOST_TEST(clear_values() == 3U);  // nothing rewritten yet
+
+    ddb::table_key_watch<ddb::local_backend<>> watch(f.backend, f.keys, ring);
+    BOOST_TEST(watch.pass(1) == 1U);
+    BOOST_TEST(clear_values() == 0U);
+    BOOST_TEST((f.sse_of("old").status == ddb::sse_status::enabled));
+    r = f.call("GetItem", R"({"TableName":"old","Key":{"pk":{"S":"b"}}})");
+    BOOST_TEST(r.body.at("Item").at("v").at("S").as_string() == "plain-b");
+    r = f.call("DescribeTable", R"({"TableName":"old"})");
+    BOOST_TEST(r.body.at("Table").at("SSEDescription").at("Status").as_string() == "ENABLED");
+}
 
 BOOST_AUTO_TEST_CASE(the_settings_are_checked) {
     const auto none = std::get<ddb::encryption_settings>(settings({}));

@@ -128,6 +128,7 @@
 #include <kythira/dynamodb/streams.hpp>
 #include <kythira/dynamodb/strong_tables.hpp>
 #include <kythira/dynamodb/table_api.hpp>
+#include <kythira/dynamodb/table_key_refresh.hpp>
 #include <kythira/dynamodb/table_keys.hpp>
 #include <kythira/dynamodb/ttl.hpp>
 #include <kythira/dynamodb/txn_api.hpp>
@@ -310,6 +311,14 @@ struct gateway_config {
     /// (`table_key_providers.hpp`); none: no table is encrypted.
     encryption_settings kms{};
     table_key_config encryption{};
+    /// The table keys this node's replicas seal and open item values with
+    /// (`item_sealing.hpp`), shared with the hosts' item groups; the
+    /// gateway keeps it filled (`table_key_refresh.hpp`). None: sealed
+    /// tables cannot be served here.
+    std::shared_ptr<table_key_ring> key_ring{};
+    /// How long a table's key may fail to open on the catalog leader
+    /// before the table goes INACCESSIBLE_ENCRYPTION_CREDENTIALS.
+    std::uint64_t kms_inaccessible_after_ms = 600'000;
 };
 
 /// Reads one environment variable; empty optional when unset.
@@ -1160,6 +1169,8 @@ public:
                      : std::make_unique<disk_guard>(_config.data_dir, _config.disk_floor_bytes)),
           _backend(backend),
           _keys(_config.encryption),
+          _key_refresher(backend, _keys, _config.key_ring),
+          _key_watch(backend, _keys, _config.key_ring),
           _tables(backend),
           _items(backend, _guard.get()),
           _queries(backend),
@@ -1323,9 +1334,13 @@ public:
         _publisher.set_sink(_config.kinesis.configured() ? _config.kinesis
                                                          : kinesis_sink_from_env());
         _publisher.set_region(_config.front.region);
+        _key_watch.inaccessible_after_ms = _config.kms_inaccessible_after_ms;
         _ready.store(true);
         _stopping = false;
         _sweeper_thread = std::thread([this] { sweep_loop(); });
+        if (_config.key_ring && _keys.configured()) {
+            _key_thread = std::thread([this] { key_loop(); });
+        }
     }
 
     void stop() {
@@ -1336,6 +1351,9 @@ public:
         _sweep_cv.notify_all();
         if (_sweeper_thread.joinable()) {
             _sweeper_thread.join();
+        }
+        if (_key_thread.joinable()) {
+            _key_thread.join();
         }
         if (_server) {
             _server->stop();
@@ -1580,6 +1598,15 @@ private:
                             _log(true, std::string("global tables: ") + e.what());
                         }
                     }
+                    try {
+                        // Sealed tables' keys checked, clear tables that
+                        // gained a key re-sealed (KMS task 16).
+                        (void)_key_watch.pass(_backend.now_ms());
+                    } catch (const std::exception& e) {
+                        if (_log) {
+                            _log(true, std::string("table keys: ") + e.what());
+                        }
+                    }
                     // Unpublished records stay in the change log; the next
                     // pass resumes from the stored cursors.
                     (void)_publisher.pass();
@@ -1591,6 +1618,34 @@ private:
             }
             lock.lock();
             _sweep_cv.wait_for(lock, std::chrono::seconds{1}, [this] { return _stopping; });
+        }
+    }
+
+    /// Keeps the node's table key ring filled (KMS task 16), on every node:
+    /// what a replica asked for at once, every sealed table's key now and
+    /// then. A slow key provider delays only this thread.
+    void key_loop() {
+        constexpr auto k_full_pass = std::chrono::seconds{30};
+        auto next_full = std::chrono::steady_clock::now();
+        std::unique_lock lock(_sweep_mu);
+        while (!_stopping) {
+            lock.unlock();
+            const auto now = std::chrono::steady_clock::now();
+            const bool all = now >= next_full;
+            try {
+                (void)_key_refresher.pass(all, _backend.now_ms());
+                if (all) {
+                    next_full = now + k_full_pass;
+                }
+            } catch (const std::exception& e) {
+                // No catalog leader yet, or a timeout: the next pass
+                // starts over.
+                if (_log) {
+                    _log(true, std::string("table keys: ") + e.what());
+                }
+            }
+            lock.lock();
+            _sweep_cv.wait_for(lock, std::chrono::milliseconds{250}, [this] { return _stopping; });
         }
     }
 
@@ -1631,6 +1686,8 @@ private:
     Backend& _backend;
     /// Table keys (KMS task 16), from `gateway_config::encryption`.
     table_keys _keys;
+    table_key_refresher<Backend> _key_refresher;
+    table_key_watch<Backend> _key_watch;
     table_api<Backend> _tables;
     item_api<Backend> _items;
     query_api<Backend> _queries;
@@ -1674,6 +1731,7 @@ private:
     std::condition_variable _sweep_cv;
     bool _stopping = false;
     std::thread _sweeper_thread;
+    std::thread _key_thread;
 };
 
 }  // namespace kythira::dynamodb

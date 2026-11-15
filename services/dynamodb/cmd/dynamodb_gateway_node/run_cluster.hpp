@@ -344,8 +344,9 @@ public:
         hc.logger_factory = [level = cfg.log_level](const std::uint64_t&) {
             return kythira::console_logger{level};
         };
-        hc.state_machine_factory = [this](const std::uint64_t& group) {
+        hc.state_machine_factory = [this, ring = cfg.key_ring](const std::uint64_t& group) {
             ddb::dynamo_group_state_machine<typename Storage::engine_type> inner;
+            inner.set_sealer(ddb::item_sealer(ring));
             inner.set_change_log(
                 _change_log.get(), [this, group](const kythira::record_segment_descriptor& d) {
                     auto* b = _fetch_via.load(std::memory_order_acquire);
