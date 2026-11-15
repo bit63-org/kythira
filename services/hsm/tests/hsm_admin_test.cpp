@@ -14,6 +14,7 @@
 
 #include "hsm_test_store.hpp"
 
+#include <kythira/hsm/audit_json.hpp>
 #include <kythira/hsm/catalog_state_machine.hpp>
 #include <kythira/hsm/hsm_admin.hpp>
 #include <kythira/hsm/key_vault.hpp>
@@ -366,4 +367,41 @@ BOOST_FIXTURE_TEST_CASE(uncertain_commits_still_hand_out_the_shares, fixture) {
     BOOST_TEST(json(rk).at("generation").to_number<int>() == 2);
     BOOST_TEST(call("POST", "/v1/seal").status == 503U);
     BOOST_TEST(!vault.sealed());  // the seal did not commit, so nothing changed here
+}
+
+// Task 14 (Requirement 11.1): init, unseal, seal, tokens and bindings each
+// give an audit event naming the operator and the result; a refused caller
+// does too; reads do not; no event carries a share.
+BOOST_FIXTURE_TEST_CASE(operator_actions_are_audited, fixture) {
+    std::vector<hsm::audit_event> events;
+    api.set_audit_hook([&](const hsm::audit_event& e) { events.push_back(e); });
+    const auto shares =
+        shares_of(json(call("POST", "/v1/init", R"({"mode": "operator", "k": 2, "n": 3})")));
+    (void)call("POST", "/v1/unseal", unseal_body(shares[0]));
+    (void)call("POST", "/v1/unseal", unseal_body(shares[1]));
+    (void)call("GET", "/v1/status");
+    (void)call("POST", "/v1/tokens", R"({"id": 3, "label": "ca"})");
+    (void)call("PUT", "/v1/tokens/3/bindings/app");
+    (void)call("DELETE", "/v1/tokens/3/bindings/app");
+    (void)call("POST", "/v1/seal", "", {"spiffe://apps/payments"});
+    (void)call("POST", "/v1/seal");
+    std::vector<std::string> actions;
+    for (const auto& e : events) {
+        actions.emplace_back(e.action);
+        const auto line = hsm::audit_line(e, 1);
+        for (const auto& s : shares) {
+            BOOST_TEST(line.find(s) == std::string::npos);
+        }
+    }
+    BOOST_TEST(actions == (std::vector<std::string>{"init", "unseal", "unseal", "create_token",
+                                                    "bind", "unbind", "seal", "seal"}),
+               boost::test_tools::per_element());
+    BOOST_REQUIRE(events.size() == 8U);
+    BOOST_TEST(events[0].identity == k_operator);
+    BOOST_TEST(events[0].rv == CKR_OK);
+    BOOST_TEST(events[4].token.value_or(0) == 3U);
+    BOOST_TEST(events[6].identity == "spiffe://apps/payments");
+    BOOST_TEST(events[6].http_status == 403U);
+    BOOST_TEST(events[6].rv == CKR_USER_NOT_LOGGED_IN);
+    BOOST_TEST(events[7].rv == CKR_OK);
 }

@@ -82,6 +82,11 @@ struct hsm_host_stats {
     /// Tokens whose id falls outside the module's group space.
     std::uint64_t tokens_out_of_space = 0;
     std::uint64_t split_merge_vetoes = 0;
+    /// Replica lag (task 14): how many entries this replica was behind the
+    /// leader's applied index the last time a forwarded read or proposal
+    /// waited for it, and the time spent waiting in all.
+    std::uint64_t replica_lag_entries = 0;
+    std::uint64_t replica_wait_us = 0;
 };
 
 /// A leader's answer to a forwarded proposal or read-index request.
@@ -525,12 +530,24 @@ private:
     /// Wait until this replica of group `g` has applied `index`.
     auto wait_applied(group_id_type g, std::uint64_t index, clock::time_point deadline)
         -> ck_result<void> {
+        const auto started = clock::now();
+        bool first = true;
         for (;; std::this_thread::sleep_for(std::chrono::milliseconds{1})) {
             auto* n = _host->group_node(g);
             if (n == nullptr) {
                 return unexpected(CKR_DEVICE_ERROR);  // destroyed meanwhile
             }
-            if (static_cast<std::uint64_t>(n->last_applied_index()) >= index) {
+            const auto applied = static_cast<std::uint64_t>(n->last_applied_index());
+            if (first) {
+                const std::lock_guard lock(_mutex);
+                _stats.replica_lag_entries = index > applied ? index - applied : 0;
+                first = false;
+            }
+            if (applied >= index) {
+                const std::lock_guard lock(_mutex);
+                _stats.replica_wait_us += static_cast<std::uint64_t>(
+                    std::chrono::duration_cast<std::chrono::microseconds>(clock::now() - started)
+                        .count());
                 return {};
             }
             if (clock::now() >= deadline) {

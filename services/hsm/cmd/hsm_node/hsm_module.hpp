@@ -30,6 +30,7 @@
 // cryptographic call answers CKR_DEVICE_ERROR, and health() says so while
 // staying healthy, since a sealed HSM is up and waiting for its operators.
 
+#include "hsm_audit.hpp"
 #include "hsm_config.hpp"
 
 #include <kythira/hsm/hsm_admin.hpp>
@@ -219,10 +220,18 @@ public:
         };
         _host = std::make_unique<hsm_host>(*_raft, _ctx, hopts);
 
+        // Audit (task 14): the hooks hold the pipeline, since a co-located
+        // consumer may keep the session layer past this module.
+        _audit = std::make_shared<audit_pipeline>(_opt);
+        const kythira::hsm::audit_hook audit = [a = _audit](const kythira::hsm::audit_event& e) {
+            a->record(e);
+        };
         kythira::hsm::session_options so;
         so.pin_log2_n = _opt.pin_log2_n;
         so.max_login_failures = _opt.max_login_failures;
         so.max_sessions = _opt.max_sessions;
+        so.audit = audit;
+        so.audit_sample_every = _opt.audit_sample_every;
         _layer = std::make_shared<kythira::hsm::session_layer>(*_host, _vault, so);
         kythira::hsm::admin_policy policy;
         policy.operators = _opt.operators;
@@ -230,6 +239,7 @@ public:
         policy.unseal_timeout = _opt.unseal_timeout;
         _admin = std::make_unique<admin_type>(*_host, _vault, std::move(policy));
         _admin->set_seal_hook([layer = _layer] { layer->seal(); });
+        _admin->set_audit_hook(audit);
         _peer_policy.identities = _opt.peer_identities;
         _peer_policy.allow_plaintext = _opt.insecure_plaintext;
         // Node unseal (task 8): this node's share at rest, and init and
@@ -286,6 +296,10 @@ public:
                     if (_admin->maintain()) {
                         log(kythira::log_level::info,
                             "hsm: sealed (the catalog was sealed or rekeyed)");
+                        kythira::hsm::audit_event e;
+                        e.action = "sealed";
+                        e.identity = "catalog";
+                        _audit->record(e);
                     }
                     try_node_unseal();
                 } catch (const std::exception& e) {
@@ -379,6 +393,10 @@ public:
         _clients.reset();
         _admin.reset();
         _layer.reset();
+        if (_audit) {
+            _audit->flush();
+        }
+        _audit.reset();
         _host.reset();
         _raft.reset();
         _started = false;
@@ -399,7 +417,7 @@ public:
             return {};
         }
         const auto s = _host->stats();
-        return {
+        auto out = std::vector<service_node::module_metric>{
             {"sealed", _vault.sealed() ? 1.0 : 0.0, {}},
             {"tokens", static_cast<double>(_host->tokens().size()), {}},
             {"groups_created", static_cast<double>(s.groups_created), {}},
@@ -416,7 +434,15 @@ public:
             {"client_connections_refused",
              static_cast<double>(_clients ? _clients->stats().refused : 0),
              {}},
-            {"raft_term_sum", service_node::raft_term_sum(*_raft), {}}};
+            {"raft_term_sum", service_node::raft_term_sum(*_raft), {}},
+            {"replica_lag_entries", static_cast<double>(s.replica_lag_entries), {}},
+            {"replica_wait_seconds_total", static_cast<double>(s.replica_wait_us) / 1e6, {}}};
+        if (_audit) {
+            auto more = _audit->metrics();
+            out.insert(out.end(), std::make_move_iterator(more.begin()),
+                       std::make_move_iterator(more.end()));
+        }
+        return out;
     }
 
     /// The listener's port once started (tests pass port 0).
@@ -488,6 +514,15 @@ private:
             });
         }
         const auto outcome = _node_unseal->attempt(_host->catalog(), peers);
+        if (outcome == kythira::hsm::node_unseal_outcome::unsealed ||
+            outcome != _last_node_unseal) {
+            kythira::hsm::audit_event e;
+            e.action = "node_unseal";
+            e.identity = kythira::host_node_id_text(_opt.node_id);
+            e.rv = outcome == kythira::hsm::node_unseal_outcome::unsealed ? CKR_OK
+                                                                          : CKR_FUNCTION_FAILED;
+            _audit->record(e);
+        }
         if (outcome == kythira::hsm::node_unseal_outcome::unsealed) {
             log(kythira::log_level::info, "hsm: unsealed with shares from the other members");
         } else if (outcome != _last_node_unseal) {
@@ -577,6 +612,7 @@ private:
     std::shared_ptr<typename group_sm::context> _ctx;
     std::unique_ptr<raft_host> _raft;
     std::unique_ptr<hsm_host> _host;
+    std::shared_ptr<audit_pipeline> _audit;
     std::shared_ptr<kythira::hsm::session_layer> _layer;
     std::unique_ptr<admin_type> _admin;
     std::shared_ptr<const kythira::hsm::peer_client> _peers;

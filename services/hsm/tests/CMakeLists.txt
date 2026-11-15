@@ -85,6 +85,17 @@ set_tests_properties(hsm_peer_test PROPERTIES
 kythira_hsm_test(hsm_admin_test hsm_admin_test.cpp)
 set_tests_properties(hsm_admin_test PROPERTIES
     LABELS "unit;hsm;hsm-module" TIMEOUT 120)
+# Task 14 (Requirements 11.1-11.2): the audit line, the shared audit queue,
+# the module's file sink and the ledger sink. It includes the module's
+# hsm_audit.hpp, whose configuration header reaches httplib.
+if(TARGET httplib::httplib)
+    kythira_hsm_test(hsm_audit_test hsm_audit_test.cpp)
+    target_include_directories(hsm_audit_test PRIVATE
+        "${CMAKE_SOURCE_DIR}/services/hsm/cmd/hsm_node")
+    target_link_libraries(hsm_audit_test PRIVATE httplib::httplib boost_json)
+    set_tests_properties(hsm_audit_test PROPERTIES
+        LABELS "unit;hsm;hsm-module" TIMEOUT 60)
+endif()
 # Task 7: operator unseal (shares checked on arrival, k needed, expiry) and
 # the vault sealing itself after a seal or rekey.
 kythira_hsm_test(hsm_unseal_test hsm_unseal_test.cpp)

@@ -71,6 +71,20 @@ struct hsm_options {
     bool allow_single_share{false};
     /// How long partial operator shares are held.
     std::chrono::seconds unseal_timeout{600};
+    /// Where audit lines go (task 14): "stderr", "off" or "file:<path>".
+    std::string audit{"stderr"};
+    /// A counted operation is logged on its first call and once in this
+    /// many after.
+    std::uint64_t audit_sample_every{1000};
+    /// A verifiable ledger that also receives every audit line, as
+    /// https://host:port; empty for none. Its client certificate, key and
+    /// CA default to this node's TLS files.
+    std::string audit_ledger_url;
+    std::string audit_ledger{"hsm_audit"};
+    std::string audit_ledger_table{"audit"};
+    std::string audit_ledger_cert;
+    std::string audit_ledger_key;
+    std::string audit_ledger_ca;
     /// Node unseal (task 8): how this node's share is sealed at rest
     /// ("file") and, for "file", the key's path (default data_dir/share.key).
     std::string share_sealer{"file"};

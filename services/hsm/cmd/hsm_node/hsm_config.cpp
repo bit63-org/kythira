@@ -301,6 +301,26 @@ auto from_env(const env_fn& env) -> hsm_options {
     if (o.unseal_timeout.count() == 0) {
         throw fail("KYTHIRA_HSM_UNSEAL_TIMEOUT_S must be at least 1");
     }
+    o.audit = get_opt(env, "KYTHIRA_HSM_AUDIT", o.audit);
+    const bool audit_file = o.audit.starts_with("file:") && o.audit.size() > 5;
+    if (o.audit != "stderr" && o.audit != "off" && !audit_file) {
+        throw fail("KYTHIRA_HSM_AUDIT must be stderr, off or file:<path>");
+    }
+    o.audit_sample_every = u64_opt(env, "KYTHIRA_HSM_AUDIT_SAMPLE_EVERY", o.audit_sample_every);
+    if (o.audit_sample_every == 0) {
+        throw fail("KYTHIRA_HSM_AUDIT_SAMPLE_EVERY must be at least 1");
+    }
+    o.audit_ledger_url = get_opt(env, "KYTHIRA_HSM_AUDIT_LEDGER_URL");
+    const bool ledger_plaintext = o.insecure_plaintext && o.audit_ledger_url.starts_with("http://");
+    if (!o.audit_ledger_url.empty() && !o.audit_ledger_url.starts_with("https://") &&
+        !ledger_plaintext) {
+        throw fail("KYTHIRA_HSM_AUDIT_LEDGER_URL must be an https:// URL");
+    }
+    o.audit_ledger = get_opt(env, "KYTHIRA_HSM_AUDIT_LEDGER", o.audit_ledger);
+    o.audit_ledger_table = get_opt(env, "KYTHIRA_HSM_AUDIT_LEDGER_TABLE", o.audit_ledger_table);
+    o.audit_ledger_cert = get_opt(env, "KYTHIRA_HSM_AUDIT_LEDGER_CERT", o.tls_cert);
+    o.audit_ledger_key = get_opt(env, "KYTHIRA_HSM_AUDIT_LEDGER_KEY", o.tls_key);
+    o.audit_ledger_ca = get_opt(env, "KYTHIRA_HSM_AUDIT_LEDGER_CA", o.client_ca);
     o.max_login_failures = static_cast<std::uint32_t>(
         u64_opt(env, "KYTHIRA_HSM_MAX_LOGIN_FAILURES", o.max_login_failures));
     if (o.max_login_failures == 0) {
@@ -386,6 +406,16 @@ auto usage_text() -> std::string_view {
                                      (development only)
   KYTHIRA_HSM_UNSEAL_TIMEOUT_S       seconds partial operator shares are
                                      held before they are discarded (600)
+  KYTHIRA_HSM_AUDIT                  audit lines to stderr (default), off, or
+                                     file:<path> (appended)
+  KYTHIRA_HSM_AUDIT_SAMPLE_EVERY     signing, verification and encryption are
+                                     counted per client and key; one call in
+                                     this many is logged (1000)
+  KYTHIRA_HSM_AUDIT_LEDGER_URL       also append every audit line to this
+                                     verifiable ledger (https://host:port)
+  KYTHIRA_HSM_AUDIT_LEDGER           its ledger name (hsm_audit); _TABLE the
+                                     table (audit); _CERT, _KEY and _CA the
+                                     client TLS files (the node's own)
   KYTHIRA_HSM_SHARE_SEALER           how this node's node-unseal share is
                                      sealed at rest: file (default)
   KYTHIRA_HSM_SHARE_KEY_FILE         the file sealer's key, created 0600 on
