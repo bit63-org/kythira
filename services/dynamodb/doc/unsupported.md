@@ -35,12 +35,12 @@ replica updates. These parts of the API answer `ValidationException`
 ("Kythira does not support ... yet"), or differ, as listed:
 
 - `ReplicaUpdates` `Update`, and the per-replica overrides on `Create`
-  (`KMSMasterKeyId`, `ProvisionedThroughputOverride`,
+  other than `KMSMasterKeyId` (`ProvisionedThroughputOverride`,
   `OnDemandThroughputOverride`, `GlobalSecondaryIndexes`,
-  `TableClassOverride`): replicas take the source table's settings,
-  except its table key: a replica made in another region is not
-  encrypted until KMS spec task 17 gives each replica a key from its
-  own region's KMS.
+  `TableClassOverride`): replicas take the source table's settings.
+  Each replica has a table key of its own from its own region's key
+  provider, under the `KMSMasterKeyId` its `Create` named or that
+  region's `alias/aws/dynamodb`.
 - On multi-region strongly consistent tables (task 27), as on AWS:
   replicas cannot be added after creation, transactions, TTL and LSIs
   are refused, and a single replica or the witness cannot be deleted

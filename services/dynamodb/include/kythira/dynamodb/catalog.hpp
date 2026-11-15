@@ -248,6 +248,10 @@ struct table_replica {
     std::vector<std::pair<std::string, std::uint64_t>> cursors;
     /// Why creating it failed (`creation_failed`).
     std::string failure;
+    /// The KMS key its table key is wrapped under in its own region
+    /// (`ReplicaUpdates` `Create` `KMSMasterKeyId`), empty for that
+    /// region's DynamoDB managed key (KMS task 17, Requirement 12.8).
+    std::string kms_key;
 
     friend auto operator==(const table_replica&, const table_replica&) -> bool = default;
 };
@@ -755,7 +759,8 @@ namespace catalog_detail {
 /// multi-region strongly consistent table.
 /// Commands only: 12 added `qualify_tables` (task 28); the descriptor is
 /// read as in 11.
-/// 13 added `sse` after `salvage_after_ms`, with `set_sse` (KMS task 16),
+/// 13 added `sse` after `salvage_after_ms`, then each replica's `kms_key`,
+/// with `set_sse` (KMS task 16),
 /// only for an encrypted table, so a node that predates encryption
 /// refuses an encrypted table's forms rather than reading it as a clear
 /// one.
@@ -766,7 +771,9 @@ inline constexpr std::uint8_t k_result_format_version = 13;
 
 /// The version a form carrying `d` is written as.
 [[nodiscard]] inline auto version_for(const table_descriptor& d) -> std::uint8_t {
-    if (d.sse != table_sse{}) {
+    if (d.sse != table_sse{} || std::ranges::any_of(d.replicas, [](const table_replica& r) {
+            return !r.kms_key.empty();
+        })) {
         return 13;
     }
     if (d.strong || !d.witnesses.empty() || !d.retired_ids.empty()) {
@@ -960,6 +967,9 @@ inline void put_descriptor_body(std::string& out, const table_descriptor& d, std
         detail::put_bytes(out, d.sse.account);
         out.push_back(static_cast<char>(d.sse.status));
         detail::put_varint(out, d.sse.inaccessible_ms);
+        for (const auto& r : d.replicas) {
+            detail::put_bytes(out, r.kms_key);
+        }
     }
 }
 
@@ -1231,6 +1241,13 @@ inline void put_descriptor_body(std::string& out, const table_descriptor& d, std
         d.sse.account = std::move(*account);
         d.sse.status = static_cast<sse_status>(*status);
         d.sse.inaccessible_ms = *since;
+        for (auto& rep : d.replicas) {
+            auto replica_key = r.bytes();
+            if (!replica_key) {
+                return std::nullopt;
+            }
+            rep.kms_key = std::move(*replica_key);
+        }
     }
     d.name = std::move(*name);
     d.table_id = *id;

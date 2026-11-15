@@ -1291,6 +1291,7 @@ public:
                 });
             }
         }
+        _receiver.set_table_keys(&_keys);
         _receiver.register_with(*_front);
         _replicator.set_peers(_peers.get());
         _replicator.set_log([this](std::string_view line) {
