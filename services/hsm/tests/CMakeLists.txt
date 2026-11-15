@@ -118,6 +118,23 @@ add_dependencies(hsm_pkcs11_library_test kythira_pkcs11)
 set_tests_properties(hsm_pkcs11_library_test PROPERTIES
     LABELS "unit;hsm;hsm-module" TIMEOUT 120)
 
+# Task 10b, Requirement 5.6: the library under real consumers, each run
+# by services/hsm/pkcs11/tests/consumers.sh against a node this test
+# serves. The tools are installed only by hsm-module.yml's consumers job,
+# which turns this on; it is opt-in, as the container suites are.
+option(KYTHIRA_HSM_CONSUMER_TESTS
+       "Register hsm_pkcs11_consumers_test (needs pkcs11-tool, pkcs11-provider, p11-kit, GnuTLS, Go, Java and PKCS11TEST)"
+       OFF)
+if(KYTHIRA_HSM_CONSUMER_TESTS)
+    kythira_hsm_test(hsm_pkcs11_consumers_test hsm_pkcs11_consumers_test.cpp)
+    target_compile_definitions(hsm_pkcs11_consumers_test PRIVATE
+        KYTHIRA_PKCS11_LIBRARY="$<TARGET_FILE:kythira_pkcs11>"
+        KYTHIRA_HSM_CONSUMERS_SCRIPT="${KYTHIRA_HSM_SOURCE_DIR}/pkcs11/tests/consumers.sh")
+    add_dependencies(hsm_pkcs11_consumers_test kythira_pkcs11)
+    set_tests_properties(hsm_pkcs11_consumers_test PROPERTIES
+        LABELS "hsm;hsm-module;hsm-consumers" TIMEOUT 900)
+endif()
+
 add_test(NAME hsm_node_self_test COMMAND hsm_node --self-test)
 set_tests_properties(hsm_node_self_test PROPERTIES
     LABELS "unit;hsm;hsm-module" TIMEOUT 60)

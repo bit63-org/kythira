@@ -1,0 +1,42 @@
+# Copyright (c) 2026 Clark Rawlins
+# SPDX-License-Identifier: Apache-2.0
+
+# Google pkcs11test tests left out for libkythira_pkcs11.so, one gtest
+# pattern per line, each with the reason. consumers.sh joins them into
+# --gtest_filter=-<patterns>. Only behaviour the virtual HSM leaves out by
+# design belongs here (.kiro/specs/virtual-hsm/ requirement 6.5 and
+# mechanisms.hpp's unsupported_functions()); a failure anywhere else is a
+# bug to fix, not a line to add.
+#
+# pkcs11test (commit 2cbe462c) builds most of its fixtures from keys the
+# virtual HSM does not make: SecretKey() defaults to CKM_DES3_KEY_GEN and
+# KeyPair() asks for a 1024-bit RSA modulus. Its cipher table is DES,
+# 3DES, AES-ECB and AES-CBC without padding. Requirement 6 keeps the
+# mechanism list to AES-GCM, AES-CBC-PAD, AES key wrap, RSA of 2048 bits
+# or more, EC and HMAC, so every test below fails at its fixture or at
+# C_EncryptInit with CKR_MECHANISM_INVALID or CKR_KEY_SIZE_RANGE before
+# it reaches what it means to check.
+
+# DES, 3DES, AES-ECB and unpadded AES-CBC: the whole cipher table.
+Ciphers/SecretKeyTest.*
+# Fixture: a 3DES secret key.
+Digests/DigestTest.DigestKey*
+Duals/DualSecretKeyTest.*
+ROUserSessionTest.WrapUnwrap
+ROUserSessionTest.WrapInvalid
+ROUserSessionTest.UnwrapInvalid
+RWEitherSessionTest.TookanAttackA2
+ReadWriteSessionTest.TookanAttack*
+ReadWriteSessionTest.FindObjectSubset
+ReadWriteSessionTest.SetLatchingAttribute
+# C_CreateObject of CKK_DES keys and DES/3DES test vectors.
+ReadOnlySessionTest.CreateSecretKeyAttributes
+ReadOnlySessionTest.SecretKeyTestVectors
+# Fixture or test vectors: RSA with a 1024-bit modulus.
+Signatures/SignTest.*
+KeyPairTest.EncryptDecrypt
+ReadOnlySessionTest.CreateKeyPairObjects
+ReadOnlySessionTest.SignVerifyRecover
+ReadWriteSessionTest.PublicExponent4Bytes
+ReadWriteSessionTest.ExtractKeys
+ReadWriteSessionTest.AsymmetricTokenKeyPair

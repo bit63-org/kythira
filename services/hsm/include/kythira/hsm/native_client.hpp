@@ -128,6 +128,9 @@ public:
         -> ck_result<std::vector<CK_OBJECT_HANDLE>> {
         return _layer->find_objects(_app, s, max);
     }
+    auto session_cancel(CK_SESSION_HANDLE s, CK_FLAGS flags) -> ck_result<void> {
+        return _layer->session_cancel(_app, s, flags);
+    }
     auto find_objects_final(CK_SESSION_HANDLE s) -> ck_result<void> {
         return _layer->find_objects_final(_app, s);
     }

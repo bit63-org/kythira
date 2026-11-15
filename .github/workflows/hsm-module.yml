@@ -25,7 +25,10 @@
 # request. Whoever merges a pull request that touches the module waits for
 # this workflow too (services/README.md).
 #
-# The cluster and container jobs arrive with hsm_node (task 11).
+# The build job also runs libkythira_pkcs11.so under its consumers
+# (pkcs11-tool, OpenSSL's pkcs11-provider, p11-kit and GnuTLS, Go, Java and
+# pkcs11test), which only this job installs. The cluster and container jobs
+# arrive with hsm_node (task 11).
 
 name: HSM Module
 
@@ -212,6 +215,41 @@ jobs:
 
       - name: Run the module's tests
         run: ctest --test-dir build -L '^hsm$' --output-on-failure --no-tests=error
+
+      # libkythira_pkcs11.so under the consumers requirement 5.6 names
+      # (task 10b): hsm_pkcs11_consumers_test serves a node and runs each
+      # through services/hsm/pkcs11/tests/consumers.sh. The library is the
+      # one just built, with vcpkg's static OpenSSL, as it ships.
+      - name: Install the PKCS#11 consumers
+        run: |
+          for attempt in 1 2 3; do
+            if timeout 600 sudo apt-get install -y --no-install-recommends \
+                 opensc pkcs11-provider p11-kit p11-kit-modules gnutls-bin; then
+              break
+            fi
+            if (( attempt == 3 )); then
+              echo "::error::apt-get install failed after 3 attempts" >&2
+              exit 1
+            fi
+            sleep 30
+          done
+          go version
+          java -version
+
+      # Google's pkcs11test at a pinned commit, built from source (it has
+      # no release or package).
+      - name: Build pkcs11test
+        run: |
+          git clone --filter=blob:none https://github.com/google/pkcs11test.git /tmp/pkcs11test
+          git -C /tmp/pkcs11test checkout 2cbe462c62bacf537b9a9a427a1c053d8c2e4760
+          make -C /tmp/pkcs11test -j"$(nproc)" CXX=g++
+          echo "PKCS11TEST=/tmp/pkcs11test/pkcs11test" >> "$GITHUB_ENV"
+
+      - name: Run the PKCS#11 consumer tests
+        run: |
+          cmake build -DKYTHIRA_HSM_CONSUMER_TESTS=ON
+          cmake --build build -j"$(nproc)" --target hsm_pkcs11_consumers_test
+          ctest --test-dir build -L '^hsm-consumers$' --output-on-failure --no-tests=error
 
       - name: Configure (module off, ci_no_hsm_defconfig, strict)
         run: |

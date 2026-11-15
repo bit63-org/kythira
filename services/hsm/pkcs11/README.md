@@ -55,12 +55,28 @@ stderr.
   `CKR_DEVICE_ERROR`. A session that made session objects is gone, since
   they lived on the old node: it answers `CKR_SESSION_HANDLE_INVALID`. With
   no node answering, calls answer `CKR_DEVICE_ERROR` until one does.
+- **Key usage.** A new key gets no usage flag (`CKA_SIGN`, `CKA_ENCRYPT`,
+  ...) its template does not ask for. Most consumers ask; Java's SunPKCS11
+  does not, so its configuration names them, as for any HSM with strict
+  defaults:
+
+  ```
+  attributes(generate, CKO_PRIVATE_KEY, *) = { CKA_SIGN = true }
+  attributes(generate, CKO_PUBLIC_KEY, *) = { CKA_VERIFY = true }
+  attributes(generate, CKO_SECRET_KEY, *) = { CKA_ENCRYPT = true CKA_DECRYPT = true }
+  ```
+- **TLS inside OpenSSL.** The library's TLS runs in an OpenSSL library
+  context of its own with only the default provider. Built against a
+  shared OpenSSL, it would otherwise inherit the host's configuration,
+  which may load pkcs11-provider over this very library.
+- **Exit.** The library's state is never destroyed, so a consumer that
+  closes its sessions from its own exit handlers (pkcs11-provider does,
+  from `OPENSSL_cleanup`) still finds it.
 - **fork().** The child must call `C_Initialize` again; until then every
   call answers `CKR_CRYPTOKI_NOT_INITIALIZED`.
 - **Not supported.** `C_GetOperationState`/`C_SetOperationState`, the
   recover and dual-function calls, `C_WaitForSlotEvent`, the 3.0 message
-  functions and `C_LoginUser`/`C_SessionCancel` answer
-  `CKR_FUNCTION_NOT_SUPPORTED`; `C_SeedRandom` answers
+  functions and `C_LoginUser` answer `CKR_FUNCTION_NOT_SUPPORTED`; `C_SeedRandom` answers
   `CKR_RANDOM_SEED_NOT_SUPPORTED`. `C_GetObjectSize` answers
   `CK_UNAVAILABLE_INFORMATION`. Each still checks the session, the
   handle and its arguments first.
@@ -85,5 +101,22 @@ library depends on that `libcrypto`/`libssl` instead. It is linked
 inside it stay valid.
 
 `hsm_pkcs11_library_test` loads it with `dlopen` against wire servers on
-Unix sockets; the consumer tests (pkcs11-tool, pkcs11-provider, p11-kit,
-pkcs11test, Go, Java) are task 10b.
+Unix sockets.
+
+## Consumer tests
+
+`hsm_pkcs11_consumers_test` serves a node over mutual TLS and a socket and
+runs each consumer through `tests/consumers.sh`:
+
+| Consumer | What it does |
+|---|---|
+| `pkcs11-tool` (OpenSC) | slots, mechanisms, EC, RSA and AES keys, ECDSA and RSA-PSS sign and verify, a signature checked by `openssl` with the exported public key, a sensitive value refused, random bytes, a wrong PIN |
+| OpenSSL 3 with pkcs11-provider | sign with a token key, a self-signed certificate for it, and a TLS 1.3 handshake to `s_server` holding the key, verified by a client with only the default provider |
+| p11-kit and GnuTLS | the token through `p11-kit server` and `p11-kit-client.so`; `p11tool` generating, listing and test-signing |
+| Go, `github.com/ThalesGroup/crypto11` (`tests/go/`) | an ECDSA `crypto.Signer` verified by `crypto/ecdsa`, find by label, AES-GCM seal and open |
+| Java SunPKCS11 (`tests/java/`) | `SHA256withECDSA` verified by the JDK's own provider, `AES/GCM/NoPadding` |
+| Google pkcs11test | its suite, less the tests `tests/pkcs11test.filter` names for what the token leaves out by design |
+
+It is registered only with `-DKYTHIRA_HSM_CONSUMER_TESTS=ON`, which
+hsm-module.yml sets after installing the tools and building pkcs11test
+(`PKCS11TEST` names the binary).

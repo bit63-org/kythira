@@ -25,7 +25,8 @@
 # Variants and the configuration each one analyses under:
 #   dns       configs/ci_dns_defconfig (libldns + Poco DNSSD)
 #   gcp       configs/ci_gcp_defconfig with KYTHIRA_GCP_REAL_TESTS=ON
-#   ion       configs/ci_ion_defconfig (ion-c, RocksDB)
+#   ion       configs/ci_ion_defconfig (ion-c, RocksDB) with
+#             KYTHIRA_HSM_CONSUMER_TESTS=ON (the opt-in PKCS#11 consumer test)
 #   no-cloud  configs/no_cloud_defconfig (no AWS S3, so multi_raft_node
 #             builds its "S3 unavailable" test instead of the S3 ones)
 
@@ -80,5 +81,6 @@ ion services/ledger/tests/ledger_crash_test.cpp
 ion services/ledger/tests/docker/ledger_chaos_test.cpp
 ion services/hsm/cmd/hsm_node/hsm_config.cpp
 ion services/hsm/cmd/hsm_node/hsm_module_registrar.cpp
+ion services/hsm/tests/hsm_pkcs11_consumers_test.cpp
 
 no-cloud tests/multi_raft_node_s3_unavailable_test.cpp

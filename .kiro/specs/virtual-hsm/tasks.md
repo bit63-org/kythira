@@ -270,12 +270,12 @@ task is one PR unless noted.
     every node's client listener in `kythira_node_cluster_test`
   - _Requirements: 2.4, 8.1-8.3_
 
-- [ ] 10. `libkythira_pkcs11.so`
+- [x] 10. `libkythira_pkcs11.so`
   - [x] 10a. The library: PKCS#11 v3.0 entry points, config file, static
     deps with a version script, OS locking, failover and re-login, slot
     and token info; a dlopen test against wire servers
     (`hsm_pkcs11_library_test`)
-  - [ ] 10b. `pkcs11test`, `pkcs11-tool`, OpenSSL `pkcs11-provider`
+  - [x] 10b. `pkcs11test`, `pkcs11-tool`, OpenSSL `pkcs11-provider`
     (including a TLS handshake with a token key), p11-kit, Go and Java
     smoke tests in CI
   - _Requirements: 5.1-5.7, 13.2_

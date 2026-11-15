@@ -356,6 +356,12 @@ inline auto wire_dispatch(native_client& client, std::string_view identity,
                 r.finish();
                 return answer(client.find_objects_final(s));
             }
+            case op::session_cancel: {
+                const auto s = handle();
+                const auto flags = r.u64();
+                r.finish();
+                return answer(client.session_cancel(s, static_cast<CK_FLAGS>(flags)));
+            }
             case op::sign_init:
             case op::verify_init:
             case op::encrypt_init:

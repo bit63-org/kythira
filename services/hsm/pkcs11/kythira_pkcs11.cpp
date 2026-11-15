@@ -41,6 +41,7 @@
 #include <kythira/hsm/wire_client.hpp>
 
 #include <openssl/crypto.h>
+#include <openssl/provider.h>
 
 #include <unistd.h>
 
@@ -255,6 +256,24 @@ struct login {
         }
     }
 };
+
+/// The OpenSSL library context the library's TLS runs in, with only the
+/// default provider. Where the library shares a libcrypto with its host
+/// (a build against a shared OpenSSL), the host's default context carries
+/// the host's configuration, which may load pkcs11-provider over this very
+/// library: a handshake there would call back into the library while it
+/// holds its lock. Made once and never freed, like the library state.
+auto tls_libctx() -> OSSL_LIB_CTX* {
+    static OSSL_LIB_CTX* const ctx = [] {
+        OSSL_LIB_CTX* c = OSSL_LIB_CTX_new();
+        if (c != nullptr && OSSL_PROVIDER_load(c, "default") == nullptr) {
+            OSSL_LIB_CTX_free(c);
+            c = nullptr;
+        }
+        return c;
+    }();
+    return ctx;
+}
 
 auto encode_mechanism(const CK_MECHANISM& m) -> ck_result<std::vector<std::byte>> {
     kythira::hsm::byte_writer w;
@@ -874,6 +893,39 @@ public:
         return !r && r.error() == CKR_OPERATION_NOT_INITIALIZED ? CKR_OK : rv_of(r);
     }
 
+    /// C_SessionCancel (3.0): ends the operations `flags` names, here and on
+    /// the node. SunPKCS11 calls it to reset a cipher.
+    auto session_cancel(CK_SESSION_HANDLE h, CK_FLAGS flags) -> CK_RV {
+        auto* s = live(h);
+        if (s == nullptr) {
+            return CKR_SESSION_HANDLE_INVALID;
+        }
+        constexpr CK_FLAGS known =
+            CKF_SIGN | CKF_VERIFY | CKF_ENCRYPT | CKF_DECRYPT | CKF_DIGEST | CKF_FIND_OBJECTS;
+        if ((flags & ~known) != 0) {
+            return CKR_OPERATION_CANCEL_FAILED;
+        }
+        const std::array<std::pair<op_kind, CK_FLAGS>, 6> kinds{{
+            {op_kind::sign, CKF_SIGN},
+            {op_kind::verify, CKF_VERIFY},
+            {op_kind::encrypt, CKF_ENCRYPT},
+            {op_kind::decrypt, CKF_DECRYPT},
+            {op_kind::digest, CKF_DIGEST},
+            {op_kind::find, CKF_FIND_OBJECTS},
+        }};
+        for (const auto& [kind, flag] : kinds) {
+            if ((flags & flag) != 0) {
+                s->ops.erase(kind);
+            }
+        }
+        // After a failover nothing is active on the new node; the cancel
+        // there is then a no-op.
+        return rv_of(
+            call(on(*s, [flags](wire_client& c,
+                                CK_SESSION_HANDLE rh) { return c.session_cancel(rh, flags); }),
+                 true));
+    }
+
     // -- Keys ----------------------------------------------------------------------
 
     auto generate_key(CK_SESSION_HANDLE h, CK_MECHANISM_PTR m, CK_ATTRIBUTE_PTR t, CK_ULONG n,
@@ -1350,6 +1402,10 @@ private:
         t.cert_path = _config.cert_path;
         t.key_path = _config.key_path;
         t.ca_path = _config.ca_path;
+        t.libctx = tls_libctx();
+        if (t.libctx == nullptr) {
+            return nullptr;
+        }
         return wire::connection::tls(t, timeout);
     }
 
@@ -1463,9 +1519,13 @@ private:
     std::map<CK_SLOT_ID, login> _logins;
 };
 
+/// The process's library state, never destroyed: a consumer may call in
+/// from its own exit handlers after static destructors have run
+/// (pkcs11-provider closes its sessions from OPENSSL_cleanup), so the
+/// state must outlive them. It stays reachable, so it is not a leak.
 auto lib() -> library& {
-    static library instance;
-    return instance;
+    static auto* const instance = new library();  // NOLINT(cppcoreguidelines-owning-memory)
+    return *instance;
 }
 
 #define KYTHIRA_GUARD()                \
@@ -1929,8 +1989,9 @@ CK_RV C_LoginUser(CK_SESSION_HANDLE, CK_USER_TYPE, CK_UTF8CHAR_PTR, CK_ULONG, CK
                   CK_ULONG) {
     return CKR_FUNCTION_NOT_SUPPORTED;
 }
-CK_RV C_SessionCancel(CK_SESSION_HANDLE, CK_FLAGS) {
-    return CKR_FUNCTION_NOT_SUPPORTED;
+CK_RV C_SessionCancel(CK_SESSION_HANDLE h, CK_FLAGS flags) {
+    KYTHIRA_GUARD();
+    return lib().session_cancel(h, flags);
 }
 CK_RV C_MessageEncryptInit(CK_SESSION_HANDLE, CK_MECHANISM_PTR, CK_OBJECT_HANDLE) {
     return CKR_FUNCTION_NOT_SUPPORTED;
