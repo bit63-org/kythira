@@ -23,6 +23,7 @@
 
 #include <kythira/kms/kms_catalog.hpp>
 #include <kythira/kms/kms_ciphertext.hpp>
+#include <kythira/kms/kms_public_key.hpp>
 
 #include <raft/pkcs11_module.hpp>
 
@@ -297,7 +298,10 @@ public:
         const auto label = backing_label(key_id, version);
         call([&](CK_SESSION_HANDLE s) {
             using kythira::pkcs11::attribute;
-            _handles.erase(label);
+            for (const CK_OBJECT_CLASS cls : {CKO_SECRET_KEY, CKO_PRIVATE_KEY, CKO_PUBLIC_KEY}) {
+                _handles.erase(label + "#" + std::to_string(cls));
+            }
+            _public_keys.erase(label);
             const std::array tmpl{attribute::of_string(CKA_LABEL, label)};
             for (const auto o : _b->find_objects(s, tmpl)) {
                 _b->destroy_object(s, o);
@@ -379,6 +383,75 @@ public:
         return call(std::forward<F>(f));
     }
 
+    /// Signs `data` with `mechanism` on the private key (`cls`
+    /// CKO_PRIVATE_KEY) or HMAC key (CKO_SECRET_KEY) of `key_id`'s
+    /// `version`. The key never leaves the token.
+    [[nodiscard]] auto sign(std::string_view key_id, std::uint32_t version, CK_OBJECT_CLASS cls,
+                            const CK_MECHANISM& mechanism, std::span<const std::uint8_t> data)
+        -> std::vector<std::uint8_t> {
+        return call([&](CK_SESSION_HANDLE s) {
+            return with_key(
+                s, key_id, version,
+                [&](CK_OBJECT_HANDLE k) { return _b->sign(s, mechanism, k, data); }, cls);
+        });
+    }
+
+    /// RSA decryption on the private key; nullopt when the ciphertext does
+    /// not decode (OAEP padding, length).
+    [[nodiscard]] auto private_decrypt(std::string_view key_id, std::uint32_t version,
+                                       const CK_MECHANISM& mechanism,
+                                       std::span<const std::uint8_t> data)
+        -> std::optional<std::vector<std::uint8_t>> {
+        return call([&](CK_SESSION_HANDLE s) -> std::optional<std::vector<std::uint8_t>> {
+            try {
+                return with_key(
+                    s, key_id, version,
+                    [&](CK_OBJECT_HANDLE k) { return _b->decrypt(s, mechanism, k, data); },
+                    CKO_PRIVATE_KEY);
+            } catch (const kythira::pkcs11::error& e) {
+                if (e.rv() == CKR_ENCRYPTED_DATA_INVALID ||
+                    e.rv() == CKR_ENCRYPTED_DATA_LEN_RANGE ||
+                    (e.rv() == CKR_GENERAL_ERROR && session_works(s))) {
+                    return std::nullopt;
+                }
+                throw;
+            }
+        });
+    }
+
+    /// The SubjectPublicKeyInfo of `key_id`'s `version`, read from the
+    /// token's public key object once and remembered (it is public).
+    [[nodiscard]] auto public_key(std::string_view key_id, std::uint32_t version) -> der_bytes {
+        return call([&](CK_SESSION_HANDLE s) {
+            const auto label = backing_label(key_id, version);
+            if (const auto it = _public_keys.find(label); it != _public_keys.end()) {
+                return it->second;
+            }
+            const std::array<CK_ATTRIBUTE_TYPE, 4> types{CKA_MODULUS, CKA_PUBLIC_EXPONENT,
+                                                         CKA_EC_PARAMS, CKA_EC_POINT};
+            const auto v = with_key(
+                s, key_id, version,
+                [&](CK_OBJECT_HANDLE k) { return _b->get_attributes(s, k, types); },
+                CKO_PUBLIC_KEY);
+            der_bytes spki;
+            try {
+                if (v.size() == 4 && v[0] && v[1]) {
+                    spki = rsa_spki(*v[0], *v[1]);
+                } else if (v.size() == 4 && v[2] && v[3]) {
+                    spki = ec_spki(*v[2], *v[3]);
+                } else {
+                    throw std::runtime_error("no public key attributes");
+                }
+            } catch (const std::runtime_error& e) {
+                throw backing_error(
+                    backing_error::kind::failed, CKR_ATTRIBUTE_VALUE_INVALID,
+                    std::string("kms backing store: public key of ") + label + ": " + e.what());
+            }
+            _public_keys.emplace(label, spki);
+            return spki;
+        });
+    }
+
 private:
     [[nodiscard]] static auto gcm_params(std::span<const std::uint8_t> nonce,
                                          std::span<const std::uint8_t> aad) -> CK_GCM_PARAMS {
@@ -404,28 +477,30 @@ private:
     /// once and remembered; a remembered handle the module no longer knows
     /// is looked up again. No such key throws backing_error (failed).
     template<typename F>
-    auto with_key(CK_SESSION_HANDLE s, std::string_view key_id, std::uint32_t version, F&& f)
+    auto with_key(CK_SESSION_HANDLE s, std::string_view key_id, std::uint32_t version, F&& f,
+                  CK_OBJECT_CLASS cls = CKO_SECRET_KEY)
         -> std::invoke_result_t<F&, CK_OBJECT_HANDLE> {
         const auto label = backing_label(key_id, version);
+        const auto slot = label + "#" + std::to_string(cls);
         for (int attempt = 0;; ++attempt) {
-            auto it = _handles.find(label);
+            auto it = _handles.find(slot);
             if (it == _handles.end()) {
                 using kythira::pkcs11::attribute;
-                const std::array tmpl{attribute::of_ulong(CKA_CLASS, CKO_SECRET_KEY),
+                const std::array tmpl{attribute::of_ulong(CKA_CLASS, cls),
                                       attribute::of_string(CKA_LABEL, label)};
                 const auto found = _b->find_objects(s, tmpl);
                 if (found.empty()) {
                     throw backing_error(backing_error::kind::failed, CKR_KEY_HANDLE_INVALID,
                                         "kms backing store: no backing key " + label);
                 }
-                it = _handles.emplace(label, found.front()).first;
+                it = _handles.emplace(slot, found.front()).first;
             }
             try {
                 return f(it->second);
             } catch (const kythira::pkcs11::error& e) {
                 if (attempt == 0 &&
                     (e.rv() == CKR_KEY_HANDLE_INVALID || e.rv() == CKR_OBJECT_HANDLE_INVALID)) {
-                    _handles.erase(label);
+                    _handles.erase(slot);
                     continue;
                 }
                 throw;
@@ -479,7 +554,9 @@ private:
     std::string _pin;
     std::mutex _mu;
     std::optional<CK_SESSION_HANDLE> _session;
-    std::map<std::string, CK_OBJECT_HANDLE, std::less<>> _handles;  // label to handle, under _mu
+    // label#class to handle, and label to public key; under _mu.
+    std::map<std::string, CK_OBJECT_HANDLE, std::less<>> _handles;
+    std::map<std::string, der_bytes, std::less<>> _public_keys;
 };
 
 }  // namespace kythira::kms

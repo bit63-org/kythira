@@ -112,6 +112,12 @@ set_tests_properties(kms_api_test PROPERTIES LABELS "unit;kms;kms-module" TIMEOU
 kythira_kms_test(kms_crypto_test kms_crypto_test.cpp)
 set_tests_properties(kms_crypto_test PROPERTIES LABELS "unit;kms;kms-module" TIMEOUT 120)
 
+# Task 8, Requirements 3.2, 5.1, 5.4 and 5.5: RSA-OAEP, Sign and Verify for
+# every RSA and ECC spec and algorithm (RAW and DIGEST), GetPublicKey, data
+# key pairs and HMAC, each signature and key checked with OpenSSL.
+kythira_kms_test(kms_asymmetric_test kms_asymmetric_test.cpp)
+set_tests_properties(kms_asymmetric_test PROPERTIES LABELS "unit;kms;kms-module" TIMEOUT 300)
+
 # Task 5, Requirements 4.1-4.3: every key spec's backing key on a real
 # module, SoftHSM2 standing in for an external one; registered when the
 # build finds SoftHSM2 and softhsm2-util (kms-module.yml installs them;
