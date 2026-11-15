@@ -8,6 +8,7 @@
 #include <kythira/kinesis/kinesis_peer_client.hpp>
 
 #include <raft/net_bind.hpp>
+#include <raft/pkcs11_uri.hpp>
 
 #include <cstdlib>
 #include <fstream>
@@ -372,8 +373,8 @@ void read_kinesis_side(const reader& r, node_options& o) {
     o._disk_floor_bytes = r.u64("KINESIS_DISK_FLOOR_BYTES", "1073741824");
     o._metrics = r.flag("KINESIS_METRICS", "false");
     o._kms = r.opt("KINESIS_KMS", "off");
-    if (o._kms != "off" && o._kms != "local" && o._kms != "aws") {
-        fail("KINESIS_KMS must be off, local or aws");
+    if (o._kms != "off" && o._kms != "local" && o._kms != "aws" && o._kms != "pkcs11") {
+        fail("KINESIS_KMS must be off, local, aws or pkcs11");
     }
     if (r.set("KINESIS_KMS_PASSPHRASE") && r.set("KINESIS_KMS_PASSPHRASE_FILE")) {
         fail("set KINESIS_KMS_PASSPHRASE or KINESIS_KMS_PASSPHRASE_FILE, not both");
@@ -390,6 +391,28 @@ void read_kinesis_side(const reader& r, node_options& o) {
     o._kms_endpoint = r.opt("KINESIS_KMS_ENDPOINT", "");
     if (!o._kms_endpoint.empty() && !kinesis::split_host_port(o._kms_endpoint)) {
         fail("KINESIS_KMS_ENDPOINT: '" + o._kms_endpoint + "' is not host:port");
+    }
+    if (o._kms == "pkcs11") {
+        o._kms_pkcs11_uri = r.required("KINESIS_KMS_PKCS11_URI");
+        try {
+            const auto u = pkcs11::uri::parse(o._kms_pkcs11_uri);
+            if (!u.token && !u.serial) {
+                fail("KINESIS_KMS_PKCS11_URI must name the token (token= or serial=)");
+            }
+            if (!u.pin_source && !u.pin_value) {
+                fail("KINESIS_KMS_PKCS11_URI needs pin-source (or pin-value)");
+            }
+            o._kms_pkcs11_identity = r.opt("KINESIS_KMS_PKCS11_IDENTITY", "kinesis");
+            if (!u.module_path && o._kms_pkcs11_identity.empty()) {
+                fail("KINESIS_KMS_PKCS11_IDENTITY must not be empty");
+            }
+        } catch (const pkcs11::uri_error& e) {
+            fail(std::string("KINESIS_KMS_PKCS11_URI: ") + e.what());
+        }
+        o._kms_pkcs11_oaep = r.opt("KINESIS_KMS_PKCS11_OAEP", "sha256");
+        if (o._kms_pkcs11_oaep != "sha256" && o._kms_pkcs11_oaep != "sha1") {
+            fail("KINESIS_KMS_PKCS11_OAEP must be sha256 or sha1");
+        }
     }
     o._maintenance_interval = r.ms("KINESIS_MAINTENANCE_INTERVAL_MS", "60000");
     if (o._maintenance_interval.count() < 100) {
@@ -584,6 +607,9 @@ auto describe(const node_options& o) -> std::string {
         << (o._kms == "aws" ? " region=" + o._kms_region +
                                   (o._kms_endpoint.empty() ? "" : " endpoint=" + o._kms_endpoint)
                             : std::string())
+        << (o._kms == "pkcs11" ? " token=" + pkcs11::uri::parse(o._kms_pkcs11_uri).to_string() +
+                                     " oaep=" + o._kms_pkcs11_oaep
+                               : std::string())
         << '\n';
     if (o._tier_after_ms > 0) {
         out << "tier=s3://" << o._tier_bucket << '/' << o._tier_prefix << " after "
@@ -641,11 +667,15 @@ auto usage() -> std::string {
            "  KINESIS_COMMAND_TIMEOUT_MS       commit timeout per write (5000)\n"
            "  KINESIS_METRICS                  serve Prometheus metrics on GET /metrics,\n"
            "                                   unauthenticated (false)\n"
-           "  KINESIS_KMS                      key provider for encrypted streams: off, local\n"
-           "                                   or aws (off)\n"
+           "  KINESIS_KMS                      key provider for encrypted streams: off, local,\n"
+           "                                   aws or pkcs11 (off)\n"
            "  KINESIS_KMS_PASSPHRASE[_FILE]    local: wraps data keys, same on every node\n"
            "  KINESIS_KMS_REGION               aws: KMS region (default: KINESIS_REGION)\n"
            "  KINESIS_KMS_ENDPOINT             aws: KMS host:port (default: AWS)\n"
+           "  KINESIS_KMS_PKCS11_URI           pkcs11: the token, pkcs11:token=...;pin-source=...\n"
+           "                                   (module-path= when the HSM is not co-located)\n"
+           "  KINESIS_KMS_PKCS11_IDENTITY      pkcs11: co-located HSM application (kinesis)\n"
+           "  KINESIS_KMS_PKCS11_OAEP          pkcs11: RSA-OAEP hash, sha256 or sha1 (sha256)\n"
            "\n"
            "Retention and tiering:\n"
            "  KINESIS_DISK_FLOOR_BYTES         refuse writes below this free space (1073741824;\n"

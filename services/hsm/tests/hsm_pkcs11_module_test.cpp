@@ -24,6 +24,7 @@
 #include <kythira/hsm/pkcs11_native_backend.hpp>
 #include <kythira/hsm/wire_server.hpp>
 
+#include <raft/pkcs11_envelope.hpp>
 #include <raft/pkcs11_module.hpp>
 #include <raft/pkcs11_uri.hpp>
 
@@ -277,6 +278,48 @@ void consumer_scenario(const p11::module& m, const std::string& token_uri, const
                         BOOST_TEST(back == p11::bytes(data_key.begin(), data_key.end()),
                                    boost::test_tools::per_element());
                     }
+                    // Envelope encryption (pkcs11_envelope.hpp) with this key: a
+                    // data key sealed in software opens on the token, and only
+                    // for the binding it was sealed for.
+                    const auto env_hash =
+                        oaep.size() == 1 ? oaep.front() : p11::hash_algorithm::sha256;
+                    const p11::envelope_key env(s, key, env_hash);
+                    std::array<std::uint8_t, 32> data_key{};
+                    BOOST_REQUIRE(RAND_bytes(data_key.data(), data_key.size()) == 1);
+                    const std::string ctx = "stream=orders";
+                    const std::string other_ctx = "stream=billing";
+                    const auto as_bytes = [](const std::string& t) {
+                        return std::span(reinterpret_cast<const std::uint8_t*>(t.data()), t.size());
+                    };
+                    auto sealed = env.seal(data_key, as_bytes(ctx));
+                    BOOST_TEST(env.open(sealed, as_bytes(ctx)) ==
+                                   p11::bytes(data_key.begin(), data_key.end()),
+                               boost::test_tools::per_element());
+                    BOOST_TEST(rv_of([&] { (void)env.open(sealed, as_bytes(other_ctx)); }) ==
+                               CKR_ENCRYPTED_DATA_INVALID);
+                    auto tampered = sealed;
+                    tampered.back() ^= 0x01U;
+                    // Refused by the token's OAEP check (SoftHSM2 answers
+                    // CKR_GENERAL_ERROR rather than CKR_ENCRYPTED_DATA_INVALID).
+                    BOOST_TEST(rv_of([&] { (void)env.open(tampered, as_bytes(ctx)); }) != CKR_OK);
+                    BOOST_TEST(rv_of([&] {
+                                   (void)env.open(std::span(sealed).first(3), as_bytes(ctx));
+                               }) == CKR_ENCRYPTED_DATA_INVALID);
+                    BOOST_TEST(rv_of([&] {
+                                   const std::vector<std::uint8_t> big(env.max_secret() + 1, 7);
+                                   (void)env.seal(big, as_bytes(ctx));
+                               }) == CKR_DATA_LEN_RANGE);
+                    if (c.label == "rsa4096-dec") {
+                        // Sealed for the other decryption key: refused here.
+                        auto other_key = base;
+                        other_key.object = "rsa-dec";
+                        const p11::envelope_key other(s, s.find(other_key), env_hash);
+                        BOOST_TEST(rv_of([&] {
+                                       (void)env.open(other.seal(data_key, as_bytes(ctx)),
+                                                      as_bytes(ctx));
+                                   }) != CKR_OK);
+                    }
+
                     // Not a signing key.
                     const auto d = digest(p11::hash_algorithm::sha256, "m");
                     BOOST_TEST(rv_of([&] {

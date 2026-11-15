@@ -17,10 +17,15 @@
 #include <raft/service_module.hpp>
 #include <raft/static_or_iam_authorizer.hpp>
 
+#include <memory>
 #include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
+
+namespace kythira::pkcs11 {
+class backend;
+}  // namespace kythira::pkcs11
 
 namespace kythira::service_node {
 
@@ -34,6 +39,9 @@ inline constexpr std::string_view kinesis_put_records = "kinesis.put_records";
 /// (`iam_evaluator`): what a consumer's embedded IAM replica gives it
 /// stand-alone.
 inline constexpr std::string_view iam_evaluator = "iam.evaluator";
+/// The co-located virtual HSM as a PKCS#11 module (`pkcs11_provider`), for
+/// core's consumer wrapper (raft/pkcs11_module.hpp).
+inline constexpr std::string_view hsm_pkcs11 = "hsm.pkcs11";
 }  // namespace interface_names
 
 /// One AWS JSON-protocol request, signed with SigV4 exactly as it would be
@@ -114,6 +122,28 @@ public:
     /// ElastiCache's actions itself: AUTH is Redis's only use of IAM.
     [[nodiscard]] virtual auto credential_verifier(const elasticache_scope& scope)
         -> credential_verifier_fn = 0;
+};
+
+/// The co-located virtual HSM as a PKCS#11 module (`hsm.pkcs11`): a
+/// consumer wraps the backend in `kythira::pkcs11::module` and uses it as
+/// it would a dlopen'd library, so the same code serves a YubiHSM 2 by a
+/// change of configuration.
+///
+/// `identity` is the application the backend acts as; the HSM's catalog
+/// must bind a token to it (`PUT /v1/tokens/N/bindings/<identity>`) and the
+/// token's PIN is still needed, exactly as for a network client, so
+/// co-location never widens access. Each call makes a new application.
+class pkcs11_provider {
+public:
+    pkcs11_provider() = default;
+    pkcs11_provider(const pkcs11_provider&) = delete;
+    auto operator=(const pkcs11_provider&) -> pkcs11_provider& = delete;
+    pkcs11_provider(pkcs11_provider&&) = delete;
+    auto operator=(pkcs11_provider&&) -> pkcs11_provider& = delete;
+    virtual ~pkcs11_provider() = default;
+
+    [[nodiscard]] virtual auto backend_for(const std::string& identity)
+        -> std::shared_ptr<kythira::pkcs11::backend> = 0;
 };
 
 }  // namespace kythira::service_node

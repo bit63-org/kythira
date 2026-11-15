@@ -176,6 +176,8 @@ kythira_kinesis_test(kinesis_tags_test kinesis_tags_test.cpp)
 # Task 14: encryption at rest (the local key provider, sealed records, the
 # AWS KMS adapter against a fake KMS, Start/StopStreamEncryption).
 kythira_kinesis_test(kinesis_encryption_test kinesis_encryption_test.cpp)
+# Virtual HSM task 13: KINESIS_KMS=pkcs11 against a software token.
+kythira_kinesis_test(kinesis_kms_pkcs11_test kinesis_kms_pkcs11_test.cpp)
 # Task 13: enhanced fan-out (consumers, SubscribeToShard events pulled
 # directly, over HTTP/1.1 chunked and, with nghttp2, over HTTP/2 through
 # the nghttp2 client in tests/h2_test_client.hpp).

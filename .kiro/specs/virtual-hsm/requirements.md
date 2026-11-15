@@ -275,7 +275,10 @@ without changing the services that use keys.
    and sign certificates through it, as an alternative to the passphrase
    sealed key.
 2. Kinesis SHALL gain a `pkcs11` `kms_key_provider` that wraps and unwraps
-   stream data keys with an AES key on a token.
+   stream data keys with a key on a token. Within 9.2's common subset that
+   key is an RSA decryption key pair: data keys are sealed with RSA-OAEP in
+   software on its public half and opened on the token (the YubiHSM 2 has
+   no standard AES key wrap, so an AES key on the token would not move).
 3. IAM SHALL be able to keep its OIDC and STS signing keys on a token.
 4. Each consumer SHALL keep its current key handling as the default, so
    nothing changes for an existing deployment.

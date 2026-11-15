@@ -103,11 +103,18 @@ struct node_options {
     /// under `KINESIS_KMS_PASSPHRASE[_FILE]`, the same on every node) or
     /// `aws` (AWS KMS in `KINESIS_KMS_REGION`, default the region above, at
     /// `KINESIS_KMS_ENDPOINT` host:port, default AWS's; credentials from
-    /// `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`).
+    /// `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`)
+    /// or `pkcs11` (keys on the PKCS#11 token `KINESIS_KMS_PKCS11_URI`
+    /// names: through its `module-path`, or the co-located virtual HSM as
+    /// `KINESIS_KMS_PKCS11_IDENTITY`; RSA-OAEP with
+    /// `KINESIS_KMS_PKCS11_OAEP`, sha256 or sha1).
     std::string _kms{"off"};
     std::string _kms_passphrase;
     std::string _kms_region;
     std::string _kms_endpoint;
+    std::string _kms_pkcs11_uri;
+    std::string _kms_pkcs11_identity;
+    std::string _kms_pkcs11_oaep{"sha256"};
     /// `KINESIS_MAINTENANCE_INTERVAL_MS`: how often a node runs the
     /// retention and tiering pass.
     std::chrono::milliseconds _maintenance_interval{60000};
