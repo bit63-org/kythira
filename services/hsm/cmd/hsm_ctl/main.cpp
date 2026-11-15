@@ -2,8 +2,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 // hsm_ctl: the operator's command line for the virtual HSM
-// (.kiro/specs/virtual-hsm/ task 7). Each command is one request to a
-// node's operator API over mutual TLS, with the operator's certificate.
+// (.kiro/specs/virtual-hsm/ task 7). Each command but migrate is one
+// request to a node's operator API over mutual TLS, with the operator's
+// certificate; migrate (task 12b) is a PKCS#11 application on two modules
+// (kythira/hsm/migrate.hpp).
 //
 //   hsm_ctl [options] status
 //   hsm_ctl [options] init --k K --n N [--mode operator|node]
@@ -11,6 +13,8 @@
 //   hsm_ctl [options] unseal --reset
 //   hsm_ctl [options] seal
 //   hsm_ctl [options] rekey [--k K] [--n N] [--mode operator|node]
+//   hsm_ctl migrate --from URI --to URI [--transport-key URI] [--dry-run]
+//                   [--keep-extractable]
 //
 // Options (each also read from the environment):
 //   --url URL     HSM_CTL_URL    a node's API, https://host:port
@@ -25,7 +29,11 @@
 // init and rekey print each share once and nothing keeps them: hand each
 // to its holder and do not store them together.
 
+#include <kythira/hsm/migrate.hpp>
 #include <kythira/hsm/mtls_client.hpp>
+
+#include <raft/pkcs11_module.hpp>
+#include <raft/pkcs11_uri.hpp>
 
 #include <boost/json.hpp>
 
@@ -55,6 +63,17 @@ commands:
   rekey [--k K] [--n N] [--mode operator|node]
                                       a new master key and new shares; the
                                       old shares stop working
+  migrate --from URI --to URI [--transport-key URI] [--dry-run]
+          [--keep-extractable]
+                                      copy a token's extractable keys, their
+                                      public halves and its certificates to
+                                      another PKCS#11 module, wrapped; report
+                                      the keys that need re-issuing there.
+                                      Each URI (RFC 7512) names a token and
+                                      carries module-path and pin-source, e.g.
+                                      pkcs11:token=alpha?module-path=/usr/lib/
+                                      libkythira_pkcs11.so&pin-source=/run/pin
+                                      (no --url or certificates needed)
 
 options (environment):
   --url URL        (HSM_CTL_URL)        a node's API, https://host:port
@@ -116,10 +135,11 @@ auto parse(int argc, char** argv) -> invocation {
             timeout = value();
         } else if (w == "--insecure-plaintext") {
             inv.tls.plaintext = true;
-        } else if (w == "--k" || w == "--n" || w == "--mode") {
+        } else if (w == "--k" || w == "--n" || w == "--mode" || w == "--from" || w == "--to" ||
+                   w == "--transport-key") {
             inv.flags[w.substr(2)] = value();
-        } else if (w == "--reset") {
-            inv.flags["reset"] = "true";
+        } else if (w == "--reset" || w == "--dry-run" || w == "--keep-extractable") {
+            inv.flags[w.substr(2)] = "true";
         } else if (w.starts_with("--")) {
             throw usage_error("unknown option " + w);
         } else if (inv.command.empty()) {
@@ -136,7 +156,7 @@ auto parse(int argc, char** argv) -> invocation {
     if (inv.command.empty()) {
         throw usage_error("no command");
     }
-    if (inv.url.empty()) {
+    if (inv.url.empty() && inv.command != "migrate") {
         throw usage_error("no --url (or HSM_CTL_URL)");
     }
     return inv;
@@ -225,6 +245,68 @@ void print_answer(const std::string& body) {
     std::cout << boost::json::serialize(v) << "\n";
 }
 
+/// migrate: both modules loaded from their URIs, the report as JSON.
+auto run_migrate(const invocation& inv) -> int {
+    namespace p11 = kythira::pkcs11;
+    if (!inv.flags.contains("from") || !inv.flags.contains("to")) {
+        throw usage_error("migrate needs --from and --to");
+    }
+    const auto from_uri = p11::uri::parse(inv.flags.at("from"));
+    const auto to_uri = p11::uri::parse(inv.flags.at("to"));
+    kythira::hsm::migrate_options opts;
+    opts.dry_run = inv.flags.contains("dry-run");
+    opts.keep_extractable = inv.flags.contains("keep-extractable");
+    if (const auto it = inv.flags.find("transport-key"); it != inv.flags.end()) {
+        opts.transport_key = p11::uri::parse(it->second);
+    }
+    const auto from_module = p11::module::load(from_uri);
+    const auto to_module = p11::module::load(to_uri);
+    auto from = from_module.open(from_uri);
+    auto to = to_module.open(to_uri);
+    const auto report = kythira::hsm::migrate(from, to, opts);
+
+    boost::json::array entries;
+    for (const auto& e : report.entries) {
+        static constexpr std::string_view hex = "0123456789abcdef";
+        std::string id;
+        for (const auto b : e.id) {
+            id.push_back(hex.at(b >> 4U));
+            id.push_back(hex.at(b & 0x0FU));
+        }
+        const char* cls = e.object_class == CKO_SECRET_KEY    ? "secret-key"
+                          : e.object_class == CKO_PRIVATE_KEY ? "private"
+                          : e.object_class == CKO_PUBLIC_KEY  ? "public"
+                          : e.object_class == CKO_CERTIFICATE ? "cert"
+                                                              : "data";
+        boost::json::object o{{"type", cls},
+                              {"label", e.label},
+                              {"id", id},
+                              {"outcome", std::string(kythira::hsm::outcome_name(e.outcome))}};
+        if (!e.detail.empty()) {
+            o["detail"] = e.detail;
+        }
+        entries.push_back(std::move(o));
+    }
+    boost::json::object out{
+        {"from", from_uri.to_string()},
+        {"to", to_uri.to_string()},
+        {"dry_run", report.dry_run},
+        {"copied", report.count(kythira::hsm::migrate_outcome::copied)},
+        {"exists", report.count(kythira::hsm::migrate_outcome::exists)},
+        {"needs_reissue", report.count(kythira::hsm::migrate_outcome::needs_reissue)},
+        {"failed", report.count(kythira::hsm::migrate_outcome::failed)},
+        {"objects", std::move(entries)}};
+    if (!report.oaep_hash.empty()) {
+        out["transport_oaep_hash"] = report.oaep_hash;
+    }
+    std::cout << boost::json::serialize(out) << "\n";
+    if (report.count(kythira::hsm::migrate_outcome::needs_reissue) != 0) {
+        std::cerr << "hsm_ctl: keys marked needs_reissue are not extractable; make new keys on "
+                     "the target and move their users to them.\n";
+    }
+    return report.ok() ? 0 : 1;
+}
+
 }  // namespace
 
 auto main(int argc, char** argv) -> int {
@@ -233,6 +315,9 @@ auto main(int argc, char** argv) -> int {
         if (inv.command == "help") {
             std::cout << usage;
             return 0;
+        }
+        if (inv.command == "migrate") {
+            return run_migrate(inv);
         }
         const auto c = call_of(inv);
         const kythira::hsm::mtls_client client(inv.tls);

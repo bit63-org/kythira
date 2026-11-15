@@ -65,13 +65,14 @@ else()
 endif()
 
 # hsm_ctl (task 7): the operator's command line, one HTTPS request per
-# command to a node's operator API with the operator's certificate. It
-# needs only the HSM headers (the mutual-TLS client in mtls_client.hpp),
-# OpenSSL and Boost.JSON.
+# command to a node's operator API with the operator's certificate, and
+# migrate (task 12b), which dlopens two PKCS#11 modules. It needs only the
+# HSM headers (the mutual-TLS client in mtls_client.hpp, migrate.hpp),
+# core's PKCS#11 wrapper, OpenSSL, Boost.JSON and libdl.
 if(TARGET boost_json)
     find_package(Threads REQUIRED)
     add_executable(hsm_ctl hsm_ctl/main.cpp)
-    target_link_libraries(hsm_ctl PRIVATE kythira_hsm boost_json Threads::Threads)
+    target_link_libraries(hsm_ctl PRIVATE kythira_hsm boost_json Threads::Threads ${CMAKE_DL_LIBS})
     target_compile_features(hsm_ctl PRIVATE cxx_std_23)
     set_target_properties(hsm_ctl PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")

@@ -20,6 +20,7 @@
 #define BOOST_TEST_MODULE hsm_pkcs11_module_test
 #include "hsm_test_node.hpp"
 
+#include <kythira/hsm/migrate.hpp>
 #include <kythira/hsm/pkcs11_native_backend.hpp>
 #include <kythira/hsm/wire_server.hpp>
 
@@ -34,19 +35,24 @@
 #include <openssl/param_build.h>
 #include <openssl/rand.h>
 #include <openssl/rsa.h>
+#include <openssl/x509.h>
 
+#include <sys/wait.h>
 #include <unistd.h>
 
 #include <array>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <random>
 #include <span>
 #include <string>
+#include <utility>
 #include <vector>
 
 #ifndef KYTHIRA_PKCS11_LIBRARY
@@ -403,27 +409,266 @@ BOOST_AUTO_TEST_CASE(libkythira_pkcs11_through_dlopen) {
 }
 
 #if defined(KYTHIRA_SOFTHSM2_LIBRARY) && defined(KYTHIRA_SOFTHSM2_UTIL)
-BOOST_AUTO_TEST_CASE(softhsm2_as_an_external_module) {
-    const auto dir = temp_path("-softhsm");
-    std::filesystem::create_directories(dir / "tokens");
-    const auto conf = dir / "softhsm2.conf";
-    std::ofstream(conf) << "directories.tokendir = " << (dir / "tokens").string() << "\n"
-                        << "objectstore.backend = file\nlog.level = ERROR\n";
-    ::setenv("SOFTHSM2_CONF", conf.c_str(), 1);  // NOLINT(concurrency-mt-unsafe)
-    const std::string init = std::string(KYTHIRA_SOFTHSM2_UTIL) +
-                             " --init-token --free --label external --so-pin " + k_so_pin +
-                             " --pin " + k_user_pin + " > /dev/null";
-    BOOST_REQUIRE(std::system(init.c_str()) == 0);  // NOLINT(cert-env33-c,concurrency-mt-unsafe)
-    {
-        const auto m = p11::module::load(KYTHIRA_SOFTHSM2_LIBRARY);
-        // SoftHSM2 2.6's RSA-OAEP takes SHA-1 only (the hash and MGF1).
-        consumer_scenario(m, full_token_uri(m, "external"), k_user_pin, "SoftHSM2",
-                          {p11::hash_algorithm::sha1});
-        BOOST_TEST(rv_of([&] {
-                       (void)m.open(p11::uri::parse("pkcs11:token=external"), "wrong");
-                   }) == CKR_PIN_INCORRECT);
+namespace {
+
+/// A SoftHSM2 token store of its own, with one token initialized.
+struct softhsm_token {
+    std::filesystem::path dir = temp_path("-softhsm");
+
+    explicit softhsm_token(const std::string& label) {
+        std::filesystem::create_directories(dir / "tokens");
+        const auto conf = dir / "softhsm2.conf";
+        std::ofstream(conf) << "directories.tokendir = " << (dir / "tokens").string() << "\n"
+                            << "objectstore.backend = file\nlog.level = ERROR\n";
+        ::setenv("SOFTHSM2_CONF", conf.c_str(), 1);  // NOLINT(concurrency-mt-unsafe)
+        const std::string init = std::string(KYTHIRA_SOFTHSM2_UTIL) +
+                                 " --init-token --free --label " + label + " --so-pin " + k_so_pin +
+                                 " --pin " + k_user_pin + " > /dev/null";
+        BOOST_REQUIRE(std::system(init.c_str()) ==
+                      0);  // NOLINT(cert-env33-c,concurrency-mt-unsafe)
     }
-    std::error_code ec;
-    std::filesystem::remove_all(dir, ec);
+    softhsm_token(const softhsm_token&) = delete;
+    auto operator=(const softhsm_token&) -> softhsm_token& = delete;
+    softhsm_token(softhsm_token&&) = delete;
+    auto operator=(softhsm_token&&) -> softhsm_token& = delete;
+    ~softhsm_token() {
+        std::error_code ec;
+        std::filesystem::remove_all(dir, ec);
+    }
+};
+
+/// A self-signed X.509 certificate's DER and its subject's DER.
+auto self_signed() -> std::pair<p11::bytes, p11::bytes> {
+    EVP_PKEY* key = EVP_EC_gen("P-256");
+    BOOST_REQUIRE(key != nullptr);
+    X509* x = X509_new();
+    ASN1_INTEGER_set(X509_get_serialNumber(x), 7);
+    X509_gmtime_adj(X509_getm_notBefore(x), 0);
+    X509_gmtime_adj(X509_getm_notAfter(x), 3600);
+    X509_set_pubkey(x, key);
+    X509_NAME* name = X509_get_subject_name(x);
+    X509_NAME_add_entry_by_txt(name, "CN", MBSTRING_ASC,
+                               reinterpret_cast<const unsigned char*>("migrated"), -1, -1, 0);
+    X509_set_issuer_name(x, name);
+    BOOST_REQUIRE(X509_sign(x, key, EVP_sha256()) > 0);
+    unsigned char* der = nullptr;
+    const int n = i2d_X509(x, &der);
+    p11::bytes cert(der, der + n);
+    OPENSSL_free(der);
+    unsigned char* sder = nullptr;
+    const int sn = i2d_X509_NAME(name, &sder);
+    p11::bytes subject(sder, sder + sn);
+    OPENSSL_free(sder);
+    X509_free(x);
+    EVP_PKEY_free(key);
+    return {cert, subject};
+}
+
+auto by_label(std::string_view label, p11::object_type t) -> p11::uri {
+    p11::uri u;
+    u.object = std::string(label);
+    u.type = t;
+    return u;
+}
+
+auto outcome_of(const hsm::migrate_report& r, CK_OBJECT_CLASS cls, std::string_view label)
+    -> std::optional<hsm::migrate_outcome> {
+    for (const auto& e : r.entries) {
+        if (e.object_class == cls && e.label == label) {
+            return e.outcome;
+        }
+    }
+    return std::nullopt;
+}
+
+}  // namespace
+
+BOOST_AUTO_TEST_CASE(softhsm2_as_an_external_module) {
+    const softhsm_token token("external");
+    const auto m = p11::module::load(KYTHIRA_SOFTHSM2_LIBRARY);
+    // SoftHSM2 2.6's RSA-OAEP takes SHA-1 only (the hash and MGF1).
+    consumer_scenario(m, full_token_uri(m, "external"), k_user_pin, "SoftHSM2",
+                      {p11::hash_algorithm::sha1});
+    BOOST_TEST(rv_of([&] { (void)m.open(p11::uri::parse("pkcs11:token=external"), "wrong"); }) ==
+               CKR_PIN_INCORRECT);
+}
+
+// Requirement 9.3: hsm_ctl migrate's copy, from the virtual HSM to
+// SoftHSM2 standing in for hardware.
+BOOST_AUTO_TEST_CASE(migrate_to_softhsm2) {
+    node n;
+    const softhsm_token token("hardware");
+    const p11::module source(std::make_shared<hsm::pkcs11_native_backend>(n.layer, "app-a"));
+    const auto target = p11::module::load(KYTHIRA_SOFTHSM2_LIBRARY);
+    auto from = source.open(p11::uri::parse("pkcs11:token=alpha"), k_user_pin);
+    auto to = target.open(p11::uri::parse("pkcs11:token=hardware"), k_user_pin);
+    auto raw = from.unrestricted();
+    using p11::attribute;
+
+    // On the virtual HSM: an extractable AES key, extractable EC and RSA
+    // pairs, a pair that is not extractable, a certificate and a data
+    // object.
+    CK_MECHANISM aes_gen{CKM_AES_KEY_GEN, nullptr, 0};
+    const std::array<std::uint8_t, 2> aes_id{0x4b, 0x01};
+    const std::array<attribute, 9> aes_tmpl{attribute::of_ulong(CKA_CLASS, CKO_SECRET_KEY),
+                                            attribute::of_ulong(CKA_KEY_TYPE, CKK_AES),
+                                            attribute::of_ulong(CKA_VALUE_LEN, 32),
+                                            attribute::of_bool(CKA_TOKEN, true),
+                                            attribute::of_bool(CKA_EXTRACTABLE, true),
+                                            attribute::of_bool(CKA_ENCRYPT, true),
+                                            attribute::of_bool(CKA_DECRYPT, true),
+                                            attribute::of_string(CKA_LABEL, "aes-ext"),
+                                            attribute::of_bytes(CKA_ID, aes_id)};
+    const auto aes = raw.b.generate_key(raw.handle, aes_gen, aes_tmpl);
+    const std::array<std::uint8_t, 2> ec_id{0x4b, 0x02};
+    const std::array<std::uint8_t, 2> rsa_id{0x4b, 0x03};
+    const std::array<std::uint8_t, 2> fixed_id{0x4b, 0x04};
+    (void)from.generate_key_pair(p11::key_spec::ec_p256, p11::key_usage::sign, "ec-ext", ec_id,
+                                 true);
+    (void)from.generate_key_pair(p11::key_spec::rsa_2048, p11::key_usage::decrypt, "rsa-ext",
+                                 rsa_id, true);
+    (void)from.generate_key_pair(p11::key_spec::ec_p256, p11::key_usage::sign, "ec-fixed",
+                                 fixed_id);
+    const auto [cert_der, subject] = self_signed();
+    const std::array<std::uint8_t, 2> cert_id{0x4b, 0x05};
+    const std::array<attribute, 7> cert_tmpl{attribute::of_ulong(CKA_CLASS, CKO_CERTIFICATE),
+                                             attribute::of_ulong(CKA_CERTIFICATE_TYPE, CKC_X_509),
+                                             attribute::of_bool(CKA_TOKEN, true),
+                                             attribute::of_string(CKA_LABEL, "cert"),
+                                             attribute::of_bytes(CKA_ID, cert_id),
+                                             attribute::of_bytes(CKA_SUBJECT, subject),
+                                             attribute::of_bytes(CKA_VALUE, cert_der)};
+    (void)raw.b.create_object(raw.handle, cert_tmpl);
+    const std::array<attribute, 4> data_tmpl{
+        attribute::of_ulong(CKA_CLASS, CKO_DATA), attribute::of_bool(CKA_TOKEN, true),
+        attribute::of_string(CKA_LABEL, "notes"), attribute::of_string(CKA_VALUE, "kept here")};
+    (void)raw.b.create_object(raw.handle, data_tmpl);
+
+    // A dry run says what would happen and changes nothing.
+    hsm::migrate_options dry;
+    dry.dry_run = true;
+    const auto plan = hsm::migrate(from, to, dry);
+    BOOST_TEST(plan.dry_run);
+    BOOST_TEST((outcome_of(plan, CKO_PRIVATE_KEY, "ec-ext") == hsm::migrate_outcome::copied));
+    BOOST_TEST(
+        (outcome_of(plan, CKO_PRIVATE_KEY, "ec-fixed") == hsm::migrate_outcome::needs_reissue));
+    BOOST_TEST((outcome_of(plan, CKO_DATA, "notes") == hsm::migrate_outcome::skipped));
+    BOOST_TEST(rv_of([&] { (void)to.find(by_label("ec-ext", p11::object_type::private_key)); }) ==
+               CKR_OBJECT_HANDLE_INVALID);
+
+    // The copy.
+    const auto report = hsm::migrate(from, to);
+    BOOST_TEST(report.ok());
+    BOOST_TEST(report.unwrap_mechanism == CKM_AES_KEY_WRAP_PAD);  // SoftHSM2's name for RFC 5649
+    BOOST_TEST(report.oaep_hash == "SHA-1");
+    for (const auto& [cls, label] :
+         std::vector<std::pair<CK_OBJECT_CLASS, std::string>>{{CKO_SECRET_KEY, "aes-ext"},
+                                                              {CKO_PRIVATE_KEY, "ec-ext"},
+                                                              {CKO_PUBLIC_KEY, "ec-ext"},
+                                                              {CKO_PRIVATE_KEY, "rsa-ext"},
+                                                              {CKO_PUBLIC_KEY, "rsa-ext"},
+                                                              {CKO_CERTIFICATE, "cert"}}) {
+        BOOST_TEST_CONTEXT(label << " class " << cls) {
+            BOOST_TEST((outcome_of(report, cls, label) == hsm::migrate_outcome::copied));
+        }
+    }
+    BOOST_TEST(
+        (outcome_of(report, CKO_PRIVATE_KEY, "ec-fixed") == hsm::migrate_outcome::needs_reissue));
+    BOOST_TEST(rv_of([&] { (void)to.find(by_label("ec-fixed", p11::object_type::private_key)); }) ==
+               CKR_OBJECT_HANDLE_INVALID);
+
+    // The same keys: the target signs what the source's public key
+    // verifies, decrypts what was encrypted to the source's key, and
+    // decrypts what the source's AES key encrypted.
+    const auto ec_on_target = to.find(by_label("ec-ext", p11::object_type::private_key));
+    const auto ec_pub =
+        from.public_key(from.find(by_label("ec-ext", p11::object_type::private_key)));
+    const auto d = digest(p11::hash_algorithm::sha256, "signed on the hardware");
+    BOOST_TEST(verifies(ec_pub, p11::signature_scheme::ecdsa, p11::hash_algorithm::sha256, d,
+                        to.sign_digest(ec_on_target, p11::signature_scheme::ecdsa,
+                                       p11::hash_algorithm::sha256, d)));
+    BOOST_TEST((to.public_key(ec_on_target).ec_point == ec_pub.ec_point));
+    const auto rsa_pub =
+        from.public_key(from.find(by_label("rsa-ext", p11::object_type::private_key)));
+    const std::array<std::uint8_t, 5> secret{9, 8, 7, 6, 5};
+    BOOST_TEST(to.decrypt_oaep(to.find(by_label("rsa-ext", p11::object_type::private_key)),
+                               p11::hash_algorithm::sha1,
+                               oaep_encrypt(rsa_pub, p11::hash_algorithm::sha1, secret)) ==
+                   p11::bytes(secret.begin(), secret.end()),
+               boost::test_tools::per_element());
+    std::array<std::uint8_t, 16> iv{};
+    CK_MECHANISM cbc{CKM_AES_CBC_PAD, iv.data(), iv.size()};
+    const std::string plain = "carried under the transport key";
+    const auto ct = raw.b.encrypt(
+        raw.handle, cbc, aes, {reinterpret_cast<const std::uint8_t*>(plain.data()), plain.size()});
+    auto dst = to.unrestricted();
+    const auto aes_on_target = to.find(by_label("aes-ext", p11::object_type::secret_key));
+    const auto back = dst.b.decrypt(dst.handle, cbc, aes_on_target, ct);
+    BOOST_TEST(std::string(back.begin(), back.end()) == plain);
+
+    // On the target the keys are sensitive and no longer extractable.
+    const std::array<CK_ATTRIBUTE_TYPE, 3> flags{CKA_SENSITIVE, CKA_EXTRACTABLE, CKA_TOKEN};
+    for (const auto h : {ec_on_target, aes_on_target}) {
+        const auto v = dst.b.get_attributes(dst.handle, h, flags);
+        BOOST_TEST((v[0] && v[0]->at(0) == CK_TRUE));
+        BOOST_TEST((v[1] && v[1]->at(0) == CK_FALSE));
+        BOOST_TEST((v[2] && v[2]->at(0) == CK_TRUE));
+    }
+    // The certificate is the same certificate.
+    const std::array<CK_ATTRIBUTE_TYPE, 1> value{CKA_VALUE};
+    BOOST_TEST(
+        *dst.b.get_attributes(dst.handle, to.find(by_label("cert", p11::object_type::certificate)),
+                              value)[0] == cert_der,
+        boost::test_tools::per_element());
+
+    // A second run finds everything there and copies nothing.
+    const auto again = hsm::migrate(from, to);
+    BOOST_TEST(again.ok());
+    BOOST_TEST(again.count(hsm::migrate_outcome::copied) == 0U);
+    BOOST_TEST(again.count(hsm::migrate_outcome::exists) ==
+               report.count(hsm::migrate_outcome::copied) - 2U);
+
+    // SoftHSM2 cannot wrap with CKM_AES_KEY_WRAP_KWP, so it cannot be a
+    // source; refused before anything is touched.
+    BOOST_TEST(rv_of([&] { (void)hsm::migrate(to, from); }) == CKR_MECHANISM_INVALID);
+
+#if defined(KYTHIRA_HSM_CTL)
+    // hsm_ctl migrate as an operator runs it: both modules dlopen'd from
+    // their URIs (the virtual HSM through libkythira_pkcs11.so over a
+    // socket), PINs from a file, the report as JSON on stdout.
+    hsm::wire_server_config cfg;
+    cfg.tls_port.reset();
+    cfg.socket_path = temp_path(".sock").string();
+    cfg.socket_allow = {{static_cast<std::uint32_t>(::getuid()), "app-a"}};
+    hsm::wire_server server(
+        std::shared_ptr<hsm::session_layer>(&n.layer, [](hsm::session_layer*) {}), cfg);
+    server.start();
+    const auto conf = token.dir / "kythira-pkcs11.conf";
+    std::ofstream(conf) << "socket = " << cfg.socket_path << "\n";
+    ::setenv("KYTHIRA_PKCS11_CONF", conf.c_str(), 1);  // NOLINT(concurrency-mt-unsafe)
+    const auto pin = token.dir / "pin";
+    std::ofstream(pin) << k_user_pin << "\n";
+    const std::string cmd =
+        std::string(KYTHIRA_HSM_CTL) +
+        " migrate --from 'pkcs11:token=alpha?module-path=" + KYTHIRA_PKCS11_LIBRARY +
+        "&pin-source=" + pin.string() +
+        "' --to 'pkcs11:token=hardware?module-path=" + KYTHIRA_SOFTHSM2_LIBRARY +
+        "&pin-source=" + pin.string() + "' 2>/dev/null";
+    FILE* out = ::popen(cmd.c_str(), "r");  // NOLINT(cert-env33-c)
+    BOOST_REQUIRE(out != nullptr);
+    std::string json;
+    std::array<char, 4096> buf{};
+    while (const auto got = std::fread(buf.data(), 1, buf.size(), out)) {
+        json.append(buf.data(), got);
+    }
+    const int status = ::pclose(out);
+    BOOST_TEST_INFO("hsm_ctl printed: " << json);
+    BOOST_TEST(WIFEXITED(status));
+    BOOST_TEST(WEXITSTATUS(status) == 0);
+    BOOST_TEST(json.find("\"copied\":0") != std::string::npos);
+    BOOST_TEST(json.find("\"exists\":4") != std::string::npos);
+    BOOST_TEST(json.find("\"needs_reissue\":1") != std::string::npos);
+    BOOST_TEST(json.find(k_user_pin) == std::string::npos);
+#endif
 }
 #endif
