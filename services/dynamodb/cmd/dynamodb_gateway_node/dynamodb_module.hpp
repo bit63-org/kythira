@@ -38,6 +38,7 @@
 #include <kythira/dynamodb/dynamodb_actions.hpp>
 #include <kythira/dynamodb/gateway.hpp>
 #include <kythira/dynamodb/kinesis_destination.hpp>
+#include <kythira/dynamodb/table_key_providers.hpp>
 
 #include <raft/memory_kv_engine.hpp>
 #include <raft/module_interfaces.hpp>
@@ -224,7 +225,7 @@ public:
     /// streaming destinations, without one they use the network; a
     /// co-located IAM's evaluator answers before this module serves.
     [[nodiscard]] auto starts_after() const -> std::vector<std::string> override {
-        return {"iam", "kinesis"};
+        return {"iam", "kinesis", "kms"};
     }
 
     /// The settings, the S3 stores and IAM's replica: everything that can
@@ -236,6 +237,9 @@ public:
             return *e;
         }
         _cfg = std::get<ddb::gateway_config>(std::move(parsed));
+        if (auto e = configure_table_keys(env)) {
+            return e;
+        }
         try {
             if (!_cfg.backups) {
                 _cfg.backups = make_s3_backup_store(_cfg);
@@ -317,6 +321,16 @@ public:
     }
 
     void start(kythira::service_node::module_registry& registry) override {
+        if (_kms_in_process) {
+            // The KMS starts first (starts_after) and publishes its client;
+            // the providers read the slot from the first table on.
+            *_kms_slot = registry.lookup<kythira::service_node::kms_endpoint>(
+                std::string(kythira::service_node::interface_names::kms_client));
+            if (!*_kms_slot) {
+                throw std::invalid_argument(
+                    "KYTHIRA_DYNAMODB_KMS=kythira: the KMS module publishes no client");
+            }
+        }
         ddb::kinesis_sink kinesis;
         const auto co_located = registry.lookup<kythira::service_node::aws_json_endpoint>(
             kythira::service_node::interface_names::kinesis_put_records);
@@ -382,6 +396,40 @@ private:
     /// KYTHIRA_DYNAMODB_AUTH=iam|both in kythira_node beside the IAM module.
     bool _iam_in_process{false};
     std::shared_ptr<kythira::service_node::iam_evaluator> _iam_evaluator;
+    /// The co-located KMS's client (KMS task 16), filled at start.
+    ddb::kms_endpoint_slot _kms_slot =
+        std::make_shared<std::shared_ptr<kythira::service_node::kms_endpoint>>();
+    bool _kms_in_process{false};
+
+    /// The table keys' provider (KMS task 16): `KYTHIRA_DYNAMODB_KMS`, or
+    /// kythira where the KMS module runs in this node, else none.
+    auto configure_table_keys(const kythira::service_node::env_lookup& env)
+        -> std::optional<std::string> {
+        const auto& s = _cfg.kms;
+        const bool kms_here = !_standalone && kythira::service_node::co_located(env, "kms");
+        const std::string provider = !s.kms.empty() ? s.kms : (kms_here ? "kythira" : "off");
+        const bool uses_kythira = provider == "kythira" || s.kms_previous == "kythira";
+        if (uses_kythira && s.endpoint.empty() && !kms_here) {
+            return std::string(
+                "KYTHIRA_DYNAMODB_KMS=kythira needs the KMS module in this kythira_node or "
+                "KYTHIRA_DYNAMODB_KMS_ENDPOINT");
+        }
+        _kms_in_process = uses_kythira && s.endpoint.empty();
+        try {
+            _cfg.encryption = ddb::make_table_key_config(s, provider, _cfg.front.region, _kms_slot);
+        } catch (const std::exception& e) {
+            return std::string(e.what());
+        }
+        if (provider != "off") {
+            std::cerr << "[info] dynamodb_gateway_node: tables are encrypted with the " << provider
+                      << " key provider ("
+                      << (_cfg.encryption.at_rest == ddb::at_rest_mode::owned
+                              ? "owned key by default"
+                              : "only when a table asks")
+                      << ")\n";
+        }
+        return std::nullopt;
+    }
 #ifdef KYTHIRA_DYNAMODB_GATEWAY_IAM
     std::unique_ptr<iam_auth> _iam;
 #endif

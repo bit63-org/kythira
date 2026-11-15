@@ -37,7 +37,10 @@ replica updates. These parts of the API answer `ValidationException`
 - `ReplicaUpdates` `Update`, and the per-replica overrides on `Create`
   (`KMSMasterKeyId`, `ProvisionedThroughputOverride`,
   `OnDemandThroughputOverride`, `GlobalSecondaryIndexes`,
-  `TableClassOverride`): replicas take the source table's settings.
+  `TableClassOverride`): replicas take the source table's settings,
+  except its table key: a replica made in another region is not
+  encrypted until KMS spec task 17 gives each replica a key from its
+  own region's KMS.
 - On multi-region strongly consistent tables (task 27), as on AWS:
   replicas cannot be added after creation, transactions, TTL and LSIs
   are refused, and a single replica or the witness cannot be deleted

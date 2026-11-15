@@ -202,6 +202,13 @@ set_tests_properties(dynamodb_backup_test PROPERTIES
 kythira_dynamodb_test(dynamodb_pitr_test dynamodb_pitr_test.cpp)
 set_tests_properties(dynamodb_pitr_test PROPERTIES
     LABELS "unit;dynamodb;dynamodb-module" TIMEOUT 120)
+# Table keys (.kiro/specs/kms-compatible-api/ task 16): SSESpecification
+# on CreateTable, UpdateTable and restores over a fake key provider, the
+# owned key default, SSEDescription, re-wrapping, the previous provider,
+# catalog format 13, and the KYTHIRA_DYNAMODB_KMS settings.
+kythira_dynamodb_test(dynamodb_table_keys_test dynamodb_table_keys_test.cpp)
+set_tests_properties(dynamodb_table_keys_test PROPERTIES
+    LABELS "unit;dynamodb;dynamodb-module" TIMEOUT 60)
 # Exports and imports (task 20): the formats (Ion, CSV, gzip, zstd, MD5),
 # full, point-in-time and incremental exports, imports of each format.
 kythira_dynamodb_test(dynamodb_export_import_test dynamodb_export_import_test.cpp)

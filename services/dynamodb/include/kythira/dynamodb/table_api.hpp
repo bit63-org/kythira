@@ -35,6 +35,7 @@
 #include <kythira/dynamodb/catalog.hpp>
 #include <kythira/dynamodb/errors.hpp>
 #include <kythira/dynamodb/front_end.hpp>
+#include <kythira/dynamodb/table_keys.hpp>
 
 #include <raft/aws_json_protocol.hpp>
 
@@ -718,8 +719,14 @@ template<typename TypeOf>
     out["AttributeDefinitions"] = std::move(defs);
     out["TableName"] = call_context::bare_name(d.name);
     out["KeySchema"] = std::move(keys);
-    out["TableStatus"] = status_name(d.status);
+    // A table whose key cannot be used says so, whatever it is doing.
+    out["TableStatus"] = d.sse.status == sse_status::inaccessible
+                             ? std::string_view("INACCESSIBLE_ENCRYPTION_CREDENTIALS")
+                             : status_name(d.status);
     out["CreationDateTime"] = millis_to_seconds(d.created_ms);
+    if (auto sse = sse_description(d.sse)) {
+        out["SSEDescription"] = std::move(*sse);
+    }
     out["ProvisionedThroughput"] = boost::json::object{
         {"NumberOfDecreasesToday", 0},
         {"ReadCapacityUnits", d.read_capacity},
@@ -893,6 +900,11 @@ public:
         if (auto e = within_account_limit(ctx, c.table)) {
             return *e;
         }
+        // The table key last, once nothing else refuses the table, so a
+        // refused request makes no KMS call.
+        if (auto e = encrypt_new_table(_keys, ctx, c.table, in.if_contains("SSESpecification"))) {
+            return *e;
+        }
         const auto r = _backend.catalog(c);
         if (!r.ok()) {
             return table_api_detail::error_of(r);
@@ -910,10 +922,8 @@ public:
         if (!valid_catalog_name(ctx, name)) {
             return bad_table_name();
         }
-        for (const char* member : {"SSESpecification", "OnDemandThroughput"}) {
-            if (in.contains(member)) {
-                return unsupported(member);
-            }
+        if (in.contains("OnDemandThroughput")) {
+            return unsupported("OnDemandThroughput");
         }
         std::optional<table_stream> stream;
         if (const auto* s = in.if_contains("StreamSpecification")) {
@@ -1226,10 +1236,11 @@ public:
     auto update_table(call_context& ctx, boost::json::object& in) -> result {
         using namespace table_api_detail;
         const auto name = ctx.table_name(in.at("TableName").as_string());
-        for (const char* member : {"SSESpecification", "OnDemandThroughput"}) {
-            if (in.contains(member)) {
-                return unsupported(member);
-            }
+        if (in.contains("OnDemandThroughput")) {
+            return unsupported("OnDemandThroughput");
+        }
+        if (const auto* sse = in.if_contains("SSESpecification")) {
+            return update_sse(ctx, name, in, *sse);
         }
         bool strong = false;
         if (const auto* mode = in.if_contains("MultiRegionConsistency")) {
@@ -1754,6 +1765,50 @@ public:
     /// The peer regions `ReplicaUpdates` may name (task 22); unset, none.
     void set_peers(std::function<bool(std::string_view)> known) { _peer_known = std::move(known); }
 
+    /// `UpdateTable` with `SSESpecification` (KMS task 16): the table's key
+    /// re-wrapped under the key the request names, alone in its request.
+    auto update_sse(call_context& ctx, const std::string& name, const boost::json::object& in,
+                    const boost::json::value& spec) -> result {
+        using namespace table_api_detail;
+        for (const auto& [member, value] : in) {
+            if (member != "TableName" && member != "SSESpecification") {
+                return validation_error("SSESpecification cannot be combined with " +
+                                        std::string(member) + " in one UpdateTable");
+            }
+        }
+        if (!spec.is_object()) {
+            return validation_error("SSESpecification must be an object");
+        }
+        const auto current = _backend.describe(name);
+        if (!current) {
+            return not_found(name);
+        }
+        if (current->status != table_status::active) {
+            return in_use_message("Table: " + std::string(call_context::bare_name(name)));
+        }
+        static const table_keys none;
+        const auto& keys = _keys != nullptr ? *_keys : none;
+        auto sse = keys.rewrap(ctx, client_table_name(name), current->sse,
+                               table_account(name, ctx.owner()), spec.get_object());
+        if (!sse) {
+            return sse.error();
+        }
+        catalog_command c;
+        c.op = catalog_command::kind::set_sse;
+        c.table = *current;
+        c.table.sse = std::move(*sse);
+        c.now_ms = _backend.now_ms();
+        const auto r = _backend.catalog(c);
+        if (!r.ok()) {
+            return error_of(r);
+        }
+        return boost::json::object{{"TableDescription", table_description(*r.table, ctx)}};
+    }
+
+    /// The table keys (`table_keys.hpp`); null: no table is encrypted.
+    /// Set before serving.
+    void set_table_keys(const table_keys* keys) { _keys = keys; }
+
     /// The three regions of the strong host (task 27); empty without one.
     void set_strong_regions(std::vector<std::string> regions) {
         _strong_regions = std::move(regions);
@@ -2269,6 +2324,7 @@ private:
     }
 
     Backend& _backend;
+    const table_keys* _keys = nullptr;
     std::vector<std::string> _strong_regions;
     std::function<bool(std::string_view)> _peer_known;
 };

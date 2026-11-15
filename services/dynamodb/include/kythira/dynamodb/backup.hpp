@@ -650,6 +650,9 @@ public:
         : _backend(backend), _store(std::move(store)) {}
 
     void set_store(std::shared_ptr<backup_store> store) { _store = std::move(store); }
+    /// The table keys a new table is encrypted with (`table_keys.hpp`);
+    /// null: none.
+    void set_table_keys(const table_keys* keys) { _keys = keys; }
     /// Called when a backup is asked for, so the worker looks at once.
     void on_created(std::function<void()> fn) { _created = std::move(fn); }
 
@@ -826,6 +829,9 @@ public:
         }
         d.restore.source_backup_arn = r->arn;
         d.restore.source_table_arn = r->table_arn;
+        if (auto e = encrypt_new_table(_keys, ctx, d, in.if_contains("SSESpecificationOverride"))) {
+            return *e;
+        }
         catalog_command c;
         c.op = catalog_command::kind::create_table;
         c.table = std::move(d);
@@ -930,6 +936,7 @@ private:
     }
 
     Backend& _backend;
+    const table_keys* _keys = nullptr;
     std::shared_ptr<backup_store> _store;
     std::function<void()> _created;
 };

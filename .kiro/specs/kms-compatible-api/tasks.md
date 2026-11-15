@@ -236,6 +236,13 @@ is one PR unless noted.
     `kythira`, `aws` and `local` providers and `KYTHIRA_DYNAMODB_KMS`;
     provider tag on table keys
   - _Requirements: 12.1-12.7, 12.10-12.12_
+  - Progress: the providers moved to core (`raft/kms_key_provider*.hpp`)
+    and gained `wrap_data_key` (`Encrypt` of a key the caller holds),
+    which re-wraps a table key when its table changes key or provider;
+    the KMS gives services owned keys; DynamoDB has table keys
+    (`table_keys.hpp`, catalog format 13, `SSESpecification`,
+    `SSEDescription`, `KYTHIRA_DYNAMODB_KMS`). Left: sealing, the
+    inaccessible state, background re-encryption.
 
 - [ ] 17. DynamoDB archives and replicas
   - Sealing of change log records, backups, PITR archives and exports;

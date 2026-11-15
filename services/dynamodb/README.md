@@ -94,6 +94,9 @@ configuration `.github/workflows/dynamodb-module.yml` checks.
 | `tests/dynamodb_strong_test.cpp` | The strong catalog's ids from 2^62, routing between the cluster's host and the strong host, making tables strong, leaving, GSIs, streams, PITR and backups across regions | 27 |
 | `tests/dynamodb_strong_cluster_test.cpp`, `dynamodb_cluster_fixture.hpp` | Three in-process regions over one strong host: cross-region reads, racing conditional writes, losing a region, cutting one off through relays, a witness, splits under load | 27 |
 | `tools/strong/` | Three regions on RocksDB under Docker, rootless Podman or as processes, with a region killed and restarted (`run_strong.sh`) | 27 |
+| `include/kythira/dynamodb/table_keys.hpp` | Table keys (KMS spec task 16): `SSESpecification` checked as AWS checks it, each table's key made under the owned, AWS managed or named KMS key, bound to the table by its encryption context, re-wrapped by `UpdateTable`, `SSEDescription`; the `KYTHIRA_DYNAMODB_KMS` settings | KMS 16 |
+| `include/kythira/dynamodb/table_key_providers.hpp` | The `kythira`, `aws` and `local` key providers (core's `raft/kms_key_provider*.hpp`, shared with Kinesis) made from those settings | KMS 16 |
+| `tests/dynamodb_table_keys_test.cpp` | Table keys over a fake KMS: the owned default, a named key used for the caller, refusals, `off` and no provider, re-wrapping without new data keys, the previous provider, restores, catalog format 13, the settings | KMS 16 |
 
 The rest follows the plan in the spec's `tasks.md`.
 
@@ -132,6 +135,28 @@ standard `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` and
 `AWS_SESSION_TOKEN`, unless `KYTHIRA_DYNAMODB_KINESIS_ENDPOINT` names
 another endpoint, such as a Kythira `kinesis_gateway_node`
 (`KYTHIRA_DYNAMODB_KINESIS_TLS=0` for a plain-HTTP one).
+
+Tables are encrypted at rest under a KMS key (KMS spec task 16) when a
+key provider is set: `KYTHIRA_DYNAMODB_KMS=kythira` (Kythira's KMS, the
+default in a kythira_node that runs the KMS module, or another cluster's
+at `KYTHIRA_DYNAMODB_KMS_ENDPOINT`), `aws` (AWS KMS under the operator's
+credentials, with `KYTHIRA_DYNAMODB_KMS_OWNED_KEY` standing for the owned
+key, since AWS owned keys are not usable outside AWS) or `local` (a
+master key derived from `KYTHIRA_DYNAMODB_KMS_PASSPHRASE`, owned key
+only). A table that names no key gets the owned key, as AWS gives it an
+AWS owned key, unless `KYTHIRA_DYNAMODB_ENCRYPT_AT_REST=off`;
+`SSESpecification` with `Enabled` names the AWS managed key
+`alias/aws/dynamodb` or `KMSMasterKeyId`. Each table has its own 256-bit
+key, stored only wrapped in the catalog and bound to the table by the
+encryption context `aws:dynamodb:tableName` and
+`aws:dynamodb:subscriberId`. With `aws`, AWS decides who may use the key
+under the operator's credentials; Kythira's IAM still decides who may use
+the table. A table keeps opening after the cluster moves to another
+provider while the old one is named by `KYTHIRA_DYNAMODB_KMS_PREVIOUS`.
+This step makes and keeps the keys; sealing items, change records,
+backups and exports under them, `INACCESSIBLE_ENCRYPTION_CREDENTIALS`
+and re-encrypting existing tables come with the next step of task 16,
+so until then items are stored as before.
 
 Backups live in `KYTHIRA_DYNAMODB_BACKUP_DIR` (a directory every node of a
 cluster shares) or, in a build with the AWS SDK, an S3 bucket
