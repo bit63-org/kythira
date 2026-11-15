@@ -114,7 +114,7 @@ task is one PR unless noted.
     `hsm_node` members after keys were used everywhere and the master
     key rekeyed, with a token label as the control that must be found.
 
-- [ ] 6. HSM service module and session layer
+- [x] 6. HSM service module and session layer
   - `hsm_module` on the service module interface: groups on the node's
     multi-raft host, data directory, admin API (init, unseal, seal,
     status, tokens)
@@ -264,7 +264,10 @@ task is one PR unless noted.
       member restarted with another down unseals from the third.
   - [ ] 8b. TPM 2.0 (`tpm2-tss`) and cloud KMS (AWS KMS, Azure Key Vault,
     GCP KMS through the existing cloud clients) share sealers behind
-    `share_sealer`, chosen with `KYTHIRA_HSM_SHARE_SEALER`
+    `share_sealer`, chosen with `KYTHIRA_HSM_SHARE_SEALER`. Scheduled
+    after the KMS-compatible API (`.kiro/specs/kms-compatible-api/`)
+    makes `kms_key_provider` a shared library, so the cloud sealers
+    reuse it rather than growing their own clients.
 
 - [x] 9. Wire protocol and remote access
   - Framed protocol (the module's codec; design "Wire protocol" says why
@@ -453,8 +456,20 @@ task is one PR unless noted.
     and `kythira_node_cluster_test` (a client named by an IAM role sees a
     token only once a role policy grants `hsm:OpenToken` on its ARN).
 
-- [ ] 15. Documentation
+- [x] 15. Documentation
   - `services/hsm/README.md` and `doc/hsm.md` opening with the threat model
     table; startup log line; operator guide for both unseal modes and for
     moving to an external module
   - _Requirements: 4.8, 12.1, 12.2_
+  - Done: both open with the same table (stolen disks, backups and
+    snapshots, a lost node, consumers that should not read keys, PIN
+    guessing, silent changes; against root on a serving host, a
+    hypervisor, memory dumps, side channels, a compromised co-located
+    service, a member's certificate in node mode). `doc/hsm.md` is the
+    operator guide: running a cluster, choosing an unseal mode (with the
+    Requirement 4.8 statement), operator and node unseal step by step,
+    sealing and rekeying, tokens, bindings and PINs, audit, backups and
+    which share set they need, and moving consumers and keys to an
+    external module. Every node logs a warning at start that it is a
+    software HSM with keys in host memory; `hsm_node_cluster_test`
+    checks each member's log for it.

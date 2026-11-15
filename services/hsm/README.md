@@ -1,5 +1,19 @@
 # HSM module
 
+A software HSM. What it protects against, and what it does not:
+
+| Protects against | Does not protect against |
+|---|---|
+| A stolen disk, backup, Raft snapshot or data directory: every key on disk is sealed under the master key (MK), and the MK is never written anywhere | Root on a host where a node is unsealed: the MK and every key in use are in that process's memory |
+| A lost or retired node: its data opens nothing without the MK, and `hsm_ctl rekey` makes its old share useless | A hypervisor, or anyone who can read the VM's memory |
+| Fewer than `k` share holders, or the disks of fewer than `k` members in node unseal mode | Memory dumps taken by someone with that access (core dumps and ptrace are turned off, and key memory is locked and kept out of dumps, but that only stops accidents) |
+| Consumers that should use a key without reading it: keys are made non-extractable unless asked, and a client sees only the tokens it is bound to | Side channels (timing, cache, power) on the host |
+| A client without a token's PIN, and guessing it: failures count on every node and lock the PIN | A compromised service in the same `kythira_node` process when the HSM is co-located |
+| Keys silently changed or misused: every key change, operator action and refusal is audited, optionally to a verifiable ledger | A member's certificate and key in node unseal mode, with network reach to `k - 1` other members: that is enough to collect `k` shares |
+
+Keys are in host memory while they are in use, and each node says so in its
+log at startup. The operator guide is `doc/hsm.md`.
+
 A virtual HSM for Kythira: a software token that keeps its keys in Kythira
 Raft groups, sealed under a master key split with Shamir's scheme, and serves
 them through PKCS#11. Consumers (the CA, Kinesis, IAM, and anything that loads
@@ -259,8 +273,8 @@ has no IAM to ask and refuses `KYTHIRA_HSM_IAM=true`.
 | `pkcs11/` | `libkythira_pkcs11.so`, the PKCS#11 client library, as its own target: the entry points, the configuration file, failover, the exported-symbol map (`pkcs11/README.md`) | 10 |
 | `docker/` | the chaos image (`hsm-chaos/Dockerfile`: `hsm_node` and `kythira_node`) and `hsm-chaos-compose.yml`, three members addressed by service name in either layout | 11 |
 
-TPM and cloud KMS share sealing and the documentation follow in tasks
-8b and 15 (`.kiro/specs/virtual-hsm/tasks.md`).
+TPM and cloud KMS share sealing follows in task 8b, after the
+KMS-compatible API's shared key provider (`.kiro/specs/virtual-hsm/tasks.md`).
 
 ## Core targets and variables used
 

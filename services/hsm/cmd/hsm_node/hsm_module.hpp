@@ -337,6 +337,12 @@ public:
     }
 
     void start(service_node::module_registry& registry) override {
+        // Requirement 12.2: no one should mistake this for a hardware
+        // boundary.
+        log(kythira::log_level::warning,
+            "hsm: this is a software HSM: keys are in this host's memory while in use, "
+            "readable by root on this host; see doc/hsm.md for what it does and does not "
+            "protect against");
         if (_iam) {
             auto iam = registry.lookup<service_node::iam_evaluator>(
                 std::string(service_node::interface_names::iam_evaluator));

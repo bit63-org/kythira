@@ -275,6 +275,13 @@ BOOST_FIXTURE_TEST_CASE(the_catalog_leader_killed_during_rekey, process_cluster)
 
 BOOST_FIXTURE_TEST_CASE(no_secret_reaches_a_data_directory, process_cluster) {
     namespace t = hsm::test;
+    // Requirement 12.2: every member says at startup what it is.
+    for (std::size_t i = 0; i < 3; ++i) {
+        const auto log = slurp(data_dir(i).parent_path() / "node.log");
+        BOOST_TEST(log.find("software HSM: keys are in this host's memory while in use") !=
+                       std::string::npos,
+                   "member " << i + 1);
+    }
     std::random_device rd;
     const auto random_bytes = [&](std::size_t n) {
         std::vector<std::uint8_t> out(n);
