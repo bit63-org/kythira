@@ -1,0 +1,16 @@
+/* Copyright (c) 2026 Clark Rawlins
+   SPDX-License-Identifier: Apache-2.0
+
+   libkythira_pkcs11.so exports the three PKCS#11 3.0 entry points and
+   nothing else: every other C_ function is reached through the function
+   lists they return, and OpenSSL, the C++ runtime's inline symbols and
+   the library's own code stay local, so they cannot collide with the
+   application's copies. */
+{
+    global:
+        C_GetFunctionList;
+        C_GetInterfaceList;
+        C_GetInterface;
+    local:
+        *;
+};
