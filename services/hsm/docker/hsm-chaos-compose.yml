@@ -1,0 +1,134 @@
+# Copyright (c) 2026 Clark Rawlins
+# SPDX-License-Identifier: Apache-2.0
+
+# Three virtual HSM members for services/hsm/tests/docker/
+# hsm_chaos_test.cpp (.kiro/specs/virtual-hsm/ task 11b, Requirement
+# 13.6), in either layout from one image:
+#
+#   * stand-alone (the default): `hsm_node`, the HSM module alone;
+#   * co-located: KYTHIRA_HSM_CHAOS_DAEMON=/usr/local/bin/kythira_node and
+#     KYTHIRA_HSM_CHAOS_SERVICES=hsm,redis, so the HSM shares each node's
+#     process, Raft listener and data directory with the Redis module.
+#
+# The test SIGKILLs members, starts them again and cuts them off the
+# network while it generates keys and rekeys the master key. A killed
+# member keeps its /data volume, so it rejoins as the same voter (sealed,
+# as after any restart, until the operator's shares unseal it).
+#
+# CLAUDE.md's container rules, as they apply here:
+#
+#   * **No static IPs.** Raft peers, the members' forwarding to the leader
+#     and every certificate name address members by **service name**
+#     (hsm-1 .. hsm-3).
+#   * **No runtime named anywhere.** The test drives this file through
+#     `container_runtime()` / `compose_prefix()`
+#     (tests/docker_chaos/os_faults.hpp).
+#   * **No capabilities, no privileged or host networking.** Faults are
+#     `kill` (SIGKILL), `start`, and `network disconnect`/`connect`, which
+#     rootless Podman allows. Key memory is allowed to stay unlocked, since
+#     locking it would need CAP_IPC_LOCK.
+#
+# The test writes a throwaway PKI into a host directory, world-readable so
+# uid 10001 can read it under Docker's uid mapping and rootless Podman's
+# alike, and passes it in as KYTHIRA_HSM_CHAOS_PKI_DIR: a CA, one
+# certificate per member (its service name, localhost and 127.0.0.1 as DNS
+# and IP SANs, spiffe://hsm/node-N as its identity), the operator's and the
+# application's. Raft, the operator API and the PKCS#11 listener are all
+# mutual TLS.
+#
+# The operator API and the PKCS#11 listener are published on loopback at
+# ports the test picks (KYTHIRA_HSM_CHAOS_API_N, _CLIENTS_N). The network
+# has a fixed name so the test can disconnect a member from it, and
+# reconnects it with its service-name alias.
+
+name: kythira-hsm-chaos
+
+x-node: &node
+  image: kythira-hsm-chaos:dev
+  entrypoint: ["${KYTHIRA_HSM_CHAOS_DAEMON:-/usr/local/bin/hsm_node}"]
+  networks:
+    hsm_chaos_net: {}
+
+x-node-env: &node-env
+  KYTHIRA_SERVICES: "${KYTHIRA_HSM_CHAOS_SERVICES:-hsm}"
+  KYTHIRA_NODE_DATA_DIR: /data
+  KYTHIRA_NODE_PEERS: "1=hsm-1:7100,2=hsm-2:7100,3=hsm-3:7100"
+  KYTHIRA_NODE_RAFT_BIND: 0.0.0.0
+  KYTHIRA_NODE_RAFT_PORT: "7100"
+  KYTHIRA_NODE_TLS_CA: /pki/ca.pem
+  KYTHIRA_HSM_API_LISTEN: 0.0.0.0:9443
+  KYTHIRA_HSM_API_URLS: "1=https://hsm-1:9443,2=https://hsm-2:9443,3=https://hsm-3:9443"
+  KYTHIRA_HSM_PEER_IDENTITIES: "spiffe://hsm/node-1,spiffe://hsm/node-2,spiffe://hsm/node-3"
+  KYTHIRA_HSM_OPERATORS: spiffe://test/operator
+  KYTHIRA_HSM_CLIENT_LISTEN: 0.0.0.0:9444
+  KYTHIRA_HSM_ALLOW_UNLOCKED_MEMORY: "true"
+  KYTHIRA_HSM_PIN_COST_LOG2: "10"
+  # Slow CI disks and two runtimes' network stacks: the 300-600 ms
+  # defaults would elect on every burst of writes.
+  KYTHIRA_ELECTION_TIMEOUT_MIN_MS: "1000"
+  KYTHIRA_ELECTION_TIMEOUT_MAX_MS: "2000"
+  KYTHIRA_HEARTBEAT_INTERVAL_MS: "150"
+  # Read only by kythira_node in the co-located layout: Redis on plaintext
+  # RESP with no ACL, in memory.
+  KYTHIRA_REDIS_LISTEN: 0.0.0.0:6379
+  KYTHIRA_REDIS_ALLOW_ANONYMOUS: "1"
+  KYTHIRA_CACHE_PERSISTENCE: memory
+
+services:
+  hsm-1:
+    <<: *node
+    container_name: kythira-hsm-chaos-1
+    hostname: hsm-1
+    environment:
+      <<: *node-env
+      KYTHIRA_NODE_ID: "1"
+      KYTHIRA_NODE_TLS_CERT: /pki/node-1.pem
+      KYTHIRA_NODE_TLS_KEY: /pki/node-1.key
+    volumes:
+      - ${KYTHIRA_HSM_CHAOS_PKI_DIR:?the scenario test sets it}:/pki:ro
+      - hsm-1-data:/data
+    ports:
+      - "127.0.0.1:${KYTHIRA_HSM_CHAOS_API_1:-19441}:9443"
+      - "127.0.0.1:${KYTHIRA_HSM_CHAOS_CLIENTS_1:-19451}:9444"
+
+  hsm-2:
+    <<: *node
+    container_name: kythira-hsm-chaos-2
+    hostname: hsm-2
+    environment:
+      <<: *node-env
+      KYTHIRA_NODE_ID: "2"
+      KYTHIRA_NODE_TLS_CERT: /pki/node-2.pem
+      KYTHIRA_NODE_TLS_KEY: /pki/node-2.key
+    volumes:
+      - ${KYTHIRA_HSM_CHAOS_PKI_DIR:?the scenario test sets it}:/pki:ro
+      - hsm-2-data:/data
+    ports:
+      - "127.0.0.1:${KYTHIRA_HSM_CHAOS_API_2:-19442}:9443"
+      - "127.0.0.1:${KYTHIRA_HSM_CHAOS_CLIENTS_2:-19452}:9444"
+
+  hsm-3:
+    <<: *node
+    container_name: kythira-hsm-chaos-3
+    hostname: hsm-3
+    environment:
+      <<: *node-env
+      KYTHIRA_NODE_ID: "3"
+      KYTHIRA_NODE_TLS_CERT: /pki/node-3.pem
+      KYTHIRA_NODE_TLS_KEY: /pki/node-3.key
+    volumes:
+      - ${KYTHIRA_HSM_CHAOS_PKI_DIR:?the scenario test sets it}:/pki:ro
+      - hsm-3-data:/data
+    ports:
+      - "127.0.0.1:${KYTHIRA_HSM_CHAOS_API_3:-19443}:9443"
+      - "127.0.0.1:${KYTHIRA_HSM_CHAOS_CLIENTS_3:-19453}:9444"
+
+volumes:
+  hsm-1-data:
+  hsm-2-data:
+  hsm-3-data:
+
+networks:
+  hsm_chaos_net:
+    name: kythira_hsm_chaos_net
+    driver: bridge

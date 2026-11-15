@@ -55,6 +55,9 @@ public:
     auto operator=(test_pki&&) -> test_pki& = delete;
 
     [[nodiscard]] auto ca_path() const -> const std::string& { return _ca_path; }
+    /// Where the PEM files are: `ca.pem`, and `<name>.pem` / `<name>.key`
+    /// for each leaf issued.
+    [[nodiscard]] auto dir() const -> const std::filesystem::path& { return _dir; }
 
     /// A leaf signed by the CA, with `sans` in OpenSSL's config syntax
     /// ("DNS:localhost,IP:127.0.0.1,URI:spiffe://hsm/node-1").

@@ -163,4 +163,10 @@ if(KYTHIRA_HSM_NODE_DAEMON)
         LABELS "integration;hsm;hsm-module" TIMEOUT 600)
 endif()
 
+# Task 11b (Requirement 13.6): the container scenario, where the daemon is
+# built (the image carries it and kythira_node).
+if(KYTHIRA_HSM_NODE_DAEMON AND Boost_FOUND AND httplib_FOUND)
+    add_subdirectory(docker)
+endif()
+
 kythira_scale_test_timeouts()
