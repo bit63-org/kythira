@@ -13,6 +13,11 @@
 //   raft/<group>/           each group's Raft log
 //   snapshots/group-<id>/   checkpoints and incoming snapshot transfers
 //
+// PKCS#11 clients in other processes connect to the client listener
+// (mutual TLS, KYTHIRA_HSM_CLIENT_LISTEN) or the Unix socket
+// (KYTHIRA_HSM_SOCKET), wire_server.hpp; each connection is an
+// application under its certificate's or uid's identity.
+//
 // Co-located modules reach the HSM in process: the module publishes its
 // session layer as "hsm.session_layer", and a consumer opens it through a
 // native_client under its own identity, which the catalog's bindings
@@ -33,6 +38,7 @@
 #include <kythira/hsm/node_unseal.hpp>
 #include <kythira/hsm/secure_arena.hpp>
 #include <kythira/hsm/session_layer.hpp>
+#include <kythira/hsm/wire_server.hpp>
 
 #include <raft/beast_https_server.hpp>
 #include <raft/binary_file_persistence.hpp>
@@ -278,14 +284,40 @@ public:
                     std::string(message));
             });
         _server->start();
+
+        kythira::hsm::wire_server_config wc;
+        if (_opt.client_listen) {
+            wc.bind_address = _opt.client_listen->first;
+            wc.tls_port = _opt.client_listen->second;
+        } else {
+            wc.tls_port.reset();
+        }
+        wc.cert_path = _opt.tls_cert;
+        wc.key_path = _opt.tls_key;
+        wc.ca_path = _opt.app_ca;
+        wc.socket_path = _opt.socket_path.string();
+        wc.socket_allow = _opt.socket_allow;
+        wc.max_connections = static_cast<std::size_t>(_opt.client_max_connections);
+        wc.idle_timeout = _opt.client_idle_timeout;
+        _clients = std::make_unique<kythira::hsm::wire_server>(
+            _layer, std::move(wc), [this](bool warning, std::string_view message) {
+                log(warning ? kythira::log_level::warning : kythira::log_level::info,
+                    std::string(message));
+            });
+        _clients->start();
         _started = true;
         std::cout << "hsm " << kythira::host_node_id_text(_opt.node_id)
-                  << " ready: api=" << _server->port()
+                  << " ready: api=" << _server->port() << " clients="
+                  << (_opt.client_listen ? std::to_string(_clients->tls_port()) : "off")
+                  << (_opt.socket_path.empty() ? "" : " socket=" + _opt.socket_path.string())
                   << (_opt.insecure_plaintext ? " (PLAINTEXT)" : " (mutual TLS)")
                   << " members=" << _opt.api_urls.size() << " sealed" << std::endl;
     }
 
     void drain() override {
+        if (_clients) {
+            _clients->stop();
+        }
         if (_server) {
             _server->stop();
         }
@@ -314,6 +346,7 @@ public:
             _layer->seal();  // the key cache and session objects too
         }
         _vault.seal();
+        _clients.reset();
         _admin.reset();
         _layer.reset();
         _host.reset();
@@ -336,20 +369,32 @@ public:
             return {};
         }
         const auto s = _host->stats();
-        return {{"sealed", _vault.sealed() ? 1.0 : 0.0, {}},
-                {"tokens", static_cast<double>(_host->tokens().size()), {}},
-                {"groups_created", static_cast<double>(s.groups_created), {}},
-                {"groups_destroyed", static_cast<double>(s.groups_destroyed), {}},
-                {"proposals_forwarded", static_cast<double>(s.proposals_forwarded), {}},
-                {"read_indexes_forwarded", static_cast<double>(s.read_indexes_forwarded), {}},
-                {"proposals_served", static_cast<double>(s.proposals_served), {}},
-                {"read_indexes_served", static_cast<double>(s.read_indexes_served), {}},
-                {"cached_keys", static_cast<double>(_layer ? _layer->cached_keys() : 0), {}},
-                {"raft_term_sum", service_node::raft_term_sum(*_raft), {}}};
+        return {
+            {"sealed", _vault.sealed() ? 1.0 : 0.0, {}},
+            {"tokens", static_cast<double>(_host->tokens().size()), {}},
+            {"groups_created", static_cast<double>(s.groups_created), {}},
+            {"groups_destroyed", static_cast<double>(s.groups_destroyed), {}},
+            {"proposals_forwarded", static_cast<double>(s.proposals_forwarded), {}},
+            {"read_indexes_forwarded", static_cast<double>(s.read_indexes_forwarded), {}},
+            {"proposals_served", static_cast<double>(s.proposals_served), {}},
+            {"read_indexes_served", static_cast<double>(s.read_indexes_served), {}},
+            {"cached_keys", static_cast<double>(_layer ? _layer->cached_keys() : 0), {}},
+            {"client_connections",
+             static_cast<double>(_clients ? _clients->active_connections() : 0),
+             {}},
+            {"client_requests", static_cast<double>(_clients ? _clients->stats().requests : 0), {}},
+            {"client_connections_refused",
+             static_cast<double>(_clients ? _clients->stats().refused : 0),
+             {}},
+            {"raft_term_sum", service_node::raft_term_sum(*_raft), {}}};
     }
 
     /// The listener's port once started (tests pass port 0).
     [[nodiscard]] auto api_port() const -> std::uint16_t { return _server ? _server->port() : 0; }
+    /// The client listener's port once started.
+    [[nodiscard]] auto client_port() const -> std::uint16_t {
+        return _clients ? _clients->tls_port() : 0;
+    }
 
 private:
     auto make_raft_config(Host& host, const service_node::group_space& space) -> raft_config {
@@ -507,6 +552,7 @@ private:
     std::shared_ptr<const kythira::hsm::peer_client> _peers;
     kythira::hsm::peer_policy _peer_policy;
     std::unique_ptr<kythira::https::server> _server;
+    std::unique_ptr<kythira::hsm::wire_server> _clients;
     std::atomic<bool> _driving{false};
     std::thread _driver;
     std::mutex _warden_mutex;

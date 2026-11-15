@@ -39,6 +39,24 @@ are enough to collect `k` shares. In either mode an unsealed node's memory
 holds the MK and the keys in use, which root on that host can read
 (requirement 2.5). `hsm_ctl seal` makes every node discard them.
 
+## Clients in other processes
+
+A PKCS#11 client reaches a node over mutual TLS 1.3
+(`KYTHIRA_HSM_CLIENT_LISTEN`, 9444 by default) or, on the same host, a
+Unix socket (`KYTHIRA_HSM_SOCKET`). Each connection is one PKCS#11
+application acting as an identity: over TLS, the client certificate's
+first URI SAN (its first DNS SAN when it has no URI), checked against
+`KYTHIRA_HSM_APP_CA`; over the socket, the identity
+`KYTHIRA_HSM_SOCKET_ALLOW` gives the connecting uid (`root=local-app,
+1001=spiffe://example/app`); any other uid is closed unanswered. An
+operator binds a token to an identity (`PUT /v1/tokens/N/bindings/<id>`);
+every other token answers `CKR_TOKEN_NOT_PRESENT` to that client whether
+it exists or not, and the token's PIN is still needed to log in
+(requirement 8).
+
+With `KYTHIRA_HSM_INSECURE_PLAINTEXT` there is no client identity, so the
+TLS client listener stays off and only the socket serves.
+
 ## What is here
 
 | Path | What | Task |
@@ -67,16 +85,19 @@ holds the MK and the keys in use, which root on that host can read
 | `include/kythira/hsm/hsm_admin.hpp` | the operator API, transport-free: status; init, unseal, seal and rekey; creating, deleting, binding and unbinding tokens | 6, 7 |
 | `include/kythira/hsm/unseal.hpp` | operator unseal: shares checked on arrival (encoding, split, duplicates), held in memory until `k` arrive or the timeout | 7 |
 | `include/kythira/hsm/node_unseal.hpp` | node unseal: the share sealer interface and the key-file sealer, the sealed share store, collection from peers, and the member-only share routes | 8 |
+| `include/kythira/hsm/wire.hpp`, `client_types.hpp` | the client wire protocol: frames, op numbers, mechanism parameters field by field (never a raw structure with pointers), and the values calls return | 9 |
+| `include/kythira/hsm/wire_server.hpp` | the dispatcher (one request, one `native_client` call) and the listeners: mutual TLS 1.3, where a client is its certificate's first URI SAN (else DNS SAN), and a Unix socket served only to the uids `KYTHIRA_HSM_SOCKET_ALLOW` names; a thread per connection up to a cap | 9 |
+| `include/kythira/hsm/wire_client.hpp` | a connection (TLS with the node's name checked, or the socket) and `wire_client`, `native_client`'s calls over the wire, which the client library builds on | 9 |
 | `include/kythira/hsm/mtls_client.hpp` | one blocking HTTPS request with a client certificate (TLS 1.3, server name checked), for forwarding and `hsm_ctl` | 6, 7 |
 | `include/kythira/hsm/expected.hpp` | `expected`/`unexpected`, the part of `std::expected` the module uses (clang 18 has none over libstdc++ 13) | 2 |
-| `cmd/hsm_node/hsm_module.hpp`, `hsm_config.*`, `hsm_module_registrar.cpp` | the service module (`KYTHIRA_SERVICES=hsm` in `kythira_node`): RocksDB-backed groups on the node's transport, one HTTPS listener for the operator API and the members' forwarding routes, the session layer published as `hsm.session_layer`; configuration from `KYTHIRA_HSM_*` (`usage_text()` lists it) | 6 |
+| `cmd/hsm_node/hsm_module.hpp`, `hsm_config.*`, `hsm_module_registrar.cpp` | the service module (`KYTHIRA_SERVICES=hsm` in `kythira_node`): RocksDB-backed groups on the node's transport, one HTTPS listener for the operator API and the members' forwarding routes, the PKCS#11 client listener and socket, the session layer published as `hsm.session_layer`; configuration from `KYTHIRA_HSM_*` (`usage_text()` lists it) | 6 |
 | `cmd/hsm_ctl/` | `hsm_ctl status|init|unseal|seal|rekey`: one request to a node's operator API with the operator's certificate; init and rekey print each share once | 7 |
 | `cmd/hsm_node/` | the daemon; a placeholder (`--help`, `--self-test [--allow-unlocked-memory]`, which also prepares key memory) until task 11 | 1, 3 |
-| `tests/` | `hsm_pkcs11_headers_test` (the vendored headers' version, ABI types and 3.0 function table) and `hsm_node_self_test`; `hsm_shamir_test` (split and combine properties, encoding and every refusal); `hsm_secure_arena_test` (smaps flags, wiping, lock failures under a real zero `RLIMIT_MEMLOCK`, hardening); `hsm_mechanisms_test` (published vectors, round trips, tampering, exclusions); `hsm_attribute_policy_test` (one test per rule); `hsm_key_store_test` (both state machines, persistence, the no-plaintext scan); `hsm_session_layer_test` (the vault, bindings, session states, replicated PIN counters, read-index checks against a destroy or narrowing elsewhere, the key cache, sealing, multi-part operations); `hsm_object_import_test` (create, copy, wrap and unwrap rules, ECDH on both sides, the RFC 5869 HKDF vector); `hsm_host_test` (three members on the in-process fabric: groups on every member, forwarding, a destroy seen everywhere, a partitioned member answering `CKR_DEVICE_ERROR`, a leader change, deleted token ids); `hsm_peer_test` (the wire format, membership, refusals before the host is asked, mutual TLS against a real listener, plaintext only when both sides ask); `hsm_admin_test` (operators only, status, tokens sealed under the master key, bindings, refusals, init, unseal, a seal reaching another node, rekey keeping tokens and retiring old shares, shares answered when a commit is uncertain); `hsm_unseal_test` (k shares and no fewer, checks on arrival, expiry, the vault sealing after a seal or rekey); `hsm_node_unseal_test` (the owner-only key file, shares bound to their key and never overwritten, pruning, k needed and bad peer answers skipped, member-only routes, init and rekey delivering one share per member before committing); `hsm_test_pki.hpp` issues the TLS tests' certificates; `hsm_test_node.hpp` and `hsm_test_store.hpp` are the shared fixtures | 1-8 |
+| `tests/` | `hsm_pkcs11_headers_test` (the vendored headers' version, ABI types and 3.0 function table) and `hsm_node_self_test`; `hsm_shamir_test` (split and combine properties, encoding and every refusal); `hsm_secure_arena_test` (smaps flags, wiping, lock failures under a real zero `RLIMIT_MEMLOCK`, hardening); `hsm_mechanisms_test` (published vectors, round trips, tampering, exclusions); `hsm_attribute_policy_test` (one test per rule); `hsm_key_store_test` (both state machines, persistence, the no-plaintext scan); `hsm_session_layer_test` (the vault, bindings, session states, replicated PIN counters, read-index checks against a destroy or narrowing elsewhere, the key cache, sealing, multi-part operations); `hsm_object_import_test` (create, copy, wrap and unwrap rules, ECDH on both sides, the RFC 5869 HKDF vector); `hsm_host_test` (three members on the in-process fabric: groups on every member, forwarding, a destroy seen everywhere, a partitioned member answering `CKR_DEVICE_ERROR`, a leader change, deleted token ids); `hsm_peer_test` (the wire format, membership, refusals before the host is asked, mutual TLS against a real listener, plaintext only when both sides ask); `hsm_admin_test` (operators only, status, tokens sealed under the master key, bindings, refusals, init, unseal, a seal reaching another node, rekey keeping tokens and retiring old shares, shares answered when a commit is uncertain); `hsm_unseal_test` (k shares and no fewer, checks on arrival, expiry, the vault sealing after a seal or rekey); `hsm_node_unseal_test` (the owner-only key file, shares bound to their key and never overwritten, pruning, k needed and bad peer answers skipped, member-only routes, init and rekey delivering one share per member before committing); `hsm_wire_test` (every call through the dispatcher, mechanism parameters, malformed and forged requests refused, the socket's allow list, TLS identities, connection and frame limits); `hsm_test_pki.hpp` issues the TLS tests' certificates; `hsm_test_node.hpp` and `hsm_test_store.hpp` are the shared fixtures | 1-9 |
 | `pkcs11/` | `libkythira_pkcs11.so`, the PKCS#11 client library, as its own target (`pkcs11/README.md`) | 10 |
 
-TPM and cloud KMS share sealing, the wire protocol, the client library,
-consumers and audit follow in tasks 8b to 15 (`.kiro/specs/virtual-hsm/tasks.md`).
+TPM and cloud KMS share sealing, the client library, consumers and audit
+follow in tasks 8b and 10 to 15 (`.kiro/specs/virtual-hsm/tasks.md`).
 
 ## Core targets and variables used
 

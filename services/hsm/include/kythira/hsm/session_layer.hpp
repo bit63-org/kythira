@@ -11,7 +11,7 @@
 // by key_store.hpp; everything it reads comes from this node's replica.
 //
 // Applications. A PKCS#11 application is one client: a native_client in
-// this process or, later, one connection (task 9). It carries the identity
+// this process or one wire connection (wire_server.hpp). It carries the identity
 // the catalog's bindings name, and logins are per application and token,
 // as PKCS#11 has them: every session the application has on the token
 // shares one login state, and closing its last session there logs it out.
@@ -46,6 +46,7 @@
 
 #include <kythira/hsm/attribute_policy.hpp>
 #include <kythira/hsm/attributes.hpp>
+#include <kythira/hsm/client_types.hpp>
 #include <kythira/hsm/hsm_store.hpp>
 #include <kythira/hsm/key_store.hpp>
 #include <kythira/hsm/key_vault.hpp>
@@ -93,27 +94,6 @@ inline constexpr CK_ULONG max_pin_length = 255;
 inline constexpr CK_OBJECT_HANDLE first_session_object_handle = max_token_object_handle + 1;
 
 using app_id = std::uint64_t;
-
-struct token_info {
-    std::string label;
-    CK_FLAGS flags = 0;
-    CK_ULONG session_count = 0;
-    CK_ULONG rw_session_count = 0;
-};
-
-struct session_info {
-    CK_SLOT_ID slot = 0;
-    CK_STATE state = CKS_RO_PUBLIC_SESSION;
-    CK_FLAGS flags = 0;
-};
-
-/// One attribute of C_GetAttributeValue: its value, or why there is none
-/// (CKR_ATTRIBUTE_SENSITIVE or CKR_ATTRIBUTE_TYPE_INVALID).
-struct attribute_value {
-    CK_ATTRIBUTE_TYPE type = 0;
-    std::optional<std::vector<std::uint8_t>> value;
-    CK_RV rv = CKR_OK;
-};
 
 /// A CK_MECHANISM copied out of the caller's memory, parameters and the
 /// buffers they point at included, so an operation can outlive the call

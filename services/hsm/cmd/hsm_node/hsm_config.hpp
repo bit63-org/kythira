@@ -20,6 +20,7 @@
 #include <set>
 #include <string>
 #include <string_view>
+#include <utility>
 
 namespace kythira::hsm_node {
 
@@ -45,6 +46,18 @@ struct hsm_options {
     std::set<std::string> operators;
     std::uint64_t max_body_bytes{std::uint64_t{1} << 20U};
     std::uint64_t max_connections{256};
+
+    // -- PKCS#11 clients (task 9) ----------------------------------------------
+    /// The mutual TLS client listener; none when unset (off, or plaintext).
+    std::optional<std::pair<std::string, std::uint16_t>> client_listen{{"0.0.0.0", 9444}};
+    /// The CA application certificates chain to (default: client_ca).
+    std::string app_ca;
+    /// The Unix socket; none when empty.
+    std::filesystem::path socket_path;
+    /// uid -> the identity that uid's socket connections act as.
+    std::map<std::uint32_t, std::string> socket_allow;
+    std::uint64_t client_max_connections{256};
+    std::chrono::seconds client_idle_timeout{3600};
 
     // -- Keys and sessions -----------------------------------------------------
     std::filesystem::path data_dir;

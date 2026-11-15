@@ -3,11 +3,15 @@
 
 #include "hsm_config.hpp"
 
+#include <pwd.h>
+#include <unistd.h>
+
 #include <filesystem>
 #include <map>
 #include <stdexcept>
 #include <string>
 #include <utility>
+#include <vector>
 
 namespace kythira::hsm_node {
 
@@ -139,6 +143,41 @@ auto id_map(const char* name, const std::string& text)
     return out;
 }
 
+/// `who=identity,...`, where `who` is a uid or a user name.
+auto socket_allow_of(const char* name, const std::string& text)
+    -> std::map<std::uint32_t, std::string> {
+    std::map<std::uint32_t, std::string> out;
+    for (const auto& item : list_of(text)) {
+        const auto eq = item.find('=');
+        if (eq == std::string::npos || eq == 0 || eq + 1 == item.size()) {
+            throw fail(std::string(name) + " expects user=identity[,user=identity...], got '" +
+                       item + "'");
+        }
+        const auto who = item.substr(0, eq);
+        std::uint32_t uid = 0;
+        if (who.find_first_not_of("0123456789") == std::string::npos) {
+            const auto n = to_u64(name, who);
+            if (n > UINT32_MAX) {
+                throw fail(std::string(name) + ": uid " + who + " is out of range");
+            }
+            uid = static_cast<std::uint32_t>(n);
+        } else {
+            passwd pw{};
+            passwd* found = nullptr;
+            std::vector<char> buf(16384);
+            if (::getpwnam_r(who.c_str(), &pw, buf.data(), buf.size(), &found) != 0 ||
+                found == nullptr) {
+                throw fail(std::string(name) + ": no user " + who);
+            }
+            uid = static_cast<std::uint32_t>(found->pw_uid);
+        }
+        if (!out.emplace(uid, item.substr(eq + 1)).second) {
+            throw fail(std::string(name) + " names uid " + std::to_string(uid) + " twice");
+        }
+    }
+    return out;
+}
+
 }  // namespace
 
 auto composite_env(env_fn env) -> env_fn {
@@ -226,6 +265,35 @@ auto from_env(const env_fn& env) -> hsm_options {
         throw fail("KYTHIRA_HSM_MAX_CONNECTIONS must be at least 1");
     }
 
+    const auto client_listen = get_opt(env, "KYTHIRA_HSM_CLIENT_LISTEN", "0.0.0.0:9444");
+    if (client_listen == "off" || o.insecure_plaintext) {
+        // Plaintext has no client identity to bind tokens to: the socket
+        // is the only way in then.
+        o.client_listen.reset();
+    } else {
+        o.client_listen = split_listen("KYTHIRA_HSM_CLIENT_LISTEN", client_listen);
+    }
+    o.app_ca = get_opt(env, "KYTHIRA_HSM_APP_CA", o.client_ca);
+    o.socket_path = get_opt(env, "KYTHIRA_HSM_SOCKET");
+    o.socket_allow =
+        socket_allow_of("KYTHIRA_HSM_SOCKET_ALLOW", get_opt(env, "KYTHIRA_HSM_SOCKET_ALLOW"));
+    if (!o.socket_path.empty() && o.socket_allow.empty()) {
+        throw fail(
+            "KYTHIRA_HSM_SOCKET needs KYTHIRA_HSM_SOCKET_ALLOW: with no uid allowed, "
+            "the socket would serve nobody");
+    }
+    o.client_max_connections =
+        u64_opt(env, "KYTHIRA_HSM_CLIENT_MAX_CONNECTIONS", o.client_max_connections);
+    if (o.client_max_connections == 0) {
+        throw fail("KYTHIRA_HSM_CLIENT_MAX_CONNECTIONS must be at least 1");
+    }
+    o.client_idle_timeout =
+        std::chrono::seconds{u64_opt(env, "KYTHIRA_HSM_CLIENT_IDLE_TIMEOUT_S",
+                                     static_cast<std::uint64_t>(o.client_idle_timeout.count()))};
+    if (o.client_idle_timeout.count() == 0) {
+        throw fail("KYTHIRA_HSM_CLIENT_IDLE_TIMEOUT_S must be at least 1");
+    }
+
     o.allow_unlocked_memory = bool_opt(env, "KYTHIRA_HSM_ALLOW_UNLOCKED_MEMORY", false);
     o.allow_single_share = bool_opt(env, "KYTHIRA_HSM_ALLOW_SINGLE_SHARE", false);
     o.unseal_timeout = std::chrono::seconds{
@@ -297,6 +365,19 @@ auto usage_text() -> std::string_view {
                                      separated (required); never a member's
   KYTHIRA_HSM_INSECURE_PLAINTEXT     plaintext listener and forwarding, for tests
                                      only (default: KYTHIRA_NODE_INSECURE_PLAINTEXT)
+  KYTHIRA_HSM_CLIENT_LISTEN          host:port of the PKCS#11 clients' mutual
+                                     TLS listener, or off (0.0.0.0:9444; off
+                                     with plaintext)
+  KYTHIRA_HSM_APP_CA                 the CA client certificates chain to
+                                     (default: KYTHIRA_HSM_CLIENT_CA); a
+                                     client is its first URI SAN, else its
+                                     first DNS SAN
+  KYTHIRA_HSM_SOCKET                 a Unix socket for clients on this host
+  KYTHIRA_HSM_SOCKET_ALLOW           user=identity,... : the uids (or user
+                                     names) the socket serves, and the
+                                     identity each acts as
+  KYTHIRA_HSM_CLIENT_MAX_CONNECTIONS client connections at once (256)
+  KYTHIRA_HSM_CLIENT_IDLE_TIMEOUT_S  an idle client connection is closed (3600)
   KYTHIRA_HSM_DATA_DIR               state (the node's hsm/ in kythira_node)
   KYTHIRA_HSM_ALLOW_UNLOCKED_MEMORY  start where key memory cannot be locked
                                      (development only; false)

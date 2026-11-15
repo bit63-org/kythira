@@ -174,7 +174,7 @@ consumer at a library and have it work.
    `KYTHIRA_PKCS11_CONF` (endpoints, client certificate, CA bundle, socket
    path), and SHALL keep no key material: every operation goes to the HSM.
 3. It SHALL link its dependencies statically with hidden symbols, so it
-   loads into processes that use another OpenSSL or protobuf.
+   loads into processes that use another OpenSSL.
 4. It SHALL be safe for multi-threaded callers (`CKF_OS_LOCKING_OK`) and
    SHALL honour `C_Initialize` locking arguments.
 5. On failover to another HSM node it SHALL reconnect and re-login an
