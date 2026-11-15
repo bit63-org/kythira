@@ -21,3 +21,9 @@ TagResource
 UntagResource
 UpdateAlias
 UpdateKeyDescription
+Decrypt
+Encrypt
+GenerateDataKey
+GenerateDataKeyWithoutPlaintext
+GenerateRandom
+ReEncrypt

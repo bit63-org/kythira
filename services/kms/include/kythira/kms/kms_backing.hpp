@@ -22,12 +22,15 @@
 // module lacks: UnsupportedOperationException (4.3).
 
 #include <kythira/kms/kms_catalog.hpp>
+#include <kythira/kms/kms_ciphertext.hpp>
 
 #include <raft/pkcs11_module.hpp>
 
+#include <algorithm>
 #include <array>
 #include <charconv>
 #include <cstdint>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -138,6 +141,14 @@ inline constexpr std::array<std::uint8_t, 7> ec_secp256k1{0x06, 0x05, 0x2B, 0x81
             return 0;
     }
 }
+
+/// What AES-GCM made of a plaintext: the nonce the token generated, the
+/// ciphertext and the tag.
+struct gcm_sealed {
+    std::array<std::uint8_t, k_gcm_nonce_size> nonce{};
+    std::vector<std::uint8_t> ciphertext;
+    std::array<std::uint8_t, k_gcm_tag_size> tag{};
+};
 
 /// The KMS's backing keys on one token, through one logged-in session.
 /// Thread-safe: calls are serialized on the session, which is reopened
@@ -286,6 +297,7 @@ public:
         const auto label = backing_label(key_id, version);
         call([&](CK_SESSION_HANDLE s) {
             using kythira::pkcs11::attribute;
+            _handles.erase(label);
             const std::array tmpl{attribute::of_string(CKA_LABEL, label)};
             for (const auto o : _b->find_objects(s, tmpl)) {
                 _b->destroy_object(s, o);
@@ -296,6 +308,71 @@ public:
 
     [[nodiscard]] auto backend() const -> kythira::pkcs11::backend& { return *_b; }
 
+    /// `length` bytes from the token's random number generator.
+    [[nodiscard]] auto random(std::size_t length) -> std::vector<std::uint8_t> {
+        return call([&](CK_SESSION_HANDLE s) { return _b->generate_random(s, length); });
+    }
+
+    /// Encrypts `plain` under `key_id`'s `version` with AES-256-GCM, a
+    /// nonce from the token's generator and `aad` as additional data
+    /// (Requirement 5.2). The key never leaves the token.
+    [[nodiscard]] auto gcm_encrypt(std::string_view key_id, std::uint32_t version,
+                                   std::span<const std::uint8_t> plain,
+                                   std::span<const std::uint8_t> aad) -> gcm_sealed {
+        return call([&](CK_SESSION_HANDLE s) {
+            gcm_sealed out;
+            const auto nonce = _b->generate_random(s, out.nonce.size());
+            if (nonce.size() != out.nonce.size()) {
+                throw backing_error(backing_error::kind::failed, CKR_FUNCTION_FAILED,
+                                    "kms backing store: short random");
+            }
+            std::ranges::copy(nonce, out.nonce.begin());
+            auto params = gcm_params(out.nonce, aad);
+            const CK_MECHANISM m{CKM_AES_GCM, &params, sizeof params};
+            const auto sealed = with_key(s, key_id, version, [&](CK_OBJECT_HANDLE k) {
+                return _b->encrypt(s, m, k, plain);
+            });
+            if (sealed.size() != plain.size() + k_gcm_tag_size) {
+                throw backing_error(backing_error::kind::failed, CKR_FUNCTION_FAILED,
+                                    "kms backing store: AES-GCM output of the wrong length");
+            }
+            out.ciphertext.assign(sealed.begin(),
+                                  sealed.end() - static_cast<std::ptrdiff_t>(k_gcm_tag_size));
+            std::copy(sealed.end() - static_cast<std::ptrdiff_t>(k_gcm_tag_size), sealed.end(),
+                      out.tag.begin());
+            return out;
+        });
+    }
+
+    /// The plaintext of what gcm_encrypt made, or nullopt when the tag does
+    /// not check (the ciphertext, nonce, tag or additional data changed).
+    [[nodiscard]] auto gcm_decrypt(std::string_view key_id, std::uint32_t version,
+                                   const gcm_sealed& sealed, std::span<const std::uint8_t> aad)
+        -> std::optional<std::vector<std::uint8_t>> {
+        std::vector<std::uint8_t> in(sealed.ciphertext);
+        in.insert(in.end(), sealed.tag.begin(), sealed.tag.end());
+        return call([&](CK_SESSION_HANDLE s) -> std::optional<std::vector<std::uint8_t>> {
+            auto params = gcm_params(sealed.nonce, aad);
+            const CK_MECHANISM m{CKM_AES_GCM, &params, sizeof params};
+            try {
+                return with_key(s, key_id, version,
+                                [&](CK_OBJECT_HANDLE k) { return _b->decrypt(s, m, k, in); });
+            } catch (const kythira::pkcs11::error& e) {
+                if (e.rv() == CKR_ENCRYPTED_DATA_INVALID ||
+                    e.rv() == CKR_ENCRYPTED_DATA_LEN_RANGE) {
+                    return std::nullopt;
+                }
+                // Some modules (SoftHSM2 2.6) answer a failed tag with
+                // CKR_GENERAL_ERROR. When the session still works, the data
+                // was at fault, not the device.
+                if (e.rv() == CKR_GENERAL_ERROR && session_works(s)) {
+                    return std::nullopt;
+                }
+                throw;
+            }
+        });
+    }
+
     /// Runs `f` on the logged-in session; for the cryptographic calls of
     /// later tasks.
     template<typename F> auto with_session(F&& f) -> std::invoke_result_t<F&, CK_SESSION_HANDLE> {
@@ -303,6 +380,59 @@ public:
     }
 
 private:
+    [[nodiscard]] static auto gcm_params(std::span<const std::uint8_t> nonce,
+                                         std::span<const std::uint8_t> aad) -> CK_GCM_PARAMS {
+        // PKCS#11 takes non-const pointers; the module only reads them.
+        return CK_GCM_PARAMS{
+            const_cast<CK_BYTE_PTR>(nonce.data()),  // NOLINT(cppcoreguidelines-pro-type-const-cast)
+            static_cast<CK_ULONG>(nonce.size()),   static_cast<CK_ULONG>(nonce.size() * 8),
+            const_cast<CK_BYTE_PTR>(aad.data()),  // NOLINT(cppcoreguidelines-pro-type-const-cast)
+            static_cast<CK_ULONG>(aad.size()),     static_cast<CK_ULONG>(k_gcm_tag_size * 8)};
+    }
+
+    /// Whether the module still answers on `s`.
+    [[nodiscard]] auto session_works(CK_SESSION_HANDLE s) -> bool {
+        try {
+            (void)_b->generate_random(s, 1);
+            return true;
+        } catch (const kythira::pkcs11::error&) {
+            return false;
+        }
+    }
+
+    /// Runs `f` on the secret key of `key_id`'s `version`, found by label
+    /// once and remembered; a remembered handle the module no longer knows
+    /// is looked up again. No such key throws backing_error (failed).
+    template<typename F>
+    auto with_key(CK_SESSION_HANDLE s, std::string_view key_id, std::uint32_t version, F&& f)
+        -> std::invoke_result_t<F&, CK_OBJECT_HANDLE> {
+        const auto label = backing_label(key_id, version);
+        for (int attempt = 0;; ++attempt) {
+            auto it = _handles.find(label);
+            if (it == _handles.end()) {
+                using kythira::pkcs11::attribute;
+                const std::array tmpl{attribute::of_ulong(CKA_CLASS, CKO_SECRET_KEY),
+                                      attribute::of_string(CKA_LABEL, label)};
+                const auto found = _b->find_objects(s, tmpl);
+                if (found.empty()) {
+                    throw backing_error(backing_error::kind::failed, CKR_KEY_HANDLE_INVALID,
+                                        "kms backing store: no backing key " + label);
+                }
+                it = _handles.emplace(label, found.front()).first;
+            }
+            try {
+                return f(it->second);
+            } catch (const kythira::pkcs11::error& e) {
+                if (attempt == 0 &&
+                    (e.rv() == CKR_KEY_HANDLE_INVALID || e.rv() == CKR_OBJECT_HANDLE_INVALID)) {
+                    _handles.erase(label);
+                    continue;
+                }
+                throw;
+            }
+        }
+    }
+
     template<typename F> auto call(F&& f) -> std::invoke_result_t<F&, CK_SESSION_HANDLE> {
         const std::lock_guard lock(_mu);
         for (int attempt = 0;; ++attempt) {
@@ -341,6 +471,7 @@ private:
             }
             _session.reset();
         }
+        _handles.clear();
     }
 
     std::shared_ptr<kythira::pkcs11::backend> _b;
@@ -348,6 +479,7 @@ private:
     std::string _pin;
     std::mutex _mu;
     std::optional<CK_SESSION_HANDLE> _session;
+    std::map<std::string, CK_OBJECT_HANDLE, std::less<>> _handles;  // label to handle, under _mu
 };
 
 }  // namespace kythira::kms

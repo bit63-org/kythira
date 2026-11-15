@@ -263,6 +263,10 @@ public:
                                           CK_OBJECT_HANDLE unwrapping_key,
                                           std::span<const std::uint8_t> wrapped,
                                           std::span<const attribute> tmpl) -> CK_OBJECT_HANDLE = 0;
+    /// `length` bytes from the module's random number generator
+    /// (C_GenerateRandom).
+    [[nodiscard]] virtual auto generate_random(CK_SESSION_HANDLE s, std::size_t length)
+        -> bytes = 0;
 };
 
 namespace detail {
@@ -546,6 +550,13 @@ public:
             return _f->C_Decrypt(s, detail::mutable_ptr(data), static_cast<CK_ULONG>(data.size()),
                                  out, n);
         });
+    }
+
+    [[nodiscard]] auto generate_random(CK_SESSION_HANDLE s, std::size_t length) -> bytes override {
+        bytes out(length);
+        check(_f->C_GenerateRandom(s, out.data(), static_cast<CK_ULONG>(out.size())),
+              "C_GenerateRandom");
+        return out;
     }
 
     [[nodiscard]] auto wrap_key(CK_SESSION_HANDLE s, const CK_MECHANISM& m,

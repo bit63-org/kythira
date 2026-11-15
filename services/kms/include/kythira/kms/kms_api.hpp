@@ -169,7 +169,155 @@ template<typename Catalog> struct api_deps {
     std::function<std::string()> new_key_id = random_key_id;
 };
 
-template<typename Catalog> class key_management_api {
+/// What every KMS operation shares: reading the request, resolving the key
+/// it names, and authorizing an action on that key with its key policy.
+class api_common {
+protected:
+    /// A key the request named, and whether it named it by alias.
+    struct resolved {
+        key_record record;
+        bool by_alias = false;
+        std::string alias;  ///< the alias name, when named by alias
+    };
+
+    [[nodiscard]] static auto str(const boost::json::object& o, std::string_view key)
+        -> std::optional<std::string_view> {
+        if (const auto* v = o.if_contains(key); v != nullptr && v->is_string()) {
+            return std::string_view(v->get_string());
+        }
+        return std::nullopt;
+    }
+
+    [[nodiscard]] static auto seconds(std::uint64_t ms) -> double {
+        return static_cast<double>(ms) / 1000.0;
+    }
+
+    [[nodiscard]] static auto limit_of(const boost::json::object& in, std::size_t def)
+        -> std::size_t {
+        if (const auto* l = in.if_contains("Limit"); l != nullptr && l->is_int64()) {
+            return static_cast<std::size_t>(std::clamp<std::int64_t>(l->get_int64(), 1, 1000));
+        }
+        return def;
+    }
+
+    static auto add_request_tags(aws_auth::authz_request& r, const tag_map& tags) -> void {
+        std::vector<std::pair<std::string, std::string>> pairs(tags.begin(), tags.end());
+        std::vector<std::string> keys;
+        for (const auto& [k, v] : tags) {
+            keys.push_back(k);
+        }
+        r.request_tags = std::move(pairs);
+        r.keys.emplace_back("aws:TagKeys", std::move(keys));
+    }
+
+    [[nodiscard]] static auto spec_keys(const key_record& k)
+        -> std::vector<std::pair<std::string, std::vector<std::string>>> {
+        const auto* info = find_key_spec(k.spec);
+        return {{"kms:KeySpec", {std::string(info != nullptr ? info->name : "")}},
+                {"kms:KeyUsage", {std::string(usage_name(k.usage))}},
+                {"kms:KeyOrigin", {"AWS_KMS"}},
+                {"kms:MultiRegion", {"false"}}};
+    }
+
+    /// The key `member` names: a key id or key ARN, and with `alias_ok`
+    /// an alias name or alias ARN.
+    template<typename Catalog>
+    [[nodiscard]] static auto resolve(const call_context& ctx, const Catalog& c,
+                                      const boost::json::object& in, std::string_view member,
+                                      bool alias_ok) -> aws_json::result<resolved> {
+        const auto text = str(in, member).value_or("");
+        std::string account = ctx.principal.account;
+        std::string key_id;
+        bool by_alias = false;
+        std::string_view name = text;
+        if (text.starts_with("arn:")) {
+            const auto parts = parse_kms_arn(text);
+            if (!parts || parts->partition != ctx.partition || parts->region != ctx.region) {
+                return not_found("Invalid arn " + std::string(text));
+            }
+            account = std::string(parts->account);
+            name = parts->resource;
+            if (name.starts_with("key/")) {
+                key_id = std::string(name.substr(4));
+            }
+        } else if (!name.starts_with("alias/")) {
+            key_id = std::string(name);
+        }
+        if (key_id.empty()) {
+            if (!name.starts_with("alias/") || !alias_ok) {
+                return not_found(std::string(member) + " " + std::string(text) +
+                                 " is not a key id or key ARN");
+            }
+            const auto a = c.alias(account, name);
+            if (!a) {
+                return not_found("Alias " + ctx.alias_arn(account, name) + " is not found.");
+            }
+            key_id = a->key_id;
+            by_alias = true;
+        }
+        const auto k = c.key(key_id);
+        if (!k || k->account != account) {
+            return not_found("Key '" + ctx.key_arn(account, key_id) + "' does not exist");
+        }
+        return resolved{*k, by_alias, by_alias ? std::string(name) : std::string()};
+    }
+
+    template<typename Catalog>
+    [[nodiscard]] static auto key_request(const call_context& ctx, const Catalog& c,
+                                          const resolved& k, std::string_view action)
+        -> aws_auth::authz_request {
+        aws_auth::authz_request r;
+        r.action = "kms:" + std::string(action);
+        r.resource = ctx.key_arn(k.record.account, k.record.key_id);
+        r.resource_account = k.record.account;
+        r.resource_policy = k.record.policy;
+        r.resource_kind = aws_auth::resource_policy_kind::key;
+        for (const auto& [tk, tv] : c.tags(k.record.key_id)) {
+            r.resource_tags.emplace_back(tk, tv);
+        }
+        r.keys = spec_keys(k.record);
+        std::vector<std::string> aliases;
+        for (const auto& a : c.aliases(k.record.account, k.record.key_id)) {
+            aliases.push_back(a.name);
+        }
+        r.keys.emplace_back("kms:ResourceAliases", std::move(aliases));
+        if (k.by_alias) {
+            r.keys.emplace_back("kms:RequestAlias", std::vector<std::string>{k.alias});
+        }
+        return r;
+    }
+
+    template<typename Catalog>
+    [[nodiscard]] static auto authorize_key(call_context& ctx, const Catalog& c, const resolved& k,
+                                            std::string_view action,
+                                            const tag_map* request_tags = nullptr)
+        -> std::optional<aws_json::error> {
+        auto r = key_request(ctx, c, k, action);
+        if (request_tags != nullptr) {
+            add_request_tags(r, *request_tags);
+        }
+        return ctx.authorize(std::move(r));
+    }
+
+    /// An alias action on the alias's own ARN, decided by identity policies
+    /// (an alias has no policy of its own).
+    [[nodiscard]] static auto authorize_alias(call_context& ctx, std::string_view name,
+                                              std::string_view action)
+        -> std::optional<aws_json::error> {
+        aws_auth::authz_request r;
+        r.action = "kms:" + std::string(action);
+        r.resource = ctx.alias_arn(ctx.principal.account, name);
+        return ctx.authorize(std::move(r));
+    }
+
+    [[nodiscard]] static auto key_label(const call_context& ctx, const key_record& k)
+        -> std::string {
+        return "Key '" + ctx.key_arn(k.account, k.key_id) + "'";
+    }
+};
+
+/// The key management operations.
+template<typename Catalog> class key_management_api : protected api_common {
 public:
     using result = aws_json::result<boost::json::object>;
 
@@ -473,7 +621,7 @@ public:
             return *denied;
         }
         if (old) {
-            if (auto denied = authorize_key(ctx, **c, resolved{*old, false}, "UpdateAlias")) {
+            if (auto denied = authorize_key(ctx, **c, resolved{*old, false, {}}, "UpdateAlias")) {
                 return *denied;
             }
         }
@@ -503,7 +651,7 @@ public:
             return *denied;
         }
         if (const auto k = (*c)->key(alias->key_id)) {
-            if (auto denied = authorize_key(ctx, **c, resolved{*k, false}, "DeleteAlias")) {
+            if (auto denied = authorize_key(ctx, **c, resolved{*k, false, {}}, "DeleteAlias")) {
                 return *denied;
             }
         }
@@ -645,32 +793,6 @@ public:
     }
 
 private:
-    /// A key the request named, and whether it named it by alias.
-    struct resolved {
-        key_record record;
-        bool by_alias = false;
-    };
-
-    [[nodiscard]] static auto str(const boost::json::object& o, std::string_view key)
-        -> std::optional<std::string_view> {
-        if (const auto* v = o.if_contains(key); v != nullptr && v->is_string()) {
-            return std::string_view(v->get_string());
-        }
-        return std::nullopt;
-    }
-
-    [[nodiscard]] static auto seconds(std::uint64_t ms) -> double {
-        return static_cast<double>(ms) / 1000.0;
-    }
-
-    [[nodiscard]] static auto limit_of(const boost::json::object& in, std::size_t def)
-        -> std::size_t {
-        if (const auto* l = in.if_contains("Limit"); l != nullptr && l->is_int64()) {
-            return static_cast<std::size_t>(std::clamp<std::int64_t>(l->get_int64(), 1, 1000));
-        }
-        return def;
-    }
-
     [[nodiscard]] static auto find_spec_named(std::string_view name) -> const key_spec_info* {
         for (const auto& i : k_key_specs) {
             if (i.name == name) {
@@ -750,25 +872,6 @@ private:
         return out;
     }
 
-    static auto add_request_tags(aws_auth::authz_request& r, const tag_map& tags) -> void {
-        std::vector<std::pair<std::string, std::string>> pairs(tags.begin(), tags.end());
-        std::vector<std::string> keys;
-        for (const auto& [k, v] : tags) {
-            keys.push_back(k);
-        }
-        r.request_tags = std::move(pairs);
-        r.keys.emplace_back("aws:TagKeys", std::move(keys));
-    }
-
-    [[nodiscard]] static auto spec_keys(const key_record& k)
-        -> std::vector<std::pair<std::string, std::vector<std::string>>> {
-        const auto* info = find_key_spec(k.spec);
-        return {{"kms:KeySpec", {std::string(info != nullptr ? info->name : "")}},
-                {"kms:KeyUsage", {std::string(usage_name(k.usage))}},
-                {"kms:KeyOrigin", {"AWS_KMS"}},
-                {"kms:MultiRegion", {"false"}}};
-    }
-
     /// The catalog after a read barrier.
     [[nodiscard]] auto catalog() const -> aws_json::result<std::shared_ptr<const Catalog>> {
         if (!_d.barrier()) {
@@ -779,95 +882,6 @@ private:
             return internal_error("The KMS catalog has not opened yet");
         }
         return c;
-    }
-
-    /// The key `member` names: a key id or key ARN, and with `alias_ok`
-    /// an alias name or alias ARN.
-    [[nodiscard]] auto resolve(const call_context& ctx, const Catalog& c,
-                               const boost::json::object& in, std::string_view member,
-                               bool alias_ok) const -> aws_json::result<resolved> {
-        const auto text = str(in, member).value_or("");
-        std::string account = ctx.principal.account;
-        std::string key_id;
-        bool by_alias = false;
-        std::string_view name = text;
-        if (text.starts_with("arn:")) {
-            const auto parts = parse_kms_arn(text);
-            if (!parts || parts->partition != ctx.partition || parts->region != ctx.region) {
-                return not_found("Invalid arn " + std::string(text));
-            }
-            account = std::string(parts->account);
-            name = parts->resource;
-            if (name.starts_with("key/")) {
-                key_id = std::string(name.substr(4));
-            }
-        } else if (!name.starts_with("alias/")) {
-            key_id = std::string(name);
-        }
-        if (key_id.empty()) {
-            if (!name.starts_with("alias/") || !alias_ok) {
-                return not_found(std::string(member) + " " + std::string(text) +
-                                 " is not a key id or key ARN");
-            }
-            const auto a = c.alias(account, name);
-            if (!a) {
-                return not_found("Alias " + ctx.alias_arn(account, name) + " is not found.");
-            }
-            key_id = a->key_id;
-            by_alias = true;
-        }
-        const auto k = c.key(key_id);
-        if (!k || k->account != account) {
-            return not_found("Key '" + ctx.key_arn(account, key_id) + "' does not exist");
-        }
-        return resolved{*k, by_alias};
-    }
-
-    [[nodiscard]] auto key_request(const call_context& ctx, const Catalog& c, const resolved& k,
-                                   std::string_view action) const -> aws_auth::authz_request {
-        aws_auth::authz_request r;
-        r.action = "kms:" + std::string(action);
-        r.resource = ctx.key_arn(k.record.account, k.record.key_id);
-        r.resource_account = k.record.account;
-        r.resource_policy = k.record.policy;
-        r.resource_kind = aws_auth::resource_policy_kind::key;
-        for (const auto& [tk, tv] : c.tags(k.record.key_id)) {
-            r.resource_tags.emplace_back(tk, tv);
-        }
-        r.keys = spec_keys(k.record);
-        std::vector<std::string> aliases;
-        for (const auto& a : c.aliases(k.record.account, k.record.key_id)) {
-            aliases.push_back(a.name);
-        }
-        r.keys.emplace_back("kms:ResourceAliases", std::move(aliases));
-        return r;
-    }
-
-    [[nodiscard]] auto authorize_key(call_context& ctx, const Catalog& c, const resolved& k,
-                                     std::string_view action,
-                                     const tag_map* request_tags = nullptr) const
-        -> std::optional<aws_json::error> {
-        auto r = key_request(ctx, c, k, action);
-        if (request_tags != nullptr) {
-            add_request_tags(r, *request_tags);
-        }
-        return ctx.authorize(std::move(r));
-    }
-
-    /// An alias action on the alias's own ARN, decided by identity policies
-    /// (an alias has no policy of its own).
-    [[nodiscard]] static auto authorize_alias(call_context& ctx, std::string_view name,
-                                              std::string_view action)
-        -> std::optional<aws_json::error> {
-        aws_auth::authz_request r;
-        r.action = "kms:" + std::string(action);
-        r.resource = ctx.alias_arn(ctx.principal.account, name);
-        return ctx.authorize(std::move(r));
-    }
-
-    [[nodiscard]] static auto key_label(const call_context& ctx, const key_record& k)
-        -> std::string {
-        return "Key '" + ctx.key_arn(k.account, k.key_id) + "'";
     }
 
     /// Proposes `cmd` and answers `{}` on success.

@@ -18,7 +18,6 @@ retryable fault.
 | `ConnectCustomKeyStore` | out of scope | Custom key stores are out of scope: the virtual HSM's external-module support swaps the backing store for the whole KMS (design, "Metadata in the KMS, material in the HSM"). | `UnsupportedOperationException`, HTTP 400 |
 | `CreateCustomKeyStore` | out of scope | Custom key stores are out of scope: the virtual HSM's external-module support swaps the backing store for the whole KMS (design, "Metadata in the KMS, material in the HSM"). | `UnsupportedOperationException`, HTTP 400 |
 | `CreateGrant` | task 10 | Not built yet (grants). | `UnsupportedOperationException`, HTTP 400 |
-| `Decrypt` | task 7 | Not built yet (symmetric operations). | `UnsupportedOperationException`, HTTP 400 |
 | `DeleteCustomKeyStore` | out of scope | Custom key stores are out of scope: the virtual HSM's external-module support swaps the backing store for the whole KMS (design, "Metadata in the KMS, material in the HSM"). | `UnsupportedOperationException`, HTTP 400 |
 | `DeleteImportedKeyMaterial` | out of scope | Imported key material is out of scope for this spec (design, "What stays out"): it needs an RSA-OAEP unwrap into a non-extractable HSM object, left for a follow-up spec. | `UnsupportedOperationException`, HTTP 400 |
 | `DeriveSharedSecret` | none | Not in the spec: ECDH key agreement on an ECC key pair (KMS added it after the spec was written). Open question for the owner. | `UnsupportedOperationException`, HTTP 400 |
@@ -26,13 +25,9 @@ retryable fault.
 | `DisableKeyRotation` | task 11 | Not built yet (rotation). | `UnsupportedOperationException`, HTTP 400 |
 | `DisconnectCustomKeyStore` | out of scope | Custom key stores are out of scope: the virtual HSM's external-module support swaps the backing store for the whole KMS (design, "Metadata in the KMS, material in the HSM"). | `UnsupportedOperationException`, HTTP 400 |
 | `EnableKeyRotation` | task 11 | Not built yet (rotation). | `UnsupportedOperationException`, HTTP 400 |
-| `Encrypt` | task 7 | Not built yet (symmetric operations). | `UnsupportedOperationException`, HTTP 400 |
-| `GenerateDataKey` | task 7 | Not built yet (symmetric operations). | `UnsupportedOperationException`, HTTP 400 |
 | `GenerateDataKeyPair` | task 8 | Not built yet (asymmetric and HMAC operations). | `UnsupportedOperationException`, HTTP 400 |
 | `GenerateDataKeyPairWithoutPlaintext` | task 8 | Not built yet (asymmetric and HMAC operations). | `UnsupportedOperationException`, HTTP 400 |
-| `GenerateDataKeyWithoutPlaintext` | task 7 | Not built yet (symmetric operations). | `UnsupportedOperationException`, HTTP 400 |
 | `GenerateMac` | task 8 | Not built yet (asymmetric and HMAC operations). | `UnsupportedOperationException`, HTTP 400 |
-| `GenerateRandom` | task 7 | Not built yet (symmetric operations). | `UnsupportedOperationException`, HTTP 400 |
 | `GetKeyLastUsage` | none | Not in the spec: when a key was last used (a recent KMS addition). Open question for the owner. | `UnsupportedOperationException`, HTTP 400 |
 | `GetKeyPolicy` | task 9 | Not built yet (key policies). | `UnsupportedOperationException`, HTTP 400 |
 | `GetKeyRotationStatus` | task 11 | Not built yet (rotation). | `UnsupportedOperationException`, HTTP 400 |
@@ -44,7 +39,6 @@ retryable fault.
 | `ListKeyRotations` | task 11 | Not built yet (rotation). | `UnsupportedOperationException`, HTTP 400 |
 | `ListRetirableGrants` | task 10 | Not built yet (grants). | `UnsupportedOperationException`, HTTP 400 |
 | `PutKeyPolicy` | task 9 | Not built yet (key policies). | `UnsupportedOperationException`, HTTP 400 |
-| `ReEncrypt` | task 7 | Not built yet (symmetric operations). | `UnsupportedOperationException`, HTTP 400 |
 | `ReplicateKey` | out of scope | Multi-Region keys are out of scope: they need key material replicated across regions' HSMs, which the virtual HSM does not do (design, "What stays out"). | `UnsupportedOperationException`, HTTP 400 |
 | `RetireGrant` | task 10 | Not built yet (grants). | `UnsupportedOperationException`, HTTP 400 |
 | `RevokeGrant` | task 10 | Not built yet (grants). | `UnsupportedOperationException`, HTTP 400 |

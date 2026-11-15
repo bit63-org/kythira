@@ -105,6 +105,13 @@ set_tests_properties(kms_host_test PROPERTIES
 kythira_kms_test(kms_api_test kms_api_test.cpp)
 set_tests_properties(kms_api_test PROPERTIES LABELS "unit;kms;kms-module" TIMEOUT 120)
 
+# Task 7, Requirements 5.1-5.3 and 5.6: Encrypt, Decrypt, ReEncrypt, the
+# data keys and GenerateRandom through signed requests over the fake
+# token's AES-GCM: tampering, wrong keys and contexts, key states,
+# rotation, the HSM away, DryRun, and the authorizer's condition keys.
+kythira_kms_test(kms_crypto_test kms_crypto_test.cpp)
+set_tests_properties(kms_crypto_test PROPERTIES LABELS "unit;kms;kms-module" TIMEOUT 120)
+
 # Task 5, Requirements 4.1-4.3: every key spec's backing key on a real
 # module, SoftHSM2 standing in for an external one; registered when the
 # build finds SoftHSM2 and softhsm2-util (kms-module.yml installs them;

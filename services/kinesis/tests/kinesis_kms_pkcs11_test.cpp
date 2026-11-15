@@ -203,6 +203,9 @@ public:
                  std::span<const std::uint8_t> /*d*/) -> p11::bytes override {
         throw p11::error("encrypt", CKR_FUNCTION_NOT_SUPPORTED);
     }
+    auto generate_random(CK_SESSION_HANDLE /*s*/, std::size_t /*length*/) -> p11::bytes override {
+        throw p11::error("generate_random", CKR_FUNCTION_NOT_SUPPORTED);
+    }
     auto wrap_key(CK_SESSION_HANDLE /*s*/, const CK_MECHANISM& /*m*/, CK_OBJECT_HANDLE /*w*/,
                   CK_OBJECT_HANDLE /*k*/) -> p11::bytes override {
         throw p11::error("wrap_key", CKR_FUNCTION_NOT_SUPPORTED);

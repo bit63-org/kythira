@@ -101,11 +101,20 @@ is one PR unless noted.
     CreateKey's two steps), tested by `kms_api_test` through signed
     requests. The module serves them once task 12 adds the listener.
 
-- [ ] 7. Symmetric cryptographic operations
+- [x] 7. Symmetric cryptographic operations
   - `Encrypt`, `Decrypt`, `ReEncrypt`, `GenerateDataKey`,
     `GenerateDataKeyWithoutPlaintext`, `GenerateRandom`; read-index
     serving on any replica
   - _Requirements: 5.1-5.3, 5.6_
+  - Done: `kms_crypto_api.hpp` over `crypto_deps` (the catalog replica,
+    a read-index barrier and the bound backing store), AES-GCM and
+    random bytes in `backing_store`, and `generate_random` added to
+    core's `pkcs11::backend` (C_GenerateRandom) so data keys, nonces and
+    GenerateRandom come from the token. Tests: `kms_crypto_test`, and an
+    AES-GCM case in `kms_backing_softhsm_test`. SoftHSM2 2.6 answers a
+    failed tag with CKR_GENERAL_ERROR, so a decrypt failure on a session
+    that still answers counts as a bad ciphertext. Asymmetric keys
+    answer UnsupportedOperationException until task 8.
 
 - [ ] 8. Asymmetric and HMAC operations
   - RSA and ECC keys: `Encrypt`/`Decrypt` with RSA-OAEP, `Sign`/`Verify`
