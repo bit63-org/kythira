@@ -509,7 +509,11 @@ using stream_command = std::variant<
     set_monitoring_command, set_encryption_command, consumer_command, channel_command,
     channel_checkpoint_command, shard_tip_command, add_data_key_command>;
 
-inline constexpr std::uint8_t stream_command_version = 1;
+/// 2 added the provider to a `set_encryption_command`'s data key (KMS
+/// task 15). A command is written as version 1 unless it carries a
+/// provider, so a node not yet upgraded keeps reading the log until a
+/// provider is named; a version 1 command still reads, with none.
+inline constexpr std::uint8_t stream_command_version = 2;
 
 /// The multi_raft routing key a command is proposed under.
 [[nodiscard]] inline auto command_key(const stream_command& c) -> std::string {
@@ -578,9 +582,14 @@ inline auto decode_append(codec::reader& r) -> append_records_command {
 [[nodiscard]] inline auto encode_command(const stream_command& c) -> std::vector<std::byte> {
     using command_detail::encode_append;
     codec::writer w;
-    w.u8(stream_command_version).u8(static_cast<std::uint8_t>(c.index()));
+    const auto* enc = std::get_if<set_encryption_command>(&c);
+    const std::uint8_t version =
+        enc != nullptr && enc->_data_key && !enc->_data_key->_provider.empty()
+            ? stream_command_version
+            : 1;
+    w.u8(version).u8(static_cast<std::uint8_t>(c.index()));
     std::visit(
-        [&w]<typename T>(const T& v) {
+        [&w, version]<typename T>(const T& v) {
             if constexpr (std::is_same_v<T, create_stream_command>) {
                 w.str(v._account).str(v._name).u32(v._shard_count);
                 w.u8(static_cast<std::uint8_t>(v._mode));
@@ -677,10 +686,14 @@ inline auto decode_append(codec::reader& r) -> append_records_command {
                 if (v._data_key) {
                     w.u32(v._data_key->_generation).str(v._data_key->_key_id);
                     w.str(v._data_key->_wrapped);
+                    if (version >= 2) {
+                        w.str(v._data_key->_provider);
+                    }
                 }
             } else if constexpr (std::is_same_v<T, add_data_key_command>) {
                 w.str(v._account).str(v._name).u64(v._id).str(v._key_id);
                 w.u32(v._data_key._generation).str(v._data_key._key_id).str(v._data_key._wrapped);
+                w.str(v._data_key._provider);
             } else if constexpr (std::is_same_v<T, consumer_command>) {
                 w.str(v._account).str(v._name).u64(v._id).u8(static_cast<std::uint8_t>(v._op));
                 w.str(v._consumer).i64(v._created_ms);
@@ -722,7 +735,8 @@ inline auto decode_append(codec::reader& r) -> append_records_command {
 
 [[nodiscard]] inline auto decode_command(std::span<const std::byte> bytes) -> stream_command {
     codec::reader r(bytes);
-    if (r.u8() != stream_command_version) {
+    const auto version = r.u8();
+    if (version != 1 && version != stream_command_version) {
         throw kinesis_codec_error("kinesis codec: unknown command version");
     }
     const auto kind = r.u8();
@@ -957,6 +971,9 @@ inline auto decode_append(codec::reader& r) -> append_records_command {
                 k._generation = r.u32();
                 k._key_id = r.str();
                 k._wrapped = r.str();
+                if (version >= 2) {
+                    k._provider = r.str();
+                }
                 c._data_key = std::move(k);
             }
             out = std::move(c);
@@ -1034,6 +1051,7 @@ inline auto decode_append(codec::reader& r) -> append_records_command {
             c._data_key._generation = r.u32();
             c._data_key._key_id = r.str();
             c._data_key._wrapped = r.str();
+            c._data_key._provider = r.str();
             out = std::move(c);
             break;
         }

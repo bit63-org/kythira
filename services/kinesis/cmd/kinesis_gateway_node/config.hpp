@@ -117,6 +117,12 @@ struct node_options {
     /// `KYTHIRA_KMS_TRUSTED_SERVICES`) and verified against
     /// `KINESIS_KMS_CA`. Each call is made for the request's own caller.
     std::string _kms{"off"};
+    /// `KINESIS_KMS_PREVIOUS`: a provider this node no longer wraps with
+    /// but whose data keys it still opens (off, local, aws, pkcs11 or
+    /// kythira, with that provider's settings): a stream keeps reading
+    /// after a move between providers. Data keys from before providers
+    /// were recorded count as this one's.
+    std::string _kms_previous{"off"};
     /// Whether `KINESIS_KMS` was set (so kythira_node may default it).
     bool _kms_set{false};
     std::string _kms_ca;

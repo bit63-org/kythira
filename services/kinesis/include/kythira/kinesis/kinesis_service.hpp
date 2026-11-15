@@ -149,6 +149,15 @@ struct kinesis_service_config {
     /// `StartStreamEncryption` is refused, and an encrypted stream's
     /// records cannot be written or read on this node.
     key_provider _kms{};
+    /// `_kms`'s name (`KINESIS_KMS`), recorded with each data key it wraps.
+    std::string _kms_name{};
+    /// Providers this node no longer wraps with but still opens keys of
+    /// (`KINESIS_KMS_PREVIOUS`), by name: a stream written under `local`
+    /// or `aws` keeps reading after the node moves to `kythira`.
+    std::map<std::string, key_provider, std::less<>> _kms_previous{};
+    /// The provider that wrapped keys from before the tag existed: a name
+    /// in `_kms_previous`, or empty for `_kms`.
+    std::string _kms_untagged{};
     /// With a provider that authorizes each caller (`KINESIS_KMS=kythira`):
     /// how long one caller's KMS answer for a stream stands before the
     /// caller is asked about again. AWS reuses a producer's or consumer's
@@ -947,22 +956,27 @@ public:
         if (rec._status != stream_status::active) {
             return not_active(rec);
         }
-        if (rec._encryption == encryption_type::kms && rec._key_id == key) {
+        if (rec._encryption == encryption_type::kms && rec._key_id == key &&
+            !wrapped_by_previous(rec)) {
             return boost::json::object{};
         }
+        // The same key again after a move to another provider re-keys:
+        // the stream's next data key is the new provider's.
         generated_data_key fresh;
         try {
             fresh = _config._kms.generate_data_key(key, encryption_context_of(rec), caller_of(ctx));
         } catch (const kms_error& e) {
             return kms_error_answer(e);
         }
-        const auto r = propose(set_encryption_command{
-            ._account = rec._account,
-            ._name = rec._name,
-            ._id = rec._id,
-            ._encryption = encryption_type::kms,
-            ._key_id = key,
-            ._data_key = data_key_record{._key_id = fresh._key_id, ._wrapped = fresh._wrapped}});
+        const auto r = propose(
+            set_encryption_command{._account = rec._account,
+                                   ._name = rec._name,
+                                   ._id = rec._id,
+                                   ._encryption = encryption_type::kms,
+                                   ._key_id = key,
+                                   ._data_key = data_key_record{._key_id = fresh._key_id,
+                                                                ._wrapped = fresh._wrapped,
+                                                                ._provider = _config._kms_name}});
         if (r && r->_status == apply_status::ok) {
             const std::scoped_lock lock(_data_key_mutex);
             _data_key_cache.insert_or_assign(
@@ -2654,6 +2668,34 @@ private:
                                      now + _config._kms_caller_ttl.count());
     }
 
+    /// Whether `rec`'s current data key is a previous provider's
+    /// (`KINESIS_KMS_PREVIOUS`), not this node's own.
+    [[nodiscard]] auto wrapped_by_previous(const stream_record& rec) const -> bool {
+        const auto* dk = rec.current_data_key();
+        if (dk == nullptr) {
+            return false;
+        }
+        const auto& name = dk->_provider.empty() ? _config._kms_untagged : dk->_provider;
+        return !name.empty() && name != _config._kms_name;
+    }
+
+    /// The provider that opens `k`: the one its tag names, this node's own,
+    /// or for an untagged key `_kms_untagged`. A key from a provider this
+    /// node lacks answers KMSNotFoundException naming it.
+    [[nodiscard]] auto provider_for(const data_key_record& k) const -> const key_provider& {
+        const auto& name = k._provider.empty() ? _config._kms_untagged : k._provider;
+        if (name.empty() || name == _config._kms_name) {
+            return _config._kms;
+        }
+        if (const auto it = _config._kms_previous.find(name); it != _config._kms_previous.end()) {
+            return it->second;
+        }
+        throw kms_error(kms_failure::unavailable,
+                        "This data key was wrapped by the '" + name +
+                            "' key provider, which this endpoint does not have "
+                            "(KINESIS_KMS_PREVIOUS).");
+    }
+
     /// The wrapped data key of `rec`'s generation `generation`, from `rec`
     /// or, for a generation newer than `rec` (started since it was read),
     /// a fresh catalog read. Throws `record_open_error` when there is none.
@@ -2685,7 +2727,16 @@ private:
     /// generation exists.
     auto data_key_of(const stream_record& rec, std::uint32_t generation, const kms_caller& who)
         -> data_key_bytes {
-        const bool per_caller = _config._kms.per_caller();
+        const auto wrapped_here = [&]() -> std::optional<data_key_record> {
+            if (const auto* k = rec.find_data_key(generation)) {
+                return *k;
+            }
+            return std::nullopt;
+        }();
+        // The provider is the generation's; a generation newer than `rec`
+        // was made by this node's current provider or a peer's, read below.
+        const auto& known = wrapped_here ? provider_for(*wrapped_here) : _config._kms;
+        const bool per_caller = known.per_caller();
         const auto now = per_caller ? _config._monotonic() : 0;
         {
             const std::scoped_lock lock(_data_key_mutex);
@@ -2695,14 +2746,15 @@ private:
                 return it->second;
             }
         }
-        const auto wrapped = wrapped_key_of(rec, generation);
+        const auto wrapped = wrapped_here ? *wrapped_here : wrapped_key_of(rec, generation);
+        const auto& provider = provider_for(wrapped);
         // The provider may be a network call: not under the cache's lock.
-        const auto key = _config._kms.decrypt_data_key(wrapped._key_id, wrapped._wrapped,
-                                                       encryption_context_of(rec), who);
+        const auto key = provider.decrypt_data_key(wrapped._key_id, wrapped._wrapped,
+                                                   encryption_context_of(rec), who);
         const std::scoped_lock lock(_data_key_mutex);
         _data_key_cache.insert_or_assign({rec._id, generation}, key);
-        if (per_caller) {
-            prove(who, rec._id, generation, now);
+        if (provider.per_caller()) {
+            prove(who, rec._id, generation, _config._monotonic());
         }
         return key;
     }
@@ -2724,13 +2776,16 @@ private:
         if (dk == nullptr) {
             return std::nullopt;
         }
-        if (!_config._kms.per_caller()) {
+        // A stream still under a key of a previous provider keeps it (and
+        // that provider's authority) until it is started with a new key.
+        const auto& provider = provider_for(*dk);
+        if (!provider.per_caller()) {
             return std::pair{dk->_generation, data_key_of(rec, dk->_generation, who)};
         }
         const auto now = _config._monotonic();
         const auto held = [&]() -> std::optional<std::pair<std::uint32_t, data_key_bytes>> {
             for (auto it = rec._data_keys.rbegin(); it != rec._data_keys.rend(); ++it) {
-                if (it->_key_id != dk->_key_id) {
+                if (it->_key_id != dk->_key_id || it->_provider != dk->_provider) {
                     continue;
                 }
                 if (const auto c = _data_key_cache.find({rec._id, it->_generation});
@@ -2748,7 +2803,7 @@ private:
                 }
             }
         }
-        auto fresh = _config._kms.generate_data_key(dk->_key_id, encryption_context_of(rec), who);
+        auto fresh = provider.generate_data_key(dk->_key_id, encryption_context_of(rec), who);
         const auto forget = [&] {
             OPENSSL_cleanse(fresh._plaintext.data(), fresh._plaintext.size());
         };
@@ -2765,7 +2820,8 @@ private:
             ._name = rec._name,
             ._id = rec._id,
             ._key_id = rec._key_id,
-            ._data_key = data_key_record{._key_id = fresh._key_id, ._wrapped = fresh._wrapped}});
+            ._data_key = data_key_record{
+                ._key_id = fresh._key_id, ._wrapped = fresh._wrapped, ._provider = dk->_provider}});
         if (!r || r->_status != apply_status::ok) {
             forget();
             // Re-keyed or stopped since `rec` was read, or no answer: the

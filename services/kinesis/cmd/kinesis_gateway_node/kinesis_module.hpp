@@ -214,7 +214,7 @@ public:
             if (!_opt._kms_set && kms_here) {
                 _opt._kms = "kythira";
             }
-            if (_opt._kms == "kythira" && _opt._kms_endpoint.empty() && !kms_here) {
+            if (uses_kms("kythira") && _opt._kms_endpoint.empty() && !kms_here) {
                 return std::string(
                     "KINESIS_KMS=kythira needs the KMS module in this node or "
                     "KINESIS_KMS_ENDPOINT naming one on another cluster");
@@ -354,7 +354,7 @@ public:
             }
             _iam_evaluator = std::move(iam);
         }
-        if (_opt._kms == "kythira" && _opt._kms_endpoint.empty()) {
+        if (uses_kms("kythira") && _opt._kms_endpoint.empty()) {
             // The KMS starts first (starts_after) and publishes its client.
             _kms_client = registry.lookup<service_node::kms_endpoint>(
                 std::string(service_node::interface_names::kms_client));
@@ -363,7 +363,7 @@ public:
                     "KINESIS_KMS=kythira: the KMS module publishes no client");
             }
         }
-        if (_opt._kms == "pkcs11" && !_kms_token.module_path) {
+        if (uses_kms("pkcs11") && !_kms_token.module_path) {
             // The HSM starts first (starts_after); a stand-alone node, or
             // one without the HSM module, names a module-path instead.
             _hsm_pkcs11 = registry.lookup<service_node::pkcs11_provider>(
@@ -560,6 +560,78 @@ private:
     /// The cluster adapter, the front end, the service, the gateway and
     /// the Lease API: everything a request reaches, built before any
     /// listener opens.
+    /// Whether `name` is this node's key provider or its previous one.
+    [[nodiscard]] auto uses_kms(std::string_view name) const -> bool {
+        return _opt._kms == name || _opt._kms_previous == name;
+    }
+
+    /// The key provider `name` (`KINESIS_KMS` or `KINESIS_KMS_PREVIOUS`)
+    /// from its settings; empty for `off`.
+    auto make_kms_provider(const std::string& name) -> kinesis::key_provider {
+        if (name == "local") {
+            return kinesis::key_provider(kinesis::local_kms_provider(_opt._kms_passphrase));
+        }
+        if (name == "aws") {
+            kinesis::aws_kms_config kc;
+            kc._region = _opt._kms_region;
+            kc._endpoint = _opt._kms_endpoint;
+            // Read once at startup: nothing in the process changes its
+            // environment.
+            const auto env = [](const char* var) {
+                const char* v = std::getenv(var);  // NOLINT(concurrency-mt-unsafe)
+                return v != nullptr ? std::string(v) : std::string();
+            };
+            kc._credentials = [creds = kinesis::aws_kms_credentials{
+                                   env("AWS_ACCESS_KEY_ID"), env("AWS_SECRET_ACCESS_KEY"),
+                                   env("AWS_SESSION_TOKEN")}] { return creds; };
+            return kinesis::key_provider(kinesis::aws_kms_provider(std::move(kc)));
+        }
+        if (name == "kythira") {
+            if (!_opt._kms_endpoint.empty()) {
+                // A KMS on another cluster: signed as this gateway, which
+                // the KMS trusts to forward the caller it serves.
+                const auto env = [](const char* var) {
+                    const char* v = std::getenv(var);  // NOLINT(concurrency-mt-unsafe)
+                    return v != nullptr ? std::string(v) : std::string();
+                };
+                service_node::kms_https_config kc;
+                kc.endpoint = "https://" + _opt._kms_endpoint;
+                kc.region = _opt._kms_region;
+                kc.access_key_id = env("AWS_ACCESS_KEY_ID");
+                kc.secret_access_key = env("AWS_SECRET_ACCESS_KEY");
+                kc.session_token = env("AWS_SESSION_TOKEN");
+                kc.tls.ca_path = _opt._kms_ca;
+                kc.tls.client_certificate = false;
+                _kms_client = std::make_shared<service_node::kms_https_endpoint>(std::move(kc));
+            }
+            // Set before the listener opens (here, or in start() for the
+            // co-located client) and never after: a plain read.
+            return kinesis::key_provider(
+                kinesis::kythira_kms_provider([this] { return _kms_client; }));
+        }
+        if (name == "pkcs11") {
+            _kms_token = pkcs11::uri::parse(_opt._kms_pkcs11_uri);
+            kinesis::pkcs11_kms_config kc;
+            kc.token = _kms_token;
+            kc.oaep = _opt._kms_pkcs11_oaep == "sha1" ? pkcs11::hash_algorithm::sha1
+                                                      : pkcs11::hash_algorithm::sha256;
+            // The module opens on first use, after start() has found the
+            // co-located HSM when the URI names no library.
+            return kinesis::key_provider(
+                kinesis::pkcs11_kms_provider(std::move(kc), [this]() -> pkcs11::module {
+                    if (_kms_token.module_path) {
+                        return pkcs11::module::load(_kms_token);
+                    }
+                    if (!_hsm_pkcs11) {
+                        throw kinesis::kms_error(kinesis::kms_failure::unavailable,
+                                                 "The co-located virtual HSM is not running.");
+                    }
+                    return pkcs11::module(_hsm_pkcs11->backend_for(_opt._kms_pkcs11_identity));
+                }));
+        }
+        return {};
+    }
+
     void build_service() {
         const auto gateways = _opt._peer_gateways;
         const auto address_of =
@@ -601,65 +673,14 @@ private:
         } else if (!_opt._forward_secret.empty()) {
             sc._iterator_keys = kinesis::derived_iterator_key(_opt._forward_secret);
         }
-        // Encryption at rest (task 14).
-        if (_opt._kms == "local") {
-            sc._kms = kinesis::key_provider(kinesis::local_kms_provider(_opt._kms_passphrase));
-        } else if (_opt._kms == "aws") {
-            kinesis::aws_kms_config kc;
-            kc._region = _opt._kms_region;
-            kc._endpoint = _opt._kms_endpoint;
-            // Read once at startup: nothing in the process changes its
-            // environment.
-            const auto env = [](const char* name) {
-                const char* v = std::getenv(name);  // NOLINT(concurrency-mt-unsafe)
-                return v != nullptr ? std::string(v) : std::string();
-            };
-            kc._credentials = [creds = kinesis::aws_kms_credentials{
-                                   env("AWS_ACCESS_KEY_ID"), env("AWS_SECRET_ACCESS_KEY"),
-                                   env("AWS_SESSION_TOKEN")}] { return creds; };
-            sc._kms = kinesis::key_provider(kinesis::aws_kms_provider(std::move(kc)));
-        } else if (_opt._kms == "kythira") {
-            if (!_opt._kms_endpoint.empty()) {
-                // A KMS on another cluster: signed as this gateway, which
-                // the KMS trusts to forward the caller it serves.
-                const auto env = [](const char* name) {
-                    const char* v = std::getenv(name);  // NOLINT(concurrency-mt-unsafe)
-                    return v != nullptr ? std::string(v) : std::string();
-                };
-                service_node::kms_https_config kc;
-                kc.endpoint = "https://" + _opt._kms_endpoint;
-                kc.region = _opt._kms_region;
-                kc.access_key_id = env("AWS_ACCESS_KEY_ID");
-                kc.secret_access_key = env("AWS_SECRET_ACCESS_KEY");
-                kc.session_token = env("AWS_SESSION_TOKEN");
-                kc.tls.ca_path = _opt._kms_ca;
-                kc.tls.client_certificate = false;
-                _kms_client = std::make_shared<service_node::kms_https_endpoint>(std::move(kc));
-            }
-            // Set before the listener opens (here, or in start() for the
-            // co-located client) and never after: a plain read.
-            sc._kms = kinesis::key_provider(
-                kinesis::kythira_kms_provider([this] { return _kms_client; }));
-            sc._kms_caller_ttl = _opt._kms_caller_ttl;
-        } else if (_opt._kms == "pkcs11") {
-            _kms_token = pkcs11::uri::parse(_opt._kms_pkcs11_uri);
-            kinesis::pkcs11_kms_config kc;
-            kc.token = _kms_token;
-            kc.oaep = _opt._kms_pkcs11_oaep == "sha1" ? pkcs11::hash_algorithm::sha1
-                                                      : pkcs11::hash_algorithm::sha256;
-            // The module opens on first use, after start() has found the
-            // co-located HSM when the URI names no library.
-            sc._kms = kinesis::key_provider(
-                kinesis::pkcs11_kms_provider(std::move(kc), [this]() -> pkcs11::module {
-                    if (_kms_token.module_path) {
-                        return pkcs11::module::load(_kms_token);
-                    }
-                    if (!_hsm_pkcs11) {
-                        throw kinesis::kms_error(kinesis::kms_failure::unavailable,
-                                                 "The co-located virtual HSM is not running.");
-                    }
-                    return pkcs11::module(_hsm_pkcs11->backend_for(_opt._kms_pkcs11_identity));
-                }));
+        // Encryption at rest (task 14), and the provider older data keys
+        // name (KMS task 15).
+        sc._kms = make_kms_provider(_opt._kms);
+        sc._kms_name = _opt._kms;
+        sc._kms_caller_ttl = _opt._kms_caller_ttl;
+        if (_opt._kms_previous != "off") {
+            sc._kms_previous.emplace(_opt._kms_previous, make_kms_provider(_opt._kms_previous));
+            sc._kms_untagged = _opt._kms_previous;
         }
         _service = std::make_unique<kinesis::kinesis_service<cluster_type>>(*_cluster, sc);
         _service->register_with(*_front_end);
