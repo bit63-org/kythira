@@ -100,6 +100,27 @@ public:
         -> ck_result<void> {
         return _layer->set_attribute_value(_app, s, o, changes);
     }
+    auto create_object(CK_SESSION_HANDLE s, const attribute_map& tmpl)
+        -> ck_result<CK_OBJECT_HANDLE> {
+        return _layer->create_object(_app, s, tmpl);
+    }
+    auto copy_object(CK_SESSION_HANDLE s, CK_OBJECT_HANDLE o, const attribute_map& tmpl)
+        -> ck_result<CK_OBJECT_HANDLE> {
+        return _layer->copy_object(_app, s, o, tmpl);
+    }
+    auto wrap_key(CK_SESSION_HANDLE s, const CK_MECHANISM& m, CK_OBJECT_HANDLE wrapping_key,
+                  CK_OBJECT_HANDLE key) -> ck_result<bytes> {
+        return _layer->wrap_key(_app, s, m, wrapping_key, key);
+    }
+    auto unwrap_key(CK_SESSION_HANDLE s, const CK_MECHANISM& m, CK_OBJECT_HANDLE unwrapping_key,
+                    std::span<const std::uint8_t> wrapped, const attribute_map& tmpl)
+        -> ck_result<CK_OBJECT_HANDLE> {
+        return _layer->unwrap_key(_app, s, m, unwrapping_key, wrapped, tmpl);
+    }
+    auto derive_key(CK_SESSION_HANDLE s, const CK_MECHANISM& m, CK_OBJECT_HANDLE base_key,
+                    const attribute_map& tmpl) -> ck_result<CK_OBJECT_HANDLE> {
+        return _layer->derive_key(_app, s, m, base_key, tmpl);
+    }
     auto find_objects_init(CK_SESSION_HANDLE s, const attribute_map& tmpl) -> ck_result<void> {
         return _layer->find_objects_init(_app, s, tmpl);
     }

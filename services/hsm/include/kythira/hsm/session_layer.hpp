@@ -50,6 +50,7 @@
 #include <kythira/hsm/key_store.hpp>
 #include <kythira/hsm/key_vault.hpp>
 #include <kythira/hsm/mechanisms.hpp>
+#include <kythira/hsm/object_import.hpp>
 #include <kythira/hsm/pkcs11.hpp>
 #include <kythira/hsm/sealing.hpp>
 #include <kythira/hsm/secret_bytes.hpp>
@@ -767,12 +768,12 @@ public:
                 v.rv = r.error();
             } else if (auto b = o->attributes.bytes(type)) {
                 v.value.emplace(b->begin(), b->end());
-            } else if (type == CKA_VALUE && cls == CKO_SECRET_KEY) {
-                auto k = material(*ctx, *o);
+            } else if (type == CKA_VALUE && (cls == CKO_SECRET_KEY || cls == CKO_DATA)) {
+                auto k = value_of(*ctx, *o);
                 if (!k) {
                     return unexpected(k.error());
                 }
-                v.value.emplace((*k)->secret.view().begin(), (*k)->secret.view().end());
+                v.value.emplace(k->view().begin(), k->view().end());
             } else {
                 v.rv = CKR_ATTRIBUTE_TYPE_INVALID;
             }
@@ -850,6 +851,236 @@ public:
             }
         }
         return unexpected(CKR_DEVICE_ERROR);
+    }
+
+    /// C_CreateObject: a key, data object or certificate from the caller's
+    /// template (object_import.hpp). Secret parts are sealed for a token
+    /// object and never kept in the record.
+    auto create_object(app_id app, CK_SESSION_HANDLE h, const attribute_map& tmpl)
+        -> ck_result<CK_OBJECT_HANDLE> {
+        auto ctx = context(app, h);
+        if (!ctx) {
+            return unexpected(ctx.error());
+        }
+        if (auto r = require_unsealed(); !r) {
+            return unexpected(r.error());
+        }
+        attribute_map t = tmpl;
+        auto cls = t.get_ulong(CKA_CLASS);
+        if (!cls) {
+            return unexpected(cls.error());
+        }
+        if (!*cls) {
+            return unexpected(CKR_TEMPLATE_INCOMPLETE);
+        }
+        auto token = check_new_object(*ctx, t, **cls);
+        if (!token) {
+            return unexpected(token.error());
+        }
+        if (auto r = check_trusted(t, ctx->user); !r) {
+            return unexpected(r.error());
+        }
+        auto o = build_created_object(t);
+        if (!o) {
+            return unexpected(o.error());
+        }
+        return store_new_object(*ctx, std::move(*o), *token);
+    }
+
+    /// C_CopyObject: the object with the template's changes, which may only
+    /// be CKA_TOKEN, CKA_PRIVATE, CKA_MODIFIABLE, CKA_DESTROYABLE,
+    /// CKA_LABEL, CKA_ID, and the one-way CKA_SENSITIVE and
+    /// CKA_EXTRACTABLE moves.
+    auto copy_object(app_id app, CK_SESSION_HANDLE h, CK_OBJECT_HANDLE object,
+                     const attribute_map& tmpl) -> ck_result<CK_OBJECT_HANDLE> {
+        auto ctx = context(app, h);
+        if (!ctx) {
+            return unexpected(ctx.error());
+        }
+        if (auto r = require_unsealed(); !r) {
+            return unexpected(r.error());
+        }
+        auto o = lookup(*ctx, object);
+        if (!o) {
+            return unexpected(o.error());
+        }
+        if (!o->attributes.get_bool(CKA_COPYABLE, true).value_or(true)) {
+            return unexpected(CKR_ACTION_PROHIBITED);
+        }
+        for (const auto& [type, value] : tmpl) {
+            switch (type) {
+                case CKA_TOKEN:
+                case CKA_PRIVATE:
+                case CKA_MODIFIABLE:
+                case CKA_DESTROYABLE:
+                case CKA_LABEL:
+                case CKA_ID:
+                case CKA_SENSITIVE:
+                case CKA_EXTRACTABLE:
+                    break;
+                default:
+                    return unexpected(CKR_ATTRIBUTE_READ_ONLY);
+            }
+        }
+        if (auto r = check_sensitive_change(o->attributes, tmpl); !r) {
+            return unexpected(r.error());
+        }
+        if (auto r = check_extractable_change(o->attributes, tmpl); !r) {
+            return unexpected(r.error());
+        }
+        attribute_map t = o->attributes;
+        t.merge(tmpl);
+        const auto cls = t.get_ulong(CKA_CLASS).value_or(std::nullopt).value_or(CKO_DATA);
+        auto token = check_new_object(*ctx, t, cls);
+        if (!token) {
+            return unexpected(token.error());
+        }
+        built_object copy;
+        copy.record.attributes = std::move(t);
+        copy.record.public_der = o->public_der;
+        if (has_material(cls)) {
+            auto v = value_of(*ctx, *o);
+            if (!v) {
+                return unexpected(v.error());
+            }
+            copy.material = std::move(*v);
+        }
+        return store_new_object(*ctx, std::move(copy), *token);
+    }
+
+    /// C_WrapKey: the key's value or PKCS#8 encrypted under the wrapping
+    /// key, after a read-index round and every wrap rule (CKA_WRAP,
+    /// CKA_EXTRACTABLE, CKA_WRAP_WITH_TRUSTED, CKA_WRAP_TEMPLATE).
+    auto wrap_key(app_id app, CK_SESSION_HANDLE h, const CK_MECHANISM& mechanism,
+                  CK_OBJECT_HANDLE wrapping_key, CK_OBJECT_HANDLE key) -> ck_result<bytes> {
+        auto ctx = context(app, h);
+        if (!ctx) {
+            return unexpected(ctx.error());
+        }
+        if (auto r = mechanism_allows(mechanism, CKF_WRAP); !r) {
+            return unexpected(r.error());
+        }
+        auto w = key_for_use(*ctx, wrapping_key, key_operation::wrap);
+        if (!w) {
+            return unexpected(w.error() == CKR_KEY_HANDLE_INVALID ? CKR_WRAPPING_KEY_HANDLE_INVALID
+                                                                  : w.error());
+        }
+        // The round above covered this token; a session key needs none.
+        auto k = lookup(*ctx, key);
+        if (!k) {
+            return unexpected(CKR_KEY_HANDLE_INVALID);
+        }
+        const auto cls = k->attributes.get_ulong(CKA_CLASS).value_or(std::nullopt);
+        if (cls != CKO_SECRET_KEY && cls != CKO_PRIVATE_KEY) {
+            return unexpected(CKR_KEY_NOT_WRAPPABLE);
+        }
+        if (auto r = check_wrappable(w->record.attributes, k->attributes); !r) {
+            return unexpected(r.error());
+        }
+        auto value = value_of(*ctx, *k);
+        if (!value) {
+            return unexpected(value.error());
+        }
+        return kythira::hsm::wrap(mechanism, *w->key, value->view());
+    }
+
+    /// C_UnwrapKey: a new key from wrapped bytes, under the unwrapping
+    /// key's CKA_UNWRAP_TEMPLATE.
+    auto unwrap_key(app_id app, CK_SESSION_HANDLE h, const CK_MECHANISM& mechanism,
+                    CK_OBJECT_HANDLE unwrapping_key, std::span<const std::uint8_t> wrapped,
+                    const attribute_map& tmpl) -> ck_result<CK_OBJECT_HANDLE> {
+        auto ctx = context(app, h);
+        if (!ctx) {
+            return unexpected(ctx.error());
+        }
+        if (auto r = mechanism_allows(mechanism, CKF_UNWRAP); !r) {
+            return unexpected(r.error());
+        }
+        auto u = key_for_use(*ctx, unwrapping_key, key_operation::unwrap);
+        if (!u) {
+            return unexpected(u.error() == CKR_KEY_HANDLE_INVALID
+                                  ? CKR_UNWRAPPING_KEY_HANDLE_INVALID
+                                  : u.error());
+        }
+        auto t = apply_key_template(u->record.attributes, CKA_UNWRAP_TEMPLATE, tmpl);
+        if (!t) {
+            return unexpected(t.error());
+        }
+        auto cls = t->get_ulong(CKA_CLASS);
+        if (!cls) {
+            return unexpected(cls.error());
+        }
+        if (!*cls) {
+            return unexpected(CKR_TEMPLATE_INCOMPLETE);
+        }
+        auto token = check_new_object(*ctx, *t, **cls);
+        if (!token) {
+            return unexpected(token.error());
+        }
+        if (auto r = check_trusted(*t, ctx->user); !r) {
+            return unexpected(r.error());
+        }
+        auto key_bytes = kythira::hsm::unwrap(mechanism, *u->key, wrapped);
+        if (!key_bytes) {
+            return unexpected(key_bytes.error());
+        }
+        auto o = build_unwrapped_key(*t, std::move(*key_bytes));
+        if (!o) {
+            return unexpected(o.error());
+        }
+        return store_new_object(*ctx, std::move(*o), *token);
+    }
+
+    /// C_DeriveKey: a secret key (or, for CKM_HKDF_DATA, a data object)
+    /// from the base key, under its CKA_DERIVE_TEMPLATE.
+    auto derive_key(app_id app, CK_SESSION_HANDLE h, const CK_MECHANISM& mechanism,
+                    CK_OBJECT_HANDLE base_key, const attribute_map& tmpl)
+        -> ck_result<CK_OBJECT_HANDLE> {
+        auto ctx = context(app, h);
+        if (!ctx) {
+            return unexpected(ctx.error());
+        }
+        if (auto r = mechanism_allows(mechanism, CKF_DERIVE); !r) {
+            return unexpected(r.error());
+        }
+        auto base = key_for_use(*ctx, base_key, key_operation::derive);
+        if (!base) {
+            return unexpected(base.error());
+        }
+        auto t = apply_key_template(base->record.attributes, CKA_DERIVE_TEMPLATE, tmpl);
+        if (!t) {
+            return unexpected(t.error());
+        }
+        const CK_OBJECT_CLASS want =
+            mechanism.mechanism == CKM_HKDF_DATA ? CKO_DATA : CKO_SECRET_KEY;
+        auto given = t->get_ulong(CKA_CLASS);
+        if (!given) {
+            return unexpected(given.error());
+        }
+        if (*given && **given != want) {
+            return unexpected(CKR_TEMPLATE_INCONSISTENT);
+        }
+        t->set_ulong(CKA_CLASS, want);
+        auto token = check_new_object(*ctx, *t, want);
+        if (!token) {
+            return unexpected(token.error());
+        }
+        if (auto r = check_trusted(*t, ctx->user); !r) {
+            return unexpected(r.error());
+        }
+        auto len = t->get_ulong(CKA_VALUE_LEN);
+        if (!len) {
+            return unexpected(len.error());
+        }
+        auto value = kythira::hsm::derive(mechanism, *base->key, len->value_or(0));
+        if (!value) {
+            return unexpected(value.error());
+        }
+        auto o = build_derived_object(*t, std::move(*value), base->record.attributes);
+        if (!o) {
+            return unexpected(o.error());
+        }
+        return store_new_object(*ctx, std::move(*o), *token);
     }
 
     auto find_objects_init(app_id app, CK_SESSION_HANDLE h, const attribute_map& tmpl)
@@ -1218,6 +1449,22 @@ private:
         return {};
     }
 
+    /// The node is unsealed and the mechanism can do `flag`.
+    [[nodiscard]] auto mechanism_allows(const CK_MECHANISM& m, CK_FLAGS flag) const
+        -> ck_result<void> {
+        if (auto r = require_unsealed(); !r) {
+            return r;
+        }
+        const auto info = mechanism_info(m.mechanism);
+        if (!info) {
+            return unexpected(info.error());
+        }
+        if ((info->flags & flag) == 0) {
+            return unexpected(CKR_MECHANISM_INVALID);
+        }
+        return {};
+    }
+
     [[nodiscard]] auto require_unsealed() const -> ck_result<void> {
         if (_vault->sealed()) {
             return unexpected(CKR_DEVICE_ERROR);
@@ -1316,12 +1563,13 @@ private:
     }
 
     /// The defaults and session rules for a new object: CKA_PRIVATE is true
-    /// for secret and private keys unless the caller says otherwise, a
+    /// for secret and private keys (false for anything else) unless the
+    /// caller says otherwise, a
     /// private object needs the user logged in, and a token object needs a
     /// read-write session. Answers whether it is a token object.
     [[nodiscard]] static auto check_new_object(const call_context& ctx, attribute_map& t,
                                                CK_OBJECT_CLASS cls) -> ck_result<bool> {
-        auto priv = t.get_bool(CKA_PRIVATE, cls != CKO_PUBLIC_KEY);
+        auto priv = t.get_bool(CKA_PRIVATE, cls == CKO_SECRET_KEY || cls == CKO_PRIVATE_KEY);
         auto token = t.get_bool(CKA_TOKEN, false);
         if (!priv || !token) {
             return unexpected(!priv ? priv.error() : token.error());
@@ -1466,8 +1714,13 @@ private:
 
     /// The key an operation is about to use, checked as of now: for a
     /// token object, after a read-index round (requirement 3.4, 3.5).
-    auto key_for_use(const call_context& ctx, CK_OBJECT_HANDLE h, op_kind kind)
-        -> ck_result<std::shared_ptr<const key_material>> {
+    struct key_in_use {
+        object_record record;
+        std::shared_ptr<const key_material> key;
+    };
+
+    auto key_for_use(const call_context& ctx, CK_OBJECT_HANDLE h, key_operation op)
+        -> ck_result<key_in_use> {
         if (auto r = require_unsealed(); !r) {
             return unexpected(r.error());
         }
@@ -1481,10 +1734,81 @@ private:
             drop_cached(ctx.token, h);
             return unexpected(CKR_KEY_HANDLE_INVALID);
         }
-        if (auto r = check_usage(o->attributes, usage_of(kind)); !r) {
+        if (auto r = check_usage(o->attributes, op); !r) {
             return unexpected(r.error());
         }
-        return material(ctx, *o);
+        auto k = material(ctx, *o);
+        if (!k) {
+            return unexpected(k.error());
+        }
+        return key_in_use{std::move(*o), std::move(*k)};
+    }
+
+    /// The secret part of `o` (a secret key's value, a private key's
+    /// PKCS#8, a data object's value), copied. No barrier or usage check.
+    auto value_of(const call_context& ctx, const object_record& o) -> ck_result<secret_bytes> {
+        if (is_session_object(o.handle)) {
+            const std::lock_guard lock(_mutex);
+            const auto it = _session_objects.find(o.handle);
+            if (it == _session_objects.end() || !it->second.key) {
+                return unexpected(CKR_OBJECT_HANDLE_INVALID);
+            }
+            return it->second.key->secret.clone();
+        }
+        if (o.sealed.empty()) {
+            return secret_bytes{};
+        }
+        const auto entry = _store->token(ctx.token);
+        if (!entry) {
+            return unexpected(CKR_DEVICE_ERROR);
+        }
+        auto v = _vault->with_token_key(*entry, [&](std::span<const std::uint8_t> tk) {
+            return open_object(tk, ctx.token, o);
+        });
+        if (!v || !*v) {
+            return unexpected(CKR_DEVICE_ERROR);  // sealed, or a bad tag
+        }
+        return std::move(**v);
+    }
+
+    /// Stores a new object: a session object in memory, or a token object
+    /// sealed under a fresh random handle and proposed, with another
+    /// handle tried if that one is taken.
+    auto store_new_object(const call_context& ctx, built_object o, bool token)
+        -> ck_result<CK_OBJECT_HANDLE> {
+        o.record.attributes.set_bool(CKA_TOKEN, token);
+        if (!token) {
+            o.record.handle = next_session_object();
+            return add_session_object(ctx, std::move(o.record), std::move(o.material));
+        }
+        const auto entry = _store->token(ctx.token);
+        if (!entry) {
+            return unexpected(CKR_DEVICE_ERROR);
+        }
+        const auto cls = o.record.attributes.get_ulong(CKA_CLASS).value_or(std::nullopt);
+        for (int attempt = 0; attempt < _opt.handle_attempts; ++attempt) {
+            o.record.handle = random_object_handle();
+            if (cls && has_material(*cls)) {
+                auto sealed = _vault->with_token_key(*entry, [&](std::span<const std::uint8_t> tk) {
+                    seal_object(tk, ctx.token, o);
+                    return true;
+                });
+                if (!sealed) {
+                    return unexpected(sealed.error());
+                }
+            }
+            auto reply = propose(ctx.token, make_create_objects_command({o.record}));
+            if (!reply) {
+                return unexpected(reply.error());
+            }
+            if (reply->rv == CKR_OK) {
+                return static_cast<CK_OBJECT_HANDLE>(o.record.handle);
+            }
+            if (reply->rv != CKR_FUNCTION_REJECTED) {
+                return unexpected(reply->rv);
+            }
+        }
+        return unexpected(CKR_DEVICE_ERROR);
     }
 
     auto drop_cached(std::uint64_t token, std::uint64_t handle) -> void {
@@ -1526,11 +1850,11 @@ private:
         }
         std::shared_ptr<const key_material> key;
         if (kind != op_kind::digest) {
-            auto k = key_for_use(*ctx, current.key, kind);
+            auto k = key_for_use(*ctx, current.key, usage_of(kind));
             if (!k) {
                 return unexpected(k.error());
             }
-            key = std::move(*k);
+            key = std::move(k->key);
         } else if (auto r = require_unsealed(); !r) {
             return unexpected(r.error());
         }

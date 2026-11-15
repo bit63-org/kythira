@@ -138,8 +138,20 @@ task is one PR unless noted.
       call. `native_client.hpp` is one application in process.
       `key_store.hpp` gains `build_secret_key` / `build_key_pair` so
       session objects and token objects share one construction.
-  - [ ] 6b. `C_CreateObject`, `C_CopyObject`, `C_WrapKey`,
+  - [x] 6b. `C_CreateObject`, `C_CopyObject`, `C_WrapKey`,
     `C_UnwrapKey` and `C_DeriveKey` in the session layer
+    - Done: `object_import.hpp` builds the record and the material
+      for each import path, so create, unwrap and derive share one set
+      of checks. RSA private keys need every CRT component, EC private
+      keys get their public point computed from the scalar, AES keys
+      must be 16, 24 or 32 bytes. Data objects keep their value sealed
+      like a key; certificates (X.509 only) keep it public. A copy
+      keeps the material and may change only TOKEN, PRIVATE, LABEL,
+      ID, MODIFIABLE, DESTROYABLE and the one-way SENSITIVE and
+      EXTRACTABLE flags; `CKA_COPYABLE` false refuses it. Wrapping
+      needs `CKA_WRAP` on the wrapping key and `CKA_EXTRACTABLE` on the
+      target, and private keys wrap as PKCS#8. `CKM_HKDF_DATA` gives a
+      data object, every other derivation a secret key.
   - [ ] 6c. `hsm_module`, the group state machine and host on the
     node's multi-raft host, the admin API, and forwarding proposals and
     read-index rounds from a follower to the group's leader
