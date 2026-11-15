@@ -183,6 +183,10 @@ is one PR unless noted.
     listener; `kms.client` in-process and over HTTPS with forwarded
     principals and `KYTHIRA_KMS_TRUSTED_SERVICES`; `kms` in
     `KYTHIRA_SERVICES`
+  - Done (12a): `kms_node`, the API listener with `KYTHIRA_KMS_AUTH`,
+    and forwarding to the leader over mutual TLS (`kms_peer.hpp`,
+    `kms_node_cluster_test`). Left (12b): `kms.client` and trusted
+    services
   - _Requirements: 2.2-2.5_
 
 - [ ] 13. AWS managed and owned keys

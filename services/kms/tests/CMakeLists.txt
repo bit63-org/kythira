@@ -133,6 +133,11 @@ set_tests_properties(kms_grants_test PROPERTIES LABELS "unit;kms;kms-module")
 kythira_kms_test(kms_rotation_test kms_rotation_test.cpp)
 set_tests_properties(kms_rotation_test PROPERTIES LABELS "unit;kms;kms-module")
 
+# Task 12: the peer protocol members forward to the leader with: the
+# reply's wire form, who is a member, and serve_peer's answers.
+kythira_kms_test(kms_peer_test kms_peer_test.cpp)
+set_tests_properties(kms_peer_test PROPERTIES LABELS "unit;kms;kms-module")
+
 # Task 5, Requirements 4.1-4.3: every key spec's backing key on a real
 # module, SoftHSM2 standing in for an external one; registered when the
 # build finds SoftHSM2 and softhsm2-util (kms-module.yml installs them;
@@ -154,5 +159,42 @@ endif()
 add_test(NAME kms_node_self_test COMMAND kms_node --self-test)
 set_tests_properties(kms_node_self_test PROPERTIES
     LABELS "unit;kms;kms-module" TIMEOUT 60)
+
+# Task 12: kms_node is kythira_node with the KMS module (and the HSM and
+# IAM modules where built). Three of them with mutual TLS, static
+# authentication and SoftHSM2 as the shared HSM: keys made through any
+# member are seen by all, ciphertexts cross members, only members reach
+# the peer paths, and two members carry on without the third.
+if(KYTHIRA_KMS_NODE_DAEMON)
+    add_test(NAME kms_node_help COMMAND kms_node --help)
+    set_tests_properties(kms_node_help PROPERTIES
+        PASS_REGULAR_EXPRESSION "KYTHIRA_SERVICES +kms, optionally with hsm and iam"
+        LABELS "unit;kms;kms-module" TIMEOUT 30)
+    add_test(NAME kms_node_refuses_other_services COMMAND kms_node)
+    set_tests_properties(kms_node_refuses_other_services PROPERTIES
+        ENVIRONMENT "KYTHIRA_SERVICES=kms,redis;KYTHIRA_NODE_ID=1;KYTHIRA_NODE_DATA_DIR=${CMAKE_CURRENT_BINARY_DIR}/refuses;KYTHIRA_NODE_INSECURE_PLAINTEXT=1"
+        PASS_REGULAR_EXPRESSION "kms_node runs kms, hsm and iam only"
+        LABELS "unit;kms;kms-module" TIMEOUT 30)
+    add_test(NAME kms_node_needs_kms COMMAND kms_node)
+    set_tests_properties(kms_node_needs_kms PROPERTIES
+        ENVIRONMENT "KYTHIRA_SERVICES=hsm;KYTHIRA_NODE_ID=1;KYTHIRA_NODE_DATA_DIR=${CMAKE_CURRENT_BINARY_DIR}/needs-kms;KYTHIRA_NODE_INSECURE_PLAINTEXT=1"
+        PASS_REGULAR_EXPRESSION "KYTHIRA_SERVICES must name kms"
+        LABELS "unit;kms;kms-module" TIMEOUT 30)
+
+    if(KYTHIRA_KMS_SOFTHSM2_LIBRARY AND KYTHIRA_KMS_SOFTHSM2_UTIL AND TARGET httplib::httplib)
+        kythira_kms_test(kms_node_cluster_test kms_node_cluster_test.cpp)
+        target_link_libraries(kms_node_cluster_test PRIVATE
+            httplib::httplib boost_json OpenSSL::SSL OpenSSL::Crypto kythira_test_support)
+        target_compile_definitions(kms_node_cluster_test PRIVATE
+            KMS_NODE_PATH="$<TARGET_FILE:kms_node>"
+            KYTHIRA_SOFTHSM2_LIBRARY="${KYTHIRA_KMS_SOFTHSM2_LIBRARY}"
+            KYTHIRA_SOFTHSM2_UTIL="${KYTHIRA_KMS_SOFTHSM2_UTIL}")
+        add_dependencies(kms_node_cluster_test kms_node)
+        set_tests_properties(kms_node_cluster_test PROPERTIES
+            LABELS "integration;kms;kms-module" TIMEOUT 600)
+    else()
+        message(STATUS "kms_node_cluster_test: needs SoftHSM2 and httplib, not registered")
+    endif()
+endif()
 
 kythira_scale_test_timeouts()
