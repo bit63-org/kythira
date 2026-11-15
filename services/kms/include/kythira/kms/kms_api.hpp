@@ -6,7 +6,8 @@
 // The KMS operations over the catalog and the HSM
 // (.kiro/specs/kms-compatible-api/ task 6, Requirements 3.1-3.6, 6.1-6.3
 // and 7.2): key management, aliases and tags. The cryptographic
-// operations join in tasks 7 and 8, key policies and grants in 9 and 10.
+// operations are in kms_crypto_api.hpp and kms_signing_api.hpp; key
+// policies (task 9, Requirements 7.1-7.5) are here; grants join in 10.
 //
 // Every handler resolves the key the request names (key id, key ARN, and
 // where AWS takes one an alias name or alias ARN), authorizes the
@@ -324,12 +325,13 @@ public:
     explicit key_management_api(api_deps<Catalog> deps) : _d(std::move(deps)) {}
 
     /// The operations this registers, for implemented-operations.txt.
-    static constexpr std::array<std::string_view, 15> k_operations{
+    static constexpr std::array<std::string_view, 18> k_operations{
         "CreateKey",           "DescribeKey",       "ListKeys",
         "EnableKey",           "DisableKey",        "UpdateKeyDescription",
         "ScheduleKeyDeletion", "CancelKeyDeletion", "CreateAlias",
         "UpdateAlias",         "DeleteAlias",       "ListAliases",
-        "TagResource",         "UntagResource",     "ListResourceTags"};
+        "TagResource",         "UntagResource",     "ListResourceTags",
+        "GetKeyPolicy",        "PutKeyPolicy",      "ListKeyPolicies"};
 
     template<typename FrontEnd> void register_on(FrontEnd& fe) {
         const auto bind = [this](auto method) {
@@ -352,6 +354,9 @@ public:
         fe.on("TagResource", bind(&key_management_api::tag_resource));
         fe.on("UntagResource", bind(&key_management_api::untag_resource));
         fe.on("ListResourceTags", bind(&key_management_api::list_resource_tags));
+        fe.on("GetKeyPolicy", bind(&key_management_api::get_key_policy));
+        fe.on("PutKeyPolicy", bind(&key_management_api::put_key_policy));
+        fe.on("ListKeyPolicies", bind(&key_management_api::list_key_policies));
     }
 
     // -- Keys ------------------------------------------------------------------
@@ -412,14 +417,24 @@ public:
         aws_auth::authz_request r;
         r.action = "kms:CreateKey";
         r.keys = spec_keys(k);
-        if (const auto* b = in.if_contains("BypassPolicyLockoutSafetyCheck");
-            b != nullptr && b->is_bool()) {
-            r.keys.emplace_back("kms:BypassPolicyLockoutSafetyCheck",
-                                std::vector<std::string>{b->get_bool() ? "true" : "false"});
-        }
+        add_bypass_key(r, in);
         add_request_tags(r, *tags);
         if (auto denied = ctx.authorize(r)) {
             return *denied;
+        }
+        // AWS checks a policy the caller supplies (never the default one,
+        // which delegates to the account) for lockout.
+        if (in.contains("Policy") && !bypass_of(in)) {
+            aws_auth::authz_request again;
+            again.action = "kms:PutKeyPolicy";
+            again.resource = ctx.key_arn(k.account, k.key_id);
+            again.resource_account = k.account;
+            again.resource_policy = k.policy;
+            again.resource_kind = aws_auth::resource_policy_kind::key;
+            again.keys = spec_keys(k);
+            if (auto locked = lockout_check(ctx, std::move(again))) {
+                return *locked;
+            }
         }
         if (!tags->empty()) {
             aws_auth::authz_request t;
@@ -792,7 +807,131 @@ public:
         return res;
     }
 
+    // -- Key policies ----------------------------------------------------------
+
+    auto get_key_policy(call_context& ctx, boost::json::object& in) -> result {
+        auto c = catalog();
+        if (!c) {
+            return c.error();
+        }
+        auto k = resolve(ctx, **c, in, "KeyId", false);
+        if (!k) {
+            return k.error();
+        }
+        if (auto denied = authorize_key(ctx, **c, *k, "GetKeyPolicy")) {
+            return *denied;
+        }
+        if (auto bad = check_policy_name(in)) {
+            return *bad;
+        }
+        return boost::json::object{{"Policy", k->record.policy}, {"PolicyName", k_policy_name}};
+    }
+
+    auto put_key_policy(call_context& ctx, boost::json::object& in) -> result {
+        auto c = catalog();
+        if (!c) {
+            return c.error();
+        }
+        auto k = resolve(ctx, **c, in, "KeyId", false);
+        if (!k) {
+            return k.error();
+        }
+        auto r = key_request(ctx, **c, *k, "PutKeyPolicy");
+        add_bypass_key(r, in);
+        if (auto denied = ctx.authorize(r)) {
+            return *denied;
+        }
+        if (auto bad = check_policy_name(in)) {
+            return *bad;
+        }
+        const auto policy = str(in, "Policy");
+        if (!policy) {
+            return validation_error("Policy is required");
+        }
+        if (auto bad = check_policy(*policy)) {
+            return *bad;
+        }
+        if (!bypass_of(in)) {
+            r.resource_policy = std::string(*policy);
+            if (auto locked = lockout_check(ctx, std::move(r))) {
+                return *locked;
+            }
+        }
+        if (k->record.state == key_state::creating) {
+            return invalid_state(key_label(ctx, k->record) + " is still being created");
+        }
+        if (k->record.manager == key_manager::aws) {
+            return unsupported("The key policy of an AWS managed key cannot be changed");
+        }
+        auto out =
+            write(make_put_policy_command(k->record.key_id, *policy), key_label(ctx, k->record));
+        if (!out) {
+            return out;
+        }
+        return boost::json::object{};
+    }
+
+    auto list_key_policies(call_context& ctx, boost::json::object& in) -> result {
+        auto c = catalog();
+        if (!c) {
+            return c.error();
+        }
+        auto k = resolve(ctx, **c, in, "KeyId", false);
+        if (!k) {
+            return k.error();
+        }
+        if (auto denied = authorize_key(ctx, **c, *k, "ListKeyPolicies")) {
+            return *denied;
+        }
+        // One policy, so a marker past it ends the list.
+        boost::json::array names;
+        if (str(in, "Marker").value_or("").empty()) {
+            names.emplace_back(k_policy_name);
+        }
+        return boost::json::object{{"PolicyNames", std::move(names)}, {"Truncated", false}};
+    }
+
 private:
+    /// A key's only policy, as on AWS.
+    static constexpr std::string_view k_policy_name = "default";
+
+    [[nodiscard]] static auto bypass_of(const boost::json::object& in) -> bool {
+        const auto* b = in.if_contains("BypassPolicyLockoutSafetyCheck");
+        return b != nullptr && b->is_bool() && b->get_bool();
+    }
+
+    static auto add_bypass_key(aws_auth::authz_request& r, const boost::json::object& in) -> void {
+        if (const auto* b = in.if_contains("BypassPolicyLockoutSafetyCheck");
+            b != nullptr && b->is_bool()) {
+            r.keys.emplace_back("kms:BypassPolicyLockoutSafetyCheck",
+                                std::vector<std::string>{b->get_bool() ? "true" : "false"});
+        }
+    }
+
+    /// AWS's lockout safety check (Requirement 7.5): with the new policy in
+    /// place, the caller must still be allowed to change it again, or the
+    /// policy is refused as malformed. `again` is the PutKeyPolicy request
+    /// carrying the new policy. The caller was already authorized, so a
+    /// refusal here only replaces the answer, never the authorization.
+    [[nodiscard]] static auto lockout_check(call_context& ctx, aws_auth::authz_request again)
+        -> std::optional<aws_json::error> {
+        if (ctx.authorize(std::move(again))) {
+            return kms_error("MalformedPolicyDocumentException",
+                             "The new key policy will not allow you to update the key policy "
+                             "in the future.");
+        }
+        return std::nullopt;
+    }
+
+    [[nodiscard]] static auto check_policy_name(const boost::json::object& in)
+        -> std::optional<aws_json::error> {
+        const auto name = str(in, "PolicyName").value_or(k_policy_name);
+        if (name != k_policy_name) {
+            return not_found("No such policy exists: " + std::string(name));
+        }
+        return std::nullopt;
+    }
+
     [[nodiscard]] static auto find_spec_named(std::string_view name) -> const key_spec_info* {
         for (const auto& i : k_key_specs) {
             if (i.name == name) {
