@@ -176,6 +176,8 @@ struct fixture {
                 return std::string(buf);
             },
         .rotate = [this](std::string_view id, kms::rotation_type t) { return jobs.rotate(id, t); },
+        .ensure_managed = [this](std::string_view account,
+                                 const kms::managed_service& s) { return ensure(account, s); },
     }};
 
     kms::grants_api<catalog_t> grants{kms::api_deps<catalog_t>{
@@ -187,6 +189,7 @@ struct fixture {
         .clock_ms = [this] { return now; },
         .new_key_id = kms::random_key_id,
         .rotate = {},
+        .ensure_managed = {},
     }};
 
     kms::crypto_api<catalog_t> crypto{kms::crypto_deps<catalog_t>{
@@ -194,6 +197,8 @@ struct fixture {
             [this] { return std::shared_ptr<const catalog_t>(&sm, [](const catalog_t*) {}); },
         .barrier = [this] { return !leaderless; },
         .hsm = [this] { return hsm_bound ? hsm : nullptr; },
+        .ensure_managed = [this](std::string_view account,
+                                 const kms::managed_service& s) { return ensure(account, s); },
     }};
 
     kms::signing_api<catalog_t> signing{kms::crypto_deps<catalog_t>{
@@ -201,6 +206,7 @@ struct fixture {
             [this] { return std::shared_ptr<const catalog_t>(&sm, [](const catalog_t*) {}); },
         .barrier = [this] { return !leaderless; },
         .hsm = [this] { return hsm_bound ? hsm : nullptr; },
+        .ensure_managed = {},
     }};
 
     fixture() {
@@ -217,6 +223,26 @@ struct fixture {
         kms::front_end_config c;
         c.trusted_services = {std::string(k_service_arn)};
         return c;
+    }
+
+    /// Makes an AWS managed key as the module does (kms_managed.hpp).
+    auto ensure(std::string_view account, const kms::managed_service& s) -> kms::key_result {
+        const kms::managed_deps<catalog_t> d{
+            .catalog =
+                [this] {
+                    return leaderless
+                               ? nullptr
+                               : std::shared_ptr<const catalog_t>(&sm, [](const catalog_t*) {});
+                },
+            .propose = [this](const std::vector<std::byte>& c) { return propose(c); },
+            .create_key = [this](
+                              kms::key_record k,
+                              const kms::tag_map& t) { return jobs.create_key(std::move(k), t); },
+            .clock_ms = [this] { return now; },
+            .partition = "aws",
+            .region = "us-east-1",
+        };
+        return kms::ensure_managed_key(d, account, s);
     }
 
     auto propose(const std::vector<std::byte>& c) -> kms::catalog_status {

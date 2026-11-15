@@ -74,6 +74,8 @@ inline constexpr std::size_t k_max_tags_per_key = 50;
 inline constexpr std::size_t k_max_policy_bytes = 32768;
 inline constexpr std::size_t k_max_description_bytes = 8192;
 inline constexpr std::uint64_t k_ms_per_day = 86400000;
+/// How often AWS managed keys rotate.
+inline constexpr std::uint32_t k_managed_rotation_days = 365;
 
 enum class key_spec : std::uint8_t {
     symmetric_default = 1,
@@ -1044,6 +1046,13 @@ private:
         }
         k->state = key_state::enabled;
         k->current_version = 1;
+        if (k->manager == key_manager::aws) {
+            // AWS managed keys rotate every year, set here so no command
+            // a customer could send turns it on or off (Requirement 10.2).
+            k->rotation_enabled = true;
+            k->rotation_period_days = k_managed_rotation_days;
+            k->next_rotation_ms = now + std::uint64_t{k_managed_rotation_days} * k_ms_per_day;
+        }
         put_key(batch, *k);
         put(batch, key_child_prefix('v', id) + detail::be32_key(1),
             key_version{1, object, now, rotation_type::initial}.encode());
@@ -1063,6 +1072,9 @@ private:
         if (k->state != key_state::enabled && k->state != key_state::disabled) {
             return catalog_status::invalid_state;
         }
+        if (k->manager == key_manager::aws) {
+            return catalog_status::rejected;  // AWS managed keys stay enabled
+        }
         k->state = enabled ? key_state::enabled : key_state::disabled;
         put_key(batch, *k);
         return catalog_status::ok;
@@ -1078,6 +1090,9 @@ private:
         }
         if (k->state == key_state::creating || k->state == key_state::pending_deletion) {
             return catalog_status::invalid_state;
+        }
+        if (k->manager == key_manager::aws) {
+            return catalog_status::rejected;  // AWS's description, not the customer's
         }
         k->description = std::move(description);
         put_key(batch, *k);

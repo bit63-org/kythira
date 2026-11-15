@@ -416,6 +416,24 @@ BOOST_FIXTURE_TEST_CASE(keys_made_through_any_member_are_seen_by_all, process_cl
     BOOST_TEST(d.str("Plaintext") == "c2VjcmV0");
 }
 
+// Task 13: an AWS managed key made on first use through any member is one
+// key, seen by all.
+BOOST_FIXTURE_TEST_CASE(a_managed_key_is_made_once_through_any_member, process_cluster) {
+    const auto first = call(1, "DescribeKey", R"({"KeyId":"alias/aws/kinesis"})");
+    BOOST_REQUIRE_MESSAGE(first.status == 200, first.status << " " << first.str("__type"));
+    const auto& md = first.body.at("KeyMetadata").as_object();
+    BOOST_TEST(md.at("KeyManager").as_string() == "AWS");
+    const auto id = std::string(md.at("KeyId").as_string());
+    for (std::size_t on = 0; on < 3; ++on) {
+        const auto d = call(on, "DescribeKey", R"({"KeyId":"alias/aws/kinesis"})");
+        BOOST_REQUIRE_MESSAGE(d.status == 200, d.status << " " << d.str("__type"));
+        BOOST_TEST(d.body.at("KeyMetadata").as_object().at("KeyId").as_string() == id);
+    }
+    const auto keys = call(2, "ListKeys", "{}");
+    BOOST_REQUIRE(keys.status == 200);
+    BOOST_TEST(keys.body.at("Keys").as_array().size() == 1U);
+}
+
 BOOST_FIXTURE_TEST_CASE(only_members_reach_the_peer_paths, process_cluster) {
     for (std::size_t i = 0; i < 3; ++i) {
         BOOST_TEST(peer(i, nullptr) == 403, "member " << i + 1 << ", no certificate");

@@ -27,6 +27,7 @@
 #include <kythira/kms/kms_front_end.hpp>
 #include <kythira/kms/kms_grants.hpp>
 #include <kythira/kms/kms_keys.hpp>
+#include <kythira/kms/kms_managed.hpp>
 
 #include <raft/aws_json_protocol.hpp>
 #include <raft/aws_request_authorizer.hpp>
@@ -172,6 +173,9 @@ template<typename Catalog> struct api_deps {
     std::function<std::string()> new_key_id = random_key_id;
     /// A rotation's two steps (key_jobs::rotate), for RotateKeyOnDemand.
     std::function<key_result(std::string_view, rotation_type)> rotate;
+    /// Makes an AWS managed key on first use (ensure_managed_key); empty:
+    /// none is made.
+    std::function<key_result(std::string_view, const managed_service&)> ensure_managed;
 };
 
 /// What every KMS operation shares: reading the request, resolving the key
@@ -222,6 +226,46 @@ protected:
                 {"kms:KeyUsage", {std::string(usage_name(k.usage))}},
                 {"kms:KeyOrigin", {"AWS_KMS"}},
                 {"kms:MultiRegion", {"false"}}};
+    }
+
+    using managed_fn = std::function<key_result(std::string_view, const managed_service&)>;
+
+    /// When `member` names an AWS managed key's alias in the caller's own
+    /// account that does not exist yet, makes it (Requirement 10.1).
+    /// @returns whether a key was made, so the caller reads the catalog
+    ///          again; the failure's exception when making it failed.
+    template<typename Catalog>
+    [[nodiscard]] static auto make_managed_if_named(const call_context& ctx, const Catalog& c,
+                                                    const boost::json::object& in,
+                                                    std::string_view member,
+                                                    const managed_fn& ensure)
+        -> aws_json::result<bool> {
+        if (!ensure) {
+            return false;
+        }
+        std::string_view name = str(in, member).value_or("");
+        if (name.starts_with("arn:")) {
+            const auto parts = parse_kms_arn(name);
+            if (!parts || parts->partition != ctx.partition || parts->region != ctx.region ||
+                parts->account != ctx.principal.account) {
+                return false;  // another account's managed keys are its own
+            }
+            name = parts->resource;
+        }
+        const auto service = managed_service_of(name);
+        if (!service || c.alias(ctx.principal.account, name)) {
+            return false;
+        }
+        key_result made;
+        try {
+            made = ensure(ctx.principal.account, *service);
+        } catch (const std::exception&) {
+            return dependency_timeout();
+        }
+        if (!made.ok()) {
+            return outcome_error(made, "the AWS managed key " + std::string(name));
+        }
+        return true;
     }
 
     /// The key `member` names: a key id or key ARN, and with `alias_ok`
@@ -518,7 +562,7 @@ public:
     }
 
     auto describe_key(call_context& ctx, boost::json::object& in) -> result {
-        auto c = catalog();
+        auto c = catalog_for(ctx, in, "KeyId");
         if (!c) {
             return c.error();
         }
@@ -1002,6 +1046,9 @@ public:
         if (auto bad = rotatable(ctx, key)) {
             return *bad;
         }
+        if (key.manager == key_manager::aws) {
+            return unsupported("AWS rotates its managed keys itself");
+        }
         if (auto bad = usable_state(ctx, key)) {
             return *bad;
         }
@@ -1269,6 +1316,22 @@ private:
         return c;
     }
 
+    /// catalog(), after making the AWS managed key `member` names if it
+    /// does not exist yet.
+    [[nodiscard]] auto catalog_for(const call_context& ctx, const boost::json::object& in,
+                                   std::string_view member) const
+        -> aws_json::result<std::shared_ptr<const Catalog>> {
+        auto c = catalog();
+        if (!c) {
+            return c;
+        }
+        const auto made = make_managed_if_named(ctx, **c, in, member, _d.ensure_managed);
+        if (!made) {
+            return made.error();
+        }
+        return *made ? catalog() : c;
+    }
+
     /// Proposes `cmd` and answers `{}` on success.
     [[nodiscard]] auto write(const std::vector<std::byte>& cmd, const std::string& what) const
         -> result {
@@ -1304,15 +1367,16 @@ private:
         if (k->record.state == key_state::creating) {
             return invalid_state(key_label(ctx, k->record) + " is still being created");
         }
+        // Every simple write changes the key, which no customer may do to
+        // an AWS managed key (Requirement 10.2). With IAM its policy
+        // already refuses; with static keys this is what does.
+        if (k->record.manager == key_manager::aws) {
+            return unsupported("This operation is not allowed on an AWS managed key");
+        }
         if (acted != nullptr) {
             *acted = k->record;
         }
-        auto out = write(make(k->record), key_label(ctx, k->record));
-        if (!out && out.error().type == "ValidationException" &&
-            k->record.manager == key_manager::aws) {
-            return unsupported("This operation is not allowed on an AWS managed key");
-        }
-        return out;
+        return write(make(k->record), key_label(ctx, k->record));
     }
 
     [[nodiscard]] auto metadata(const call_context& ctx, const key_record& k) const
