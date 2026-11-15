@@ -5,13 +5,21 @@ interface and `kythira_node`) for task 6 on, and on the persistent state
 machine for the Raft groups. Tasks 1-5 need neither and can start now. Each
 task is one PR unless noted.
 
-- [ ] 1. Module skeleton and vendored headers
+- [x] 1. Module skeleton and vendored headers
   - `KYTHIRA_HSM` Kconfig option (default off), `services/hsm/` layout per
     `services/README.md`, boundary check coverage
   - OASIS PKCS#11 v3.0 headers vendored unchanged under
     `services/hsm/third_party/pkcs11/`, with their licence
   - Off-by-default build proved unchanged
   - _Requirements: 1.1-1.4_
+  - Done: the Kconfig symbol is `HSM` (`CONFIG_HSM`, CMake
+    `KYTHIRA_BUILD_HSM`), like every other module's. The headers come from
+    the OASIS TC's repository (`published/3-00/`), checksums in
+    `third_party/pkcs11/README.md`; `<kythira/hsm/pkcs11.hpp>` is the only
+    includer. `ci_full_defconfig` and its copies turn the module on;
+    `ci_no_hsm_defconfig` and `hsm-module.yml` prove the module-off build
+    has no HSM target or test. `docker/` and `pkcs11/`'s target arrive with
+    the tasks that fill them (11 and 10).
 
 - [ ] 2. Shamir secret sharing and share encoding
   - GF(2^8) split and combine, share format with checksum and MK check
