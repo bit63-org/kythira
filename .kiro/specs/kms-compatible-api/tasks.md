@@ -23,7 +23,7 @@ is one PR unless noted.
     `kms-module.yml` builds the module on and configures it off
     (`configs/ci_no_kms_defconfig`).
 
-- [ ] 2. `kms` action table and IAM condition keys
+- [x] 2. `kms` action table and IAM condition keys
   - `kms_actions.hpp` with every action, the `key` and `alias` resource
     ARN formats and the condition keys of 7.4, generated from AWS's
     service authorization reference and pinned
@@ -31,6 +31,12 @@ is one PR unless noted.
     policy without delegation, cross-account, `kms:ViaService`,
     `kms:EncryptionContext:*`, `kms:CallerAccount`
   - _Requirements: 7.3, 7.4, 7.6_
+  - Done: `tools/gen_kms_actions.py` over the pinned reference (v1.5)
+    makes `kms_actions.hpp`: 58 actions, the operation map (ReEncrypt
+    checks ReEncryptFrom and ReEncryptTo) and the static roles of 7.7.
+    30 cases in `services/iam/tests/corpus/evaluate/kms_key_policies.json`.
+    Grant cases are the KMS's own (task 9): IAM's evaluator never sees a
+    grant, because the KMS checks grants before asking IAM.
 
 - [ ] 3. Ciphertext format
   - `kms_ciphertext.hpp`: blob encoding, AAD canonicalization of the key

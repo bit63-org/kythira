@@ -51,6 +51,18 @@ kythira_kms_test(kms_model_test kms_model_test.cpp)
 set_tests_properties(kms_model_test PROPERTIES
     LABELS "unit;kms;kms-module" TIMEOUT 60)
 
+# Task 2, Requirement 7.4 and 7.7: the `kms` action table, the operation
+# map and the static-key roles, and that the header is what
+# tools/gen_kms_actions.py makes of the pinned service reference.
+kythira_kms_test(kms_actions_test kms_actions_test.cpp)
+add_test(NAME kms_actions_header_fresh
+    COMMAND "${Python3_EXECUTABLE}" tools/gen_kms_actions.py
+            tools/kms-service-reference.json
+            include/kythira/kms/kms_actions.hpp --check
+    WORKING_DIRECTORY "${KYTHIRA_KMS_SOURCE_DIR}")
+set_tests_properties(kms_actions_test kms_actions_header_fresh PROPERTIES
+    LABELS "unit;kms;kms-module" TIMEOUT 60)
+
 # Task 1: kms_node links and checks its model.
 add_test(NAME kms_node_self_test COMMAND kms_node --self-test)
 set_tests_properties(kms_node_self_test PROPERTIES
