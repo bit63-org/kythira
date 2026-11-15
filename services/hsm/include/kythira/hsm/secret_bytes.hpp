@@ -3,11 +3,12 @@
 
 #pragma once
 
-// A heap buffer for secret bytes (a master key, a share, a key being
-// unwrapped) that is wiped with OPENSSL_cleanse when it is destroyed,
-// resized or moved from, and that cannot be copied by accident. It is the
-// interim holder until the secure arena (task 3) gives key material locked,
-// non-dumpable pages; the interface stays when the storage moves there.
+// A buffer for secret bytes (a master key, a share, a key being unwrapped)
+// that lives in the secure arena (locked, non-dumpable pages; see
+// secure_arena.hpp), is wiped when it is destroyed, resized or moved from,
+// and cannot be copied by accident.
+
+#include <kythira/hsm/secure_arena.hpp>
 
 #include <openssl/crypto.h>
 
@@ -64,7 +65,7 @@ public:
     }
 
 private:
-    std::vector<std::uint8_t> _bytes;
+    std::vector<std::uint8_t, secure_allocator<std::uint8_t>> _bytes;
 };
 
 /// Constant-time equality of two byte strings of the same length; strings of
