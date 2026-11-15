@@ -1,0 +1,21 @@
+# Copyright (c) 2026 Clark Rawlins
+# SPDX-License-Identifier: Apache-2.0
+
+# The virtual HSM (services/hsm/, .kiro/specs/virtual-hsm/). Sourced from the
+# top-level Kconfig's "Service Modules" menu.
+
+config HSM
+	bool "Virtual HSM (PKCS#11 software HSM on Raft)"
+	default n
+	depends on OPENSSL
+	help
+	  Builds the services/hsm/ module: a software HSM that keeps its
+	  keys in Kythira Raft groups, sealed under a master key split with
+	  Shamir's scheme, and serves them through PKCS#11
+	  (libkythira_pkcs11.so) so that consumers can later move to a
+	  hardware HSM by configuration alone. Keys are in host memory while
+	  in use; it is not a hardware boundary. So far the module holds the
+	  vendored OASIS PKCS#11 v3.0 headers and the hsm_node placeholder
+	  (task 1); the key store, unseal and the PKCS#11 library follow.
+	  Needs OpenSSL 3 for every mechanism. Off by default like every new
+	  module (services/README.md). See .kiro/specs/virtual-hsm/.

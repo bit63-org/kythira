@@ -886,6 +886,21 @@ else()
 endif()
 kythira_kconfig_require(DYNAMODB KYTHIRA_BUILD_DYNAMODB "OpenSSL")
 
+# virtual-hsm spec: the services/hsm/ module (a PKCS#11 software HSM on Raft).
+# Off unless CONFIG_HSM=y, like every new module; needs OpenSSL 3, whose EVP
+# interface every mechanism uses. Entered with add_subdirectory(services/hsm)
+# below, after tests/.
+kythira_kconfig_gate(HSM)
+set(KYTHIRA_BUILD_HSM FALSE)
+if(_KYTHIRA_GATE_HSM AND DEFINED KCONFIG_HSM AND OpenSSL_FOUND
+   AND OPENSSL_VERSION VERSION_GREATER_EQUAL 3.0)
+    set(KYTHIRA_BUILD_HSM TRUE)
+    message(STATUS "HSM module enabled (services/hsm/, .kiro/specs/virtual-hsm/)")
+else()
+    message(STATUS "HSM module disabled (CONFIG_HSM=n, or OpenSSL 3 not found)")
+endif()
+kythira_kconfig_require(HSM KYTHIRA_BUILD_HSM "OpenSSL 3")
+
 # Core's generator of AWS JSON service models (include/raft/aws_json_protocol.hpp),
 # exported for the modules that pin a botocore model (DynamoDB, Kinesis), so
 # they reach it by variable rather than by core's source path.
@@ -2271,6 +2286,12 @@ endif()
 # .kiro/specs/dynamodb-compatible-api/), entered likewise.
 if(KYTHIRA_BUILD_DYNAMODB)
     add_subdirectory(services/dynamodb)
+endif()
+
+# The virtual HSM module (services/README.md, .kiro/specs/virtual-hsm/),
+# entered likewise.
+if(KYTHIRA_BUILD_HSM)
+    add_subdirectory(services/hsm)
 endif()
 
 # kythira_node, the composite daemon (.kiro/specs/service-colocation/),

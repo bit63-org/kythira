@@ -116,3 +116,8 @@ CONFIG_KINESIS=y
 # coverage and clang-tidy cover it. Needs only OpenSSL and Boost, which every
 # leg has. configs/ci_no_dynamodb_defconfig is this file without it.
 CONFIG_DYNAMODB=y
+# The virtual HSM module (services/hsm/, .kiro/specs/virtual-hsm/). Off by
+# default like every new module; on here so the build-and-test legs, coverage
+# and clang-tidy cover it. Needs only OpenSSL 3, which every leg has.
+# configs/ci_no_hsm_defconfig is this file without it.
+CONFIG_HSM=y
