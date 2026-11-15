@@ -322,11 +322,27 @@ public:
     }
 
     /// A read-write session on member `m`, logged in as the token's user.
+    /// A login takes a read-index round, which answers CKR_DEVICE_ERROR
+    /// while the member has not yet heard a leader of the current term
+    /// (just after an election, or a healed former leader), so it is
+    /// retried until one answers.
     static auto user_session(member& m) -> CK_SESSION_HANDLE {
-        auto s = m.client->open_session(k_token, CKF_SERIAL_SESSION | CKF_RW_SESSION);
-        BOOST_REQUIRE(s.has_value());
-        BOOST_REQUIRE(rv(m.client->login(*s, CKU_USER, k_user_pin)) == CKR_OK);
-        return *s;
+        CK_SESSION_HANDLE out = 0;
+        BOOST_REQUIRE(await([&] {
+            auto s = m.client->open_session(k_token, CKF_SERIAL_SESSION | CKF_RW_SESSION);
+            if (!s.has_value()) {
+                return false;
+            }
+            const auto r = rv(m.client->login(*s, CKU_USER, k_user_pin));
+            if (r == CKR_OK) {
+                out = *s;
+                return true;
+            }
+            BOOST_REQUIRE(r == CKR_DEVICE_ERROR);
+            (void)m.client->close_session(*s);
+            return false;
+        }));
+        return out;
     }
 
     static auto ec_pair(member& m, CK_SESSION_HANDLE s)
