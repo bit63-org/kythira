@@ -92,6 +92,7 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -148,6 +149,12 @@ struct kinesis_service_config {
     /// `StartStreamEncryption` is refused, and an encrypted stream's
     /// records cannot be written or read on this node.
     key_provider _kms{};
+    /// With a provider that authorizes each caller (`KINESIS_KMS=kythira`):
+    /// how long one caller's KMS answer for a stream stands before the
+    /// caller is asked about again. AWS reuses a producer's or consumer's
+    /// data key for five minutes; a key disabled, or a policy changed, in
+    /// the KMS takes effect within this bound.
+    std::chrono::milliseconds _kms_caller_ttl{300'000};
     /// SubscribeToShard (task 13): AWS's five minutes per subscription,
     /// 2 MiB/s per consumer and shard, and an event at least every five
     /// seconds; how often an idle subscription looks for new records and
@@ -945,7 +952,7 @@ public:
         }
         generated_data_key fresh;
         try {
-            fresh = _config._kms.generate_data_key(key, encryption_context_of(rec));
+            fresh = _config._kms.generate_data_key(key, encryption_context_of(rec), caller_of(ctx));
         } catch (const kms_error& e) {
             return kms_error_answer(e);
         }
@@ -960,6 +967,12 @@ public:
             const std::scoped_lock lock(_data_key_mutex);
             _data_key_cache.insert_or_assign(
                 {rec._id, static_cast<std::uint32_t>(r->_first_counter)}, fresh._plaintext);
+            // The caller just made the key: that answers for its writes.
+            if (_config._kms.per_caller()) {
+                _kms_proofs.insert_or_assign(
+                    {ctx._principal.arn, rec._id, 0},
+                    _config._monotonic() + _config._kms_caller_ttl.count());
+            }
         }
         OPENSSL_cleanse(fresh._plaintext.data(), fresh._plaintext.size());
         return encryption_answer(rec, r);
@@ -1502,7 +1515,7 @@ public:
             }
             sub = std::make_shared<subscription>(*this, key, ctx._encoding, found->_stream,
                                                  found->_consumer, entry->_ordinal, start->first,
-                                                 start->second);
+                                                 start->second, ctx._principal);
             _subscriptions.insert_or_assign(key, subscription_slot{sub, rec._account, rec._name});
         }
         ctx._events = sub;
@@ -2145,7 +2158,7 @@ public:
         }
         std::vector<service_detail::pending_record> batch;
         batch.push_back(std::move(*rec));
-        auto results = append(*s, std::move(batch));
+        auto results = append(*s, std::move(batch), caller_of(ctx));
         if (!results) {
             return results.error();
         }
@@ -2193,7 +2206,7 @@ public:
         if (profile_of(*s)._aws_limits && total > _config._limits._max_put_records_bytes) {
             return invalid_argument("Records size exceeds 5 MB limit");
         }
-        auto results = append(*s, std::move(batch));
+        auto results = append(*s, std::move(batch), caller_of(ctx));
         if (!results) {
             return results.error();
         }
@@ -2355,7 +2368,8 @@ public:
             ._max_bytes = profile._aws_limits ? _config._limits._max_get_records_bytes
                                               : _config._limits._relaxed_get_records_bytes};
 
-        auto page = read_page(rec, *entry, it._counter, it._min_timestamp_ms, limits, now);
+        auto page =
+            read_page(rec, *entry, it._counter, it._min_timestamp_ms, limits, now, caller_of(ctx));
         if (!page) {
             return page.error();
         }
@@ -2463,9 +2477,11 @@ public:
     /// `min_timestamp_ms`; nullopt when this replica cannot read the shard
     /// now (behind, a segment in flight, a key it cannot open). The worker
     /// retries on its next pass.
+    /// `who` is the principal the KMS is asked for an encrypted stream's
+    /// data keys as: the channel's service execution role.
     auto read_for_delivery(const stream_record& rec, const shard_entry& entry,
                            std::uint64_t counter, std::int64_t min_timestamp_ms,
-                           std::size_t max_records, std::size_t max_bytes)
+                           std::size_t max_records, std::size_t max_bytes, const kms_caller& who)
         -> std::optional<delivery_page> {
         const auto profile = profile_of(rec);
         const auto key = routing_key(rec._id, entry._ordinal);
@@ -2483,7 +2499,7 @@ public:
                                      if (!g) {
                                          throw record_open_error("kinesis: truncated record");
                                      }
-                                     return open_record(data_key_of(rec, *g), key, bytes);
+                                     return open_record(data_key_of(rec, *g, who), key, bytes);
                                  });
             } catch (const std::exception&) {
                 return std::nullopt;
@@ -2556,6 +2572,9 @@ private:
     /// Unwrapped data keys by (stream id, generation). A stream id is never
     /// reused, so an entry never names another stream's key.
     std::map<std::pair<std::uint64_t, std::uint32_t>, data_key_bytes> _data_key_cache;
+    /// Per-caller KMS answers (`_kms_caller_ttl`): (principal ARN, stream
+    /// id, generation or 0 for writes) to when the answer lapses.
+    std::map<std::tuple<std::string, std::uint64_t, std::uint32_t>, std::int64_t> _kms_proofs;
 
     /// What a stream's data keys are bound to: its account, name and id.
     [[nodiscard]] static auto encryption_context_of(const stream_record& rec)
@@ -2607,41 +2626,159 @@ private:
         return boost::json::object{};
     }
 
-    /// The plaintext data key of `rec`'s generation `generation`, from the
-    /// cache or unwrapped by the provider. A generation newer than `rec`
-    /// (started since it was read) is looked up in a fresh catalog read.
-    /// Throws `kms_error` from the provider, `record_open_error` when no
-    /// such generation exists.
-    auto data_key_of(const stream_record& rec, std::uint32_t generation) -> data_key_bytes {
-        {
-            const std::scoped_lock lock(_data_key_mutex);
-            if (const auto it = _data_key_cache.find({rec._id, generation});
-                it != _data_key_cache.end()) {
-                return it->second;
-            }
+    /// The caller a key provider call is made for.
+    [[nodiscard]] static auto caller_of(const call_context& ctx) -> kms_caller {
+        return kms_caller{._principal = &ctx._principal};
+    }
+
+    /// Whether `who`'s KMS answer for `stream` (`generation`, 0 for its
+    /// writes) still stands. Under `_data_key_mutex`.
+    [[nodiscard]] auto proven(const kms_caller& who, std::uint64_t stream, std::uint32_t generation,
+                              std::int64_t now) const -> bool {
+        if (who._principal == nullptr) {
+            return false;
+        }
+        const auto it = _kms_proofs.find({who._principal->arn, stream, generation});
+        return it != _kms_proofs.end() && it->second > now;
+    }
+
+    void prove(const kms_caller& who, std::uint64_t stream, std::uint32_t generation,
+               std::int64_t now) {
+        if (who._principal == nullptr) {
+            return;
+        }
+        // Expired answers go as new ones come, so the map holds only the
+        // callers seen within the bound.
+        std::erase_if(_kms_proofs, [now](const auto& kv) { return kv.second <= now; });
+        _kms_proofs.insert_or_assign({who._principal->arn, stream, generation},
+                                     now + _config._kms_caller_ttl.count());
+    }
+
+    /// The wrapped data key of `rec`'s generation `generation`, from `rec`
+    /// or, for a generation newer than `rec` (started since it was read),
+    /// a fresh catalog read. Throws `record_open_error` when there is none.
+    auto wrapped_key_of(const stream_record& rec, std::uint32_t generation) -> data_key_record {
+        if (const auto* k = rec.find_data_key(generation)) {
+            return *k;
         }
         std::optional<data_key_record> wrapped;
-        if (const auto* k = rec.find_data_key(generation)) {
-            wrapped = *k;
-        } else {
-            (void)read_catalog([&](const auto& sm) {
-                if (const auto* s = sm.find_stream(rec._account, rec._name);
-                    s != nullptr && s->_id == rec._id) {
-                    if (const auto* k = s->find_data_key(generation)) {
-                        wrapped = *k;
-                    }
+        (void)read_catalog([&](const auto& sm) {
+            if (const auto* s = sm.find_stream(rec._account, rec._name);
+                s != nullptr && s->_id == rec._id) {
+                if (const auto* k = s->find_data_key(generation)) {
+                    wrapped = *k;
                 }
-            });
-        }
+            }
+        });
         if (!wrapped) {
             throw record_open_error("kinesis: a sealed record names an unknown data key");
         }
+        return std::move(*wrapped);
+    }
+
+    /// The plaintext data key of `rec`'s generation `generation` for a
+    /// read by `who`, from the cache or unwrapped by the provider. With a
+    /// provider that authorizes each caller, `who` must have had its own
+    /// `Decrypt` of that generation answered within `_kms_caller_ttl`: a
+    /// key another caller unwrapped proves nothing about this one. Throws
+    /// `kms_error` from the provider, `record_open_error` when no such
+    /// generation exists.
+    auto data_key_of(const stream_record& rec, std::uint32_t generation, const kms_caller& who)
+        -> data_key_bytes {
+        const bool per_caller = _config._kms.per_caller();
+        const auto now = per_caller ? _config._monotonic() : 0;
+        {
+            const std::scoped_lock lock(_data_key_mutex);
+            if (const auto it = _data_key_cache.find({rec._id, generation});
+                it != _data_key_cache.end() &&
+                (!per_caller || proven(who, rec._id, generation, now))) {
+                return it->second;
+            }
+        }
+        const auto wrapped = wrapped_key_of(rec, generation);
         // The provider may be a network call: not under the cache's lock.
-        const auto key = _config._kms.decrypt_data_key(wrapped->_key_id, wrapped->_wrapped,
-                                                       encryption_context_of(rec));
+        const auto key = _config._kms.decrypt_data_key(wrapped._key_id, wrapped._wrapped,
+                                                       encryption_context_of(rec), who);
         const std::scoped_lock lock(_data_key_mutex);
         _data_key_cache.insert_or_assign({rec._id, generation}, key);
+        if (per_caller) {
+            prove(who, rec._id, generation, now);
+        }
         return key;
+    }
+
+    /// The generation and data key `who`'s records are sealed under, or
+    /// nothing for a stream that is not encrypted.
+    ///
+    /// With a provider that authorizes each caller, a producer must have
+    /// had its own `GenerateDataKey` on the stream's key answered within
+    /// `_kms_caller_ttl` (AWS asks producers for kms:GenerateDataKey, not
+    /// kms:Decrypt). The records are then sealed under the newest
+    /// generation of the stream's key this node holds unwrapped; a node
+    /// that holds none adds the producer's own data key as a generation,
+    /// so it never needs a Decrypt the producer may not be allowed. Each
+    /// node adds at most one generation per key while it runs.
+    auto write_key(const stream_record& rec, const kms_caller& who)
+        -> std::optional<std::pair<std::uint32_t, data_key_bytes>> {
+        const auto* dk = rec.current_data_key();
+        if (dk == nullptr) {
+            return std::nullopt;
+        }
+        if (!_config._kms.per_caller()) {
+            return std::pair{dk->_generation, data_key_of(rec, dk->_generation, who)};
+        }
+        const auto now = _config._monotonic();
+        const auto held = [&]() -> std::optional<std::pair<std::uint32_t, data_key_bytes>> {
+            for (auto it = rec._data_keys.rbegin(); it != rec._data_keys.rend(); ++it) {
+                if (it->_key_id != dk->_key_id) {
+                    continue;
+                }
+                if (const auto c = _data_key_cache.find({rec._id, it->_generation});
+                    c != _data_key_cache.end()) {
+                    return std::pair{it->_generation, c->second};
+                }
+            }
+            return std::nullopt;
+        };
+        {
+            const std::scoped_lock lock(_data_key_mutex);
+            if (proven(who, rec._id, 0, now)) {
+                if (auto k = held()) {
+                    return k;
+                }
+            }
+        }
+        auto fresh = _config._kms.generate_data_key(dk->_key_id, encryption_context_of(rec), who);
+        const auto forget = [&] {
+            OPENSSL_cleanse(fresh._plaintext.data(), fresh._plaintext.size());
+        };
+        {
+            const std::scoped_lock lock(_data_key_mutex);
+            prove(who, rec._id, 0, now);
+            if (auto k = held()) {
+                forget();
+                return k;
+            }
+        }
+        const auto r = propose(add_data_key_command{
+            ._account = rec._account,
+            ._name = rec._name,
+            ._id = rec._id,
+            ._key_id = rec._key_id,
+            ._data_key = data_key_record{._key_id = fresh._key_id, ._wrapped = fresh._wrapped}});
+        if (!r || r->_status != apply_status::ok) {
+            forget();
+            // Re-keyed or stopped since `rec` was read, or no answer: the
+            // client retries with a fresh read of the stream.
+            throw kms_error(kms_failure::invalid_state,
+                            "The stream's encryption changed while the records were written.");
+        }
+        const auto generation = static_cast<std::uint32_t>(r->_first_counter);
+        std::pair<std::uint32_t, data_key_bytes> out{generation, fresh._plaintext};
+        forget();
+        const std::scoped_lock lock(_data_key_mutex);
+        _data_key_cache.insert_or_assign({rec._id, generation}, out.second);
+        return out;
     }
 
     /// Where a read of `entry` starts for iterator type `type` (as
@@ -2725,7 +2862,7 @@ private:
 
     auto read_page(const stream_record& rec, const shard_entry& entry, std::uint64_t counter,
                    std::int64_t min_timestamp_ms, const segment_read_limits& limits,
-                   std::int64_t now) -> aws_json::result<page> {
+                   std::int64_t now, const kms_caller& who) -> aws_json::result<page> {
         const auto profile = profile_of(rec);
         const auto key = routing_key(rec._id, entry._ordinal);
         std::optional<shard_read> got;
@@ -2746,7 +2883,7 @@ private:
                                      if (!g) {
                                          throw record_open_error("kinesis: truncated record");
                                      }
-                                     return open_record(data_key_of(rec, *g), key, bytes);
+                                     return open_record(data_key_of(rec, *g, who), key, bytes);
                                  });
             } catch (const kms_error& e) {
                 return kms_error_answer(e);
@@ -2951,8 +3088,10 @@ private:
     public:
         subscription(kinesis_service& svc, std::string key, aws_json::body_encoding encoding,
                      stream_record rec, consumer_record consumer, std::uint32_t ordinal,
-                     std::uint64_t counter, std::int64_t min_timestamp_ms)
+                     std::uint64_t counter, std::int64_t min_timestamp_ms,
+                     aws_auth::principal_context subscriber)
             : _svc(svc),
+              _subscriber(std::move(subscriber)),
               _key(std::move(key)),
               _encoding(encoding),
               _rec(std::move(rec)),
@@ -3018,7 +3157,8 @@ private:
                         ._max_bytes = std::min<std::uint64_t>(static_cast<std::uint64_t>(_tokens),
                                                               std::uint64_t{1} << 20U)};
                     auto page = _svc.read_page(_rec, *entry, _counter, _min_timestamp_ms, limits,
-                                               _svc._cluster.now_ms());
+                                               _svc._cluster.now_ms(),
+                                               kms_caller{._principal = &_subscriber});
                     if (!page) {
                         _done = true;
                         const auto& e = page.error();
@@ -3067,6 +3207,8 @@ private:
 
     private:
         kinesis_service& _svc;
+        /// The subscriber, for the KMS calls its pages need.
+        aws_auth::principal_context _subscriber;
         std::string _key;
         aws_json::body_encoding _encoding;
         stream_record _rec;
@@ -4311,8 +4453,8 @@ private:
     // Requirement 7.1: one entry per shard, records in request order within
     // it. Retries the records of a shard found closed against a fresh read
     // of the stream.
-    auto append(stream_record rec, std::vector<service_detail::pending_record> batch)
-        -> aws_json::result<std::vector<record_result>> {
+    auto append(stream_record rec, std::vector<service_detail::pending_record> batch,
+                const kms_caller& who) -> aws_json::result<std::vector<record_result>> {
         std::vector<record_result> out(batch.size());
         const auto profile = profile_of(rec);
         for (int attempt = 0;; ++attempt) {
@@ -4331,15 +4473,15 @@ private:
             // reach the log (task 14).
             std::optional<data_key_bytes> key;
             std::uint32_t generation = 0;
-            if (const auto* dk = rec.current_data_key()) {
-                generation = dk->_generation;
-                try {
-                    key = data_key_of(rec, generation);
-                } catch (const kms_error& e) {
-                    return kms_error_answer(e);
-                } catch (const record_open_error&) {
-                    return internal_failure();
+            try {
+                if (auto k = write_key(rec, who)) {
+                    generation = k->first;
+                    key = k->second;
                 }
+            } catch (const kms_error& e) {
+                return kms_error_answer(e);
+            } catch (const record_open_error&) {
+                return internal_failure();
             }
             std::vector<service_detail::pending_record> retry;
             std::vector<shard_append> appends;

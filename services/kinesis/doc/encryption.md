@@ -157,8 +157,41 @@ A sealed record whose tag fails is corruption, not a key problem, and gets
     (the module restarted, the HSM failed over) opens a new session and
     tries once more.
 
+- **`kythira`**: `kythira_kms_provider` in `kinesis_kms_kythira.hpp`,
+  Kythira's own KMS (`services/kms/`, `.kiro/specs/kms-compatible-api/`
+  task 15). It is the default in a `kythira_node` that runs the KMS
+  module, unless `KINESIS_KMS` says otherwise:
+  - calls go through `kms.client`: in process to the co-located KMS
+    module, or, with `KINESIS_KMS_ENDPOINT` (host:port), over HTTPS to a
+    KMS on another cluster, signed with `AWS_ACCESS_KEY_ID` and friends
+    and verified against `KINESIS_KMS_CA`. That signer must be one of the
+    KMS's `KYTHIRA_KMS_TRUSTED_SERVICES`;
+  - every call is made for the Kinesis request's own caller, with
+    `kms:ViaService` `kinesis.<region>.amazonaws.com`. The KMS evaluates
+    the key policy, grants and identity policies for that caller, never
+    for the gateway, so a key policy that denies a role denies it through
+    Kinesis too;
+  - as on AWS, producers need `kms:GenerateDataKey` on the stream's key
+    and consumers (`GetRecords`, `SubscribeToShard`) need `kms:Decrypt`.
+    A producer's records are sealed under the newest data key of the
+    stream's KMS key that the node holds; a node that holds none (just
+    started, or another node) makes the producer's own `GenerateDataKey`
+    another generation, so it never needs a `Decrypt` the producer may
+    not have. Each node adds at most one generation per key while it
+    runs;
+  - an answer stands for one caller and stream for
+    `KINESIS_KMS_CALLER_TTL_MS` (five minutes, as AWS reuses data keys);
+    after that the caller is asked about again. A data key another caller
+    unwrapped proves nothing about the next one. So disabling the key, or
+    changing its policy, takes effect within that bound, with
+    `KMSDisabledException` or `KMSAccessDeniedException`;
+  - `alias/aws/kinesis` is the account's AWS managed key, made on first
+    use.
+
   Another cloud's key service would be one more class that satisfies the
-  concept.
+  concept: `generate_data_key` and `decrypt_data_key` with the two
+  arguments above, or with a third, the caller (`kms_caller`), for a
+  provider that authorizes each one.
 
 ## Not yet checked against AWS
 
@@ -193,6 +226,13 @@ Clark's go.
 - the AWS adapter against a fake KMS: signature checks, request shape and
   error mapping;
 - the encryption entries and data keys surviving the codec.
+
+`kinesis_kms_kythira_test` runs the `kythira` provider against a fake
+`kms.client` with per-principal permissions: the caller and
+`kms:ViaService` on every call, producers with only `GenerateDataKey`
+and consumers with only `Decrypt`, a reader refused although the node
+holds the key, the caller TTL and a disabled key, and a second gateway
+adding one generation.
 
 `kinesis_kms_pkcs11_test` runs the `pkcs11` provider against a software
 token: round trips, the key id and context bindings, refused key ids, a

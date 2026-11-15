@@ -373,8 +373,15 @@ void read_kinesis_side(const reader& r, node_options& o) {
     o._disk_floor_bytes = r.u64("KINESIS_DISK_FLOOR_BYTES", "1073741824");
     o._metrics = r.flag("KINESIS_METRICS", "false");
     o._kms = r.opt("KINESIS_KMS", "off");
-    if (o._kms != "off" && o._kms != "local" && o._kms != "aws" && o._kms != "pkcs11") {
-        fail("KINESIS_KMS must be off, local, aws or pkcs11");
+    o._kms_set = r.set("KINESIS_KMS");
+    if (o._kms != "off" && o._kms != "local" && o._kms != "aws" && o._kms != "pkcs11" &&
+        o._kms != "kythira") {
+        fail("KINESIS_KMS must be off, local, aws, pkcs11 or kythira");
+    }
+    o._kms_ca = r.opt("KINESIS_KMS_CA", "");
+    o._kms_caller_ttl = r.ms("KINESIS_KMS_CALLER_TTL_MS", "300000");
+    if (o._kms_caller_ttl.count() < 1) {
+        fail("KINESIS_KMS_CALLER_TTL_MS must be at least 1");
     }
     if (r.set("KINESIS_KMS_PASSPHRASE") && r.set("KINESIS_KMS_PASSPHRASE_FILE")) {
         fail("set KINESIS_KMS_PASSPHRASE or KINESIS_KMS_PASSPHRASE_FILE, not both");
@@ -615,6 +622,9 @@ auto describe(const node_options& o) -> std::string {
         << "maintenance_interval_ms=" << o._maintenance_interval.count() << '\n'
         << "metrics=" << (o._metrics ? "on (GET /metrics)" : "off") << '\n'
         << "kms=" << o._kms
+        << (o._kms == "kythira" ? (o._kms_endpoint.empty() ? std::string(" (co-located)")
+                                                           : " endpoint=" + o._kms_endpoint)
+                                : std::string())
         << (o._kms == "aws" ? " region=" + o._kms_region +
                                   (o._kms_endpoint.empty() ? "" : " endpoint=" + o._kms_endpoint)
                             : std::string())
@@ -689,10 +699,15 @@ auto usage() -> std::string {
            "  KINESIS_METRICS                  serve Prometheus metrics on GET /metrics,\n"
            "                                   unauthenticated (false)\n"
            "  KINESIS_KMS                      key provider for encrypted streams: off, local,\n"
-           "                                   aws or pkcs11 (off)\n"
+           "                                   aws, pkcs11 or kythira (off; kythira_node:\n"
+           "                                   kythira when the KMS module runs)\n"
            "  KINESIS_KMS_PASSPHRASE[_FILE]    local: wraps data keys, same on every node\n"
            "  KINESIS_KMS_REGION               aws: KMS region (default: KINESIS_REGION)\n"
-           "  KINESIS_KMS_ENDPOINT             aws: KMS host:port (default: AWS)\n"
+           "  KINESIS_KMS_ENDPOINT             aws: KMS host:port (default: AWS); kythira: a\n"
+           "                                   KMS on another cluster, over HTTPS\n"
+           "  KINESIS_KMS_CA                   kythira over HTTPS: the CA its listener chains to\n"
+           "  KINESIS_KMS_CALLER_TTL_MS        kythira: how long a caller's KMS answer stands\n"
+           "                                   (300000)\n"
            "  KINESIS_KMS_PKCS11_URI           pkcs11: the token, pkcs11:token=...;pin-source=...\n"
            "                                   (module-path= when the HSM is not co-located)\n"
            "  KINESIS_KMS_PKCS11_IDENTITY      pkcs11: co-located HSM application (kinesis)\n"

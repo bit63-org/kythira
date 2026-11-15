@@ -343,6 +343,19 @@ struct set_encryption_command {
     std::optional<data_key_record> _data_key{};
 };
 
+/// Another data key for the stream's current KMS key, made by a producer's
+/// own `GenerateDataKey` (kms-compatible-api task 15): applied only while
+/// the stream is still encrypted under `_key_id`, so a producer racing a
+/// `StopStreamEncryption` or a re-key cannot undo it. `_first_counter` in
+/// the result is the generation.
+struct add_data_key_command {
+    std::string _account{};
+    std::string _name{};
+    std::uint64_t _id = 0;
+    std::string _key_id{};
+    data_key_record _data_key{};
+};
+
 enum class consumer_op : std::uint8_t {
     /// Add `_consumer` (created at `_created_ms`, with `_set` as its tags).
     register_consumer = 0,
@@ -487,15 +500,14 @@ struct lease_drop_application_command {
     std::string _application{};
 };
 
-using stream_command =
-    std::variant<create_stream_command, set_stream_status_command, remove_stream_command,
-                 open_shard_command, append_records_command, close_shard_command,
-                 drop_shard_command, trim_shard_command, append_batch_command, lease_write_command,
-                 lease_read_command, lease_drop_application_command, set_retention_command,
-                 seal_shard_command, tier_segment_command, reshard_catalog_command,
-                 set_ending_counters_command, set_stream_mode_command, tag_stream_command,
-                 set_policy_command, set_monitoring_command, set_encryption_command,
-                 consumer_command, channel_command, channel_checkpoint_command, shard_tip_command>;
+using stream_command = std::variant<
+    create_stream_command, set_stream_status_command, remove_stream_command, open_shard_command,
+    append_records_command, close_shard_command, drop_shard_command, trim_shard_command,
+    append_batch_command, lease_write_command, lease_read_command, lease_drop_application_command,
+    set_retention_command, seal_shard_command, tier_segment_command, reshard_catalog_command,
+    set_ending_counters_command, set_stream_mode_command, tag_stream_command, set_policy_command,
+    set_monitoring_command, set_encryption_command, consumer_command, channel_command,
+    channel_checkpoint_command, shard_tip_command, add_data_key_command>;
 
 inline constexpr std::uint8_t stream_command_version = 1;
 
@@ -514,7 +526,8 @@ inline constexpr std::uint8_t stream_command_version = 1;
                           std::is_same_v<T, set_policy_command> ||
                           std::is_same_v<T, set_monitoring_command> ||
                           std::is_same_v<T, set_encryption_command> ||
-                          std::is_same_v<T, consumer_command>) {
+                          std::is_same_v<T, consumer_command> ||
+                          std::is_same_v<T, add_data_key_command>) {
                 return stream_key(v._account, v._name);
             } else if constexpr (std::is_same_v<T, channel_command>) {
                 return channel_key(v._account, v._name);
@@ -665,6 +678,9 @@ inline auto decode_append(codec::reader& r) -> append_records_command {
                     w.u32(v._data_key->_generation).str(v._data_key->_key_id);
                     w.str(v._data_key->_wrapped);
                 }
+            } else if constexpr (std::is_same_v<T, add_data_key_command>) {
+                w.str(v._account).str(v._name).u64(v._id).str(v._key_id);
+                w.u32(v._data_key._generation).str(v._data_key._key_id).str(v._data_key._wrapped);
             } else if constexpr (std::is_same_v<T, consumer_command>) {
                 w.str(v._account).str(v._name).u64(v._id).u8(static_cast<std::uint8_t>(v._op));
                 w.str(v._consumer).i64(v._created_ms);
@@ -1006,6 +1022,18 @@ inline auto decode_append(codec::reader& r) -> append_records_command {
         case 25: {
             shard_tip_command c;
             c._key = r.str();
+            out = std::move(c);
+            break;
+        }
+        case 26: {
+            add_data_key_command c;
+            c._account = r.str();
+            c._name = r.str();
+            c._id = r.u64();
+            c._key_id = r.str();
+            c._data_key._generation = r.u32();
+            c._data_key._key_id = r.str();
+            c._data_key._wrapped = r.str();
             out = std::move(c);
             break;
         }
@@ -1816,6 +1844,26 @@ private:
         rec->_data_keys.push_back(k);
         rec->_encryption = encryption_type::kms;
         rec->_key_id = c._key_id;
+        return {._id = rec->_id, ._first_counter = k._generation};
+    }
+
+    /// `bad_transition` once the stream is no longer encrypted under
+    /// `_key_id`; the generation is assigned here, one past the last.
+    auto apply_one(const add_data_key_command& c) -> apply_result {
+        auto* rec = stream_at(c._account, c._name, c._id);
+        if (rec == nullptr) {
+            return {._status = apply_status::not_found};
+        }
+        if (c._data_key._wrapped.empty()) {
+            return {._status = apply_status::invalid};
+        }
+        if (rec->_status != stream_status::active || rec->_encryption != encryption_type::kms ||
+            rec->_key_id != c._key_id) {
+            return {._status = apply_status::bad_transition};
+        }
+        auto k = c._data_key;
+        k._generation = rec->_data_keys.empty() ? 1 : rec->_data_keys.back()._generation + 1;
+        rec->_data_keys.push_back(k);
         return {._id = rec->_id, ._first_counter = k._generation};
     }
 

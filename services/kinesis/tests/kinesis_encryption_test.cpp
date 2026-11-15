@@ -553,6 +553,16 @@ BOOST_AUTO_TEST_CASE(encryption_commands_and_data_keys_round_trip) {
                                            ._data_key = std::nullopt};
     const auto stop_bytes = kin::encode_command(stop);
     BOOST_TEST((kin::encode_command(kin::decode_command(stop_bytes)) == stop_bytes));
+    // A producer's own data key as another generation (KMS task 15).
+    const kin::add_data_key_command add{
+        ._account = std::string(k_account),
+        ._name = "s",
+        ._id = 7,
+        ._key_id = "alias/aws/kinesis",
+        ._data_key = kin::data_key_record{._generation = 0, ._key_id = "arn:k", ._wrapped = "w2"}};
+    const auto add_bytes = kin::encode_command(add);
+    BOOST_TEST((kin::encode_command(kin::decode_command(add_bytes)) == add_bytes));
+    BOOST_TEST(kin::command_key(add) == kin::stream_key(std::string(k_account), "s"));
 
     kin::stream_record rec;
     rec._id = 7;
