@@ -35,8 +35,7 @@ BOOST_AUTO_TEST_CASE(framing_errors_and_unimplemented_operations) {
     // Not a KMS operation.
     BOOST_TEST(f.call("CreateStream", "{}").type() == "UnknownOperationException");
     // Modeled, not implemented: named as unsupported, after the signature.
-    const auto enc = f.call("CreateGrant", R"({"KeyId":"x","GranteePrincipal":"p",)"
-                                           R"("Operations":["Decrypt"]})");
+    const auto enc = f.call("GetKeyLastUsage", R"({"KeyId":"x"})");
     BOOST_TEST(enc.status == 400U);
     BOOST_TEST(enc.type() == "UnsupportedOperationException");
     BOOST_TEST(enc.message().find("unsupported.md") != std::string::npos, enc.message());
@@ -47,14 +46,17 @@ BOOST_AUTO_TEST_CASE(framing_errors_and_unimplemented_operations) {
     for (const auto op : kms::key_management_api<catalog_t>::k_operations) {
         BOOST_TEST(f.fe.handles(op), op);
     }
+    for (const auto op : kms::grants_api<catalog_t>::k_operations) {
+        BOOST_TEST(f.fe.handles(op), op);
+    }
 }
 
 BOOST_AUTO_TEST_CASE(a_handler_that_never_authorizes_cannot_answer) {
     fixture f;
-    f.fe.on("ListGrants", [](kms::call_context&, json::object&) {
+    f.fe.on("GetKeyLastUsage", [](kms::call_context&, json::object&) {
         return kythira::aws_json::result<json::object>(json::object{{"Plaintext", "c2VjcmV0"}});
     });
-    const auto r = f.call("ListGrants", R"({"KeyId":"x"})");
+    const auto r = f.call("GetKeyLastUsage", R"({"KeyId":"x"})");
     BOOST_TEST(r.status == 500U);
     BOOST_TEST(r.type() == "KMSInternalException");
     BOOST_TEST(!r.body.contains("Plaintext"));
@@ -62,11 +64,11 @@ BOOST_AUTO_TEST_CASE(a_handler_that_never_authorizes_cannot_answer) {
 
 BOOST_AUTO_TEST_CASE(a_throwing_handler_answers_internal_error) {
     fixture f;
-    f.fe.on("ListGrants",
+    f.fe.on("GetKeyLastUsage",
             [](kms::call_context&, json::object&) -> kythira::aws_json::result<json::object> {
                 throw std::runtime_error("boom");
             });
-    const auto r = f.call("ListGrants", R"({"KeyId":"x"})");
+    const auto r = f.call("GetKeyLastUsage", R"({"KeyId":"x"})");
     BOOST_TEST(r.status == 500U);
     BOOST_TEST(r.type() == "KMSInternalException");
     BOOST_TEST(r.message().find("boom") == std::string::npos);

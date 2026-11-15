@@ -148,11 +148,24 @@ is one PR unless noted.
     root's (task 12). The static roles ignore key policies, as the README
     says. `kms_policy_test`.
 
-- [ ] 10. Grants
+- [x] 10. Grants
   - `CreateGrant`, `ListGrants`, `ListRetirableGrants`, `RetireGrant`,
     `RevokeGrant`; grant evaluation with encryption context constraints;
     grant tokens
   - _Requirements: 8.1-8.4_
+  - Done: `kms_grants.hpp` (evaluation) and `kms_grants_api.hpp` (the
+    five operations). A grant allows what IAM refused without an explicit
+    deny, through `api_common::authorize_with_grants`, which every
+    key-authorized handler now uses. Operations are checked per key type,
+    constraints only on symmetric encryption keys, grants made under a
+    grant may not widen it, `Name` makes CreateGrant idempotent, and
+    RetireGrant is decided by the grant (retiring principal, grantee with
+    RetireGrant, issuing account's root). Grants are in force once
+    committed; tokens are checked but carry no authority. Grants on AWS
+    managed keys carry `kms:GrantIsForAWSResource` true. With static keys
+    `front_end_config::evaluate_grants` is off (Requirement 7.7), which
+    the composition root sets in task 12. Root-principal grantees are not
+    delegated through IAM (doc/unsupported.md). `kms_grants_test`.
 
 - [ ] 11. Rotation and deletion jobs
   - Scheduled and on-demand rotation, `ListKeyRotations`, deletion at the

@@ -388,7 +388,7 @@ private:
             r.keys.emplace_back("kms:EncryptionAlgorithm",
                                 std::vector<std::string>{std::string(alg)});
         }
-        return ctx.authorize(std::move(r));
+        return authorize_with_grants(ctx, c, k.record, std::move(r), &context);
     }
 
     /// The algorithm the key and request settle on: SYMMETRIC_DEFAULT on a
@@ -719,7 +719,7 @@ private:
         }
         r.keys.emplace_back("kms:EncryptionContextKeys", std::move(keys));
         r.keys.emplace_back("kms:DataKeyPairSpec", std::vector<std::string>{std::string(spec)});
-        if (auto denied = ctx.authorize(std::move(r))) {
+        if (auto denied = authorize_with_grants(ctx, **c, k->record, std::move(r), &context)) {
             return *denied;
         }
         auto alg = symmetric_only(ctx, k->record, context);

@@ -29,6 +29,7 @@
 
 #include <kythira/kms/kms_actions.hpp>
 #include <kythira/kms/kms_errors.hpp>
+#include <kythira/kms/kms_grants.hpp>
 #include <kythira/kms/model/kms_model.hpp>
 
 #include <raft/aws_json_protocol.hpp>
@@ -56,6 +57,10 @@ struct front_end_config {
     std::string region = "us-east-1";
     std::string partition = "aws";
     aws_json::request_limits limits{.max_body_bytes = std::size_t{1} << 20U, .max_depth = 64};
+    /// Whether grants allow requests (kms_grants.hpp). True with IAM; a
+    /// deployment on static keys turns it off, because Requirement 7.7 has
+    /// the static roles decide alone. Grants are still stored and listed.
+    bool evaluate_grants = true;
 };
 
 /// An HTTP request as the transport hands it over.
@@ -110,10 +115,20 @@ struct call_context {
     /// Authorizes one action. On refusal, the AccessDeniedException to
     /// return. An allowed call marks the request authorized.
     std::function<std::optional<aws_json::error>(aws_auth::authz_request)> authorize_fn;
+    /// Whether the last refusal was an explicit deny, which a grant cannot
+    /// override.
+    bool last_denial_explicit = false;
+    /// Whether grants may allow what the authorizer refused
+    /// (front_end_config::evaluate_grants).
+    bool grants_apply = true;
 
     [[nodiscard]] auto authorize(aws_auth::authz_request r) -> std::optional<aws_json::error> {
         return authorize_fn(std::move(r));
     }
+
+    /// A live grant allowed what IAM refused without an explicit deny
+    /// (kms_grants.hpp): the request is authorized.
+    auto allow_by_grant() -> void { authorized = true; }
 
     /// `arn:<partition>:kms:<region>:<account>:key/<id>`.
     [[nodiscard]] auto key_arn(std::string_view account, std::string_view key_id) const
@@ -227,6 +242,9 @@ public:
         if (!parsed) {
             return _codec.respond(parsed.error(), id, json);
         }
+        if (auto bad = check_grant_tokens(parsed->input)) {
+            return _codec.respond(*bad, id, json);
+        }
 
         call_context ctx;
         ctx.operation = op->name;
@@ -234,6 +252,7 @@ public:
         ctx.principal = *who;
         ctx.region = _config.region;
         ctx.partition = _config.partition;
+        ctx.grants_apply = _config.evaluate_grants;
         const auto* acts = find_operation_actions(op->name);
         ctx.replica_read_ok = acts != nullptr && !acts->writes;
         ctx.authorize_fn = [this, &ctx, &req](aws_auth::authz_request r) {
@@ -261,6 +280,22 @@ public:
     }
 
 private:
+    /// Grant tokens this KMS made; any other is InvalidGrantTokenException,
+    /// as on AWS. A valid token adds no authority (kms_grants.hpp).
+    [[nodiscard]] static auto check_grant_tokens(const boost::json::object& in)
+        -> std::optional<aws_json::error> {
+        const auto* t = in.if_contains("GrantTokens");
+        if (t == nullptr || !t->is_array()) {
+            return std::nullopt;
+        }
+        for (const auto& v : t->get_array()) {
+            if (!v.is_string() || !parse_grant_token(v.get_string())) {
+                return kms_error("InvalidGrantTokenException", "The grant token is not valid");
+            }
+        }
+        return std::nullopt;
+    }
+
     [[nodiscard]] static auto options(const front_end_config& cfg) -> aws_json::codec_options {
         aws_json::codec_options o;
         o.style = kms_error_style();
@@ -276,7 +311,7 @@ private:
         return e;
     }
 
-    [[nodiscard]] auto check(const call_context& ctx, const front_end_request& req,
+    [[nodiscard]] auto check(call_context& ctx, const front_end_request& req,
                              aws_auth::authz_request r) -> std::optional<aws_json::error> {
         r.source_ip = req.source_ip;
         r.user_agent = std::string(front_end_detail::header_value(req, "user-agent"));
@@ -290,6 +325,7 @@ private:
         }
         r.keys.emplace_back("kms:CallerAccount", std::vector<std::string>{ctx.principal.account});
         const auto d = _authorizer.authorize(ctx.principal, r);
+        ctx.last_denial_explicit = !d.allowed && d.explicit_deny;
         if (d.allowed) {
             return std::nullopt;
         }

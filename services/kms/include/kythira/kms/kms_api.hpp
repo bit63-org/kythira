@@ -24,6 +24,7 @@
 #include <kythira/kms/kms_catalog.hpp>
 #include <kythira/kms/kms_errors.hpp>
 #include <kythira/kms/kms_front_end.hpp>
+#include <kythira/kms/kms_grants.hpp>
 #include <kythira/kms/kms_keys.hpp>
 
 #include <raft/aws_json_protocol.hpp>
@@ -297,7 +298,48 @@ protected:
         if (request_tags != nullptr) {
             add_request_tags(r, *request_tags);
         }
-        return ctx.authorize(std::move(r));
+        return authorize_with_grants(ctx, c, k.record, std::move(r));
+    }
+
+    /// Authorizes `r` on key `key`; when IAM refuses without an explicit
+    /// deny, a live grant for the caller that lists the operation (and
+    /// whose constraint `context` satisfies) allows it instead
+    /// (Requirement 8.2). `context` is null for an operation without an
+    /// encryption context.
+    template<typename Catalog>
+    [[nodiscard]] static auto authorize_with_grants(call_context& ctx, const Catalog& c,
+                                                    const key_record& key,
+                                                    aws_auth::authz_request r,
+                                                    const encryption_context* context = nullptr)
+        -> std::optional<aws_json::error> {
+        const std::string op = r.action.starts_with("kms:") ? r.action.substr(4) : r.action;
+        auto denied = ctx.authorize(std::move(r));
+        if (!denied || ctx.last_denial_explicit || !ctx.grants_apply) {
+            return denied;
+        }
+        if (find_grant(c, key, ctx.principal, op, context)) {
+            ctx.allow_by_grant();
+            return std::nullopt;
+        }
+        return denied;
+    }
+
+    /// The first live grant on `key` that allows `who` to perform `op`.
+    template<typename Catalog>
+    [[nodiscard]] static auto find_grant(const Catalog& c, const key_record& key,
+                                         const aws_auth::principal_context& who,
+                                         std::string_view op, const encryption_context* context)
+        -> std::optional<grant_record> {
+        if (std::find(k_grant_operations.begin(), k_grant_operations.end(), op) ==
+            k_grant_operations.end()) {
+            return std::nullopt;
+        }
+        for (auto& g : c.grants(key.key_id)) {
+            if (grant_allows(g, who, op, context)) {
+                return std::move(g);
+            }
+        }
+        return std::nullopt;
     }
 
     /// An alias action on the alias's own ARN, decided by identity policies

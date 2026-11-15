@@ -17,6 +17,7 @@
 #include <kythira/kms/kms_catalog.hpp>
 #include <kythira/kms/kms_crypto_api.hpp>
 #include <kythira/kms/kms_front_end.hpp>
+#include <kythira/kms/kms_grants_api.hpp>
 #include <kythira/kms/kms_keys.hpp>
 #include <kythira/kms/kms_signing_api.hpp>
 
@@ -171,6 +172,15 @@ struct fixture {
             },
     }};
 
+    kms::grants_api<catalog_t> grants{kms::api_deps<catalog_t>{
+        .catalog =
+            [this] { return std::shared_ptr<const catalog_t>(&sm, [](const catalog_t*) {}); },
+        .barrier = [this] { return !leaderless; },
+        .propose = [this](const std::vector<std::byte>& c) { return propose(c); },
+        .create_key = {},
+        .clock_ms = [this] { return now; },
+    }};
+
     kms::crypto_api<catalog_t> crypto{kms::crypto_deps<catalog_t>{
         .catalog =
             [this] { return std::shared_ptr<const catalog_t>(&sm, [](const catalog_t*) {}); },
@@ -188,6 +198,7 @@ struct fixture {
     fixture() {
         sm.open(engine, sm.engine_range());
         api.register_on(fe);
+        grants.register_on(fe);
         crypto.register_on(fe);
         signing.register_on(fe);
     }

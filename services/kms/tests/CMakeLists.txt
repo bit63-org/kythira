@@ -123,6 +123,11 @@ set_tests_properties(kms_asymmetric_test PROPERTIES LABELS "unit;kms;kms-module"
 kythira_kms_test(kms_policy_test kms_policy_test.cpp)
 set_tests_properties(kms_policy_test PROPERTIES LABELS "unit;kms;kms-module")
 
+# Task 10, Requirements 8.1-8.4: grants, their constraints, grants made
+# under grants, grant tokens and retirement.
+kythira_kms_test(kms_grants_test kms_grants_test.cpp)
+set_tests_properties(kms_grants_test PROPERTIES LABELS "unit;kms;kms-module")
+
 # Task 5, Requirements 4.1-4.3: every key spec's backing key on a real
 # module, SoftHSM2 standing in for an external one; registered when the
 # build finds SoftHSM2 and softhsm2-util (kms-module.yml installs them;

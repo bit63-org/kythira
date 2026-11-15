@@ -17,7 +17,6 @@ retryable fault.
 |---|---|---|---|
 | `ConnectCustomKeyStore` | out of scope | Custom key stores are out of scope: the virtual HSM's external-module support swaps the backing store for the whole KMS (design, "Metadata in the KMS, material in the HSM"). | `UnsupportedOperationException`, HTTP 400 |
 | `CreateCustomKeyStore` | out of scope | Custom key stores are out of scope: the virtual HSM's external-module support swaps the backing store for the whole KMS (design, "Metadata in the KMS, material in the HSM"). | `UnsupportedOperationException`, HTTP 400 |
-| `CreateGrant` | task 10 | Not built yet (grants). | `UnsupportedOperationException`, HTTP 400 |
 | `DeleteCustomKeyStore` | out of scope | Custom key stores are out of scope: the virtual HSM's external-module support swaps the backing store for the whole KMS (design, "Metadata in the KMS, material in the HSM"). | `UnsupportedOperationException`, HTTP 400 |
 | `DeleteImportedKeyMaterial` | out of scope | Imported key material is out of scope for this spec (design, "What stays out"): it needs an RSA-OAEP unwrap into a non-extractable HSM object, left for a follow-up spec. | `UnsupportedOperationException`, HTTP 400 |
 | `DeriveSharedSecret` | none | Not in the spec: ECDH key agreement on an ECC key pair (KMS added it after the spec was written). Open question for the owner. | `UnsupportedOperationException`, HTTP 400 |
@@ -29,12 +28,22 @@ retryable fault.
 | `GetKeyRotationStatus` | task 11 | Not built yet (rotation). | `UnsupportedOperationException`, HTTP 400 |
 | `GetParametersForImport` | out of scope | Imported key material is out of scope for this spec (design, "What stays out"): it needs an RSA-OAEP unwrap into a non-extractable HSM object, left for a follow-up spec. | `UnsupportedOperationException`, HTTP 400 |
 | `ImportKeyMaterial` | out of scope | Imported key material is out of scope for this spec (design, "What stays out"): it needs an RSA-OAEP unwrap into a non-extractable HSM object, left for a follow-up spec. | `UnsupportedOperationException`, HTTP 400 |
-| `ListGrants` | task 10 | Not built yet (grants). | `UnsupportedOperationException`, HTTP 400 |
 | `ListKeyRotations` | task 11 | Not built yet (rotation). | `UnsupportedOperationException`, HTTP 400 |
-| `ListRetirableGrants` | task 10 | Not built yet (grants). | `UnsupportedOperationException`, HTTP 400 |
 | `ReplicateKey` | out of scope | Multi-Region keys are out of scope: they need key material replicated across regions' HSMs, which the virtual HSM does not do (design, "What stays out"). | `UnsupportedOperationException`, HTTP 400 |
-| `RetireGrant` | task 10 | Not built yet (grants). | `UnsupportedOperationException`, HTTP 400 |
-| `RevokeGrant` | task 10 | Not built yet (grants). | `UnsupportedOperationException`, HTTP 400 |
 | `RotateKeyOnDemand` | task 11 | Not built yet (rotation). | `UnsupportedOperationException`, HTTP 400 |
 | `UpdateCustomKeyStore` | out of scope | Custom key stores are out of scope: the virtual HSM's external-module support swaps the backing store for the whole KMS (design, "Metadata in the KMS, material in the HSM"). | `UnsupportedOperationException`, HTTP 400 |
 | `UpdatePrimaryRegion` | out of scope | Multi-Region keys are out of scope: they need key material replicated across regions' HSMs, which the virtual HSM does not do (design, "What stays out"). | `UnsupportedOperationException`, HTTP 400 |
+
+## Behaviour that differs inside implemented operations
+
+- **A grant to an account's root principal** serves only that root
+  principal. AWS also lets the account pass such a grant on to its users
+  and roles through IAM policies; Kythira matches a grantee by exact ARN
+  (the caller's ARN, or a role session's role ARN) and does not
+  (`include/kythira/kms/kms_grants.hpp`).
+- **Grants are in force once committed.** AWS documents grants as
+  eventually consistent and offers grant tokens to use one at once; here
+  every read passes a read barrier, so a committed grant applies to every
+  request on every replica. Grant tokens are still accepted and checked
+  (one this KMS did not make is `InvalidGrantTokenException`) but carry
+  no authority of their own.
