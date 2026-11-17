@@ -96,7 +96,12 @@ BOOST_AUTO_TEST_CASE(raft_collection_cancellation_cleanup_property_test,
                 // Property: Cancellation should happen quickly due to timeout
                 BOOST_TEST_MESSAGE("✓ Collection cancelled due to timeout in "
                                    << elapsed.count() << "ms: " << e.what());
-                BOOST_CHECK_LE(elapsed.count(), 500);  // Should timeout quickly
+                // The property is that the 200 ms timeout ends the
+                // collection instead of waiting for a future, and the
+                // earliest future settles at 1100 ms. A fixed 500 ms bound
+                // measured the runner instead: under ctest -j the timeout
+                // fired at 591 and 711 ms on two CI runs (11-16 re-survey).
+                BOOST_CHECK_LT(elapsed.count(), 1100);
             }
         }
 
