@@ -97,10 +97,18 @@ BOOST_AUTO_TEST_CASE(only_symmetric_keys_rotate_and_states_matter) {
                                    R"({"KeySpec":"ECC_NIST_P256","KeyUsage":"SIGN_VERIFY"})",
                                    R"({"KeySpec":"HMAC_256","KeyUsage":"GENERATE_VERIFY_MAC"})"}) {
         const auto id = f.create(spec);
-        for (const char* op : {"EnableKeyRotation", "DisableKeyRotation", "GetKeyRotationStatus",
-                               "RotateKeyOnDemand", "ListKeyRotations"}) {
+        for (const char* op : {"EnableKeyRotation", "RotateKeyOnDemand"}) {
             BOOST_TEST(f.call(op, kid(id)).type() == "UnsupportedOperationException", op);
         }
+        // What AWS answers for a key that cannot rotate (the differential
+        // recording): not rotating, nothing to turn off, no rotations.
+        const auto status = f.call("GetKeyRotationStatus", kid(id));
+        BOOST_TEST(status.status == 200U);
+        BOOST_TEST(!status.body.at("KeyRotationEnabled").as_bool());
+        BOOST_TEST(f.call("DisableKeyRotation", kid(id)).status == 200U);
+        const auto listed = f.call("ListKeyRotations", kid(id));
+        BOOST_TEST(listed.status == 200U);
+        BOOST_TEST(listed.body.at("Rotations").as_array().empty());
     }
     const auto id = f.create();
     BOOST_REQUIRE(f.call("DisableKey", kid(id)).status == 200U);
