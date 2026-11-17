@@ -23,8 +23,16 @@
 
 #include <raft/future_boost.hpp>
 
+#include <boost/asio/executor_work_guard.hpp>
+#include <boost/asio/io_context.hpp>
+#include <boost/asio/post.hpp>
+
+#include <atomic>
 #include <chrono>
+#include <memory>
 #include <stdexcept>
+#include <thread>
+#include <utility>
 #include <string>
 #include <vector>
 
@@ -293,6 +301,116 @@ BOOST_AUTO_TEST_CASE(collect_n_includes_failures_among_first_n_to_complete,
         }
     }
     BOOST_CHECK(saw_failure);
+}
+
+// -- via() pins a keep_alive() executor --------------------------------
+//
+// The Beast transport via()s a request's chain onto its connection's
+// executor, and a failed request (peer down, connect refused) releases the
+// connection, and with it that executor, from inside one of the chain's own
+// continuations. Boost's then(Ex&, F) holds the executor by reference, so
+// unless via() pins it the next link submit()s to freed memory: the
+// SIGSEGV in a failed pre-vote's continuation fixed for Future<T> in
+// b025e0e3. These cases drop the executor's last outside owner from the
+// first continuation and check every later link still reaches a live
+// executor, for Future<T> and for Future<void>, which had no pinning.
+
+namespace {
+
+// Shared-owned, with keep_alive(), like the Beast asio_strand_executor.
+// Work runs on an io_context the test owns, which outlives the executor.
+// The destroyed flag is global so submit() can check it without touching
+// the (possibly freed) object; a late submit runs the work inline so the
+// test fails on its check rather than hanging.
+std::atomic<bool> tracking_executor_destroyed{false};
+std::atomic<int> submits_after_destroy{0};
+
+class tracking_executor : public std::enable_shared_from_this<tracking_executor> {
+public:
+    explicit tracking_executor(boost::asio::io_context::executor_type ex) : _ex(std::move(ex)) {}
+    ~tracking_executor() { tracking_executor_destroyed = true; }
+
+    auto keep_alive() -> std::shared_ptr<void> { return weak_from_this().lock(); }
+
+    template<typename Work> auto submit(Work&& work) -> void {
+        if (tracking_executor_destroyed) {
+            ++submits_after_destroy;
+            work();
+            return;
+        }
+        boost::asio::post(_ex, std::forward<Work>(work));
+    }
+    auto close() -> void {}
+    auto closed() -> bool { return false; }
+    auto try_executing_one() -> bool { return false; }
+
+private:
+    boost::asio::io_context::executor_type _ex;
+};
+
+struct io_thread {
+    boost::asio::io_context io;
+    boost::asio::executor_work_guard<boost::asio::io_context::executor_type> guard{
+        io.get_executor()};
+    std::thread thread{[this] { io.run(); }};
+    ~io_thread() {
+        guard.reset();
+        thread.join();
+    }
+};
+
+}  // namespace
+
+BOOST_AUTO_TEST_CASE(via_keeps_released_executor_alive_for_value_chain,
+                     *boost::unit_test::timeout(10)) {
+    tracking_executor_destroyed = false;
+    submits_after_destroy = 0;
+    io_thread io;
+    {
+        auto owner = std::make_shared<tracking_executor>(io.io.get_executor());
+        auto& ex = *owner;
+        Promise<int> p;
+        auto f = p.getFuture()
+                     .via(ex)
+                     .thenValue([&owner](int v) {
+                         owner.reset();  // the connection's last lease goes
+                         return v + 1;
+                     })
+                     .thenValue([](int v) { return v * 2; })
+                     .thenValue([](int v) { return v + 3; });
+        p.setValue(1);
+        BOOST_CHECK_EQUAL(std::move(f).get(), 7);
+        BOOST_CHECK(!owner);
+    }
+    BOOST_CHECK_EQUAL(submits_after_destroy.load(), 0);
+    BOOST_CHECK(tracking_executor_destroyed.load());  // pinned, not leaked
+}
+
+BOOST_AUTO_TEST_CASE(via_keeps_released_executor_alive_for_void_chain,
+                     *boost::unit_test::timeout(10)) {
+    tracking_executor_destroyed = false;
+    submits_after_destroy = 0;
+    io_thread io;
+    std::atomic<int> links{0};
+    {
+        auto owner = std::make_shared<tracking_executor>(io.io.get_executor());
+        auto& ex = *owner;
+        Promise<void> p;
+        auto f = p.getFuture()
+                     .via(ex)
+                     .thenValue([&owner, &links]() {
+                         owner.reset();
+                         ++links;
+                     })
+                     .thenValue([&links]() { ++links; })
+                     .thenValue([&links]() { ++links; });
+        p.setValue(kythira::unit{});
+        std::move(f).get();
+        BOOST_CHECK(!owner);
+    }
+    BOOST_CHECK_EQUAL(links.load(), 3);
+    BOOST_CHECK_EQUAL(submits_after_destroy.load(), 0);
+    BOOST_CHECK(tracking_executor_destroyed.load());
 }
 
 BOOST_AUTO_TEST_SUITE_END()

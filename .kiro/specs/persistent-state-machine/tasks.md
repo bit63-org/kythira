@@ -363,6 +363,9 @@ RocksDB is linked. Each task is one PR unless noted.
       continuation. It matches the unfiled
       "Boost-backend pre-vote crash" in TODO.md's disk-backed-build-cache
       row. CI's gateway is the Folly build, which the local runs used.
+      Since fixed: PR #759 (b025e0e3, November 10, 2026) made the Boost
+      `Future::via()` pin the connection's executor; see the
+      disk-backed-build-cache tasks.md note, resolved 2026-11-17.
 
 - [x] 9. Measurement and docs
   - Bench rows: in-memory vs RocksDB (proposals/s, p99), restart time for a

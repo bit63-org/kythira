@@ -133,6 +133,39 @@ template<typename T> struct is_future : std::false_type {};
 template<typename T> struct is_future<Future<T>> : std::true_type {};
 template<typename T> inline constexpr bool is_future_v = is_future<T>::value;
 
+// via()'s executor pinning, shared by Future<T> and Future<void>.
+//
+// An executor with a `keep_alive()` member (returning shared_ptr<void>)
+// is its own owner's handle: via() holds what it returns in the first
+// continuation and, through sticky_executor_ref, in every later link, so
+// releasing the executor's owner from inside one of the chain's own
+// continuations cannot leave the next link to submit() to freed memory.
+// Executors without keep_alive() get an empty owner and behave as before.
+template<typename Ex> auto executor_owner(Ex& ex) -> std::shared_ptr<void> {
+    if constexpr (requires {
+                      { ex.keep_alive() } -> std::convertible_to<std::shared_ptr<void>>;
+                  }) {
+        return ex.keep_alive();
+    } else {
+        return {};
+    }
+}
+
+// Binds ex for the whole remaining chain, not just one hop (see
+// executor_ref_ptr's comment). The aliasing pointer shares the holder's
+// control block, so every then_on() copy of it pins `owner` too.
+template<typename Ex>
+auto sticky_executor_ref(Ex& ex, std::shared_ptr<void> owner) -> executor_ref_ptr {
+    struct holder {
+        std::shared_ptr<void> owner;
+        boost::executors::generic_executor_ref ref;
+    };
+    auto h = std::make_shared<holder>(
+        holder{std::move(owner), boost::executors::generic_executor_ref(ex)});
+    boost::executors::generic_executor_ref* ref = &h->ref;
+    return executor_ref_ptr(std::move(h), ref);
+}
+
 // The only correct bridge between std::exception_ptr and
 // boost::exception_ptr (spike-notes.md Finding 6): boost::promise::
 // set_exception takes boost::exception_ptr, which has an *implicit*
@@ -700,26 +733,11 @@ public:
     // connection, routinely from inside one of the chain's own
     // continuations, and the next link would then submit() to freed memory.
     template<typename Ex> auto via(Ex& ex) -> Future<T> {
-        std::shared_ptr<void> owner;
-        if constexpr (requires {
-                          { ex.keep_alive() } -> std::convertible_to<std::shared_ptr<void>>;
-                      }) {
-            owner = ex.keep_alive();
-        }
+        std::shared_ptr<void> owner = detail::executor_owner(ex);
         auto continuation =
             _f.then(ex, [owner](boost::future<T> completed) -> T { return completed.get(); });
-        // Binds ex for the whole remaining chain, not just this hop --
-        // see executor_ref_ptr's comment for why that distinction matters.
-        // The aliasing pointer shares the holder's control block, so every
-        // then_on() keep_alive copy pins `owner` too.
-        struct holder {
-            std::shared_ptr<void> owner;
-            boost::executors::generic_executor_ref ref;
-        };
-        auto h = std::make_shared<holder>(
-            holder{std::move(owner), boost::executors::generic_executor_ref(ex)});
-        boost::executors::generic_executor_ref* ref = &h->ref;
-        return Future<T>(std::move(continuation), executor_ref_ptr(std::move(h), ref));
+        return Future<T>(std::move(continuation),
+                         detail::sticky_executor_ref(ex, std::move(owner)));
     }
     // void* overload: required by the future_continuation concept
     // (`f.via(std::declval<void*>())`), mirroring include/raft/future.hpp's
@@ -920,11 +938,13 @@ public:
         return Future<void>(std::move(continuation), _executor);
     }
 
+    // Pins a keep_alive() executor exactly as Future<T>::via does; see there.
     template<typename Ex> auto via(Ex& ex) -> Future<void> {
+        std::shared_ptr<void> owner = detail::executor_owner(ex);
         auto continuation =
-            _f.then(ex, [](boost::future<void> completed) -> void { completed.get(); });
+            _f.then(ex, [owner](boost::future<void> completed) -> void { completed.get(); });
         return Future<void>(std::move(continuation),
-                            std::make_shared<boost::executors::generic_executor_ref>(ex));
+                            detail::sticky_executor_ref(ex, std::move(owner)));
     }
     auto via(void* ex) -> Future<void> {
         return via(*static_cast<boost::executors::executor*>(ex));
