@@ -19,6 +19,8 @@
 /// replayed later. The link uses TLS whenever the gateways do; the MAC
 /// guards the endpoint either way, so it is never open to SDK clients.
 
+#include <raft/bounded_resolver.hpp>
+
 #include <boost/asio/connect.hpp>
 #include <boost/asio/ip/tcp.hpp>
 #include <boost/asio/ssl.hpp>
@@ -33,11 +35,15 @@
 #include <array>
 #include <chrono>
 #include <cstdint>
+#include <cstring>
 #include <exception>
 #include <map>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <string_view>
+#include <sys/socket.h>
+#include <vector>
 #include <utility>
 
 namespace kythira::dynamodb {
@@ -165,15 +171,55 @@ private:
         return res.body();
     }
 
+    /// Connects `stream` to `peer` through the bounded resolver, not
+    /// Asio's. Asio's resolver is a bare getaddrinfo() on every op, and
+    /// under rootless Podman aardvark-dns can sit on a lookup for tens of
+    /// seconds: while it forwards some other container's name upstream it
+    /// answers nothing else on the network, peer gateways' names included
+    /// (bounded_resolver.hpp has the measurements). Every forward then
+    /// fails until the stall clears, and `raft_backend` reports "no leader
+    /// answered before the deadline" even when the leader is healthy. The
+    /// Podman conformance run of 2026-11-14 shows that symptom: Terraform's
+    /// first PutItem took 41 s and answered two 500s, which never happened
+    /// under Docker, whose DNS does not stall. The bounded resolver
+    /// hands out the last answer at once and refreshes it in the
+    /// background, and is told when a dial fails so a peer that moved is
+    /// looked up again rather than dialled at its old address.
+    void connect(boost::beast::tcp_stream& stream, const forward_peer& peer) const {
+        const auto service = std::to_string(peer.port);
+        const auto dialled_at = std::chrono::steady_clock::now();
+        const auto addresses =
+            net_resolve::resolve(peer.host, service, SOCK_STREAM, _config.timeout);
+        if (!addresses || addresses->empty()) {
+            throw std::runtime_error("peer gateway " + peer.host + " did not resolve");
+        }
+        std::vector<boost::asio::ip::tcp::endpoint> endpoints;
+        endpoints.reserve(addresses->size());
+        for (const auto& a : *addresses) {
+            boost::asio::ip::tcp::endpoint ep;
+            if (a.len > ep.capacity()) {
+                continue;
+            }
+            std::memcpy(ep.data(), &a.addr, a.len);
+            ep.resize(a.len);
+            endpoints.push_back(ep);
+        }
+        try {
+            stream.connect(endpoints);
+        } catch (...) {
+            net_resolve::mark_unreachable(peer.host, service, SOCK_STREAM, dialled_at);
+            throw;
+        }
+    }
+
     [[nodiscard]] auto exchange_plain(const forward_peer& peer, const std::string& op) const
         -> std::optional<std::string> {
         namespace beast = boost::beast;
         namespace http = beast::http;
         boost::asio::io_context ioc;
-        boost::asio::ip::tcp::resolver resolver(ioc);
         beast::tcp_stream stream(ioc);
         stream.expires_after(_config.timeout);
-        stream.connect(resolver.resolve(peer.host, std::to_string(peer.port)));
+        connect(stream, peer);
         http::write(stream, make_request(peer, op));
         beast::flat_buffer buffer;
         http::response_parser<http::string_body> parser;
@@ -197,15 +243,13 @@ private:
             ctx.load_verify_file(_config.ca_path);
         }
         ctx.set_verify_mode(ssl::verify_peer);
-        boost::asio::ip::tcp::resolver resolver(ioc);
         beast::ssl_stream<beast::tcp_stream> stream(ioc, ctx);
         if (SSL_set_tlsext_host_name(stream.native_handle(), peer.host.c_str()) != 1) {
             return std::nullopt;
         }
         stream.set_verify_callback(ssl::host_name_verification(peer.host));
         beast::get_lowest_layer(stream).expires_after(_config.timeout);
-        beast::get_lowest_layer(stream).connect(
-            resolver.resolve(peer.host, std::to_string(peer.port)));
+        connect(beast::get_lowest_layer(stream), peer);
         stream.handshake(ssl::stream_base::client);
         http::write(stream, make_request(peer, op));
         beast::flat_buffer buffer;
