@@ -370,6 +370,8 @@ jobs:
       - name: Start sccache
         id: sccache
         if: steps.buildcache.outputs.enabled == 'true'
+        env:
+          KYTHIRA_SCCACHE_LOG: ${{ runner.temp }}/sccache-server.log
         run: scripts/oci-build-cache/start-sccache.sh
 
       - name: Configure (Release)
@@ -434,9 +436,18 @@ jobs:
             echo "### sccache — ${{ matrix.compiler }} ${{ matrix.arch_label }}"
             echo '```'
             sccache --show-stats
+            echo
+            scripts/oci-build-cache/sccache_misses.py \
+              "${{ runner.temp }}/sccache-server.log" build/compile_commands.json
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
           sccache --show-stats
+          # Names each miss the statistics above only count. On a commit that
+          # changes no compile input every miss is a key that is not stable
+          # between builds of one tree (disk-backed-build-cache task 11 left
+          # one such clang++-18 unit unnamed).
+          scripts/oci-build-cache/sccache_misses.py \
+            "${{ runner.temp }}/sccache-server.log" build/compile_commands.json
 
       - name: Test
         id: test
