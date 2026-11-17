@@ -87,11 +87,22 @@ def fail(message):
 
 def create(args):
     c = client(args.endpoint)
-    c.create_stream(StreamName=args.stream, ShardCount=args.shards)
+    try:
+        c.create_stream(StreamName=args.stream, ShardCount=args.shards)
+    except c.exceptions.ResourceInUseException as e:
+        # botocore retries CreateStream when an attempt's answer is lost (a
+        # read timeout, a dropped connection), and CreateStream is not
+        # idempotent: if the lost attempt committed, the retry finds the
+        # stream. AWS answers the same way. Accept it, as the AWS CLI step
+        # of the scenario does, but only for a stream of the asked shape.
+        if "already exists" not in str(e):
+            raise
     deadline = time.time() + 60
     while time.time() < deadline:
-        s = c.describe_stream_summary(StreamName=args.stream)
-        if s["StreamDescriptionSummary"]["StreamStatus"] == "ACTIVE":
+        s = c.describe_stream_summary(StreamName=args.stream)["StreamDescriptionSummary"]
+        if s["StreamStatus"] == "ACTIVE":
+            if s["OpenShardCount"] != args.shards:
+                fail(f"{args.stream} exists with {s['OpenShardCount']} shards, not {args.shards}")
             print(json.dumps({"stream": args.stream, "shards": args.shards}))
             return
         time.sleep(1)
