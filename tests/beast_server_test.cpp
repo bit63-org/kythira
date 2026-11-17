@@ -21,6 +21,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstdlib>
@@ -761,6 +762,55 @@ BOOST_AUTO_TEST_CASE(server_reports_where_a_sender_connected_from) {
     BOOST_TEST(host == "127.0.0.1");
     BOOST_TEST(ntohs(a.sin_port) == 7007u);
     server.stop();
+}
+
+// stop() closes the acceptors from the caller's thread while an accept
+// handler on an io thread may be re-arming one. Asio objects are not safe
+// for concurrent use, and the race crashed this suite under TSan (a SEGV in
+// epoll_reactor::start_op reading the descriptor state close() released).
+// A client keeps connecting so accept handlers are completing and re-arming
+// at the moment of each stop(); TSan reports the race, if it comes back, as
+// a data race on the acceptor even in runs where it does not crash.
+BOOST_AUTO_TEST_CASE(server_stop_races_accept_handlers_safely) {
+    boost::asio::io_context ioc;
+    kythira::testing::io_thread_pool io_threads(ioc, 4);
+    for (int round = 0; round < 40; ++round) {
+        const auto port = kythira::testing::free_port();
+        kythira::boost_beast_server<test_transport_types> server(ioc, test_bind_address, port, {},
+                                                                 kythira::noop_metrics{});
+        register_echo_handlers(server);
+        server.start();
+        std::atomic<bool> done{false};
+        std::atomic<int> connects{0};
+        {
+            kythira::testing::joining_thread hammer([&] {
+                sockaddr_in addr{};
+                addr.sin_family = AF_INET;
+                addr.sin_port = htons(port);
+                addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+                while (!done.load()) {
+                    const int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+                    if (fd < 0) {
+                        continue;
+                    }
+                    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
+                    if (::connect(fd, reinterpret_cast<const sockaddr*>(&addr), sizeof addr) == 0) {
+                        connects.fetch_add(1);
+                    }
+                    ::close(fd);
+                }
+            });
+            // Let accepts flow, then stop while they still do.
+            const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+            while (connects.load() < 20 && std::chrono::steady_clock::now() < deadline) {
+                std::this_thread::yield();
+            }
+            BOOST_TEST(connects.load() >= 20);
+            server.stop();
+            done.store(true);
+        }
+        BOOST_TEST(!server.is_running());
+    }
 }
 
 BOOST_AUTO_TEST_SUITE_END()

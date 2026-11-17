@@ -1275,6 +1275,14 @@ private:
     /// an accept fails for want of descriptors or memory. `stop()` cancels
     /// them along with closing the acceptors.
     std::vector<std::shared_ptr<net::steady_timer>> _accept_backoff_timers;
+    /// Serializes every call on the acceptors and backoff timers. Their
+    /// handlers run on any of the io_context's threads while `stop()`
+    /// closes them from the caller's, and an Asio object is not safe for
+    /// concurrent use: an async_accept racing close() reads the
+    /// descriptor state close() just released (a TSan SEGV in
+    /// epoll_reactor::start_op). `_running` is cleared under it, so a
+    /// handler that sees it set may re-arm before the close, never after.
+    std::mutex _accept_mutex;
     std::atomic<bool> _running{false};
     std::mutex _sessions_mutex;
     std::unordered_map<std::size_t, std::function<void()>> _session_closers;
