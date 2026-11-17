@@ -1857,6 +1857,27 @@ unverified completion claim.
         random and could hand the same one out twice; it no longer does.
       Still allowlisted until the segfault is understood or a week passes
       without it. Next survey ~November 16.
+      **Re-surveyed November 16** over the `ci.yml` runs since #730
+      (2026-11-09..16, ~2,500 test jobs): 4 rescues.
+      - Two were a host's control server failing to bind a port below the
+        ephemeral range ("failed to bind 127.0.0.1:18908" and ":11540",
+        both Full suite stdexec). Other tests in the same ctest run bind
+        fixed ports in that range, and `free_port()` only checks a port
+        is free at the moment it picks it. Since #730 the host now says so
+        and exits rather than aborting. `start_all()` now gives all three
+        hosts fresh ports and starts again (up to three times) when one
+        exits on a bind failure.
+      - One was the test process's own SIGSEGV again (address
+        0x200000000, Nov 10, before the crash backtrace of 5da9983
+        landed, so still no stack).
+      - One was a `multi_raft_node` host SIGSEGV inside glibc
+        `gai_suspend` (g++-13 arm64, Nov 14), on a leader whose AppendEntries
+        to the SIGKILLed peer kept failing to connect. That is cpp-httplib's
+        non-blocking getaddrinfo path (`getaddrinfo_with_timeout`, which our
+        overlay patches for the early-return race, #547). Its timeout path
+        already waits out `gai_cancel()` in 0.58, so the cause is not known.
+        The test process uses the same httplib build, so its wild-address
+        crashes may share this cause; unproven. Next survey ~November 23.
     - Fixed the same day, all test-side: `kythira_future_continuation_operations_property_test`
       (11: the clock started after Folly's `delayed()` timer had already
       begun, so a loaded runner read 0 ms), `behavioral_preservation_property_test`

@@ -351,10 +351,60 @@ public:
     [[nodiscard]] auto all_output(std::uint64_t id) -> std::string {
         return _earlier_output[id] + host(id).output();
     }
+    /// Starts all three hosts. If one cannot bind a port, all three get
+    /// fresh ports and start again, up to three times.
+    ///
+    /// `free_port()` checks a port is free and releases it, and many other
+    /// tests in the same ctest run bind fixed ports in the same range. Twice
+    /// in a week (2026-11-10 and -14) a host's control server lost its port
+    /// that way and the case failed "never became ready". All three move
+    /// together because every host is told its peers' ports at start, which
+    /// also makes this safe for a full restart: the state lives in the bucket
+    /// under the node id, not the port. A single-host restart, `start(id)`,
+    /// keeps its ports, since its peers already know them.
     auto start_all() -> void {
-        for (std::uint64_t id = 1; id <= 3; ++id) {
-            start(id);
+        for (int attempt = 1;; ++attempt) {
+            for (std::uint64_t id = 1; id <= 3; ++id) {
+                start(id);
+            }
+            if (attempt == 3 || !lost_a_port()) {
+                return;
+            }
+            BOOST_TEST_MESSAGE("a host could not bind its port; new ports, attempt "
+                               << attempt + 1);
+            stop_all(SIGKILL);
+            for (std::uint64_t id = 1; id <= 3; ++id) {
+                _ports[id] = {free_port(), free_port(), free_port()};
+            }
         }
+    }
+
+    /// Waits, up to 20 s, until every host has printed its "ready:" line
+    /// (all its ports bound) or exited. True if one exited on a bind failure.
+    auto lost_a_port() -> bool {
+        const auto deadline = std::chrono::steady_clock::now() + 20s;
+        while (std::chrono::steady_clock::now() < deadline) {
+            bool settled = true;
+            for (std::uint64_t id = 1; id <= 3; ++id) {
+                auto& h = *_hosts.at(id);
+                const auto out = h.output();
+                if (contains(out, " ready: raft=")) {
+                    continue;
+                }
+                if (h.running() && !h.wait_exit(1ms).has_value()) {
+                    settled = false;
+                    continue;
+                }
+                if (contains(out, "failed to bind")) {
+                    return true;
+                }
+            }
+            if (settled) {
+                return false;
+            }
+            std::this_thread::sleep_for(50ms);
+        }
+        return false;
     }
     auto stop(std::uint64_t id, int signal = SIGTERM) -> int {
         auto it = _hosts.find(id);
