@@ -1874,10 +1874,25 @@ unverified completion claim.
         `gai_suspend` (g++-13 arm64, Nov 14), on a leader whose AppendEntries
         to the SIGKILLed peer kept failing to connect. That is cpp-httplib's
         non-blocking getaddrinfo path (`getaddrinfo_with_timeout`, which our
-        overlay patches for the early-return race, #547). Its timeout path
-        already waits out `gai_cancel()` in 0.58, so the cause is not known.
-        The test process uses the same httplib build, so its wild-address
-        crashes may share this cause; unproven. Next survey ~November 23.
+        overlay patches for the early-return race, #547). **Root-caused
+        November 17: two glibc defects (2.39, still in master).** The
+        resolver worker stores a lookup's result before taking the request
+        mutex, so a `gai_suspend()` that wakes in that window skips
+        unlinking the waiter on its own stack, and the worker later writes
+        through it. And `gai_cancel()` on a still-queued request never sets
+        its status, so cpp-httplib's wait after a cancel never ends. Both
+        are known upstream and unfixed since 2017: glibc BZ #20874 and the
+        libc-alpha "gai_cancel()" thread (links in the overlay README). A local
+        16-thread stress of the pattern crashed or hung in 6 of 9 runs. The
+        cpp-httplib overlay (port-version 2) now drops glibc's async API
+        for its own fixed one (`async_resolver`: a pool of at most 64
+        workers, heap-owned requests, a cancel that marks queued requests
+        cancelled; numeric addresses inline). It is clean under ASan,
+        UBSan and TSan stress, including timeout races and overload. Both
+        glibc bugs reproduce on glibc master too; a glibc patch fixing
+        both was tested locally, and the upstream report is pending. The test
+        process uses the same httplib build, so its wild-address crashes may
+        share this cause; the next survey (~November 23) will tell.
     - Fixed the same day, all test-side: `kythira_future_continuation_operations_property_test`
       (11: the clock started after Folly's `delayed()` timer had already
       begun, so a loaded runner read 0 ms), `behavioral_preservation_property_test`

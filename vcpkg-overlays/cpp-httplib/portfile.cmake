@@ -6,7 +6,7 @@ vcpkg_from_github(
     HEAD_REF master
     PATCHES
         fix-find-brotli.patch
-        0001-wait-for-in-progress-getaddrinfo-a.patch
+        0001-fixed-async-resolver-instead-of-getaddrinfo-a.patch
 )
 
 vcpkg_check_features(OUT_FEATURE_OPTIONS FEATURE_OPTIONS
