@@ -14,6 +14,14 @@
 ///
 /// Moved here from services/hsm/ (virtual-hsm task 6d) when the KMS needed
 /// the same client (kms-compatible-api task 12).
+///
+/// Names resolve through the bounded resolver (bounded_resolver.hpp), never
+/// a bare getaddrinfo: under rootless Podman an aardvark-dns stall can hold
+/// one for 12 to 40 s, longer than any forward's deadline, and a member
+/// that just restarted sits at an address its name does not give yet. A
+/// failed dial tells the resolver, so a stale answer is retired.
+
+#include <raft/bounded_resolver.hpp>
 
 #include <boost/asio/connect.hpp>
 #include <boost/asio/io_context.hpp>
@@ -25,8 +33,12 @@
 
 #include <openssl/ssl.h>
 
+#include <sys/socket.h>
+
+#include <algorithm>
 #include <chrono>
 #include <cstdint>
+#include <cstring>
 #include <exception>
 #include <optional>
 #include <string>
@@ -170,17 +182,18 @@ private:
     template<typename Request>
     [[nodiscard]] auto exchange_plain(const endpoint& e, const Request& req) const
         -> std::optional<std::pair<unsigned, std::string>> {
-        boost::asio::io_context ioc;
-        boost::asio::ip::tcp::resolver resolver(ioc);
-        boost::beast::tcp_stream stream(ioc);
-        stream.expires_after(_config.timeout);
-        boost::beast::error_code ec;
-        const auto endpoints = resolver.resolve(e.host, e.port, ec);
-        if (ec) {
+        const auto dialled_at = std::chrono::steady_clock::now();
+        const auto endpoints = resolve(e);
+        if (!endpoints) {
             return std::nullopt;
         }
-        stream.connect(endpoints, ec);
+        boost::asio::io_context ioc;
+        boost::beast::tcp_stream stream(ioc);
+        stream.expires_after(remaining(dialled_at));
+        boost::beast::error_code ec;
+        stream.connect(*endpoints, ec);
         if (ec) {
+            kythira::net_resolve::mark_unreachable(e.host, e.port, SOCK_STREAM, dialled_at);
             return std::nullopt;
         }
         auto out = send(stream, req);
@@ -206,22 +219,23 @@ private:
             ctx.use_private_key_file(_config.key_path, ssl::context::pem);
         }
         ctx.set_verify_mode(ssl::verify_peer);
+        const auto dialled_at = std::chrono::steady_clock::now();
+        const auto endpoints = resolve(e);
+        if (!endpoints) {
+            return std::nullopt;
+        }
         boost::asio::io_context ioc;
-        boost::asio::ip::tcp::resolver resolver(ioc);
         boost::beast::ssl_stream<boost::beast::tcp_stream> stream(ioc, ctx);
         if (SSL_set_tlsext_host_name(stream.native_handle(), e.host.c_str()) != 1) {
             return std::nullopt;
         }
         stream.set_verify_callback(ssl::host_name_verification(e.host));
         auto& lowest = boost::beast::get_lowest_layer(stream);
-        lowest.expires_after(_config.timeout);
+        lowest.expires_after(remaining(dialled_at));
         boost::beast::error_code ec;
-        const auto endpoints = resolver.resolve(e.host, e.port, ec);
+        lowest.connect(*endpoints, ec);
         if (ec) {
-            return std::nullopt;
-        }
-        lowest.connect(endpoints, ec);
-        if (ec) {
+            kythira::net_resolve::mark_unreachable(e.host, e.port, SOCK_STREAM, dialled_at);
             return std::nullopt;
         }
         (void)stream.handshake(ssl::stream_base::client, ec);
@@ -231,6 +245,41 @@ private:
         auto out = send(stream, req);
         (void)stream.shutdown(ec);
         return out;
+    }
+
+    /// `e`'s addresses within the exchange's timeout, from the bounded
+    /// resolver, or nothing when none came in time.
+    [[nodiscard]] auto resolve(const endpoint& e) const
+        -> std::optional<std::vector<boost::asio::ip::tcp::endpoint>> {
+        auto addresses =
+            kythira::net_resolve::resolve(e.host, e.port, SOCK_STREAM, _config.timeout);
+        if (!addresses || addresses->empty()) {
+            return std::nullopt;
+        }
+        std::vector<boost::asio::ip::tcp::endpoint> out;
+        out.reserve(addresses->size());
+        for (const auto& a : *addresses) {
+            boost::asio::ip::tcp::endpoint ep;
+            if (a.len > ep.capacity()) {
+                continue;
+            }
+            std::memcpy(ep.data(), &a.addr, a.len);
+            ep.resize(a.len);
+            out.push_back(ep);
+        }
+        if (out.empty()) {
+            return std::nullopt;
+        }
+        return out;
+    }
+
+    /// What is left of the exchange's timeout since `start`, the
+    /// resolution included.
+    [[nodiscard]] auto remaining(std::chrono::steady_clock::time_point start) const
+        -> std::chrono::milliseconds {
+        const auto spent = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - start);
+        return std::max(_config.timeout - spent, std::chrono::milliseconds{1});
     }
 
     client_config _config;
