@@ -7964,12 +7964,13 @@ auto node<Types>::start_pre_vote() -> void {
     }
 
     auto node_id = _node_id;
+    const auto round_started = std::chrono::steady_clock::now();
 
     raft_future_collector<tagged_pre_vote_t>::collect_all_with_timeout(std::move(pre_vote_futures),
                                                                        snapshot_election_timeout)
-        .thenValue([this, node_id, snap_c_new = std::move(snap_c_new),
-                    snap_c_old = std::move(snap_c_old), stop_flag = _stop_flag,
-                    scope = _async_scope](
+        .thenValue([this, node_id, prospective_term, round_started,
+                    snap_c_new = std::move(snap_c_new), snap_c_old = std::move(snap_c_old),
+                    stop_flag = _stop_flag, scope = _async_scope](
                        std::vector<kythira::try_default<tagged_pre_vote_t>> results) {
             // The ticket is what makes this guard load-bearing rather than
             // advisory: while it is held, stop()'s drain cannot return, so
@@ -8023,6 +8024,30 @@ auto node<Types>::start_pre_vote() -> void {
             {
                 std::lock_guard<std::mutex> lock(_mutex);
                 if (_state == kythira::server_state::leader) {
+                    return;
+                }
+                // A round is a question about the term it started in. The
+                // collector waits out unreachable peers, so the answer can
+                // come back hundreds of milliseconds later, after this node
+                // already moved to another term or heard from a leader that
+                // was elected meanwhile. Campaigning on it then deposes that
+                // fresh leader: in dynamodb_raft_backend_test two live nodes
+                // of three kept doing this to each other, each finishing a
+                // round begun before the other won, and one group went from
+                // term 4 to 26 in six seconds. The election timer was reset
+                // when the round began, so a node that still has no leader
+                // simply starts a new round.
+                const bool term_moved = _current_term + 1 != prospective_term;
+                const bool heard_leader =
+                    _last_leader_contact.has_value() && *_last_leader_contact >= round_started;
+                if (term_moved || heard_leader) {
+                    _logger.debug(
+                        "Pre-vote round reached quorum but is stale, not starting a "
+                        "real election",
+                        {{"node_id", node_id_to_string(node_id)},
+                         {"prospective_term", std::to_string(prospective_term)},
+                         {"current_term", std::to_string(_current_term)},
+                         {"heard_leader", heard_leader ? "true" : "false"}});
                     return;
                 }
                 _logger.debug("Pre-vote round reached quorum, starting a real election",
