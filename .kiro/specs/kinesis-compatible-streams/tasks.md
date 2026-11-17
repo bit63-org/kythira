@@ -556,3 +556,7 @@ asked.
     each key within a shard, under Docker and rootless Podman. Left: S3
     Tables, KMS, `StorageClass` and `ExpectedBucketOwner`, conformance
     runs.
+  - Progress (November 17, 2026): every delivered object carries the
+    destination's `StorageClass` and `ExpectedBucketOwner`
+    (`aws_s3_client::put_object_with`), dead letters their own
+    configuration's owner. Left: S3 Tables, KMS, conformance runs.

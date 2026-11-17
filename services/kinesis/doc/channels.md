@@ -98,6 +98,13 @@ batch's first record's arrival time), `!{kinesis:stream-name}`,
 copied as written. The key depends only on the batch, so a batch retried
 after a lost checkpoint overwrites the same object.
 
+**Storage class and bucket owner.** Each object is written with the
+destination's `StorageClass` (S3's default when left out) and its
+`ExpectedBucketOwner`, so S3 refuses the write when the bucket has
+changed hands; the batch stays undelivered and is retried on the next
+pass. Dead letters keep the default storage class and are checked against
+the dead-letter configuration's own `ExpectedBucketOwner`.
+
 **Object body.** One record per line: the record's bytes for `JSON` and
 `STRING`, base64 for `BYTE_ARRAY`.
 
@@ -140,9 +147,8 @@ SDK's s3 component logs at start that it does not deliver channels.
   the model documents; an S3 Tables channel names exactly one table, the
   only case the model says AWS supports today.
 - `aws:ResourceTag` conditions are not evaluated for channel ARNs.
-- `StorageClass` and `ExpectedBucketOwner` are kept but not yet passed on
-  the write, and delivered objects are not yet encrypted with the
-  channel's `EncryptionConfiguration`.
+- Delivered objects are not yet encrypted with the channel's
+  `EncryptionConfiguration`.
 - The channel's service execution role is not assumed: the node writes
   with its own credentials.
 

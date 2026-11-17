@@ -19,6 +19,7 @@
 
 #include "config.hpp"
 
+#include <kythira/kinesis/kinesis_channel_delivery.hpp>
 #include <kythira/kinesis/kinesis_tiering.hpp>
 
 #include <memory>
@@ -56,7 +57,7 @@ public:
 
     /// Writes to `bucket`'s root; valid while this object lives.
     [[nodiscard]] virtual auto bucket(const std::string& bucket) const
-        -> std::optional<kinesis::tier_store> = 0;
+        -> std::optional<kinesis::channel_bucket> = 0;
 };
 
 /// S3 in `_channel_s3_region` at `_channel_s3_endpoint`, or nullptr when

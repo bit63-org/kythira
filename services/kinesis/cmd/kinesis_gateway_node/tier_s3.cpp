@@ -95,11 +95,20 @@ public:
     auto operator=(s3_channel_destinations&&) -> s3_channel_destinations& = delete;
 
     [[nodiscard]] auto bucket(const std::string& bucket) const
-        -> std::optional<kinesis::tier_store> override {
+        -> std::optional<kinesis::channel_bucket> override {
         if (bucket.empty()) {
             return std::nullopt;
         }
-        return kinesis::make_tier_store<kythira::aws_s3_client>(_client, bucket, "");
+        kinesis::channel_bucket b;
+        b._put = [client = _client, bucket](const std::string& key, std::string_view bytes,
+                                            const kinesis::channel_put_options& o) {
+            (void)client->put_object_with(
+                bucket, key, bytes,
+                kythira::s3_put_options{.storage_class = o._storage_class,
+                                        .expected_bucket_owner = o._expected_owner,
+                                        .content_type = {}});
+        };
+        return b;
     }
 
 private:
