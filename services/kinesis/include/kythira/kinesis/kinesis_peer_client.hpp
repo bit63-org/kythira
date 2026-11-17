@@ -16,6 +16,8 @@
 /// route, refused, timeout, bad certificate, unparseable response) is
 /// nullopt: the callers treat a peer they cannot reach as unavailable.
 
+#include <raft/bounded_resolver.hpp>
+
 #include <boost/asio/connect.hpp>
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/ip/tcp.hpp>
@@ -28,10 +30,12 @@
 
 #include <chrono>
 #include <cstdint>
+#include <cstring>
 #include <exception>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <sys/socket.h>
 #include <utility>
 #include <vector>
 
@@ -148,20 +152,47 @@ private:
         return peer_response{._status = res.result_int(), ._body = std::move(res.body())};
     }
 
+    /// Connects `stream` to `host:port` through the bounded resolver, not
+    /// Asio's bare getaddrinfo() per call: under rootless Podman
+    /// aardvark-dns can stall every lookup on the network for tens of
+    /// seconds, and each forwarded write would wait it out
+    /// (bounded_resolver.hpp). The resolver answers from its last lookup at
+    /// once, and a failed dial tells it the address went stale.
+    [[nodiscard]] auto connect(boost::beast::tcp_stream& stream, const std::string& host,
+                               const std::string& port) const -> bool {
+        const auto dialled_at = std::chrono::steady_clock::now();
+        const auto addresses = net_resolve::resolve(host, port, SOCK_STREAM, _config._timeout);
+        if (!addresses || addresses->empty()) {
+            return false;
+        }
+        std::vector<boost::asio::ip::tcp::endpoint> endpoints;
+        endpoints.reserve(addresses->size());
+        for (const auto& a : *addresses) {
+            boost::asio::ip::tcp::endpoint ep;
+            if (a.len > ep.capacity()) {
+                continue;
+            }
+            std::memcpy(ep.data(), &a.addr, a.len);
+            ep.resize(a.len);
+            endpoints.push_back(ep);
+        }
+        boost::beast::error_code ec;
+        stream.connect(endpoints, ec);
+        if (ec) {
+            net_resolve::mark_unreachable(host, port, SOCK_STREAM, dialled_at);
+            return false;
+        }
+        return true;
+    }
+
     template<typename Request>
     [[nodiscard]] auto exchange_plain(const std::string& host, const std::string& port,
                                       const Request& req) const -> std::optional<peer_response> {
         boost::asio::io_context ioc;
-        boost::asio::ip::tcp::resolver resolver(ioc);
         boost::beast::tcp_stream stream(ioc);
         stream.expires_after(_config._timeout);
         boost::beast::error_code ec;
-        const auto endpoints = resolver.resolve(host, port, ec);
-        if (ec) {
-            return std::nullopt;
-        }
-        stream.connect(endpoints, ec);
-        if (ec) {
+        if (!connect(stream, host, port)) {
             return std::nullopt;
         }
         auto out = send(stream, req);
@@ -183,7 +214,6 @@ private:
         }
         ctx.set_verify_mode(ssl::verify_peer);
         boost::asio::io_context ioc;
-        boost::asio::ip::tcp::resolver resolver(ioc);
         boost::beast::ssl_stream<boost::beast::tcp_stream> stream(ioc, ctx);
         // SNI and the name the certificate must carry (an IP literal is
         // checked against its IP SANs).
@@ -194,12 +224,7 @@ private:
         auto& lowest = boost::beast::get_lowest_layer(stream);
         lowest.expires_after(_config._timeout);
         boost::beast::error_code ec;
-        const auto endpoints = resolver.resolve(host, port, ec);
-        if (ec) {
-            return std::nullopt;
-        }
-        lowest.connect(endpoints, ec);
-        if (ec) {
+        if (!connect(lowest, host, port)) {
             return std::nullopt;
         }
         (void)stream.handshake(ssl::stream_base::client, ec);
