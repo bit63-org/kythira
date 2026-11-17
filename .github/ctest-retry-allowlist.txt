@@ -36,7 +36,7 @@ multi_raft_driver_agreement_test                   1/54
 raft_batched_durable_writes_test                   2 jobs, no leader within 4 s
 coap_io_wait_mode_test                             2 jobs
 ca_cluster_node_rpc_tls_test                       2 jobs
-multi_raft_node_s3_process_test                    no lost write; 4 rescues in 99 runs after 11-05 fix, test-process segfault open; see TODO.md
+multi_raft_node_s3_process_test                    no lost write; 11-09..16: 4 rescues/~2500 jobs (2 port binds, fixed; 2 segfaults open); see TODO.md
 
 # Removed 2026-11-01, root-caused and fixed (see the TODO.md entry
 # "Re-measured November 1"): integration_test, simulator_property_test,
