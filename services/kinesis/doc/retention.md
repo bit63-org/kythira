@@ -36,7 +36,7 @@ next pass.
 
 ## Tiering
 
-With `KINESIS_TIER_AFTER_HOURS` and `KINESIS_TIER_S3_BUCKET` set, the leader
+With `KINESIS_TIER_AFTER_HOURS` and `KINESIS_TIER_BUCKET` set, the leader
 also uploads each sealed segment whose last record is older than the tier
 age, then proposes `tier_segment_command`. When it applies, every replica
 marks the segment tiered in the shard's state (which the snapshot carries)
@@ -60,11 +60,27 @@ five seconds.
   `InternalFailure`; it is never skipped.
 - **Trimming a tiered segment** deletes its object after the trim commits.
 
-The daemon tiers to S3 or any S3-compatible store (`KINESIS_TIER_S3_ENDPOINT`)
-through core's `aws_s3_client`, when the build has the AWS SDK's s3
-component. `kinesis_tiering.hpp`'s `tier_store` is any `key_object_store`
-with the bucket bound. Azure Blob, GCS, OCI and OSS need only a
-`make_tier_store` call in the daemon and their settings.
+### Where segments go
+
+`KINESIS_TIER_PROVIDER` picks the object store, through core's client for
+it (`kinesis_tiering.hpp`'s `tier_store` is any `key_object_store` with the
+bucket bound). The names are the ones `raft_object_backup --provider`
+takes, and each provider reads its credentials where that tool does:
+
+| Provider | Bucket | Endpoint and credentials | In the build when |
+|---|---|---|---|
+| `s3` (default) | `KINESIS_TIER_BUCKET` | `KINESIS_TIER_S3_REGION` (default `KINESIS_REGION`); `KINESIS_TIER_ENDPOINT` for an S3-compatible store; the AWS SDK's default chain | the AWS SDK's s3 component is found |
+| `azure-blob` | the container | `KINESIS_TIER_AZURE_ACCOUNT` (default `KYTHIRA_AZURE_STORAGE_ACCOUNT`), or `KINESIS_TIER_ENDPOINT` naming the whole origin (Azurite); Azure's default credential chain | `CONFIG_AZURE_BLOB_PERSISTENCE=y` and the Azure SDK |
+| `gcs` | `KINESIS_TIER_BUCKET` | `GOOGLE_CLOUD_PROJECT`; `KINESIS_TIER_ENDPOINT` for an emulator; Application Default Credentials | `CONFIG_GCP_STORAGE_PERSISTENCE=y` and vcpkg's `gcp` feature |
+| `oci-objectstorage` | `KINESIS_TIER_BUCKET` | `KYTHIRA_OCI_*` (region, credentials, optional namespace) | `CONFIG_OCI_OBJECT_PERSISTENCE=y` |
+| `oss` | `KINESIS_TIER_BUCKET` | `KYTHIRA_ALIBABA_*` | `CONFIG_ALIBABA_OSS_PERSISTENCE=y` |
+
+`KINESIS_TIER_PREFIX` puts every key under a prefix. `KINESIS_TIER_S3_BUCKET`,
+`_S3_PREFIX` and `_S3_ENDPOINT`, the names from when S3 was the only
+provider, still work; setting one beside its new name with a different
+value is refused. So is a provider this build lacks (the message says what
+would enable it), a setting that belongs to another provider, and an
+unknown provider name, all at startup, before the node serves.
 
 ## When a leader dies mid-pass
 

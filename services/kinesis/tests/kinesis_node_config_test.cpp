@@ -139,3 +139,139 @@ BOOST_AUTO_TEST_CASE(a_composite_node_without_a_data_directory_is_refused) {
                                      std::string_view::npos;
                           });
 }
+
+// The tier store's settings (.kiro/specs/kinesis-compatible-streams/ task
+// 10): a provider per KINESIS_TIER_PROVIDER, the provider-neutral names
+// beside the older S3 ones, and every refusal before anything starts.
+namespace {
+
+auto tier_vars() -> std::map<std::string, std::string> {
+    return {
+        {"KYTHIRA_NODE_ID", "1"},           {"KYTHIRA_PEERS", "1=http://127.0.0.1:7001"},
+        {"KYTHIRA_RAFT_BIND", "127.0.0.1"}, {"KINESIS_ALLOW_PLAINTEXT", "true"},
+        {"KINESIS_STATIC_KEYS_FILE", "/k"}, {"KINESIS_DATA_DIR", "/d"},
+        {"KINESIS_TIER_AFTER_HOURS", "1"},
+    };
+}
+
+auto refused_naming(std::map<std::string, std::string> vars, std::string_view text) -> bool {
+    try {
+        (void)kn::from_env(lookup(std::move(vars)));
+    } catch (const std::invalid_argument& e) {
+        if (std::string_view(e.what()).find(text) != std::string_view::npos) {
+            return true;
+        }
+        BOOST_TEST_MESSAGE("refused, but with: " << e.what());
+        return false;
+    }
+    return false;
+}
+
+}  // namespace
+
+BOOST_AUTO_TEST_CASE(tiering_needs_a_bucket_and_names_the_provider_neutral_variable) {
+    BOOST_TEST(refused_naming(tier_vars(), "needs KINESIS_TIER_BUCKET"));
+}
+
+BOOST_AUTO_TEST_CASE(an_unknown_tier_provider_is_refused_with_the_known_ones) {
+    auto vars = tier_vars();
+    vars["KINESIS_TIER_PROVIDER"] = "swift";
+    vars["KINESIS_TIER_BUCKET"] = "b";
+    BOOST_TEST(refused_naming(vars, "s3, azure-blob, gcs, oci-objectstorage, oss"));
+    // Even with tiering off: a typo should not wait until someone turns it on.
+    vars.erase("KINESIS_TIER_BUCKET");
+    vars.erase("KINESIS_TIER_AFTER_HOURS");
+    BOOST_TEST(refused_naming(vars, "KINESIS_TIER_PROVIDER"));
+}
+
+BOOST_AUTO_TEST_CASE(a_provider_missing_from_the_build_is_refused_naming_what_enables_it) {
+    for (const char* provider : {"s3", "azure-blob", "gcs", "oci-objectstorage", "oss"}) {
+        const auto support = kn::tier_provider_support(provider);
+        BOOST_TEST_CONTEXT(provider) {
+            if (support._available) {
+                BOOST_TEST(support._needs.empty());
+                continue;
+            }
+            BOOST_TEST(!support._needs.empty());
+            auto vars = tier_vars();
+            vars["KINESIS_TIER_PROVIDER"] = provider;
+            vars["KINESIS_TIER_BUCKET"] = "b";
+            vars["KINESIS_TIER_AZURE_ACCOUNT"] = "acct";
+            BOOST_TEST(refused_naming(vars, std::string(support._needs)));
+        }
+    }
+    BOOST_TEST(!kn::tier_provider_support("swift")._available);
+    BOOST_TEST(kn::tier_provider_support("swift")._needs.empty());
+}
+
+BOOST_AUTO_TEST_CASE(the_older_s3_spellings_still_work_and_may_not_disagree) {
+    if (!kn::tier_provider_support("s3")._available) {
+        BOOST_TEST_MESSAGE("no S3 tier in this build; the spellings are checked where there is");
+        return;
+    }
+    auto vars = tier_vars();
+    vars["KINESIS_TIER_S3_BUCKET"] = "segments";
+    vars["KINESIS_TIER_S3_PREFIX"] = "k/";
+    vars["KINESIS_TIER_S3_ENDPOINT"] = "http://mock:9000";
+    const auto o = kn::from_env(lookup(vars));
+    BOOST_TEST(o._tier_provider == "s3");
+    BOOST_TEST(o._tier_bucket == "segments");
+    BOOST_TEST(o._tier_prefix == "k/");
+    BOOST_TEST(o._tier_endpoint == "http://mock:9000");
+    // The same value under both names is fine; different values are not.
+    vars["KINESIS_TIER_BUCKET"] = "segments";
+    BOOST_TEST(kn::from_env(lookup(vars))._tier_bucket == "segments");
+    vars["KINESIS_TIER_BUCKET"] = "other";
+    BOOST_TEST(refused_naming(vars, "KINESIS_TIER_BUCKET and KINESIS_TIER_S3_BUCKET"));
+}
+
+BOOST_AUTO_TEST_CASE(provider_specific_settings_are_refused_on_the_wrong_provider) {
+    for (const char* provider : {"azure-blob", "gcs", "oci-objectstorage", "oss"}) {
+        if (!kn::tier_provider_support(provider)._available) {
+            continue;
+        }
+        BOOST_TEST_CONTEXT(provider) {
+            auto vars = tier_vars();
+            vars["KINESIS_TIER_PROVIDER"] = provider;
+            vars["KINESIS_TIER_BUCKET"] = "b";
+            vars["KINESIS_TIER_AZURE_ACCOUNT"] = "acct";
+            vars["KINESIS_TIER_S3_REGION"] = "us-west-2";
+            BOOST_TEST(refused_naming(vars, "applies only to KINESIS_TIER_PROVIDER=s3"));
+        }
+    }
+    for (const char* provider : {"oci-objectstorage", "oss"}) {
+        if (!kn::tier_provider_support(provider)._available) {
+            continue;
+        }
+        BOOST_TEST_CONTEXT(provider) {
+            auto vars = tier_vars();
+            vars["KINESIS_TIER_PROVIDER"] = provider;
+            vars["KINESIS_TIER_BUCKET"] = "b";
+            vars["KINESIS_TIER_ENDPOINT"] = "https://elsewhere";
+            BOOST_TEST(refused_naming(vars, "does not apply to"));
+        }
+    }
+}
+
+BOOST_AUTO_TEST_CASE(azure_needs_its_storage_account) {
+    if (!kn::tier_provider_support("azure-blob")._available) {
+        BOOST_TEST_MESSAGE("no Azure tier in this build");
+        return;
+    }
+    auto vars = tier_vars();
+    vars["KINESIS_TIER_PROVIDER"] = "azure-blob";
+    vars["KINESIS_TIER_BUCKET"] = "container";
+    BOOST_TEST(refused_naming(vars, "KINESIS_TIER_AZURE_ACCOUNT"));
+    // The account the rest of Kythira reads serves as the default ...
+    vars["KYTHIRA_AZURE_STORAGE_ACCOUNT"] = "shared";
+    BOOST_TEST(kn::from_env(lookup(vars))._tier_azure_account == "shared");
+    // ... the module's own wins ...
+    vars["KINESIS_TIER_AZURE_ACCOUNT"] = "mine";
+    BOOST_TEST(kn::from_env(lookup(vars))._tier_azure_account == "mine");
+    // ... and an endpoint naming the whole origin (Azurite) needs neither.
+    vars.erase("KINESIS_TIER_AZURE_ACCOUNT");
+    vars.erase("KYTHIRA_AZURE_STORAGE_ACCOUNT");
+    vars["KINESIS_TIER_ENDPOINT"] = "http://azurite:10000/devstoreaccount1";
+    BOOST_TEST(kn::from_env(lookup(vars))._tier_endpoint ==
+               "http://azurite:10000/devstoreaccount1");
+}

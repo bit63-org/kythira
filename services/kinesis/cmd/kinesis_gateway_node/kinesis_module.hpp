@@ -26,7 +26,7 @@
 #ifdef KYTHIRA_KINESIS_GATEWAY_IAM
 #include "iam_auth.hpp"
 #endif
-#include "tier_s3.hpp"
+#include "tier.hpp"
 
 #include <kythira/kinesis/kinesis_actions.hpp>
 #include <kythira/kinesis/kinesis_compat_profile.hpp>
@@ -264,12 +264,10 @@ public:
         }
         _transport = kinesis::make_segment_transport(*_peers, _opt._forward_secret);
         // Tiering (task 10): sealed segments past KINESIS_TIER_AFTER_HOURS go
-        // to S3, and a read that needs one fetches it back.
-#ifdef KYTHIRA_KINESIS_HAS_S3_TIER
+        // to the object store, and a read that needs one fetches it back.
         if (!_opt._tier_bucket.empty()) {
-            _tier_owner = make_s3_tier(_opt);
+            _tier_owner = make_object_tier(_opt);
         }
-#endif
         _tier = _tier_owner ? _tier_owner->store() : kinesis::tier_store{};
         // Restore cannot finish without the active segment a snapshot names:
         // try every peer, then the tier, and fail the restore (Raft retries
@@ -644,7 +642,7 @@ private:
     std::unique_ptr<kinesis::peer_client> _peers;
     std::vector<std::string> _other_gateways;
     kythira::record_segment_store::fetch_transport _transport;
-    std::unique_ptr<s3_tier> _tier_owner;
+    std::unique_ptr<object_tier> _tier_owner;
     kinesis::tier_store _tier;
     kinesis::fetched_segments _fetched;
     kinesis::segment_fetcher _fetch;

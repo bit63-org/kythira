@@ -22,8 +22,8 @@ if(ENABLE_COVERAGE OR NOT KYTHIRA_FUTURE_BACKEND_AVAILABLE OR NOT folly_FOUND
 endif()
 
 # What the daemon and the module share: the configuration, IAM's replica
-# and the S3 tier, with the compile definitions saying which of the last
-# two are in, so both see one kinesis_module.hpp.
+# and the tier stores, with the compile definitions saying which of them
+# are in, so both see one kinesis_module.hpp.
 add_library(kythira_kinesis_node_common STATIC kinesis_gateway_node/config.cpp)
 target_include_directories(kythira_kinesis_node_common PUBLIC
     "${CMAKE_CURRENT_SOURCE_DIR}/kinesis_gateway_node")
@@ -73,27 +73,65 @@ endif()
 set_tests_properties(kinesis_gateway_node_iam_switch PROPERTIES
     LABELS "unit;kinesis;kinesis-module" TIMEOUT 30)
 
-# Tiering to S3 (task 10): only with the AWS SDK's s3 component, compiled in
-# tier_s3.cpp alone so no other unit parses an SDK header. Without it the
-# daemon refuses KINESIS_TIER_S3_BUCKET at startup and keeps every segment
+# Tiering (task 10), tier.hpp: tier.cpp picks the provider named by
+# KINESIS_TIER_PROVIDER from those compiled in, and the clients sit in
+# tier_s3.cpp and tier_cloud.cpp alone so no other unit parses an SDK
+# header. A provider is in when its dependency was found and, for all but
+# S3, its persistence Kconfig gate is on, the conditions ca_cluster_node's
+# --oidc-publish-url and raft_object_backup use. S3 keeps its original
+# condition, the AWS SDK's s3 component, so builds that tiered before
+# still do. The daemon refuses KINESIS_TIER_BUCKET at startup for a
+# provider it lacks, naming what would enable it, and keeps every segment
 # on disk.
+target_sources(kythira_kinesis_node_common PRIVATE kinesis_gateway_node/tier.cpp)
 if(AWSSDK_FOUND)
     find_package(AWSSDK QUIET COMPONENTS core s3)
 endif()
-set(_KINESIS_S3_TIER FALSE)
+set(_KINESIS_TIER_PROVIDERS "")
 if(AWSSDK_FOUND)
     list(FIND AWSSDK_LINK_LIBRARIES aws-cpp-sdk-s3 _KINESIS_S3_LIB)
     if(NOT _KINESIS_S3_LIB EQUAL -1)
-        set(_KINESIS_S3_TIER TRUE)
+        target_sources(kythira_kinesis_node_common PRIVATE kinesis_gateway_node/tier_s3.cpp)
+        target_link_libraries(kythira_kinesis_node_common PUBLIC ${AWSSDK_LINK_LIBRARIES})
+        target_compile_definitions(kythira_kinesis_node_common PUBLIC KYTHIRA_KINESIS_TIER_S3)
+        list(APPEND _KINESIS_TIER_PROVIDERS s3)
     endif()
 endif()
-if(_KINESIS_S3_TIER)
-    target_sources(kythira_kinesis_node_common PRIVATE kinesis_gateway_node/tier_s3.cpp)
-    target_link_libraries(kythira_kinesis_node_common PUBLIC ${AWSSDK_LINK_LIBRARIES})
-    target_compile_definitions(kythira_kinesis_node_common PUBLIC KYTHIRA_KINESIS_HAS_S3_TIER)
-    message(STATUS "kinesis_gateway_node: S3 tiering enabled")
+set(_KINESIS_TIER_CLOUD FALSE)
+if(azure-core-cpp_FOUND AND azure-identity-cpp_FOUND AND _KYTHIRA_GATE_AZURE_BLOB_PERSISTENCE)
+    target_compile_definitions(kythira_kinesis_node_common PUBLIC
+        KYTHIRA_KINESIS_TIER_AZURE KYTHIRA_HAS_AZURE_SDK)
+    target_link_libraries(kythira_kinesis_node_common PUBLIC
+        Azure::azure-core Azure::azure-identity)
+    list(APPEND _KINESIS_TIER_PROVIDERS azure-blob)
+    set(_KINESIS_TIER_CLOUD TRUE)
+endif()
+if(TARGET google-cloud-cpp::storage AND _KYTHIRA_GATE_GCP_STORAGE_PERSISTENCE)
+    target_compile_definitions(kythira_kinesis_node_common PUBLIC
+        KYTHIRA_KINESIS_TIER_GCS KYTHIRA_HAS_GCP_STORAGE)
+    target_link_libraries(kythira_kinesis_node_common PUBLIC google-cloud-cpp::storage)
+    list(APPEND _KINESIS_TIER_PROVIDERS gcs)
+    set(_KINESIS_TIER_CLOUD TRUE)
+endif()
+if(KYTHIRA_OCI_SHARED AND _KYTHIRA_GATE_OCI_OBJECT_PERSISTENCE)
+    target_compile_definitions(kythira_kinesis_node_common PUBLIC KYTHIRA_KINESIS_TIER_OCI)
+    list(APPEND _KINESIS_TIER_PROVIDERS oci-objectstorage)
+    set(_KINESIS_TIER_CLOUD TRUE)
+endif()
+if(KYTHIRA_ALIBABA_SHARED AND _KYTHIRA_GATE_ALIBABA_OSS_PERSISTENCE)
+    target_compile_definitions(kythira_kinesis_node_common PUBLIC KYTHIRA_KINESIS_TIER_OSS)
+    list(APPEND _KINESIS_TIER_PROVIDERS oss)
+    set(_KINESIS_TIER_CLOUD TRUE)
+endif()
+if(_KINESIS_TIER_CLOUD)
+    target_sources(kythira_kinesis_node_common PRIVATE kinesis_gateway_node/tier_cloud.cpp)
+    target_link_libraries(kythira_kinesis_node_common PUBLIC httplib::httplib)
+endif()
+if(_KINESIS_TIER_PROVIDERS)
+    list(JOIN _KINESIS_TIER_PROVIDERS ", " _KINESIS_TIER_TEXT)
+    message(STATUS "kinesis_gateway_node: tiering to ${_KINESIS_TIER_TEXT}")
 else()
-    message(STATUS "kinesis_gateway_node: S3 tiering unavailable (no AWS SDK s3 component)")
+    message(STATUS "kinesis_gateway_node: tiering unavailable (no object store client in this build)")
 endif()
 
 # The Kinesis module for kythira_node (.kiro/specs/service-colocation/

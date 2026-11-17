@@ -211,6 +211,69 @@ void read_raft_side(const reader& r, node_options& o) {
     o._log_level = it->second;
 }
 
+// The tier store's settings (task 10). KINESIS_TIER_BUCKET, _PREFIX and
+// _ENDPOINT were KINESIS_TIER_S3_* while S3 was the only provider; those
+// spellings still work, and setting both to different values is refused
+// rather than one silently winning.
+[[nodiscard]] auto tier_setting(const reader& r, const char* name, const char* old_name)
+    -> std::string {
+    const auto now = r.opt(name, "");
+    const auto before = r.opt(old_name, "");
+    if (!now.empty() && !before.empty() && now != before) {
+        fail(std::string(name) + " and " + old_name + " are both set and differ; set one");
+    }
+    return now.empty() ? before : now;
+}
+
+void read_tier_store(const reader& r, node_options& o) {
+    o._tier_provider = r.opt("KINESIS_TIER_PROVIDER", "s3");
+    o._tier_bucket = tier_setting(r, "KINESIS_TIER_BUCKET", "KINESIS_TIER_S3_BUCKET");
+    o._tier_prefix = tier_setting(r, "KINESIS_TIER_PREFIX", "KINESIS_TIER_S3_PREFIX");
+    o._tier_endpoint = tier_setting(r, "KINESIS_TIER_ENDPOINT", "KINESIS_TIER_S3_ENDPOINT");
+    o._tier_region = r.opt("KINESIS_TIER_S3_REGION", o._region.c_str());
+    const auto& provider = o._tier_provider;
+    const auto support = tier_provider_support(provider);
+    if (!support._available && support._needs.empty()) {
+        fail("KINESIS_TIER_PROVIDER: '" + provider +
+             "' is not one of s3, azure-blob, gcs, oci-objectstorage, oss");
+    }
+    if (o._tier_after_ms > 0 && o._tier_bucket.empty()) {
+        fail("KINESIS_TIER_AFTER_HOURS (or _MS) needs KINESIS_TIER_BUCKET");
+    }
+    if (o._tier_bucket.empty()) {
+        return;
+    }
+    if (!support._available) {
+        fail("KINESIS_TIER_BUCKET is set for provider " + provider +
+             ", but this kinesis_gateway_node was built without it (needs " +
+             std::string(support._needs) + ")");
+    }
+    if (provider != "s3" && r.set("KINESIS_TIER_S3_REGION")) {
+        fail("KINESIS_TIER_S3_REGION applies only to KINESIS_TIER_PROVIDER=s3");
+    }
+    // OCI and OSS take their endpoint with their credentials
+    // (KYTHIRA_OCI_*, KYTHIRA_ALIBABA_*), as everywhere else in Kythira.
+    if ((provider == "oci-objectstorage" || provider == "oss") && !o._tier_endpoint.empty()) {
+        fail("KINESIS_TIER_ENDPOINT does not apply to " + provider +
+             "; its endpoint comes from its own settings");
+    }
+    if (provider == "azure-blob") {
+        o._tier_azure_account = r.opt("KINESIS_TIER_AZURE_ACCOUNT", "");
+        if (o._tier_azure_account.empty()) {
+            o._tier_azure_account = r.opt("KYTHIRA_AZURE_STORAGE_ACCOUNT", "");
+        }
+        if (o._tier_azure_account.empty() && o._tier_endpoint.empty()) {
+            fail(
+                "KINESIS_TIER_PROVIDER=azure-blob needs KINESIS_TIER_AZURE_ACCOUNT (or "
+                "KYTHIRA_AZURE_STORAGE_ACCOUNT), the storage account; KINESIS_TIER_BUCKET "
+                "names the container");
+        }
+    }
+    if (provider == "gcs") {
+        o._tier_gcs_project = r.opt("GOOGLE_CLOUD_PROJECT", "");
+    }
+}
+
 void read_kinesis_side(const reader& r, node_options& o) {
     const auto listen = r.opt("KINESIS_LISTEN", "0.0.0.0:4567");
     const auto hp = kinesis::split_host_port(listen);
@@ -351,28 +414,48 @@ void read_kinesis_side(const reader& r, node_options& o) {
         }
         o._tier_after_ms = static_cast<std::int64_t>(ms);
     }
-    o._tier_bucket = r.opt("KINESIS_TIER_S3_BUCKET", "");
-    o._tier_prefix = r.opt("KINESIS_TIER_S3_PREFIX", "");
-    o._tier_region = r.opt("KINESIS_TIER_S3_REGION", o._region.c_str());
-    o._tier_endpoint = r.opt("KINESIS_TIER_S3_ENDPOINT", "");
-    if (o._tier_after_ms > 0 && o._tier_bucket.empty()) {
-        fail("KINESIS_TIER_AFTER_HOURS (or _MS) needs KINESIS_TIER_S3_BUCKET");
-    }
-    if (!o._tier_bucket.empty() && !s3_tier_available()) {
-        fail(
-            "KINESIS_TIER_S3_BUCKET is set, but this kinesis_gateway_node was built without "
-            "the AWS SDK's s3 component");
-    }
+    read_tier_store(r, o);
 }
 
 }  // namespace
 
-auto s3_tier_available() -> bool {
-#ifdef KYTHIRA_KINESIS_HAS_S3_TIER
-    return true;
+auto tier_provider_support(std::string_view provider) -> tier_support {
+    if (provider == "s3") {
+#ifdef KYTHIRA_KINESIS_TIER_S3
+        return {true, {}};
 #else
-    return false;
+        return {false, "the AWS SDK's s3 component"};
 #endif
+    }
+    if (provider == "azure-blob") {
+#ifdef KYTHIRA_KINESIS_TIER_AZURE
+        return {true, {}};
+#else
+        return {false, "CONFIG_AZURE_BLOB_PERSISTENCE=y and the Azure SDK"};
+#endif
+    }
+    if (provider == "gcs") {
+#ifdef KYTHIRA_KINESIS_TIER_GCS
+        return {true, {}};
+#else
+        return {false, "CONFIG_GCP_STORAGE_PERSISTENCE=y and vcpkg's `gcp` feature"};
+#endif
+    }
+    if (provider == "oci-objectstorage") {
+#ifdef KYTHIRA_KINESIS_TIER_OCI
+        return {true, {}};
+#else
+        return {false, "CONFIG_OCI_OBJECT_PERSISTENCE=y"};
+#endif
+    }
+    if (provider == "oss") {
+#ifdef KYTHIRA_KINESIS_TIER_OSS
+        return {true, {}};
+#else
+        return {false, "CONFIG_ALIBABA_OSS_PERSISTENCE=y"};
+#endif
+    }
+    return {false, {}};
 }
 
 auto is_loopback_address(const std::string& address) -> bool {
@@ -568,12 +651,19 @@ auto usage() -> std::string {
            "  KINESIS_DISK_FLOOR_BYTES         refuse writes below this free space (1073741824;\n"
            "                                   0 = off)\n"
            "  KINESIS_MAINTENANCE_INTERVAL_MS  retention and tiering pass interval (60000)\n"
-           "  KINESIS_TIER_AFTER_HOURS         tier segments this old to S3 (0 = never)\n"
+           "  KINESIS_TIER_AFTER_HOURS         tier segments this old (0 = never)\n"
            "  KINESIS_TIER_AFTER_MS            the same in milliseconds (>= 1000); wins when set\n"
-           "  KINESIS_TIER_S3_BUCKET           bucket for tiered segments\n"
-           "  KINESIS_TIER_S3_PREFIX           key prefix in the bucket\n"
-           "  KINESIS_TIER_S3_REGION           bucket region (default: KINESIS_REGION)\n"
-           "  KINESIS_TIER_S3_ENDPOINT         S3-compatible endpoint (default: AWS)\n";
+           "  KINESIS_TIER_PROVIDER            s3 (default), azure-blob, gcs, oci-objectstorage, "
+           "oss\n"
+           "  KINESIS_TIER_BUCKET              bucket (Azure: container) for tiered segments\n"
+           "  KINESIS_TIER_PREFIX              key prefix in the bucket\n"
+           "  KINESIS_TIER_ENDPOINT            S3-compatible endpoint, or Azure/GCS endpoint "
+           "override\n"
+           "  KINESIS_TIER_S3_REGION           S3 bucket region (default: KINESIS_REGION)\n"
+           "  KINESIS_TIER_AZURE_ACCOUNT       Azure storage account (default:\n"
+           "                                   KYTHIRA_AZURE_STORAGE_ACCOUNT)\n"
+           "  (KINESIS_TIER_S3_BUCKET, _PREFIX and _ENDPOINT are accepted for the three above;\n"
+           "   GCS reads GOOGLE_CLOUD_PROJECT, OCI KYTHIRA_OCI_*, OSS KYTHIRA_ALIBABA_*)\n";
 }
 
 }  // namespace kythira::kinesis_node
