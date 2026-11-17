@@ -9,6 +9,7 @@
 #include <raft/json_serializer.hpp>
 #include "ca_test_fixture.hpp"
 #include "recording_metrics.hpp"
+#include "test_ports.hpp"
 #include "tls_reload_probe.hpp"
 
 #include <httplib.h>
@@ -88,7 +89,7 @@ BOOST_AUTO_TEST_CASE(invalid_reload_leaves_previous_material_serving,
                      *boost::unit_test::timeout(30)) {
     ca_test_fixture fixture;
     typename test_types::metrics_type metrics;
-    constexpr std::uint16_t port = 18601;
+    const std::uint16_t port = kythira::testing::free_port();
     const auto& files = fixture.bootstrap_client("reload-invalid", {"localhost"}, {"127.0.0.1"});
     auto ca_cert_path = write_ca_file(fixture.root_certificate_pem());
     auto server = make_server(files, ca_cert_path, port, metrics);
@@ -126,7 +127,7 @@ BOOST_AUTO_TEST_CASE(invalid_reload_leaves_previous_material_serving,
 BOOST_AUTO_TEST_CASE(mismatched_key_reload_keeps_previous_pair, *boost::unit_test::timeout(30)) {
     ca_test_fixture fixture;
     typename test_types::metrics_type metrics;
-    constexpr std::uint16_t port = 18604;
+    const std::uint16_t port = kythira::testing::free_port();
     const auto& files = fixture.bootstrap_client("reload-mismatch", {"localhost"}, {"127.0.0.1"});
     auto ca_cert_path = write_ca_file(fixture.root_certificate_pem());
     auto server = make_server(files, ca_cert_path, port, metrics);
@@ -155,7 +156,7 @@ BOOST_AUTO_TEST_CASE(reload_presents_rotated_certificate_to_new_handshakes,
                      *boost::unit_test::timeout(30)) {
     ca_test_fixture fixture;
     typename test_types::metrics_type metrics;
-    constexpr std::uint16_t port = 18602;
+    const std::uint16_t port = kythira::testing::free_port();
     const auto& files = fixture.bootstrap_client("reload-ok", {"localhost"}, {"127.0.0.1"});
     auto ca_cert_path = write_ca_file(fixture.root_certificate_pem());
     auto server = make_server(files, ca_cert_path, port, metrics);
@@ -196,7 +197,7 @@ BOOST_AUTO_TEST_CASE(reload_presents_rotated_certificate_to_new_handshakes,
 BOOST_AUTO_TEST_CASE(established_connection_survives_reload, *boost::unit_test::timeout(30)) {
     ca_test_fixture fixture;
     typename test_types::metrics_type metrics;
-    constexpr std::uint16_t port = 18605;
+    const std::uint16_t port = kythira::testing::free_port();
     const auto& files = fixture.bootstrap_client("reload-held", {"localhost"}, {"127.0.0.1"});
     auto ca_cert_path = write_ca_file(fixture.root_certificate_pem());
     auto server = make_server(files, ca_cert_path, port, metrics);
@@ -248,7 +249,7 @@ auto wait_for_presented(std::uint16_t port, const std::string& expected,
 BOOST_AUTO_TEST_CASE(auto_reload_picks_up_file_change, *boost::unit_test::timeout(30)) {
     ca_test_fixture fixture;
     typename test_types::metrics_type metrics;
-    constexpr std::uint16_t port = 18603;
+    const std::uint16_t port = kythira::testing::free_port();
     const auto& files = fixture.bootstrap_client("auto-reload", {"localhost"}, {"127.0.0.1"});
     auto ca_cert_path = write_ca_file(fixture.root_certificate_pem());
     auto server = make_server(files, ca_cert_path, port, metrics);
@@ -277,7 +278,7 @@ BOOST_AUTO_TEST_CASE(auto_reload_picks_up_file_change, *boost::unit_test::timeou
 BOOST_AUTO_TEST_CASE(failed_auto_reload_is_reported_via_metrics, *boost::unit_test::timeout(30)) {
     ca_test_fixture fixture;
     typename test_types::metrics_type metrics;
-    constexpr std::uint16_t port = 18606;
+    const std::uint16_t port = kythira::testing::free_port();
     const auto& files = fixture.bootstrap_client("auto-reload-bad", {"localhost"}, {"127.0.0.1"});
     auto ca_cert_path = write_ca_file(fixture.root_certificate_pem());
     auto server = make_server(files, ca_cert_path, port, metrics);

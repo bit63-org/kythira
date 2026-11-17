@@ -10,6 +10,7 @@
 #include <raft/test_types.hpp>
 #include "ca_test_fixture.hpp"
 #include "recording_metrics.hpp"
+#include "test_ports.hpp"
 #include "tls_reload_probe.hpp"
 
 #include <chrono>
@@ -91,7 +92,7 @@ BOOST_AUTO_TEST_CASE(coap_server_reload_presents_rotated_certificate,
     ca_test_fixture fixture;
     const auto& files =
         fixture.bootstrap_client("coap-reload-server", {"localhost"}, {"127.0.0.1"});
-    constexpr std::uint16_t port = 18701;
+    const std::uint16_t port = kythira::testing::free_port();
     test_types::metrics_type metrics;
     auto server = make_dtls_server<test_types>(files, port, metrics);
 
@@ -128,7 +129,7 @@ BOOST_AUTO_TEST_CASE(coap_dtls_association_survives_reload,
                      *boost::unit_test::timeout(kythira::testing::scaled_timeout(30))) {
     ca_test_fixture fixture;
     const auto& files = fixture.bootstrap_client("coap-reload-held", {"localhost"}, {"127.0.0.1"});
-    constexpr std::uint16_t port = 18705;
+    const std::uint16_t port = kythira::testing::free_port();
     test_types::metrics_type metrics;
     auto server = make_dtls_server<test_types>(files, port, metrics);
 
@@ -164,7 +165,7 @@ BOOST_AUTO_TEST_CASE(coap_server_reload_rejects_invalid_material,
     config.key_file = files.key_path();
     config.verify_peer_cert = false;
 
-    constexpr std::uint16_t port = 18702;
+    const std::uint16_t port = kythira::testing::free_port();
     test_types::metrics_type metrics;
     coap_server<test_types> server(test_bind_address, port, config, metrics);
     server.start();
@@ -189,7 +190,8 @@ BOOST_AUTO_TEST_CASE(coap_server_reload_requires_cert_configured,
     config.enable_dtls = false;  // no cert_file/key_file configured
 
     test_types::metrics_type metrics;
-    coap_server<test_types> server(test_bind_address, 18703, config, metrics);
+    coap_server<test_types> server(test_bind_address, kythira::testing::free_port(), config,
+                                   metrics);
 
     BOOST_CHECK_THROW(server.reload_tls_material(), std::logic_error);
 }
@@ -201,7 +203,7 @@ BOOST_AUTO_TEST_CASE(coap_server_auto_reload_picks_up_rotation,
                      *boost::unit_test::timeout(kythira::testing::scaled_timeout(30))) {
     ca_test_fixture fixture;
     const auto& files = fixture.bootstrap_client("coap-auto-reload", {"localhost"}, {"127.0.0.1"});
-    constexpr std::uint16_t port = 18704;
+    const std::uint16_t port = kythira::testing::free_port();
     recording_types::metrics_type metrics;
     auto server = make_dtls_server<recording_types>(files, port, metrics);
 
@@ -225,7 +227,7 @@ BOOST_AUTO_TEST_CASE(coap_server_failed_auto_reload_is_reported_via_metrics,
     ca_test_fixture fixture;
     const auto& files =
         fixture.bootstrap_client("coap-auto-reload-bad", {"localhost"}, {"127.0.0.1"});
-    constexpr std::uint16_t port = 18706;
+    const std::uint16_t port = kythira::testing::free_port();
     recording_types::metrics_type metrics;
     auto server = make_dtls_server<recording_types>(files, port, metrics);
 
