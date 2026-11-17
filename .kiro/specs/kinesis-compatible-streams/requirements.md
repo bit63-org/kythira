@@ -326,3 +326,32 @@ and kept separable from the core.
    Podman with service-name addressing.
 4. A recording run against real AWS Kinesis, to settle behaviour no
    emulator reproduces, SHALL need Clark's go in his own words.
+
+### Requirement 18: Channel delivery to S3 and S3 Tables
+
+Added November 17, 2026: Clark chose to support the Channel operations
+the AWS model added after this spec was written. A channel continuously
+delivers a stream's records to a general purpose S3 bucket or to Apache
+Iceberg tables on Amazon S3 Tables.
+
+#### Acceptance Criteria
+
+1. The service SHALL implement `CreateChannel`, `DescribeChannel`,
+   `ListChannels`, `UpdateChannel` and `DeleteChannel` with the pinned
+   model's request and response shapes, states and errors, including
+   AWS's restriction to on-demand streams and its per-account call rate,
+   each a profile switch where Requirement 3 applies.
+2. An active channel SHALL deliver every acknowledged record of its
+   source streams to its destination at least once, in sequence order
+   within a shard, surviving leader changes and node restarts, and SHALL
+   send records it cannot deliver to the configured dead-letter location.
+3. The S3 destination SHALL honour the output key template, compression
+   and storage class through the object-store providers the service
+   already supports; the S3 Tables destination SHALL commit to an Iceberg
+   REST catalog, real S3 Tables or a local one.
+4. Delivered objects SHALL be encrypted through the shared KMS key
+   provider when the channel's encryption configuration asks for it.
+5. Conformance SHALL cover the AWS CLI, boto3 and aws-sdk-java-v2 against
+   the Channel operations, and a container scenario under Docker and
+   rootless Podman SHALL check delivery across a leader kill.
+
