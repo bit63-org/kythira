@@ -6,11 +6,12 @@ general purpose S3 bucket, or to Apache Iceberg tables on S3 Tables
 five calls are `CreateChannel`, `DescribeChannel`, `ListChannels`,
 `UpdateChannel` and `DeleteChannel`, with the pinned model's shapes.
 
-**Status: the catalog and the API are in; delivery is not yet.** A channel
-can be created, described, listed, updated, tagged and deleted, and it
-keeps its source streams from being deleted, but no records reach the
-destination until task 19's delivery worker lands. Do not rely on a
-Kythira channel to move data yet.
+**Status: delivery to general purpose S3 works; S3 Tables does not yet.**
+A channel can be created, described, listed, updated, tagged and deleted,
+and it keeps its source streams from being deleted. An S3 channel's
+records reach its bucket as described under [Delivery to S3](#delivery-to-s3).
+An S3 Tables channel is accepted and kept but delivers nothing until the
+Iceberg commit path lands; do not rely on one to move data yet.
 
 ## What the API checks
 
@@ -63,6 +64,67 @@ each source stream's ARN, and `iam:PassRole` on the service execution role. On a
 authenticating with static keys there is no IAM to check a role against,
 so only `admin` keys may create a channel.
 
+## Delivery to S3
+
+Every `kinesis_gateway_node` runs delivery on its maintenance pass
+(`KINESIS_MAINTENANCE_INTERVAL_MS`, a minute by default). For each ACTIVE
+S3 channel, the node that leads a source shard's group delivers that
+shard:
+
+- It starts from the channel's checkpoint for the shard, a catalog entry
+  holding the next record to deliver. A new channel starts with the
+  records that arrive once it exists; what the stream held before is not
+  delivered.
+- It writes an object once the oldest undelivered record is
+  `DataFreshnessInSeconds` old, once the batch reaches 64 MiB, or when a
+  shard closed by a reshard has been read to its end.
+- After the object is written it moves the checkpoint, as a
+  compare-and-set from where it read. If two nodes both believed they led
+  the shard, one commits and the other's object is a duplicate written to
+  the same key.
+- A child shard is delivered only once its parents have been delivered to
+  their ends, so a partition key's records arrive in order across a
+  reshard.
+
+Delivery is at least once, and in sequence order within a shard.
+
+**Object keys.** `OutputKeyTemplate`, or
+`!{kinesis:stream-name}/!{timestamp:yyyy/MM/dd/HH}/` when left out, then
+`<channel>-<shard id>-<first sequence number>-<last sequence number>` and
+the compression's extension (`.gz`, `.zst`). The template takes
+`!{timestamp:...}` with `yyyy`, `MM`, `dd`, `HH` and `mm` (UTC, from the
+batch's first record's arrival time), `!{kinesis:stream-name}`,
+`!{kinesis:shard-id}` and `!{kinesis:channel-name}`; anything else is
+copied as written. The key depends only on the batch, so a batch retried
+after a lost checkpoint overwrites the same object.
+
+**Object body.** One record per line: the record's bytes for `JSON` and
+`STRING`, base64 for `BYTE_ARRAY`.
+
+**Dead letters.** A `JSON` record whose bytes do not parse as JSON goes to
+the dead-letter location instead: the `DeadLetterQueueS3Configuration`
+bucket under its `ErrorOutputPrefix`, or the destination bucket under
+`errors/` when there is none, as AWS documents. Each is one JSON line with
+`errorCode`, `errorMessage`, `sequenceNumber`, `partitionKey`,
+`approximateArrivalTimestamp` and `rawData` (base64), in an object named
+like the batch with `.json`.
+
+**Compression.** `NONE`, `GZIP` when the build found zlib and `ZSTD` when
+it found libzstd (vcpkg builds have both). A node that cannot write the
+compression a channel asks for sets the channel to FAILED with a reason
+naming it, rather than leaving it ACTIVE and silently idle.
+
+**Node settings.**
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `KINESIS_CHANNEL_DELIVERY` | `true` | Deliver channels from this node |
+| `KINESIS_CHANNEL_S3_REGION` | `KINESIS_REGION` | Region of the destination buckets |
+| `KINESIS_CHANNEL_S3_ENDPOINT` | AWS's | An S3-compatible endpoint (MinIO, Kythira's own S3) |
+
+Credentials come from the AWS SDK's usual chain. A build without the AWS
+SDK's s3 component logs at start that it does not deliver channels.
+
 ## Limits and differences
 
 - A channel is ACTIVE as soon as `CreateChannel` answers, and an update
@@ -72,6 +134,11 @@ so only `admin` keys may create a channel.
   the model documents; an S3 Tables channel names exactly one table, the
   only case the model says AWS supports today.
 - `aws:ResourceTag` conditions are not evaluated for channel ARNs.
+- `StorageClass` and `ExpectedBucketOwner` are kept but not yet passed on
+  the write, and delivered objects are not yet encrypted with the
+  channel's `EncryptionConfiguration`.
+- The channel's service execution role is not assumed: the node writes
+  with its own credentials.
 
 ## Not yet checked against AWS
 

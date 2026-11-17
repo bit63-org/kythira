@@ -529,3 +529,23 @@ asked.
     `services/kinesis/doc/channels.md` says plainly that records are not
     delivered yet. Left: the delivery worker, S3 Tables commits, KMS for
     delivered objects, the container scenario and conformance runs.
+  - Progress (November 17, 2026): delivery to general purpose S3
+    (`kinesis_channel_delivery.hpp`). Each node's maintenance pass
+    delivers the source shards it leads: from a compare-and-set
+    checkpoint per channel and shard in the catalog
+    (`channel_checkpoint_command`, keyed by channel and stream ids and
+    dropped with the channel), or from the channel's creation time; an
+    object once the oldest record is `DataFreshnessInSeconds` old, the
+    batch reaches 64 MiB, or a closed shard is read to its end; children
+    only after their parents. Keys follow `OutputKeyTemplate` (Firehose
+    style placeholders) and name the shard and sequence range, so a
+    retried batch overwrites itself. `JSON` records that do not parse go
+    to the dead-letter location. `NONE`, `GZIP` (zlib) and `ZSTD`
+    (libzstd), both found optionally at build time; a node without the
+    codec a channel asks for sets it to FAILED with the reason.
+    `kinesis_gateway_node` writes through the AWS SDK's S3 client
+    (`KINESIS_CHANNEL_S3_REGION`, `KINESIS_CHANNEL_S3_ENDPOINT`,
+    `KINESIS_CHANNEL_DELIVERY`). `kinesis_channel_delivery_test` covers
+    it. Left: `StorageClass` and `ExpectedBucketOwner` on the write, S3
+    Tables commits, KMS for delivered objects, the container scenario and
+    conformance runs.

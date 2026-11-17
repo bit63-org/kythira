@@ -61,6 +61,26 @@ namespace kythira::kinesis {
     return account_channels_prefix(account) + std::string(name);
 }
 
+/// Where a channel's delivery of one source shard has reached: the next
+/// shard counter to deliver, as a plain u64 catalog entry. Keyed by the
+/// channel's and stream's ids, so neither a recreated channel nor a
+/// recreated stream inherits a position.
+[[nodiscard]] inline auto channel_checkpoints_prefix(std::string_view account,
+                                                     std::uint64_t channel_id) -> std::string {
+    static constexpr std::string_view digits = "0123456789abcdef";
+    std::string id(16, '0');
+    for (std::size_t i = 0; i < 16; ++i) {
+        id[15 - i] = digits[(channel_id >> (4U * i)) & 0xFU];
+    }
+    return catalog_prefix() + "channel-checkpoints/" + std::string(account) + "/" + id + "/";
+}
+
+[[nodiscard]] inline auto channel_checkpoint_key(std::string_view account, std::uint64_t channel_id,
+                                                 std::string_view shard_routing_key)
+    -> std::string {
+    return channel_checkpoints_prefix(account, channel_id) + std::string(shard_routing_key);
+}
+
 enum class channel_status : std::uint8_t {
     creating = 0,
     active = 1,

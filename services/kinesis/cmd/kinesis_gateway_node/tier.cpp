@@ -42,4 +42,13 @@ auto make_object_tier(const node_options& opt) -> std::unique_ptr<object_tier> {
     throw std::runtime_error("kinesis_gateway_node: no tier provider '" + p + "' in this build");
 }
 
+auto make_channel_destinations(const node_options& opt) -> std::unique_ptr<channel_destinations> {
+#ifdef KYTHIRA_KINESIS_TIER_S3
+    return tier_detail::make_s3_channel_destinations(opt);
+#else
+    (void)opt;
+    return nullptr;
+#endif
+}
+
 }  // namespace kythira::kinesis_node
