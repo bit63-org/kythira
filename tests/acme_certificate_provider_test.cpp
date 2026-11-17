@@ -6,6 +6,7 @@
 #include <boost/test/unit_test.hpp>
 
 #include "acme_test_server.hpp"
+#include "test_ports.hpp"
 
 #include <raft/acme_certificate_provider.hpp>
 #include <raft/acme_certificate_provider_impl.hpp>
@@ -42,12 +43,15 @@ auto load_cert_pem(const std::string& pem) -> x509_ptr {
     return cert;
 }
 
-// A fixed, coordinated port for the http-01 exchange: acme_test_server's
+// A coordinated port block for the http-01 exchange: acme_test_server's
 // challenge validation always targets whatever host the identifier names on
-// this port (there is no ACME wire mechanism for the server to discover a
-// dynamically-chosen client port — real-world ACME always uses port 80; this
-// override exists purely so tests don't need root to bind 80).
-constexpr int k_http01_port = 18765;
+// the port it is configured with (there is no ACME wire mechanism for the
+// server to discover a dynamically-chosen client port — real-world ACME
+// always uses port 80; this override exists purely so tests don't need root
+// to bind 80). Both ends are configured in-process, so the block comes from
+// test_ports.hpp rather than a fixed literal that another test binary's
+// free_port() may already hold under ctest -j. Cases use offsets 0 to 6.
+const int k_http01_port = kythira::testing::free_port_block(7);
 
 }  // namespace
 

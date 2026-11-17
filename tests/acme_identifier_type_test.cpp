@@ -19,6 +19,7 @@
 #include <boost/test/unit_test.hpp>
 
 #include "acme_test_server.hpp"
+#include "test_ports.hpp"
 
 #include <raft/acme_certificate_provider.hpp>
 #include <raft/acme_certificate_provider_impl.hpp>
@@ -31,10 +32,11 @@ using namespace raft::testing;
 
 namespace {
 
-// Fixed, non-overlapping http-01 validation ports per test case — same
-// convention as acme_certificate_provider_test.cpp (there is no ACME wire
-// mechanism for the server to discover a dynamically-chosen client port).
-constexpr int k_base_port = 18800;
+// Non-overlapping http-01 validation ports per test case (offsets 0 to 4),
+// from one test_ports.hpp block — same convention as
+// acme_certificate_provider_test.cpp (there is no ACME wire mechanism for
+// the server to discover a dynamically-chosen client port).
+const int k_base_port = kythira::testing::free_port_block(5);
 
 }  // namespace
 
