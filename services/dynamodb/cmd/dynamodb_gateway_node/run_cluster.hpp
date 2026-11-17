@@ -717,6 +717,21 @@ public:
         _local->set_fetch(nullptr);
         if (_strong) {
             _strong->set_fetch(nullptr);
+        }
+        // The backends go before the hosts do: host_runtime::stop()
+        // destroys its multi_raft host, and ~raft_backend() calls
+        // set_txn_forwarder() on it. Left to ~cluster_node(), that call
+        // locked a mutex inside a freed host, and dynamodb_strong_cluster_test
+        // died three ways depending on what the memory held by then: a hang
+        // until the fixture's watchdog aborted, "terminate called after
+        // throwing std::system_error: Invalid argument", or a segfault. The
+        // gateway and the router hold references into the backends, so they
+        // go first.
+        _gateway.reset();
+        _routed.reset();
+        _strong_backend.reset();
+        _backend.reset();
+        if (_strong) {
             _strong->stop();
         }
         if (_strong_transport) {
