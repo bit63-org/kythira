@@ -85,10 +85,17 @@ public:
             auto server = make();
             configure(*server);
             server->set_socket_options([](socket_t sock) {
-                httplib::default_socket_options(sock);
+                // SO_REUSEADDR, not httplib::default_socket_options(), which
+                // sets SO_REUSEPORT on Linux. With SO_REUSEPORT a second server
+                // on the same port (a stale node process, or two nodes handed
+                // one port) binds without error and the kernel splits incoming
+                // connections between them, so a node silently receives some
+                // of another's RPCs. SO_REUSEADDR still allows a restart over
+                // TIME_WAIT sockets, and a real conflict now fails the bind.
+                int on = 1;
+                ::setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on));
                 // Harmless on an IPv4 socket. On IPv6 it keeps "::" from also
                 // claiming IPv4, so "*" can bind 0.0.0.0 beside it.
-                int on = 1;
                 ::setsockopt(sock, IPPROTO_IPV6, IPV6_V6ONLY, &on, sizeof(on));
             });
             auto host = endpoint_host(ep);
