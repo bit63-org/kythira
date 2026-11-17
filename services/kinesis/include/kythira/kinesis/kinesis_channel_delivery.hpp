@@ -50,7 +50,6 @@
 #include <kythira/kinesis/kinesis_cluster.hpp>
 #include <kythira/kinesis/kinesis_kms.hpp>
 #include <kythira/kinesis/kinesis_stream_state_machine.hpp>
-#include <kythira/kinesis/kinesis_tiering.hpp>
 
 #include <boost/json.hpp>
 
@@ -78,11 +77,28 @@
 
 namespace kythira::kinesis {
 
+/// What a channel write asks of the bucket beyond the bytes: the
+/// destination's `StorageClass` and `ExpectedBucketOwner` (empty: not
+/// sent).
+struct channel_put_options {
+    std::string _storage_class;
+    std::string _expected_owner;
+};
+
+/// One destination bucket: `_put` writes `bytes` at `key` (from the
+/// bucket's root) or throws.
+struct channel_bucket {
+    std::function<void(const std::string& key, std::string_view bytes,
+                       const channel_put_options& options)>
+        _put;
+    [[nodiscard]] auto configured() const -> bool { return static_cast<bool>(_put); }
+};
+
 struct channel_delivery_config {
-    /// The object store for a destination bucket (the name from the
-    /// bucket ARN), or nullopt when this node cannot reach it; unset turns
-    /// delivery off on this node.
-    std::function<std::optional<tier_store>(const std::string& bucket)> _destination;
+    /// The writer for a destination bucket (the name from the bucket ARN),
+    /// or nullopt when this node cannot reach it; unset turns delivery off
+    /// on this node.
+    std::function<std::optional<channel_bucket>(const std::string& bucket)> _destination;
     /// Write an object once a batch holds this many bytes, however fresh.
     std::size_t _max_object_bytes = std::size_t{64} * 1024 * 1024;
     /// Bytes read from a shard per page.
@@ -555,6 +571,12 @@ private:
         const auto& storage = dest.at("StorageConfiguration").as_object();
         const std::string compression(storage.at("CompressionType").as_string());
         const auto bucket = channel_detail::bucket_of(storage.at("BucketARN").as_string());
+        const auto text = [](const boost::json::object& o, const char* k) {
+            const auto* v = o.if_contains(k);
+            return v != nullptr && v->is_string() ? std::string(v->as_string()) : std::string();
+        };
+        const channel_put_options options{._storage_class = text(storage, "StorageClass"),
+                                          ._expected_owner = text(storage, "ExpectedBucketOwner")};
         const auto format = std::string(
             boost::json::parse(src._record_config).as_object().at("RecordFormatType").as_string());
         std::string body;
@@ -608,20 +630,25 @@ private:
                     ++stats._failures;
                     return false;
                 }
-                store->_put(store->_prefix +
-                                channel_detail::expand_template(tpl, first._arrival_ms, c._name,
-                                                                src._stream, shard_id) +
+                store->_put(channel_detail::expand_template(tpl, first._arrival_ms, c._name,
+                                                            src._stream, shard_id) +
                                 name + std::string(ext),
-                            *payload);
+                            *payload, options);
                 ++stats._objects;
             }
             if (dead_count > 0) {
                 std::string dlq_bucket = bucket;
                 std::string prefix = "errors/";
+                // Dead letters keep the default storage class; the bucket's
+                // owner is checked as for the destination.
+                channel_put_options dlq_options{._storage_class = {},
+                                                ._expected_owner = options._expected_owner};
                 if (const auto* d = dest.if_contains("DeadLetterQueueS3Configuration");
                     d != nullptr && d->is_object()) {
-                    dlq_bucket = channel_detail::bucket_of(d->at("BucketARN").as_string());
-                    if (const auto* p = d->as_object().if_contains("ErrorOutputPrefix")) {
+                    const auto& dlq = d->as_object();
+                    dlq_bucket = channel_detail::bucket_of(dlq.at("BucketARN").as_string());
+                    dlq_options._expected_owner = text(dlq, "ExpectedBucketOwner");
+                    if (const auto* p = dlq.if_contains("ErrorOutputPrefix")) {
                         prefix = std::string(p->as_string());
                     }
                 }
@@ -630,11 +657,10 @@ private:
                     ++stats._failures;
                     return false;
                 }
-                store->_put(store->_prefix +
-                                channel_detail::expand_template(prefix, first._arrival_ms, c._name,
-                                                                src._stream, shard_id) +
+                store->_put(channel_detail::expand_template(prefix, first._arrival_ms, c._name,
+                                                            src._stream, shard_id) +
                                 name + ".json",
-                            dead);
+                            dead, dlq_options);
                 stats._dead_letters += dead_count;
             }
         } catch (const std::exception&) {

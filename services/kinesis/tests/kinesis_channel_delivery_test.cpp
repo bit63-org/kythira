@@ -109,6 +109,8 @@ struct fixture {
     kin::front_end<allow_all> fe{kin::front_end_config{}, auth};
     service_t service{cluster, no_rates()};
     std::map<std::string, bucket> buckets;
+    /// The put options of each object, by `<bucket>/<key>`.
+    std::map<std::string, kin::channel_put_options> options;
     delivery_t delivery{cluster, service, delivery_config()};
 
     fixture() { service.register_with(fe); }
@@ -121,10 +123,12 @@ struct fixture {
 
     auto delivery_config() -> kin::channel_delivery_config {
         kin::channel_delivery_config cfg;
-        cfg._destination = [this](const std::string& name) -> std::optional<kin::tier_store> {
-            kin::tier_store t;
-            t._put = [this, name](const std::string& k, std::string_view b) {
+        cfg._destination = [this](const std::string& name) -> std::optional<kin::channel_bucket> {
+            kin::channel_bucket t;
+            t._put = [this, name](const std::string& k, std::string_view b,
+                                  const kin::channel_put_options& o) {
                 buckets[name][k] = std::string(b);
+                options[name + "/" + k] = o;
             };
             return t;
         };
@@ -385,7 +389,8 @@ BOOST_AUTO_TEST_CASE(byte_array_is_base64_and_key_template_applies) {
     fixture f;
     f.on_demand("s");
     f.channel("c", "s", "BYTE_ARRAY", "NONE",
-              {{"OutputKeyTemplate", "raw/!{kinesis:channel-name}/!{timestamp:yyyy}/"}});
+              {{"OutputKeyTemplate", "raw/!{kinesis:channel-name}/!{timestamp:yyyy}/"},
+               {"StorageClass", "INTELLIGENT_TIERING"}});
     f.advance_s(1);
     (void)f.put("s", std::string("\x00\x01\xff", 3));
     f.advance_s(300);
@@ -394,6 +399,10 @@ BOOST_AUTO_TEST_CASE(byte_array_is_base64_and_key_template_applies) {
     BOOST_REQUIRE(b.size() == 1U);
     BOOST_TEST(b.begin()->first.starts_with("raw/c/2025/c-shardId-"));
     BOOST_TEST(b.begin()->second == "AAH/\n");
+    // The destination's storage class and bucket owner ride on the write.
+    const auto& o = f.options.at("delivered/" + b.begin()->first);
+    BOOST_TEST(o._storage_class == "INTELLIGENT_TIERING");
+    BOOST_TEST(o._expected_owner == std::string(k_account));
 }
 
 #ifdef KYTHIRA_KINESIS_HAS_ZLIB
@@ -473,6 +482,9 @@ BOOST_AUTO_TEST_CASE(invalid_json_goes_to_the_dead_letter_location) {
     BOOST_REQUIRE(dead.size() == 1U);
     BOOST_TEST(dead.begin()->first.starts_with("bad/d-shardId-"));
     BOOST_TEST(dead.begin()->first.ends_with(".json"));
+    const auto& o = f.options.at("dead/" + dead.begin()->first);
+    BOOST_TEST(o._storage_class.empty());
+    BOOST_TEST(o._expected_owner == std::string(k_account));
     for (const auto& [k, v] : b) {
         BOOST_TEST(!k.starts_with("t/"));
     }
@@ -554,7 +566,7 @@ BOOST_AUTO_TEST_CASE(child_waits_for_its_parent) {
 
     // The parent cannot be delivered: the destination is unreachable.
     kin::channel_delivery_config cfg;
-    cfg._destination = [](const std::string&) -> std::optional<kin::tier_store> {
+    cfg._destination = [](const std::string&) -> std::optional<kin::channel_bucket> {
         return std::nullopt;
     };
     delivery_t blocked{f.cluster, f.service, cfg};

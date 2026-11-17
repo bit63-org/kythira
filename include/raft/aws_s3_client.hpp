@@ -150,6 +150,7 @@
 #include <aws/s3/model/ListObjectsV2Request.h>
 #include <aws/s3/model/PutObjectRequest.h>
 #include <aws/s3/model/ServerSideEncryption.h>
+#include <aws/s3/model/StorageClass.h>
 
 #include <memory>
 #include <optional>
@@ -295,6 +296,20 @@ inline constexpr const char* k_no_such_bucket = "NoSuchBucket";
 
 }  // namespace aws_s3_detail
 
+/// @brief Optional headers for `aws_s3_client::put_object_with`: what a
+///        delivery writer (Kinesis channels) sets and the persistence engine
+///        never needs. Empty fields are left off the request.
+struct s3_put_options {
+    /// `x-amz-storage-class`, by its S3 name (`STANDARD`,
+    /// `INTELLIGENT_TIERING`, `GLACIER_IR`, ...).
+    std::string storage_class;
+    /// `x-amz-expected-bucket-owner`: S3 refuses the write (403) when the
+    /// bucket belongs to another account.
+    std::string expected_bucket_owner;
+    /// `Content-Type`; `application/octet-stream` when empty.
+    std::string content_type;
+};
+
 /// @brief The object operations the persistence engine needs, over the AWS SDK.
 ///
 /// Satisfies `key_object_store` and `conditional_key_object_store`; the
@@ -374,6 +389,17 @@ public:
         fiu_do_on("raft/aws/s3/put_object",
                   throw std::runtime_error("chaos: raft/aws/s3/put_object " + key););
         return send_put(bucket, key, bytes, std::nullopt, kms_key_id);
+    }
+
+    /// @brief PUT one object, unconditionally, with `options`' headers.
+    /// @throws std::runtime_error when the service refuses the write (a
+    ///         bucket owned by another account answers 403).
+    [[nodiscard]] auto put_object_with(const std::string& bucket, const std::string& key,
+                                       std::string_view bytes, const s3_put_options& options) const
+        -> put_result {
+        fiu_do_on("raft/aws/s3/put_object",
+                  throw std::runtime_error("chaos: raft/aws/s3/put_object " + key););
+        return send_put(bucket, key, bytes, std::nullopt, std::nullopt, &options);
     }
 
     /// @brief PUT one object only if `pre` holds, throwing
@@ -494,12 +520,24 @@ public:
 private:
     [[nodiscard]] auto send_put(const std::string& bucket, const std::string& key,
                                 std::string_view bytes, const std::optional<precondition>& pre,
-                                const std::optional<std::string>& sse_kms_key = std::nullopt) const
-        -> put_result {
+                                const std::optional<std::string>& sse_kms_key = std::nullopt,
+                                const s3_put_options* options = nullptr) const -> put_result {
         Aws::S3::Model::PutObjectRequest req;
         req.SetBucket(aws_s3_detail::to_aws(bucket));
         req.SetKey(aws_s3_detail::to_aws(key));
-        req.SetContentType(k_content_type);
+        req.SetContentType(options != nullptr && !options->content_type.empty()
+                               ? aws_s3_detail::to_aws(options->content_type)
+                               : Aws::String(k_content_type));
+        if (options != nullptr && !options->storage_class.empty()) {
+            // A name the SDK does not list still goes out as written (its
+            // enum mappers keep unknown names), for S3-compatible stores
+            // with classes of their own.
+            req.SetStorageClass(Aws::S3::Model::StorageClassMapper::GetStorageClassForName(
+                aws_s3_detail::to_aws(options->storage_class)));
+        }
+        if (options != nullptr && !options->expected_bucket_owner.empty()) {
+            req.SetExpectedBucketOwner(aws_s3_detail::to_aws(options->expected_bucket_owner));
+        }
         req.SetContentMD5(aws_s3_detail::content_md5_base64(bytes));
         if (sse_kms_key) {
             req.SetServerSideEncryption(Aws::S3::Model::ServerSideEncryption::aws_kms);
