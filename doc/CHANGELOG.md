@@ -3,6 +3,21 @@
 Chronological log of notable changes to Kythira, newest first. For the
 current list of outstanding work, see [TODO.md](TODO.md).
 
+### What Changed (November 17, 2026)
+
+- **cpp-httplib name lookups no longer crash under concurrency.** Two glibc
+  defects made cpp-httplib's non-blocking `getaddrinfo` unsafe. The resolver
+  thread could write through a waiter that `gai_suspend()` had left on a
+  stack frame that no longer existed, and a cancelled queued lookup stayed
+  "in progress" forever. A `multi_raft_node` host crashed inside
+  `gai_suspend()` in CI. The cpp-httplib overlay port (port-version 2) no
+  longer uses glibc's asynchronous lookup API at all. It brings its own
+  fixed implementation instead: a bounded pool of up to 64 workers running
+  plain `getaddrinfo()`, with heap-owned requests and a cancel that works.
+  Numeric addresses skip the pool. Where the old pattern crashed or hung in
+  6 of 9 local stress runs, the new path ran clean under ASan, UBSan and
+  TSan, and its mean lookup latency is lower (179 us against 349 us).
+
 ### What Changed (November 14, 2026)
 
 - **CI runs take about half as long.** The `clang-tidy-result-cache`
