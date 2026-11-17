@@ -1,0 +1,12 @@
+[
+ {
+  "case": "getpublickey hmac",
+  "path": "error",
+  "why": "AWS answered KMSInternalException (HTTP 500, no message) for GetPublicKey on an HMAC key when recorded on 2026-11-17; that is a fault on AWS's side, not behaviour to copy. Kythira answers UnsupportedOperationException, as for a symmetric key."
+ },
+ {
+  "case": "getpublickey hmac",
+  "path": "status",
+  "why": "The same case: AWS's 500 against Kythira's 400."
+ }
+]

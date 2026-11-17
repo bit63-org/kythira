@@ -32,6 +32,15 @@ add_test(NAME kms_model_coverage_checker
     COMMAND "${Python3_EXECUTABLE}" tools/test_check_coverage.py
     WORKING_DIRECTORY "${KYTHIRA_KMS_SOURCE_DIR}")
 
+# Task 18: the differential tool's case list, normaliser and comparison,
+# offline (no boto3, no network). kms_node_cluster_test replays the AWS
+# recording against the cluster.
+add_test(NAME kms_differential_tool
+    COMMAND "${Python3_EXECUTABLE}" tests/differential/test_kms_differential.py
+    WORKING_DIRECTORY "${KYTHIRA_KMS_SOURCE_DIR}")
+set_tests_properties(kms_differential_tool PROPERTIES
+    LABELS "unit;kms;kms-module" TIMEOUT 60)
+
 # The checked-in shape tables are what core's scripts/gen_aws_json_shapes.py
 # (KYTHIRA_AWS_JSON_SHAPES_GENERATOR) makes of the pinned model, so a model
 # upgrade carries its regenerated header and its diff.
@@ -214,6 +223,7 @@ if(KYTHIRA_KMS_NODE_DAEMON)
             # Task 18: the AWS client suites (clients/requirements.txt).
             KYTHIRA_PYTHON3="${Python3_EXECUTABLE}"
             KMS_CLIENTS_SCRIPT="${CMAKE_CURRENT_SOURCE_DIR}/clients/kms_clients.py"
+            KMS_DIFFERENTIAL_DIR="${CMAKE_CURRENT_SOURCE_DIR}/differential"
             KYTHIRA_SOFTHSM2_LIBRARY="${KYTHIRA_KMS_SOFTHSM2_LIBRARY}"
             KYTHIRA_SOFTHSM2_UTIL="${KYTHIRA_KMS_SOFTHSM2_UTIL}")
         add_dependencies(kms_node_cluster_test kms_node)

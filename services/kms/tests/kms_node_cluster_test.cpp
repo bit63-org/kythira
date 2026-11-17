@@ -66,6 +66,9 @@
 #ifndef KMS_CLIENTS_SCRIPT
 #define KMS_CLIENTS_SCRIPT "kms_clients.py"
 #endif
+#ifndef KMS_DIFFERENTIAL_DIR
+#define KMS_DIFFERENTIAL_DIR "differential"
+#endif
 #ifndef KYTHIRA_SOFTHSM2_UTIL
 #define KYTHIRA_SOFTHSM2_UTIL "softhsm2-util"
 #endif
@@ -502,6 +505,26 @@ BOOST_FIXTURE_TEST_CASE(aws_clients_work_against_the_cluster, process_cluster) {
     const int rc = std::system(command.c_str());  // NOLINT(concurrency-mt-unsafe)
     BOOST_TEST_MESSAGE(slurp(out));
     BOOST_TEST(rc == 0, "the client suites failed:\n" << slurp(out));
+}
+
+// Task 18 (Requirement 14.3): the cases recorded against real AWS KMS
+// (differential/recordings/) answer alike here: each error's type and
+// status, each success's fields, apart from what allow.json lists. Needs
+// boto3, as the client suites do.
+BOOST_FIXTURE_TEST_CASE(differential_replay_matches_the_aws_recording, process_cluster) {
+    BOOST_REQUIRE_EQUAL(call(0, "ListKeys", "{}").status, 200);
+    const std::string dir_name = KMS_DIFFERENTIAL_DIR;
+    const auto out = dir() / "differential.log";
+    const auto command =
+        std::string("AWS_ACCESS_KEY_ID=") + std::string(k_akid) +
+        " AWS_SECRET_ACCESS_KEY=" + std::string(k_secret) +
+        " AWS_CONFIG_FILE=/dev/null AWS_SHARED_CREDENTIALS_FILE=/dev/null " + KYTHIRA_PYTHON3 +
+        " " + dir_name + "/kms_differential.py compare --endpoint " + api_url(1) + " --ca " +
+        ca_path() + " --recording " + dir_name + "/recordings/aws-us-east-1.json --allow " +
+        dir_name + "/recordings/allow.json >" + out.string() + " 2>&1";
+    const int rc = std::system(command.c_str());  // NOLINT(concurrency-mt-unsafe)
+    BOOST_TEST_MESSAGE(slurp(out));
+    BOOST_TEST(rc == 0, "the replay differs from AWS:\n" << slurp(out));
 }
 
 BOOST_FIXTURE_TEST_CASE(only_members_reach_the_peer_paths, process_cluster) {
