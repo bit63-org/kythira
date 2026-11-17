@@ -1297,15 +1297,25 @@ BOOST_AUTO_TEST_CASE(test_server_keeps_accepting_after_emfile, *boost::unit_test
             fillers.push_back(fd);
         }
         BOOST_REQUIRE(errno == EMFILE);
-        ::close(fillers.back());
-        fillers.pop_back();
 
         sockaddr_in dst{};
         dst.sin_family = AF_INET;
         dst.sin_port = htons(port);
         dst.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-        client = ::socket(AF_INET, SOCK_STREAM, 0);
+        // The server's threads share the descriptor table, so one of them
+        // can take the freed descriptor before socket() does (CI saw
+        // `client >= 0` fail once in the 11-16 re-survey). Free another
+        // until the socket gets one, then take back whatever else came
+        // free meanwhile, so the server's accept() still finds none.
+        for (int tries = 0; tries < 8 && client < 0 && !fillers.empty(); ++tries) {
+            ::close(fillers.back());
+            fillers.pop_back();
+            client = ::socket(AF_INET, SOCK_STREAM, 0);
+        }
         BOOST_REQUIRE(client >= 0);
+        for (int fd = 0; (fd = ::open("/dev/null", O_RDONLY | O_CLOEXEC)) >= 0;) {
+            fillers.push_back(fd);
+        }
         BOOST_REQUIRE(::connect(client, reinterpret_cast<sockaddr*>(&dst), sizeof(dst)) == 0);
         BOOST_TEST(
             hardening::wait_until([&] { return server->connection_stats().accept_errors > 0; }));
