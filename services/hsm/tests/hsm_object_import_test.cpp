@@ -334,6 +334,29 @@ BOOST_AUTO_TEST_CASE(copies_keep_the_material_and_change_only_what_is_allowed) {
     auto no_copy = n.client->create_object(n.session, fixed);
     BOOST_REQUIRE(no_copy.has_value());
     BOOST_TEST(rv(n.client->copy_object(n.session, *no_copy, {})) == CKR_ACTION_PROHIBITED);
+    hsm::attribute_map new_value;
+    new_value.set_bytes(CKA_VALUE, hsm::bytes(32, 0x22));
+    BOOST_TEST(rv(n.client->copy_object(n.session, *key, new_value)) == CKR_ATTRIBUTE_READ_ONLY);
+}
+
+BOOST_AUTO_TEST_CASE(a_data_object_copy_may_take_a_new_value_sealed_like_the_first) {
+    node n;
+    hsm::attribute_map d;
+    d.set_ulong(CKA_CLASS, CKO_DATA);
+    d.set_bool(CKA_TOKEN, true);
+    d.set_bytes(CKA_VALUE, data("first value"));
+    auto h = n.client->create_object(n.session, d);
+    BOOST_REQUIRE(h.has_value());
+    const auto second = data("second, longer value");
+    hsm::attribute_map change;
+    change.set_bytes(CKA_VALUE, second);
+    change.set_bytes(CKA_APPLICATION, data("copier"));
+    auto copy = n.client->copy_object(n.session, *h, change);
+    BOOST_REQUIRE(copy.has_value());
+    BOOST_TEST(*attr(n, *copy, CKA_VALUE).value == second);
+    BOOST_TEST(*attr(n, *h, CKA_VALUE).value == data("first value"));
+    BOOST_TEST(!n.store.object(k_token, *copy)->attributes.has(CKA_VALUE));
+    expect_nowhere(n, second);
 }
 
 BOOST_AUTO_TEST_CASE(wrap_and_unwrap_follow_the_rules) {
