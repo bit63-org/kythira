@@ -266,10 +266,12 @@ BOOST_AUTO_TEST_CASE(aliases_are_created_moved_listed_and_deleted) {
     };
     BOOST_TEST(f.call("CreateAlias", alias("alias/app", a)).status == 200U);
     BOOST_TEST(f.call("CreateAlias", alias("alias/app", b)).type() == "AlreadyExistsException");
-    BOOST_TEST(f.call("CreateAlias", alias("app", a)).type() == "InvalidAliasNameException");
-    BOOST_TEST(f.call("CreateAlias", alias("alias/aws/s3", a)).type() ==
-               "InvalidAliasNameException");
-    BOOST_TEST(f.call("CreateAlias", alias("alias/x", "alias/app")).type() == "NotFoundException");
+    // What AWS answers, not what its documentation lists (the differential
+    // recording).
+    BOOST_TEST(f.call("CreateAlias", alias("app", a)).type() == "ValidationException");
+    BOOST_TEST(f.call("CreateAlias", alias("alias/aws/s3", a)).type() == "NotAuthorizedException");
+    BOOST_TEST(f.call("CreateAlias", alias("alias/x", "alias/app")).type() ==
+               "ValidationException");
     // Another account's key, even by ARN, takes no alias of ours.
     const auto theirs = f.create("{}", "AKIDOTHER");
     BOOST_TEST(f.call("CreateAlias", alias("alias/x", fixture::arn(theirs, k_other))).type() ==

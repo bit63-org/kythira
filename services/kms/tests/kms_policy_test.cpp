@@ -85,7 +85,7 @@ BOOST_AUTO_TEST_CASE(a_new_key_gets_the_default_policy) {
         f.call("GetKeyPolicy", R"({"KeyId":")" + id + R"(","PolicyName":"default"})").status ==
         200U);
     BOOST_TEST(f.call("GetKeyPolicy", R"({"KeyId":")" + id + R"(","PolicyName":"other"})").type() ==
-               "NotFoundException");
+               "ValidationException");
     BOOST_REQUIRE(
         f.call("CreateAlias", R"({"AliasName":"alias/p","TargetKeyId":")" + id + R"("})").status ==
         200U);
@@ -139,7 +139,7 @@ BOOST_AUTO_TEST_CASE(put_key_policy_replaces_the_policy) {
                    .type() == "LimitExceededException");
     BOOST_TEST(f.call("PutKeyPolicy", kid(id)).type() == "ValidationException");
     BOOST_TEST(f.call("PutKeyPolicy", put_body(id, mine, R"("PolicyName":"other")")).type() ==
-               "NotFoundException");
+               "ValidationException");
     BOOST_TEST(f.sm.key(id)->policy == mine);
 
     // A key pending deletion may still have its policy changed, so that it

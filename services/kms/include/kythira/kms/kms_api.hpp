@@ -23,6 +23,7 @@
 // bad command as a bug.
 
 #include <kythira/kms/kms_catalog.hpp>
+#include <kythira/kms/kms_ciphertext.hpp>
 #include <kythira/kms/kms_errors.hpp>
 #include <kythira/kms/kms_front_end.hpp>
 #include <kythira/kms/kms_grants.hpp>
@@ -34,6 +35,7 @@
 
 #include <boost/json.hpp>
 
+#include <openssl/evp.h>
 #include <openssl/rand.h>
 
 #include <algorithm>
@@ -112,6 +114,27 @@ struct key_algorithms {
     std::vector<std::string_view> mac;
 };
 
+/// The KeyMaterialId AWS answers for a symmetric key's backing version: 64
+/// hex characters naming that version's key material. AWS's value is
+/// opaque; here it is SHA-256 over the key id and the version, so it is
+/// stable, the same on every member, and reveals nothing about the key.
+[[nodiscard]] inline auto key_material_id(std::string_view key_id, std::uint32_t version)
+    -> std::string {
+    const std::string input =
+        "kythira-kms-key-material\n" + std::string(key_id) + "\n" + std::to_string(version);
+    std::array<unsigned char, 32> digest{};
+    unsigned int len = 0;
+    EVP_Digest(input.data(), input.size(), digest.data(), &len, EVP_sha256(), nullptr);
+    static constexpr std::string_view hex = "0123456789abcdef";
+    std::string out;
+    out.reserve(64);
+    for (const auto b : digest) {
+        out.push_back(hex[b >> 4U]);
+        out.push_back(hex[b & 0xFU]);
+    }
+    return out;
+}
+
 [[nodiscard]] inline auto algorithms_of(key_spec spec, key_usage usage) -> key_algorithms {
     key_algorithms a;
     switch (spec) {
@@ -124,9 +147,11 @@ struct key_algorithms {
             if (usage == key_usage::encrypt_decrypt) {
                 a.encryption = {"RSAES_OAEP_SHA_1", "RSAES_OAEP_SHA_256"};
             } else {
-                a.signing = {"RSASSA_PSS_SHA_256",        "RSASSA_PSS_SHA_384",
-                             "RSASSA_PSS_SHA_512",        "RSASSA_PKCS1_V1_5_SHA_256",
-                             "RSASSA_PKCS1_V1_5_SHA_384", "RSASSA_PKCS1_V1_5_SHA_512"};
+                // AWS's order (the differential recording): PKCS #1 v1.5
+                // first, then PSS.
+                a.signing = {"RSASSA_PKCS1_V1_5_SHA_256", "RSASSA_PKCS1_V1_5_SHA_384",
+                             "RSASSA_PKCS1_V1_5_SHA_512", "RSASSA_PSS_SHA_256",
+                             "RSASSA_PSS_SHA_384",        "RSASSA_PSS_SHA_512"};
             }
             break;
         case key_spec::ecc_nist_p256:
@@ -643,6 +668,11 @@ public:
         }
         const auto limit = limit_of(in, 100);
         const auto marker = str(in, "Marker").value_or("");
+        // A marker is the last key id a page answered; AWS refuses anything
+        // else (the differential recording).
+        if (!marker.empty() && !is_key_id(marker)) {
+            return kms_error("InvalidMarkerException", "The marker is not valid");
+        }
         auto ids = (*c)->keys(ctx.principal.account, marker, limit + 1);
         const bool truncated = ids.size() > limit;
         if (truncated) {
@@ -737,6 +767,9 @@ public:
         if (!c) {
             return c.error();
         }
+        if (auto bad = check_alias_target(in)) {
+            return *bad;
+        }
         auto k = resolve(ctx, **c, in, "TargetKeyId", false);
         if (!k) {
             return k.error();
@@ -769,6 +802,9 @@ public:
         if (!alias) {
             return not_found("Alias " + ctx.alias_arn(ctx.principal.account, name) +
                              " is not found.");
+        }
+        if (auto bad = check_alias_target(in)) {
+            return *bad;
         }
         auto target = resolve(ctx, **c, in, "TargetKeyId", false);
         if (!target) {
@@ -837,6 +873,11 @@ public:
         std::string key_id;
         if (in.contains("KeyId")) {
             auto k = resolve(ctx, **c, in, "KeyId", false);
+            if (!k && k.error().type == "NotFoundException") {
+                // AWS lists no aliases for a key it does not have rather
+                // than refusing (the differential recording).
+                return boost::json::object{{"Aliases", boost::json::array{}}, {"Truncated", false}};
+            }
             if (!k) {
                 return k.error();
             }
@@ -1072,10 +1113,10 @@ public:
         if (auto denied = authorize_key(ctx, **c, *k, "GetKeyRotationStatus")) {
             return *denied;
         }
-        if (auto bad = rotatable(ctx, k->record)) {
-            return *bad;
-        }
         const auto& key = k->record;
+        // A key that cannot rotate is simply not rotating: AWS answers
+        // false, not UnsupportedOperationException (the differential
+        // recording). Enabling or rotating it is still refused.
         boost::json::object out{{"KeyId", ctx.key_arn(key.account, key.key_id)},
                                 {"KeyRotationEnabled", key.rotation_enabled}};
         if (key.rotation_enabled) {
@@ -1139,8 +1180,9 @@ public:
         if (auto denied = authorize_key(ctx, **c, *k, "ListKeyRotations")) {
             return *denied;
         }
-        if (auto bad = rotatable(ctx, k->record)) {
-            return *bad;
+        // No rotations, rather than a refusal, as AWS answers.
+        if (!is_symmetric(k->record.spec)) {
+            return boost::json::object{{"Rotations", boost::json::array{}}, {"Truncated", false}};
         }
         const auto limit = std::min<std::size_t>(limit_of(in, 100), 1000);
         // The marker is the last version answered; the initial backing key
@@ -1227,6 +1269,10 @@ private:
             return *denied;
         }
         const auto& key = k->record;
+        // Turning off what a key cannot have is a no-op on AWS.
+        if (!enabled && !is_symmetric(key.spec)) {
+            return boost::json::object{};
+        }
         if (auto bad = rotatable(ctx, key)) {
             return *bad;
         }
@@ -1274,8 +1320,10 @@ private:
     [[nodiscard]] static auto check_policy_name(const boost::json::object& in)
         -> std::optional<aws_json::error> {
         const auto name = str(in, "PolicyName").value_or(k_policy_name);
+        // AWS refuses another name as invalid rather than missing (the
+        // differential recording).
         if (name != k_policy_name) {
-            return not_found("No such policy exists: " + std::string(name));
+            return validation_error("Invalid policy name");
         }
         return std::nullopt;
     }
@@ -1309,20 +1357,38 @@ private:
             return kms_error("MalformedPolicyDocumentException",
                              "The key policy is not a JSON policy document");
         }
+        // A policy without statements grants nothing; AWS refuses it.
+        const auto* st = v.get_object().if_contains("Statement");
+        if (st == nullptr || (st->is_array() && st->get_array().empty()) ||
+            !(st->is_array() || st->is_object())) {
+            return kms_error("MalformedPolicyDocumentException", "The key policy has no Statement");
+        }
         return std::nullopt;
     }
 
     [[nodiscard]] static auto check_alias_name(std::string_view name)
         -> std::optional<aws_json::error> {
+        // AWS answers ValidationException and NotAuthorizedException here,
+        // not the InvalidAliasNameException its documentation lists (the
+        // differential recording, services/kms/tests/differential/).
         if (!valid_alias_name(name)) {
-            return kms_error("InvalidAliasNameException",
-                             "Alias name " + std::string(name) +
-                                 " must begin with alias/ and use only A-Z a-z 0-9 / _ -");
+            return validation_error(
+                "Alias must start with the prefix \"alias/\" and use only A-Z a-z 0-9 / _ -");
         }
         if (is_aws_alias(name)) {
-            return kms_error("InvalidAliasNameException",
-                             "Alias names beginning with alias/aws/ are reserved for AWS "
-                             "managed keys");
+            return kms_error("NotAuthorizedException",
+                             "The alias name for a customer managed CMK cannot begin with "
+                             "alias/aws/.");
+        }
+        return std::nullopt;
+    }
+
+    /// An alias names a key, never another alias.
+    [[nodiscard]] static auto check_alias_target(const boost::json::object& in)
+        -> std::optional<aws_json::error> {
+        const auto target = str(in, "TargetKeyId").value_or("");
+        if (target.starts_with("alias/") || target.find(":alias/") != std::string_view::npos) {
+            return validation_error("Aliases must refer to keys. Not aliases");
         }
         return std::nullopt;
     }
@@ -1456,6 +1522,9 @@ private:
         };
         if (k.state == key_state::pending_deletion) {
             m["DeletionDate"] = seconds(k.deletion_ms);
+        }
+        if (is_symmetric(k.spec)) {
+            m["CurrentKeyMaterialId"] = key_material_id(k.key_id, k.current_version);
         }
         const auto algs = algorithms_of(k.spec, k.usage);
         const auto list = [](const std::vector<std::string_view>& v) {

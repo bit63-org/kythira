@@ -268,9 +268,13 @@ public:
         if (!opened) {
             return opened.error();
         }
-        return boost::json::object{{"KeyId", ctx.key_arn(opened->key.account, opened->key.key_id)},
-                                   {"Plaintext", opened->plain.base64()},
-                                   {"EncryptionAlgorithm", opened->algorithm}};
+        boost::json::object out{{"KeyId", ctx.key_arn(opened->key.account, opened->key.key_id)},
+                                {"Plaintext", opened->plain.base64()},
+                                {"EncryptionAlgorithm", opened->algorithm}};
+        if (opened->version) {
+            out["KeyMaterialId"] = key_material_id(opened->key.key_id, *opened->version);
+        }
+        return out;
     }
 
     auto re_encrypt(call_context& ctx, boost::json::object& in) -> result {
@@ -302,12 +306,20 @@ public:
         if (!sealed) {
             return sealed.error();
         }
-        return boost::json::object{
+        boost::json::object out{
             {"CiphertextBlob", std::move(*sealed)},
             {"SourceKeyId", ctx.key_arn(opened->key.account, opened->key.key_id)},
             {"KeyId", ctx.key_arn(dest->record.account, dest->record.key_id)},
             {"SourceEncryptionAlgorithm", opened->algorithm},
             {"DestinationEncryptionAlgorithm", alg->name}};
+        if (opened->version) {
+            out["SourceKeyMaterialId"] = key_material_id(opened->key.key_id, *opened->version);
+        }
+        if (alg->symmetric) {
+            out["DestinationKeyMaterialId"] =
+                key_material_id(dest->record.key_id, dest->record.current_version);
+        }
+        return out;
     }
 
     auto generate_data_key(call_context& ctx, boost::json::object& in) -> result {
@@ -372,6 +384,7 @@ private:
         key_record key;
         plaintext plain;
         std::string_view algorithm;
+        std::optional<std::uint32_t> version;  ///< the backing version, symmetric only
     };
 
     /// `action` on the key, with the encryption context and algorithm as
@@ -534,6 +547,13 @@ private:
         }
         const auto context = read_context(in, context_member);
         const auto requested = str(in, algorithm_member);
+        // An RSA algorithm with a context is refused before the ciphertext
+        // is looked at, whatever key made it (the differential recording).
+        if (requested && requested->starts_with("RSAES_") && !context.empty()) {
+            return validation_error(
+                "EncryptionContext is not supported when encrypting/decrypting with "
+                "asymmetric CMKs.");
+        }
         if (named && !is_symmetric(named->record.spec)) {
             return open_rsa(ctx, c, in, *named, *raw, context, requested, action);
         }
@@ -582,7 +602,7 @@ private:
             if (!plain) {
                 return invalid_ciphertext();
             }
-            return opened_blob{*key, plaintext(std::move(*plain)), k_symmetric};
+            return opened_blob{*key, plaintext(std::move(*plain)), k_symmetric, b->backing_version};
         } catch (const backing_error& e) {
             return hsm_error(e);
         }
@@ -614,7 +634,7 @@ private:
             if (!plain) {
                 return invalid_ciphertext();
             }
-            return opened_blob{k.record, plaintext(std::move(*plain)), alg->name};
+            return opened_blob{k.record, plaintext(std::move(*plain)), alg->name, std::nullopt};
         } catch (const backing_error& e) {
             return hsm_error(e);
         }
@@ -668,8 +688,10 @@ private:
         if (!sealed) {
             return sealed.error();
         }
-        boost::json::object out{{"CiphertextBlob", std::move(*sealed)},
-                                {"KeyId", ctx.key_arn(k->record.account, k->record.key_id)}};
+        boost::json::object out{
+            {"CiphertextBlob", std::move(*sealed)},
+            {"KeyId", ctx.key_arn(k->record.account, k->record.key_id)},
+            {"KeyMaterialId", key_material_id(k->record.key_id, k->record.current_version)}};
         if (with_plaintext) {
             out["Plaintext"] = key->base64();
         }
@@ -750,6 +772,7 @@ private:
             {"PrivateKeyCiphertextBlob", std::move(*sealed)},
             {"PublicKey", aws_json::base64_encode(std::as_bytes(std::span(pair.public_spki)))},
             {"KeyId", ctx.key_arn(k->record.account, k->record.key_id)},
+            {"KeyMaterialId", key_material_id(k->record.key_id, k->record.current_version)},
             {"KeyPairSpec", spec}};
         if (with_plaintext) {
             out["PrivateKeyPlaintext"] = priv.base64();

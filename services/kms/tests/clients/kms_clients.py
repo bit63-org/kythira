@@ -114,7 +114,7 @@ def boto3_suite(c: Checks, kms: Clients) -> None:
     aliases = [a["AliasName"] for a in kms().list_aliases(KeyId=key)["Aliases"]]
     c.that("ListAliases names the alias", "alias/clients-boto3" in aliases, str(aliases))
     c.equal("DescribeKey by alias", kms().describe_key(KeyId="alias/clients-boto3")["KeyMetadata"]["KeyId"], key)
-    c.raises("CreateAlias without alias/", "InvalidAliasNameException",
+    c.raises("CreateAlias without alias/", "ValidationException",
              lambda: kms().create_alias(AliasName="nope", TargetKeyId=key))
 
     context = {"purpose": "suite", "tenant": "t1"}
