@@ -86,8 +86,13 @@ struct fixture {
     std::unique_ptr<kin::kinesis_service<kin::local_stream_cluster>> service;
 
     fixture() {
-        service = std::make_unique<kin::kinesis_service<kin::local_stream_cluster>>(
-            cluster, kin::kinesis_service_config{});
+        // These cases call faster than AWS's per-account control-plane
+        // rates, which the SDKs retry and direct calls do not;
+        // kinesis_throttle_test covers the rates.
+        kin::kinesis_service_config cfg;
+        cfg._control_plane._rates.clear();
+        service = std::make_unique<kin::kinesis_service<kin::local_stream_cluster>>(cluster,
+                                                                                    std::move(cfg));
         service->register_with(fe);
         fe.set_resource_lookup(
             [this](std::string_view arn) { return service->resource_facts_of(arn); });

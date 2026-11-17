@@ -43,10 +43,37 @@ that spreads its calls over N nodes can therefore read up to N times the
 per-shard read limit. The `GetRecords` message is AWS's: `Rate exceeded
 for Shard - A:S:shardId-…`.
 
-Not enforced yet: the per-account control-plane call rates (for example,
-`DescribeStream` at 10 per second), which AWS answers with
-`LimitExceededException`. `LimitExceededException` is returned for the
-account's shard limit.
+### Control-plane call rates
+
+AWS limits most control-plane calls per account, and answers a call past
+the rate with `LimitExceededException`. Kythira keeps one bucket per
+account and operation (`kinesis_throttle.hpp`'s `control_throttle`), one
+second deep like the others, on the node that serves the call:
+
+| Calls a second per account | Operations |
+| --- | --- |
+| 1 | `DescribeLimits` |
+| 5 | `AddTagsToStream`, `CreateStream`, `DecreaseStreamRetentionPeriod`, `DeleteStream`, `DeregisterStreamConsumer`, `DisableEnhancedMonitoring`, `EnableEnhancedMonitoring`, `IncreaseStreamRetentionPeriod`, `ListStreamConsumers`, `ListStreams`, `ListTagsForStream`, `MergeShards`, `RegisterStreamConsumer`, `RemoveTagsFromStream`, `SplitShard` |
+| 10 | `DescribeStream` |
+| 20 | `DescribeStreamConsumer`, `DescribeStreamSummary` |
+
+- The message is `Rate exceeded for stream S under account A.`, the one
+  KCL logs for `DescribeStream`, or `Rate exceeded for account
+  A.` for a call that names no stream. The second is not checked against
+  AWS: the differential recordings never ran into a rate.
+- Clients already back off on it against AWS: botocore (and so the AWS
+  CLI) retries Kinesis's `LimitExceededException`, and KCL waits and
+  tries again. A client that does neither fails here as it would there.
+- Only the cluster's `throttling` setting (`KINESIS_COMPAT=throttling=off`)
+  turns these off. A stream's tag does not: the rate is the account's, not
+  the stream's.
+- Any node serves these calls, so, as with reads, a client spreading them
+  over N nodes can make N times the rate.
+- Not here: operations AWS limits per stream, shard or consumer
+  (`ListShards` at 1000 a second per stream, `SubscribeToShard`), and
+  limits per rolling day. `UpdateStreamMode`'s two a day is enforced from
+  the catalog. `LimitExceededException` is also the answer for the
+  account's shard limit and the consumer limits.
 
 ## Measurement: hot shards in one group
 

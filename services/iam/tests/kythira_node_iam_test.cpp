@@ -502,7 +502,9 @@ auto term_sum(const node_cluster& c, const node_proc& p, const std::string& modu
 BOOST_AUTO_TEST_CASE(a_saturated_module_starts_no_elections, *boost::unit_test::timeout(600)) {
     node_cluster c;
     // Few request threads, so the flood below holds every one.
-    c.extra_env = {"KINESIS_MAX_CONNECTIONS=4"};
+    // Throttling off, so the flood's ListStreams calls are served rather
+    // than answered at once with AWS's per-account rate refusal.
+    c.extra_env = {"KINESIS_MAX_CONNECTIONS=4", "KINESIS_COMPAT=throttling=off"};
     for (auto& p : c.nodes) {
         c.start(p);
     }

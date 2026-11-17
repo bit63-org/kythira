@@ -33,6 +33,10 @@
 ///
 /// Buckets are created on first use and dropped after a minute idle, so a
 /// node's memory follows its active shards.
+///
+/// Control-plane calls (`DescribeStream`, `CreateStream`, ...) meet AWS's
+/// per-account call rates (`control_throttle`), on the node that serves the
+/// call, like reads.
 
 #include <kythira/kinesis/kinesis_stream_state_machine.hpp>
 
@@ -45,6 +49,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -276,6 +281,95 @@ private:
         it->second._iterators.refill(now);
         return it->second;
     }
+};
+
+/// AWS's per-account control-plane call rates, in calls a second, from the
+/// Kinesis Data Streams quotas page: every operation whose quota is a
+/// per-account rate. Operations limited per stream, per shard or per
+/// consumer (`ListShards`, the data plane, `SubscribeToShard`) or by calls
+/// per rolling day (`UpdateStreamMode`, counted in the catalog) are not
+/// here.
+struct control_plane_limits {
+    std::map<std::string, double, std::less<>> _rates{
+        {"AddTagsToStream", 5.0},
+        {"CreateStream", 5.0},
+        {"DecreaseStreamRetentionPeriod", 5.0},
+        {"DeleteStream", 5.0},
+        {"DeregisterStreamConsumer", 5.0},
+        {"DescribeLimits", 1.0},
+        {"DescribeStream", 10.0},
+        {"DescribeStreamConsumer", 20.0},
+        {"DescribeStreamSummary", 20.0},
+        {"DisableEnhancedMonitoring", 5.0},
+        {"EnableEnhancedMonitoring", 5.0},
+        {"IncreaseStreamRetentionPeriod", 5.0},
+        {"ListStreamConsumers", 5.0},
+        {"ListStreams", 5.0},
+        {"ListTagsForStream", 5.0},
+        {"MergeShards", 5.0},
+        {"RegisterStreamConsumer", 5.0},
+        {"RemoveTagsFromStream", 5.0},
+        {"SplitShard", 5.0},
+    };
+
+    /// The rate for `operation`; 0 when it has no per-account rate.
+    [[nodiscard]] auto rate(std::string_view operation) const -> double {
+        const auto it = _rates.find(operation);
+        return it == _rates.end() ? 0.0 : it->second;
+    }
+};
+
+/// One bucket per (account, operation) on the node that serves the call.
+/// Any node serves control-plane calls, so a client that spreads them over
+/// N nodes can make up to N times AWS's rate; one that keeps to one
+/// endpoint (every SDK and KCL) meets it exactly. Thread-safe.
+class control_throttle {
+public:
+    explicit control_throttle(control_plane_limits limits = {}, monotonic_ms clock = steady_now_ms)
+        : _limits(std::move(limits)), _clock(std::move(clock)) {}
+
+    /// Whether `account` may call `operation` now, taking a token if so.
+    /// An operation with no per-account rate is always admitted.
+    auto admit(std::string_view account, std::string_view operation) -> bool {
+        const auto rate = _limits.rate(operation);
+        if (rate <= 0.0) {
+            return true;
+        }
+        std::string key;
+        key.reserve(account.size() + 1 + operation.size());
+        key.append(account).push_back('\0');
+        key.append(operation);
+        const std::scoped_lock lock(_mutex);
+        const auto now = _clock();
+        if (now - _swept_ms >= 60'000) {
+            _swept_ms = now;
+            std::erase_if(_buckets,
+                          [now](const auto& kv) { return now - kv.second.idle_since() > 60'000; });
+        }
+        auto it = _buckets.find(key);
+        if (it == _buckets.end()) {
+            it = _buckets.emplace(std::move(key), token_bucket(rate, now)).first;
+        }
+        auto& b = it->second;
+        b.refill(now);
+        if (b.tokens() < 1.0) {
+            return false;
+        }
+        b.take(1.0);
+        return true;
+    }
+
+    [[nodiscard]] auto size() -> std::size_t {
+        const std::scoped_lock lock(_mutex);
+        return _buckets.size();
+    }
+
+private:
+    control_plane_limits _limits;
+    monotonic_ms _clock;
+    std::mutex _mutex;
+    std::map<std::string, token_bucket, std::less<>> _buckets;
+    std::int64_t _swept_ms = 0;
 };
 
 /// Proposes `command` after the leader's write admission. `propose` makes

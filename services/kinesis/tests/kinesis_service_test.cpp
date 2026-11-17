@@ -59,8 +59,18 @@ struct fixture {
     kin::front_end<allow_all> fe{kin::front_end_config{}, auth};
     kin::kinesis_service<kin::local_stream_cluster> service;
 
-    explicit fixture(kin::kinesis_service_config cfg = {}) : service(cluster, std::move(cfg)) {
+    explicit fixture(kin::kinesis_service_config cfg = {})
+        : service(cluster, without_control_rates(std::move(cfg))) {
         service.register_with(fe);
+    }
+
+    // These cases call faster than AWS's per-account control-plane rates,
+    // which the SDKs retry and direct calls do not; kinesis_throttle_test
+    // covers the rates.
+    static auto without_control_rates(kin::kinesis_service_config cfg)
+        -> kin::kinesis_service_config {
+        cfg._control_plane._rates.clear();
+        return cfg;
     }
 
     auto call(std::string_view op, const json::value& body) -> aj::http_response {

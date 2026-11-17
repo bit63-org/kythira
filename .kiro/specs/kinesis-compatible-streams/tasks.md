@@ -189,8 +189,14 @@ asked.
     stream, and with the stream winning. Measurement in
     `services/kinesis/doc/throughput.md`: one group held 4 hot shards at
     the write limit on a shared-disk sandbox (disk-bound past that).
-    Open: per-account control-plane call rates (`LimitExceededException`);
-    a re-run on separate disks.
+    Per-account control-plane call rates (November 17, 2026): one bucket
+    per account and operation on the serving node (`control_throttle`),
+    AWS's rates for the 19 operations it limits per account, answered with
+    `LimitExceededException`; the cluster switch turns them off, a
+    stream's tag does not. `kinesis_throttle_test` covers them; test
+    fixtures that call faster than AWS allows turn them off, since they
+    do not retry as the SDKs do. Open: a re-run of the measurement on
+    separate disks.
 
 ### Phase 3: KCL 2.x with the native lease layer (first consumer milestone)
 
