@@ -52,6 +52,7 @@
 
 #include "multi_raft_kv_workload.hpp"
 #include "multi_raft_test_fabric.hpp"
+#include "test_ports.hpp"
 
 #include <raft/console_logger.hpp>
 #include <raft/executor_default.hpp>
@@ -260,36 +261,21 @@ private:
 // Tier B: a real transport over loopback
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// @brief Ask the kernel for a free TCP port, then give it straight back.
+/// @brief A free TCP port for a server the fixture starts later.
 ///
-/// The alternative — binding port 0 inside the server and reading the chosen
-/// port back — cannot work here: the client needs every peer's URL at
-/// *construction* time, which is before `multi_raft::start()` has started any
-/// server. Reserving up front keeps startup in its natural order, at the cost of
-/// a small window in which another process could take the port. Any port chosen
-/// in advance has that window; this at least never collides with a port already
-/// in use.
+/// The client needs every peer's URL at *construction* time, before
+/// `multi_raft::start()` has started any server, so ports are chosen up front.
+/// This used to bind port 0, read the port back and close the socket. That
+/// hands out ephemeral ports, which the kernel can give again to the next such
+/// call or to any outgoing connection before the server binds. cpp-httplib's
+/// servers then set SO_REUSEPORT, so two nodes given one port both bound it and
+/// the kernel split connections between them: http_pre_vote_timeout_now_test
+/// saw a leader receive its own TimeoutNow, and an "isolated" follower that was
+/// still being served by its twin. `free_port()` picks below the ephemeral
+/// range, never repeats within the process, and claims the port against other
+/// test processes (tests/test_ports.hpp).
 [[nodiscard]] inline auto reserve_port() -> std::uint16_t {
-    const int fd = ::socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0) {
-        throw std::runtime_error("reserve_port: socket() failed");
-    }
-    sockaddr_in addr{};
-    addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    addr.sin_port = 0;
-    if (::bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
-        ::close(fd);
-        throw std::runtime_error("reserve_port: bind() failed");
-    }
-    socklen_t len = sizeof(addr);
-    if (::getsockname(fd, reinterpret_cast<sockaddr*>(&addr), &len) != 0) {
-        ::close(fd);
-        throw std::runtime_error("reserve_port: getsockname() failed");
-    }
-    const auto port = ntohs(addr.sin_port);
-    ::close(fd);
-    return port;
+    return free_port();
 }
 
 inline auto loopback_url(std::uint16_t port) -> std::string {
