@@ -67,13 +67,18 @@
 // checked-in AWS Kinesis recordings (tests/differential/recordings/) against
 // a third and checks the cluster answers as AWS did.
 //
-// The last case (task 17, Requirement 11.3) recreates the nodes with
+// The tiering case (task 17, Requirement 11.3) recreates the nodes with
 // tiering to an in-memory S3 mock (the `s3` profile) five seconds after a
 // segment's last record. A producer writes while every node is killed in
 // turn, with uploads slowed and the first six failing, so leaders die with
 // uploads in flight and the pass must retry. Every injected failure fires,
 // segments reach the store, and a reader through every node gets every
 // record back, in order under each key, from tiered segments.
+//
+// The last case (task 19, Requirement 18.2) recreates the nodes once more
+// to deliver channels to the same mock, five seconds after a batch's first
+// record, and writes through a channel while every node is killed in turn:
+// every record reaches the bucket, in order under each key within a shard.
 
 #define BOOST_TEST_MODULE kinesis_node_scenario_test
 #include <boost/test/results_collector.hpp>
@@ -1137,4 +1142,57 @@ BOOST_AUTO_TEST_CASE(tiered_segments_survive_leader_kills_and_s3_faults) {
     BOOST_TEST(c.code == 0, "lineage-consume failed:\n" << c.out);
     BOOST_TEST(c.out.find("\"consumed\": " + count) != std::string::npos, c.out);
     BOOST_TEST_MESSAGE("tiering case: " << puts << " segment uploads");
+}
+
+// Task 19: channel delivery through node kills. Runs after the tiering
+// case, whose S3 mock it reuses, and recreates the nodes again to deliver
+// channels there.
+BOOST_AUTO_TEST_CASE(channel_delivers_every_record_through_node_kills) {
+    const logs_on_failure logs;
+    os::checked_exec(os::real_exec, compose_cmd({"--profile", "s3", "up", "-d", "s3mock"}));
+    ::setenv("KINESIS_SCENARIO_CHANNEL_ENDPOINT", "http://s3mock:9000", 1);
+    ::setenv("KINESIS_SCENARIO_CHANNEL_MAX_DELAY_MS", "5000", 1);
+    os::checked_exec(os::real_exec, compose_cmd({"up", "-d", "--force-recreate", "--no-deps",
+                                                 "kin-1", "kin-2", "kin-3"}));
+    for (int n : {1, 2, 3}) {
+        BOOST_REQUIRE_MESSAGE(
+            eventually([&] { return aws_cli(n, {"list-streams"}).code == 0; }, 180s),
+            service(n) << " never answered ListStreams with channel delivery on");
+    }
+    {
+        auto r = boto3({"create", "--endpoint", endpoint(1), "--stream", "chan", "--on-demand"},
+                       k_admin_id, k_admin_secret);
+        BOOST_REQUIRE_MESSAGE(r.code == 0, "boto3 create failed:\n" << r.out);
+        r = boto3({"channel-create", "--endpoint", endpoint(1), "--stream", "chan", "--channel",
+                   "to-s3", "--bucket", "channel-out"},
+                  k_admin_id, k_admin_secret);
+        BOOST_REQUIRE_MESSAGE(r.code == 0, "boto3 channel-create failed:\n" << r.out);
+    }
+
+    const std::string all = endpoint(1) + "," + endpoint(2) + "," + endpoint(3);
+    constexpr int k_records = 2000;
+    const auto count = std::to_string(k_records);
+    os::CmdResult produced;
+    std::thread producer([&] {
+        produced = boto3({"batch-produce", "--endpoints", all, "--stream", "chan", "--count", count,
+                          "--keys", "8", "--tag", "ch", "--timeout", "600"});
+    });
+    for (int n : {1, 2, 3}) {
+        // Long enough for a batch to come due and its object to be written.
+        std::this_thread::sleep_for(8s);
+        os::checked_exec(os::real_exec, compose_cmd({"kill", service(n)}));
+        std::this_thread::sleep_for(std::chrono::milliseconds(k_failover_ms));
+        os::checked_exec(os::real_exec, compose_cmd({"start", service(n)}));
+        BOOST_REQUIRE_MESSAGE(
+            eventually([&] { return aws_cli(n, {"list-streams"}).code == 0; }, 120s),
+            service(n) << " never answered after restarting");
+    }
+    producer.join();
+    BOOST_REQUIRE_MESSAGE(produced.code == 0, "batch-produce failed:\n" << produced.out);
+
+    auto c = boto3({"channel-check", "--s3", "http://s3mock:9000", "--bucket", "channel-out",
+                    "--channel", "to-s3", "--count", count, "--keys", "8", "--tag", "ch",
+                    "--timeout", "240"});
+    BOOST_TEST(c.code == 0, "channel-check failed:\n" << c.out);
+    BOOST_TEST(c.out.find("\"delivered\": " + count) != std::string::npos, c.out);
 }

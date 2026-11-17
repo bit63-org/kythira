@@ -549,3 +549,10 @@ asked.
     it. Left: `StorageClass` and `ExpectedBucketOwner` on the write, S3
     Tables commits, KMS for delivered objects, the container scenario and
     conformance runs.
+  - Progress (November 17, 2026): the container scenario's channel case
+    delivers a GZIP channel to the S3 mock through a kill of every node
+    in turn (`KINESIS_CHANNEL_MAX_DELAY_MS=5000` in place of the 300 s
+    minimum freshness) and checks every record arrives, in order under
+    each key within a shard, under Docker and rootless Podman. Left: S3
+    Tables, KMS, `StorageClass` and `ExpectedBucketOwner`, conformance
+    runs.

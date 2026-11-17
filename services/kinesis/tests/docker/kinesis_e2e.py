@@ -8,7 +8,7 @@
 `boto3` service (services/kinesis/docker/kinesis_clients/Dockerfile) by
 kinesis_node_scenario_test, against the gateways by compose service name:
 
-    kinesis_e2e.py create  --endpoint URL --stream S --shards N
+    kinesis_e2e.py create  --endpoint URL --stream S (--shards N | --on-demand)
     kinesis_e2e.py produce --endpoint URL --stream S --count N --tag T
     kinesis_e2e.py consume --endpoints URL,URL --stream S --expect N
     kinesis_e2e.py ordered-produce --endpoints URL,URL --stream S --count N --keys K --tag T
@@ -16,6 +16,8 @@ kinesis_node_scenario_test, against the gateways by compose service name:
     kinesis_e2e.py batch-produce --endpoints URL,URL --stream S --count N --keys K --tag T
     kinesis_e2e.py fan-out-consume --endpoints URL,URL --stream S --count N --keys K --tag T
     kinesis_e2e.py s3-control --url URL [--put-delay MS] [--fail-puts N --prefix P]
+    kinesis_e2e.py channel-create --endpoint URL --stream S --channel C --bucket B
+    kinesis_e2e.py channel-check --s3 URL --bucket B --channel C --count N --keys K --tag T
 
 `produce` writes records `T-0` .. `T-<N-1>` with PutRecords in batches of
 100, retrying records that fail, and prints how many went to each shard.
@@ -55,10 +57,19 @@ in order under each key, by the deadline.
 `s3-control` drives the S3 mock's control side for the tiering case (task
 17): it optionally sets the PUT delay and arms a number of failing PUTs
 under a key prefix, then prints the mock's counters as one JSON line.
+
+`channel-create` makes a GZIP S3 channel from an on-demand stream to a
+bucket (task 19). `channel-check` reads that bucket through S3 (the
+scenario's mock), until every record `T-0` .. `T-<N-1>` written by
+`batch-produce` has been delivered or the deadline passes, and fails
+unless, within each shard, a key's records were delivered in the order
+they were written.
 """
 
 import argparse
+import gzip
 import json
+import re
 import sys
 import threading
 import time
@@ -66,6 +77,7 @@ import urllib.request
 
 import boto3
 from botocore.config import Config
+from botocore.exceptions import ClientError
 
 CONFIG = Config(
     retries={"max_attempts": 10, "mode": "standard"},
@@ -88,7 +100,12 @@ def fail(message):
 def create(args):
     c = client(args.endpoint)
     try:
-        c.create_stream(StreamName=args.stream, ShardCount=args.shards)
+        if args.on_demand:
+            c.create_stream(
+                StreamName=args.stream, StreamModeDetails={"StreamMode": "ON_DEMAND"}
+            )
+        else:
+            c.create_stream(StreamName=args.stream, ShardCount=args.shards)
     except c.exceptions.ResourceInUseException as e:
         # botocore retries CreateStream when an attempt's answer is lost (a
         # read timeout, a dropped connection), and CreateStream is not
@@ -101,9 +118,9 @@ def create(args):
     while time.time() < deadline:
         s = c.describe_stream_summary(StreamName=args.stream)["StreamDescriptionSummary"]
         if s["StreamStatus"] == "ACTIVE":
-            if s["OpenShardCount"] != args.shards:
+            if not args.on_demand and s["OpenShardCount"] != args.shards:
                 fail(f"{args.stream} exists with {s['OpenShardCount']} shards, not {args.shards}")
-            print(json.dumps({"stream": args.stream, "shards": args.shards}))
+            print(json.dumps({"stream": args.stream, "shards": s["OpenShardCount"]}))
             return
         time.sleep(1)
     fail(f"{args.stream} never became ACTIVE")
@@ -401,13 +418,102 @@ def s3_control(args):
     print(call("/control"))
 
 
+def channel_create(args):
+    """A GZIP S3 channel from on-demand stream S to bucket B."""
+    c = client(args.endpoint)
+    arn = c.describe_stream_summary(StreamName=args.stream)["StreamDescriptionSummary"][
+        "StreamARN"
+    ]
+    account = arn.split(":")[4]
+    out = c.create_channel(
+        ChannelName=args.channel,
+        ServiceExecutionRoleARN=f"arn:aws:iam::{account}:role/channel-delivery",
+        StreamConfigurationList=[
+            {"StreamARN": arn, "RecordConfiguration": {"RecordFormatType": "STRING"}}
+        ],
+        S3DestinationConfiguration={
+            "StorageConfiguration": {
+                "BucketARN": f"arn:aws:s3:::{args.bucket}",
+                "ExpectedBucketOwner": account,
+                "CompressionType": "GZIP",
+            }
+        },
+    )
+    print(json.dumps({"channel": args.channel, "arn": out["ChannelDescription"]["ChannelARN"]}))
+
+
+CHANNEL_OBJECT = re.compile(r"-(shardId-\d+)-(\d+)-(\d+)(\.gz)?$")
+
+
+def channel_pass(s3, args):
+    """Every delivered record, per key in delivery order: objects grouped
+    by shard and taken in sequence order, as a reader of the bucket would."""
+    objects = []
+    for page in s3.get_paginator("list_objects_v2").paginate(Bucket=args.bucket):
+        for o in page.get("Contents", []):
+            m = CHANNEL_OBJECT.search(o["Key"])
+            if m and o["Key"].rsplit("/", 1)[-1].startswith(f"{args.channel}-shardId-"):
+                objects.append((m.group(1), int(m.group(2)), int(m.group(3)), o["Key"]))
+    objects.sort()
+    prefix = f"{args.tag}-"
+    by_shard_key = {}
+    seen = set()
+    total = 0
+    for shard, _first, _last, key in objects:
+        body = s3.get_object(Bucket=args.bucket, Key=key)["Body"].read()
+        if key.endswith(".gz"):
+            body = gzip.decompress(body)
+        for line in body.decode().splitlines():
+            if not line.startswith(prefix):
+                continue
+            i = int(line[len(prefix):])
+            total += 1
+            seen.add(i)
+            by_shard_key.setdefault((shard, i % args.keys), []).append(i)
+    return by_shard_key, seen, total, len(objects)
+
+
+def channel_check(args):
+    s3 = boto3.client(
+        "s3",
+        endpoint_url=args.s3,
+        region_name="us-east-1",
+        config=Config(s3={"addressing_style": "path"}),
+    )
+    deadline = time.time() + args.timeout
+    while True:
+        try:
+            by_shard_key, seen, total, objects = channel_pass(s3, args)
+        except ClientError:
+            by_shard_key, seen, total, objects = {}, set(), 0, 0
+        missing = sorted(set(range(args.count)) - seen)
+        if not missing:
+            break
+        if time.time() > deadline:
+            fail(
+                f"{len(missing)} of {args.count} records never delivered "
+                f"({objects} objects), first {missing[0]}"
+            )
+        time.sleep(3)
+    # Within a shard a key's records were written in order; delivery keeps
+    # it. A batch re-delivered after a lost checkpoint lands on the same
+    # key and replaces itself, so only the producer's own retries repeat.
+    for (shard, key), got in by_shard_key.items():
+        for a, b in zip(got, got[1:]):
+            if b < a:
+                fail(f"{shard} key {key}: {b} delivered after {a}")
+    print(json.dumps({"delivered": len(seen), "lines": total, "objects": objects}))
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = p.add_subparsers(dest="command", required=True)
     c = sub.add_parser("create")
     c.add_argument("--endpoint", required=True)
     c.add_argument("--stream", required=True)
-    c.add_argument("--shards", type=int, required=True)
+    shape = c.add_mutually_exclusive_group(required=True)
+    shape.add_argument("--shards", type=int)
+    shape.add_argument("--on-demand", action="store_true")
     pr = sub.add_parser("produce")
     pr.add_argument("--endpoint", required=True)
     pr.add_argument("--stream", required=True)
@@ -433,6 +539,19 @@ def main():
     s3.add_argument("--put-delay", type=int)
     s3.add_argument("--fail-puts", type=int)
     s3.add_argument("--prefix", default="")
+    cc = sub.add_parser("channel-create")
+    cc.add_argument("--endpoint", required=True)
+    cc.add_argument("--stream", required=True)
+    cc.add_argument("--channel", required=True)
+    cc.add_argument("--bucket", required=True)
+    ck = sub.add_parser("channel-check")
+    ck.add_argument("--s3", required=True)
+    ck.add_argument("--bucket", required=True)
+    ck.add_argument("--channel", required=True)
+    ck.add_argument("--count", type=int, required=True)
+    ck.add_argument("--keys", type=int, required=True)
+    ck.add_argument("--tag", required=True)
+    ck.add_argument("--timeout", type=int, default=300)
     args = p.parse_args()
     {
         "create": create,
@@ -443,6 +562,8 @@ def main():
         "batch-produce": batch_produce,
         "fan-out-consume": fan_out_consume,
         "s3-control": s3_control,
+        "channel-create": channel_create,
+        "channel-check": channel_check,
     }[args.command](args)
 
 

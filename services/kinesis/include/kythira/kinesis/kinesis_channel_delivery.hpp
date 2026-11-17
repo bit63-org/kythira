@@ -85,6 +85,11 @@ struct channel_delivery_config {
     std::size_t _max_object_bytes = std::size_t{64} * 1024 * 1024;
     /// Bytes read from a shard per page.
     std::size_t _page_bytes = std::size_t{4} * 1024 * 1024;
+    /// When positive, write a batch once its oldest record is this old even
+    /// if the channel's `DataFreshnessInSeconds` (at least 300 s) has not
+    /// passed: seconds-scale delivery for tests and demos, as
+    /// `KINESIS_TIER_AFTER_MS` is for tiering. 0 keeps the channel's own.
+    std::int64_t _max_delay_ms = 0;
     /// Whether this node can write a `CompressionType`; unset asks what
     /// the build has (`channel_detail::can_compress`). Tests narrow it.
     std::function<bool(std::string_view)> _can_compress;
@@ -469,8 +474,11 @@ private:
             }
         }
         const auto now = _cluster.now_ms();
-        const auto freshness_ms =
+        auto freshness_ms =
             dest.at("DataFreshnessInSeconds").to_number<std::int64_t>() * std::int64_t{1000};
+        if (_config._max_delay_ms > 0) {
+            freshness_ms = std::min(freshness_ms, _config._max_delay_ms);
+        }
         const bool due = !batch.empty() && (batch.front()._arrival_ms + freshness_ms <= now ||
                                             bytes >= _config._max_object_bytes || exhausted);
         if (batch.empty()) {

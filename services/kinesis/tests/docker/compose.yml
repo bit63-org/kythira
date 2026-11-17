@@ -65,6 +65,12 @@ x-env: &env
   KINESIS_TIER_AFTER_MS: "${KINESIS_SCENARIO_TIER_AFTER_MS:-0}"
   KINESIS_TIER_BUCKET: "${KINESIS_SCENARIO_TIER_BUCKET:-}"
   KINESIS_TIER_ENDPOINT: "${KINESIS_SCENARIO_TIER_ENDPOINT:-}"
+  # Channel delivery to the same mock (task 19's channel case), and a
+  # five-second delivery delay in place of the channel's 300 s minimum
+  # freshness, both only when the scenario sets them and recreates the
+  # nodes.
+  KINESIS_CHANNEL_S3_ENDPOINT: "${KINESIS_SCENARIO_CHANNEL_ENDPOINT:-}"
+  KINESIS_CHANNEL_MAX_DELAY_MS: "${KINESIS_SCENARIO_CHANNEL_MAX_DELAY_MS:-0}"
   AWS_ACCESS_KEY_ID: scenario-s3-key
   AWS_SECRET_ACCESS_KEY: scenario-s3-secret
   AWS_EC2_METADATA_DISABLED: "true"

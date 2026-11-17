@@ -306,3 +306,31 @@ BOOST_AUTO_TEST_CASE(the_pkcs11_key_provider_settings) {
     vars["KINESIS_KMS_PKCS11_OAEP"] = "sha512";
     BOOST_CHECK_THROW((void)kn::from_env(kn::composite_env(lookup(vars))), std::invalid_argument);
 }
+
+// Channel delivery (task 19): on by default, toward AWS's S3 in the node's
+// region, and a seconds-scale delay only from a second up to the model's
+// 900 s ceiling.
+BOOST_AUTO_TEST_CASE(channel_delivery_settings) {
+    auto vars = tier_vars();
+    vars.erase("KINESIS_TIER_AFTER_HOURS");
+    auto o = kn::from_env(lookup(vars));
+    BOOST_TEST(o._channel_delivery);
+    BOOST_TEST(o._channel_s3_region == o._region);
+    BOOST_TEST(o._channel_s3_endpoint.empty());
+    BOOST_TEST(o._channel_max_delay_ms == 0);
+
+    vars["KINESIS_CHANNEL_DELIVERY"] = "false";
+    vars["KINESIS_CHANNEL_S3_REGION"] = "eu-west-1";
+    vars["KINESIS_CHANNEL_S3_ENDPOINT"] = "http://s3mock:9000";
+    vars["KINESIS_CHANNEL_MAX_DELAY_MS"] = "5000";
+    o = kn::from_env(lookup(vars));
+    BOOST_TEST(!o._channel_delivery);
+    BOOST_TEST(o._channel_s3_region == "eu-west-1");
+    BOOST_TEST(o._channel_s3_endpoint == "http://s3mock:9000");
+    BOOST_TEST(o._channel_max_delay_ms == 5000);
+
+    vars["KINESIS_CHANNEL_MAX_DELAY_MS"] = "500";
+    BOOST_TEST(refused_naming(vars, "KINESIS_CHANNEL_MAX_DELAY_MS"));
+    vars["KINESIS_CHANNEL_MAX_DELAY_MS"] = "900001";
+    BOOST_TEST(refused_naming(vars, "KINESIS_CHANNEL_MAX_DELAY_MS"));
+}

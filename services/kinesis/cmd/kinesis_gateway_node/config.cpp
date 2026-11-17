@@ -441,6 +441,14 @@ void read_kinesis_side(const reader& r, node_options& o) {
     o._channel_delivery = r.flag("KINESIS_CHANNEL_DELIVERY", "true");
     o._channel_s3_region = r.opt("KINESIS_CHANNEL_S3_REGION", o._region.c_str());
     o._channel_s3_endpoint = r.opt("KINESIS_CHANNEL_S3_ENDPOINT", "");
+    const auto max_delay = r.u64("KINESIS_CHANNEL_MAX_DELAY_MS", "0");
+    if (max_delay != 0 && max_delay < 1000) {
+        fail("KINESIS_CHANNEL_MAX_DELAY_MS must be 0 or at least 1000");
+    }
+    if (max_delay > std::uint64_t{900} * 1000U) {
+        fail("KINESIS_CHANNEL_MAX_DELAY_MS must be at most 900000");
+    }
+    o._channel_max_delay_ms = static_cast<std::int64_t>(max_delay);
 }
 
 }  // namespace
@@ -625,7 +633,10 @@ auto describe(const node_options& o) -> std::string {
         << (o._channel_delivery
                 ? "on region=" + o._channel_s3_region +
                       (o._channel_s3_endpoint.empty() ? std::string()
-                                                      : " endpoint=" + o._channel_s3_endpoint)
+                                                      : " endpoint=" + o._channel_s3_endpoint) +
+                      (o._channel_max_delay_ms > 0
+                           ? " max_delay=" + std::to_string(o._channel_max_delay_ms) + "ms"
+                           : std::string())
                 : std::string("off"))
         << '\n';
     for (const auto& [k, v] : o._compat) {

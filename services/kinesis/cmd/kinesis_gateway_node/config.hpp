@@ -153,6 +153,11 @@ struct node_options {
     /// empty): where channel destination buckets are written.
     std::string _channel_s3_region;
     std::string _channel_s3_endpoint;
+    /// `KINESIS_CHANNEL_MAX_DELAY_MS`: when set, write a batch once its
+    /// oldest record is this old, even inside the channel's
+    /// `DataFreshnessInSeconds` (seconds-scale delivery for tests and
+    /// demos); 0, the default, keeps each channel's own.
+    std::int64_t _channel_max_delay_ms{0};
 };
 
 /// Whether this build can tier to `provider`, and if not, what would
