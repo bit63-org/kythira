@@ -943,7 +943,20 @@ measured against what design.md assumed:
 Left open, outside this spec's tasks:
 
 - The clang++-18 build has one translation unit whose cache key changes
-  between two builds of one commit (task 11). Not yet identified.
+  between two builds of one commit (task 11). **Resolved 2026-11-17.**
+  CI now names every miss (`scripts/oci-build-cache/sccache_misses.py`,
+  run in the Build & Test job's statistics step). On PR #827, which
+  changed no compile input, the clang++-18 x64 leg missed exactly one
+  compile, `tests/`'s `kythira_test_pch` PCH (911 requests, 910 hits).
+  sccache keys a PCH compile by re-running it with `-E`, but
+  `-Xclang -emit-pch` overrides `-E`, so what it hashes is the PCH
+  itself, and clang stamps each input header's mtime into it. A fresh
+  configure rewrites `cmake_pch.hxx`, so the key changed every run.
+  The top-level `CMakeLists.txt` now adds `-Xclang -fno-pch-timestamp`
+  to Clang's PCH-creation options. Reproduced and confirmed locally with
+  sccache 0.17.0 and clang++-18: two clean configures, PCH missed then
+  hit with the flag, missed twice without it. OCI's second miss at
+  ab4265da is not accounted for by this; PR #827's run had only the one.
 - `redis_gateway_disk_store_integration_test` is still on the ctest retry
   allowlist; the November 4 re-survey counted 9 rescues in 50 runs.
 - A Boost-backend daemon can crash in pre-vote when peers are host names
