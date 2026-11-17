@@ -631,11 +631,14 @@ BOOST_AUTO_TEST_CASE(a_target_that_wins_on_its_own_completes_the_transfer,
     auto transfer = n->transfer_leadership(target, budget);
 
     // Silence the leader so the others' election timers fire, and keep the
-    // bystander from winning: nothing it asks of the target arrives. The
-    // target's own requests, and its heartbeats back to the old leader, still
-    // flow.
+    // bystander from winning: nothing it asks of the target or of the old
+    // leader arrives. Cutting only bystander -> target was not enough: the old
+    // leader, deposed by the bystander's RequestVote, granted it, and the
+    // bystander won term 3 in CI (13 of 76 runs to November 16). The target's
+    // own requests, and its heartbeats back to the old leader, still flow.
     cluster.fabric().partition(leader, target);
     cluster.fabric().partition(leader, bystander);
+    cluster.fabric().partition(bystander, leader);
     cluster.fabric().block_rpc(target, "request_pre_vote");
     cluster.fabric().block_rpc(target, "request_vote");
 
