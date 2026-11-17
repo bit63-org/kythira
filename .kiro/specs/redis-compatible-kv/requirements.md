@@ -139,6 +139,9 @@ verifiable claim and not an aspiration.
    `SUBSCRIBE`, `MSET`/`MGET`, `SETNX`, `GETSET`, `APPEND`, `EXPIRE`,
    `PERSIST`, `FLUSHDB` or any hash, list, set, stream or module command in
    this spec's scope.
+   (The transaction commands and `MSET`/`MGET` were later added by
+   `.kiro/specs/multi-raft-transactions/`, and the rest of this list except
+   streams and modules is taken up by `.kiro/specs/redis-general-data-types/`.)
 5. `CLIENT SETINFO`'s reply SHALL NOT be load-bearing: because `redis-rs`
    marks both `CLIENT SETINFO` commands `.ignore()` and
    `check_connection_setup` inspects only the `AUTH`/`HELLO` and `SELECT`
@@ -738,12 +741,21 @@ that" is a decision rather than an omission:
   it unnecessary for the target workload.
 - **Redis persistence semantics** (RDB, AOF, `BGSAVE`). Durability here is the
   Raft log and Kythira's snapshots.
-- **Pub/sub, streams, scripting, transactions, modules, keyspace notifications.**
+- **Pub/sub, streams, scripting, modules, keyspace notifications.**
+  Transactions were on this list when the spec was written; they have
+  since shipped through `.kiro/specs/multi-raft-transactions/` (`MULTI`/
+  `EXEC`/`DISCARD`, `WATCH`, `MSET`, `MGET`, multi-key `DEL`), so they are
+  no longer a non-goal of the service, only of this spec's sccache scope.
+  Pub/sub, scripting and keyspace notifications are goals of the follow-on
+  spec `.kiro/specs/redis-general-data-types/`; streams and modules
+  remain out of scope there too.
 - **Redis's own eviction policies** (`maxmemory-policy`, `allkeys-lru`). This
   spec's eviction is deterministic and leader-proposed (Requirement 9); it is
   not bug-compatible with Redis's sampling LRU.
 - **`SCAN`/`KEYS`.** No client in the target stack lists keys. Cache
-  administration tooling would need them and is separate work.
+  administration tooling would need them and is separate work, now
+  specified by `.kiro/specs/redis-general-data-types/` (tier 2), together
+  with the Redis Cluster protocol above (tier 6).
 - **Storing large values outside the Raft log.** The natural next step for this
   workload — put the blob in the object store this project already speaks to
   (S3/GCS/Azure/OSS/OCI) and keep only a digest and location in the log — is
