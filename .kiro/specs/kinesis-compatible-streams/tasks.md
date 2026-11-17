@@ -194,7 +194,7 @@ asked.
 
 ### Phase 3: KCL 2.x with the native lease layer (first consumer milestone)
 
-- [ ] 9. Lease API and the Java lease layer
+- [x] 9. Lease API and the Java lease layer
   - Lease API on `kinesis_gateway_node`
   - `java/kythira-kcl-leases` (Gradle): `LeaseRefresher`,
     `LeaseManagementFactory`, checkpointer, SigV4 signing
@@ -214,13 +214,14 @@ asked.
     three workers in the container scenario on a four-shard stream while
     each node is killed in turn (so the catalog leader dies while workers
     renew): every record arrives and no shard has two owners past the
-    failover time. Passes under Docker locally; the container job runs it
-    under Docker and rootless Podman. Backends by KCL version are in
+    failover time. The Kinesis Module workflow's container job runs it
+    under Docker and rootless Podman, both green on main (run
+    43696120949, November 15, 2026). Backends by KCL version are in
     `doc/leases.md`.
 
 ### Phase 4: durability and lifecycle
 
-- [ ] 10. Retention and tiering
+- [x] 10. Retention and tiering
   - Retention increase and decrease up to 8760 hours; leader-proposed trim
   - Tiering of sealed segments to the object stores with SHA-256, transparent
     fetch-back, disk guard
@@ -239,11 +240,24 @@ asked.
     `KINESIS_DISK_FLOOR_BYTES` on the proposing node and the leader. The
     daemon tiers to S3 or an S3-compatible endpoint (`tier_s3.cpp`, built
     with the AWS SDK's s3 component). `kinesis_retention_test`, 12 cases;
-    `doc/retention.md`. Open: the retention refusal messages are AWS's as
-    documented, not yet checked against a recording; other object stores
-    need only their `make_tier_store` call in the daemon.
+    `doc/retention.md`. The refusals match the AWS recordings of task 17
+    word for word (above the maximum, and an increase that shortens or a
+    decrease that lengthens); the recordings never asked for less than
+    the minimum, so that one message is AWS's as documented. Other stores
+    (November 17, 2026): `KINESIS_TIER_PROVIDER` picks `s3` (the default,
+    or any S3-compatible endpoint), `azure-blob`, `gcs`,
+    `oci-objectstorage` or `oss`, through core's client for each
+    (`tier.cpp` dispatches; `tier_s3.cpp` and `tier_cloud.cpp` hold the
+    clients), each compiled in under the conditions `raft_object_backup`
+    uses. `KINESIS_TIER_BUCKET`, `_PREFIX` and `_ENDPOINT` replace the
+    `_S3_` spellings, which still work. A provider missing from the
+    build, another provider's setting, or an unknown name is refused at
+    startup; `kinesis_node_config_test` covers each refusal. The
+    container scenario's tiering case runs S3 against the in-repo mock;
+    the other providers' clients are the ones object-store persistence
+    and backups already run against their clouds.
 
-- [ ] 11. Resharding
+- [x] 11. Resharding
   - `SplitShard`, `MergeShards`, `UpdateShardCount` with lineage, ending
     sequence numbers, tier-1 transactions across groups; closed shards
     readable until retention
@@ -263,8 +277,9 @@ asked.
     `kinesis_reshard_test`, 5 cases on the in-process cluster;
     `doc/resharding.md`. The container scenario's resharding case
     (three reshards, a node killed as each starts, catalog and shards in
-    separate groups, a producer writing throughout) passes under Docker
-    locally; tick once the CI Podman leg passes too.
+    separate groups, a producer writing throughout) passes in the
+    container job under Docker and rootless Podman on main (run
+    43696120949, November 15, 2026).
 
 - [x] 12. On-demand mode
   - `UpdateStreamMode`; leader-side controller that splits hot shards and
