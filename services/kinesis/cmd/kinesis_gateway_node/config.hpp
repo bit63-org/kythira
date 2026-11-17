@@ -113,20 +113,37 @@ struct node_options {
     std::chrono::milliseconds _maintenance_interval{60000};
     /// `KINESIS_TIER_AFTER_HOURS`, or `KINESIS_TIER_AFTER_MS` when set
     /// (seconds-scale tiering for tests and demos): tier sealed segments
-    /// whose last record is this old; 0 never tiers. Needs the S3 settings
-    /// below.
+    /// whose last record is this old; 0 never tiers. Needs the tier
+    /// store settings below.
     std::int64_t _tier_after_ms{0};
-    /// `KINESIS_TIER_S3_BUCKET`, `_PREFIX`, `_REGION` (default: the
-    /// region above), `_ENDPOINT` (any S3-compatible store; AWS when empty).
-    /// Credentials come from the AWS SDK's default chain.
+    /// `KINESIS_TIER_PROVIDER`: `s3` (default; any S3-compatible store with
+    /// an endpoint), `azure-blob`, `gcs`, `oci-objectstorage` or `oss`.
+    std::string _tier_provider{"s3"};
+    /// `KINESIS_TIER_BUCKET` (the container, for Azure) and
+    /// `KINESIS_TIER_PREFIX`; `KINESIS_TIER_S3_BUCKET` and `_S3_PREFIX` are
+    /// the older spellings and still accepted.
     std::string _tier_bucket;
     std::string _tier_prefix;
+    /// `KINESIS_TIER_S3_REGION` (S3 only; default: the region above).
     std::string _tier_region;
+    /// `KINESIS_TIER_ENDPOINT` (or `KINESIS_TIER_S3_ENDPOINT`): the S3
+    /// endpoint, or the Azure or GCS endpoint override (Azurite, a GCS
+    /// emulator); the provider's own when empty. OCI and OSS take theirs
+    /// from `KYTHIRA_OCI_*` and `KYTHIRA_ALIBABA_*`.
     std::string _tier_endpoint;
+    /// `KINESIS_TIER_AZURE_ACCOUNT`, default `KYTHIRA_AZURE_STORAGE_ACCOUNT`.
+    std::string _tier_azure_account;
+    /// `GOOGLE_CLOUD_PROJECT`, for GCS.
+    std::string _tier_gcs_project;
 };
 
-/// Whether this build can tier to S3 (the AWS SDK's s3 component was found).
-[[nodiscard]] auto s3_tier_available() -> bool;
+/// Whether this build can tier to `provider`, and if not, what would
+/// enable it; `_needs` is empty for a name that is no provider at all.
+struct tier_support {
+    bool _available{false};
+    std::string_view _needs;
+};
+[[nodiscard]] auto tier_provider_support(std::string_view provider) -> tier_support;
 
 /// Looks a variable up; nullptr when unset. `std::getenv` in the daemon.
 using env_lookup = std::function<const char*(const char*)>;

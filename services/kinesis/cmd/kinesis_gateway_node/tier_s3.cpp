@@ -1,7 +1,7 @@
 // Copyright (c) 2026 Clark Rawlins
 // SPDX-License-Identifier: Apache-2.0
 
-#include "tier_s3.hpp"
+#include "tier.hpp"
 
 #include <raft/aws_client_config.hpp>
 #include <raft/aws_s3_client.hpp>
@@ -15,7 +15,7 @@ namespace kythira::kinesis_node {
 
 namespace {
 
-class s3_tier_impl final : public s3_tier {
+class s3_tier_impl final : public object_tier {
 public:
     explicit s3_tier_impl(const node_options& opt) {
         Aws::InitAPI(_options);
@@ -47,7 +47,7 @@ private:
 
 }  // namespace
 
-auto make_s3_tier(const node_options& opt) -> std::unique_ptr<s3_tier> {
+auto tier_detail::make_s3_tier(const node_options& opt) -> std::unique_ptr<object_tier> {
     return std::make_unique<s3_tier_impl>(opt);
 }
 

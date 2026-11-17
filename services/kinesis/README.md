@@ -51,7 +51,7 @@ Built when `CONFIG_KINESIS=y` (`services/kinesis/Kconfig`, off by default).
 | `java/kythira-kcl-leases/` | the Java lease layer (Gradle, KCL 2.x): `KythiraLeaseRefresher` and `KythiraLeaseManagementFactory` over the Lease API, signed with SigV4 | 9 |
 | `tests/kcl/sample/`, `docker/kinesis_kcl_sample/Dockerfile` | the KCL 2.x sample consumer and its image, the workers of the container scenario's lease case | 9 |
 | `doc/retention.md`, `include/kythira/kinesis/kinesis_maintenance.hpp` | retention and tiering: the leader's seal, trim and tier entries, the pass that proposes them, and what it costs when a leader dies mid-pass | 10 |
-| `include/kythira/kinesis/kinesis_tiering.hpp`, `cmd/kinesis_gateway_node/tier_s3.cpp` | sealed segments in object storage: deterministic object keys, fetch-back on read, the S3 tier of the daemon | 10 |
+| `include/kythira/kinesis/kinesis_tiering.hpp`, `cmd/kinesis_gateway_node/tier.hpp`, `tier.cpp`, `tier_s3.cpp`, `tier_cloud.cpp` | sealed segments in object storage: deterministic object keys, fetch-back on read, the daemon's tier store on S3, Azure Blob, GCS, OCI or OSS | 10 |
 | `include/kythira/kinesis/kinesis_disk_guard.hpp` | the disk guard: appends refused below a free-space floor, on the proposing node and the leader | 10 |
 | `doc/resharding.md` | SplitShard, MergeShards and UpdateShardCount: the UPDATING lock, the cross-group transaction, ending sequence numbers and the repair of an abandoned reshard | 11 |
 | `doc/on-demand.md`, `include/kythira/kinesis/kinesis_on_demand.hpp` | on-demand capacity mode: `UpdateStreamMode` and the controller that splits shards that stay hot | 12 |
@@ -115,10 +115,10 @@ shard's leader trims what is past the stream's retention period. Writes
 stop with `InternalFailure` naming the disk guard when the segment disk has
 less than `KINESIS_DISK_FLOOR_BYTES` free (1 GiB; 0 turns it off). To keep
 long retention off local disks, set `KINESIS_TIER_AFTER_HOURS` and
-`KINESIS_TIER_S3_BUCKET` (with `_PREFIX`, `_REGION` and, for an
-S3-compatible store, `_ENDPOINT`); credentials come from the AWS SDK's
-default chain, and a build without the SDK's s3 component refuses those
-settings.
+`KINESIS_TIER_BUCKET` (with `KINESIS_TIER_PROVIDER` to pick S3, Azure Blob,
+GCS, OCI Object Storage or Alibaba OSS, and `_PREFIX`); `doc/retention.md`
+lists each provider's settings, and a build without a provider's client
+refuses it at startup, naming what would enable it.
 
 ### Beside other services in `kythira_node`
 
