@@ -6,6 +6,7 @@
 // Raft cluster whose members are named by composite ids elects, replicates
 // and catches up over them.
 #define BOOST_TEST_MODULE composite_node_id_transport_test
+#include "test_ports.hpp"
 #include <boost/test/unit_test.hpp>
 #include <raft/future_default.hpp>
 
@@ -51,18 +52,10 @@ using text_server = kythira::basic_tcp_rpc_server<std::string>;
 using docker_id = kythira::docker_container_node_id;
 
 auto find_free_port() -> std::uint16_t {
-    int fd = ::socket(AF_INET, SOCK_STREAM, 0);
-    BOOST_REQUIRE_GE(fd, 0);
-    sockaddr_in a{};
-    a.sin_family = AF_INET;
-    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    a.sin_port = 0;
-    (void)::bind(fd, reinterpret_cast<sockaddr*>(&a), sizeof(a));
-    socklen_t len = sizeof(a);
-    ::getsockname(fd, reinterpret_cast<sockaddr*>(&a), &len);
-    const auto port = ntohs(a.sin_port);
-    ::close(fd);
-    return port;
+    // Below the ephemeral range and claimed for this process; a port
+    // from bind(0) is ephemeral and unclaimed, so another test (or an
+    // outgoing connection) can take it before the server binds.
+    return static_cast<std::uint16_t>(kythira::testing::free_port());
 }
 
 template<typename NodeId, typename Address> class preset_peer_discovery {

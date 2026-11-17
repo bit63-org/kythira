@@ -7,6 +7,7 @@
 // fetch_log_entries this test could not pass: catch-up compiled down to a
 // no-op (.kiro/specs/peer2peer-log-replication/ Requirement 5.3).
 #define BOOST_TEST_MODULE tcp_rpc_peer_catch_up_test
+#include "test_ports.hpp"
 #include <boost/test/unit_test.hpp>
 #include <raft/future_default.hpp>
 
@@ -110,18 +111,10 @@ struct test_types {
 using test_node = kythira::node<test_types>;
 
 auto find_free_port() -> std::uint16_t {
-    int fd = ::socket(AF_INET, SOCK_STREAM, 0);
-    BOOST_REQUIRE_GE(fd, 0);
-    sockaddr_in a{};
-    a.sin_family = AF_INET;
-    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    a.sin_port = 0;
-    (void)::bind(fd, reinterpret_cast<sockaddr*>(&a), sizeof(a));
-    socklen_t len = sizeof(a);
-    ::getsockname(fd, reinterpret_cast<sockaddr*>(&a), &len);
-    auto port = ntohs(a.sin_port);
-    ::close(fd);
-    return port;
+    // Below the ephemeral range and claimed for this process; a port
+    // from bind(0) is ephemeral and unclaimed, so another test (or an
+    // outgoing connection) can take it before the server binds.
+    return static_cast<std::uint16_t>(kythira::testing::free_port());
 }
 
 template<typename Pred>
