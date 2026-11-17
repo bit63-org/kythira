@@ -22,6 +22,8 @@
 #include <kythira/kinesis/kinesis_tiering.hpp>
 
 #include <memory>
+#include <optional>
+#include <string>
 #include <utility>
 
 namespace kythira::kinesis_node {
@@ -41,6 +43,27 @@ public:
     [[nodiscard]] virtual auto store() const -> const kinesis::tier_store& = 0;
 };
 
+/// Channel destination buckets (task 19): a tier store for any bucket,
+/// through one client and whatever it needs alive.
+class channel_destinations {
+public:
+    virtual ~channel_destinations() = default;
+    channel_destinations() = default;
+    channel_destinations(const channel_destinations&) = delete;
+    auto operator=(const channel_destinations&) -> channel_destinations& = delete;
+    channel_destinations(channel_destinations&&) = delete;
+    auto operator=(channel_destinations&&) -> channel_destinations& = delete;
+
+    /// Writes to `bucket`'s root; valid while this object lives.
+    [[nodiscard]] virtual auto bucket(const std::string& bucket) const
+        -> std::optional<kinesis::tier_store> = 0;
+};
+
+/// S3 in `_channel_s3_region` at `_channel_s3_endpoint`, or nullptr when
+/// this build has no S3 client (`KYTHIRA_KINESIS_TIER_S3`).
+[[nodiscard]] auto make_channel_destinations(const node_options& opt)
+    -> std::unique_ptr<channel_destinations>;
+
 /// The provider, bucket and prefix from `opt` (and for S3 its region and
 /// endpoint; the other providers read their credentials where
 /// `raft_object_backup` does).
@@ -56,6 +79,8 @@ namespace tier_detail {
 [[nodiscard]] auto make_gcs_tier(const node_options& opt) -> std::unique_ptr<object_tier>;
 [[nodiscard]] auto make_oci_tier(const node_options& opt) -> std::unique_ptr<object_tier>;
 [[nodiscard]] auto make_oss_tier(const node_options& opt) -> std::unique_ptr<object_tier>;
+[[nodiscard]] auto make_s3_channel_destinations(const node_options& opt)
+    -> std::unique_ptr<channel_destinations>;
 
 /// An object_tier whose client needs nothing beyond what the store's
 /// functions hold (every provider but S3).

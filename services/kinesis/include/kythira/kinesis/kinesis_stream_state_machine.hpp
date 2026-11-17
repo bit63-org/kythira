@@ -381,6 +381,9 @@ enum class channel_op : std::uint8_t {
     remove = 2,
     /// Set `_set` and drop `_remove` among its tags, at most `_max` after.
     retag = 3,
+    /// Set the status and reason to `_record`'s (the delivery worker
+    /// failing a channel it cannot deliver for).
+    set_status = 4,
 };
 
 /// The Channel calls (task 19), at the catalog group. Every op but `create`
@@ -397,6 +400,21 @@ struct channel_command {
     std::map<std::string, std::string> _set{};
     std::vector<std::string> _remove{};
     std::uint32_t _max = 0;
+};
+
+/// Moves a channel's position in one source shard (task 19's delivery
+/// worker), at the catalog group: from `_expected` (0 when none is set) to
+/// `_next`, only while the channel exists under `_channel_id` and is
+/// ACTIVE. A refused expectation answers `bad_transition`, so of two
+/// leaders delivering the same range one commits and the other re-reads.
+struct channel_checkpoint_command {
+    std::string _account{};
+    std::string _channel{};
+    std::uint64_t _channel_id = 0;
+    /// The source shard's routing key.
+    std::string _shard{};
+    std::uint64_t _expected = 0;
+    std::uint64_t _next = 0;
 };
 
 /// What a lease write requires of the lease's current state.
@@ -459,13 +477,15 @@ struct lease_drop_application_command {
     std::string _application{};
 };
 
-using stream_command = std::variant<
-    create_stream_command, set_stream_status_command, remove_stream_command, open_shard_command,
-    append_records_command, close_shard_command, drop_shard_command, trim_shard_command,
-    append_batch_command, lease_write_command, lease_read_command, lease_drop_application_command,
-    set_retention_command, seal_shard_command, tier_segment_command, reshard_catalog_command,
-    set_ending_counters_command, set_stream_mode_command, tag_stream_command, set_policy_command,
-    set_monitoring_command, set_encryption_command, consumer_command, channel_command>;
+using stream_command =
+    std::variant<create_stream_command, set_stream_status_command, remove_stream_command,
+                 open_shard_command, append_records_command, close_shard_command,
+                 drop_shard_command, trim_shard_command, append_batch_command, lease_write_command,
+                 lease_read_command, lease_drop_application_command, set_retention_command,
+                 seal_shard_command, tier_segment_command, reshard_catalog_command,
+                 set_ending_counters_command, set_stream_mode_command, tag_stream_command,
+                 set_policy_command, set_monitoring_command, set_encryption_command,
+                 consumer_command, channel_command, channel_checkpoint_command>;
 
 inline constexpr std::uint8_t stream_command_version = 1;
 
@@ -488,6 +508,8 @@ inline constexpr std::uint8_t stream_command_version = 1;
                 return stream_key(v._account, v._name);
             } else if constexpr (std::is_same_v<T, channel_command>) {
                 return channel_key(v._account, v._name);
+            } else if constexpr (std::is_same_v<T, channel_checkpoint_command>) {
+                return channel_checkpoint_key(v._account, v._channel_id, v._shard);
             } else if constexpr (std::is_same_v<T, append_batch_command>) {
                 return v._appends.empty() ? std::string() : v._appends.front()._key;
             } else if constexpr (std::is_same_v<T, lease_write_command>) {
@@ -661,6 +683,9 @@ inline auto decode_append(codec::reader& r) -> append_records_command {
                     w.str(k);
                 }
                 w.u32(v._max);
+            } else if constexpr (std::is_same_v<T, channel_checkpoint_command>) {
+                w.str(v._account).str(v._channel).u64(v._channel_id).str(v._shard);
+                w.u64(v._expected).u64(v._next);
             } else {
                 w.str(v._key);
             }
@@ -940,7 +965,7 @@ inline auto decode_append(codec::reader& r) -> append_records_command {
             channel_command c;
             c._account = r.str();
             c._name = r.str();
-            c._op = r.enumeration<channel_op>(3);
+            c._op = r.enumeration<channel_op>(4);
             c._id = r.u64();
             c._record = decode_channel_record(r);
             const auto n = r.u32();
@@ -954,6 +979,17 @@ inline auto decode_append(codec::reader& r) -> append_records_command {
                 c._remove.push_back(r.str());
             }
             c._max = r.u32();
+            out = std::move(c);
+            break;
+        }
+        case 24: {
+            channel_checkpoint_command c;
+            c._account = r.str();
+            c._channel = r.str();
+            c._channel_id = r.u64();
+            c._shard = r.str();
+            c._expected = r.u64();
+            c._next = r.u64();
             out = std::move(c);
             break;
         }
@@ -1265,6 +1301,14 @@ public:
             }
         }
         return out;
+    }
+
+    /// The channel's position in the shard under `shard_key` (0: none).
+    [[nodiscard]] auto channel_checkpoint(std::string_view account, std::uint64_t channel_id,
+                                          std::string_view shard_key) const -> std::uint64_t {
+        auto it = _map.find(channel_checkpoint_key(account, channel_id, shard_key));
+        const auto* v = it == _map.end() ? nullptr : std::get_if<std::uint64_t>(&it->second);
+        return v == nullptr ? 0 : *v;
     }
 
     /// The account's channel with catalog id `id` (a channel ARN names the
@@ -1863,9 +1907,22 @@ private:
                 break;
             case channel_op::remove: {
                 const auto id = rec->_id;
+                const auto account = rec->_account;
                 _map.erase(it);
+                // Its delivery positions go with it.
+                const auto prefix = channel_checkpoints_prefix(account, id);
+                auto from = _map.lower_bound(prefix);
+                auto to = from;
+                while (to != _map.end() && to->first.starts_with(prefix)) {
+                    ++to;
+                }
+                _map.erase(from, to);
                 return {._id = id};
             }
+            case channel_op::set_status:
+                rec->_status = c._record._status;
+                rec->_status_reason = c._record._status_reason;
+                break;
             case channel_op::retag: {
                 auto tags = rec->_tags;
                 for (const auto& [k, v] : c._set) {
@@ -1884,6 +1941,27 @@ private:
                 break;
         }
         return {._id = rec->_id};
+    }
+
+    auto apply_one(const channel_checkpoint_command& c) -> apply_result {
+        const auto* ch = [&]() -> const channel_record* {
+            auto it = _map.find(channel_key(c._account, c._channel));
+            return it == _map.end() ? nullptr : std::get_if<channel_record>(&it->second);
+        }();
+        if (ch == nullptr || ch->_id != c._channel_id) {
+            return {._status = apply_status::not_found};
+        }
+        if (ch->_status != channel_status::active) {
+            return {._status = apply_status::bad_transition};
+        }
+        const auto key = channel_checkpoint_key(c._account, c._channel_id, c._shard);
+        auto it = _map.find(key);
+        const auto* v = it == _map.end() ? nullptr : std::get_if<std::uint64_t>(&it->second);
+        if ((v == nullptr ? 0 : *v) != c._expected) {
+            return {._status = apply_status::bad_transition, ._id = v == nullptr ? 0 : *v};
+        }
+        _map.insert_or_assign(key, entry{c._next});
+        return {._id = c._next};
     }
 
     auto apply_one(const reshard_catalog_command& c) -> apply_result {

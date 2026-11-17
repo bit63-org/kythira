@@ -2423,6 +2423,80 @@ public:
         return render_metrics(views, _metrics.snapshot());
     }
 
+    // ---- channel delivery (task 19) ------------------------------------------
+
+    /// One record as the channel delivery worker sees it: opened (decrypted
+    /// when the stream is encrypted), with its sequence number as clients
+    /// see it.
+    struct delivery_record {
+        std::uint64_t _counter = 0;
+        std::string _sequence;
+        std::int64_t _arrival_ms = 0;
+        std::string _partition_key;
+        std::vector<std::byte> _data;
+    };
+
+    struct delivery_page {
+        std::vector<delivery_record> _records;
+        /// Where the next page starts.
+        std::uint64_t _next_counter = 0;
+        /// A closed shard read to its end.
+        bool _exhausted = false;
+        /// The shard id as clients see it.
+        std::string _shard_id;
+    };
+
+    /// Up to `max_records` (and about `max_bytes`) of the shard's records
+    /// from `counter`, skipping those that arrived before
+    /// `min_timestamp_ms`; nullopt when this replica cannot read the shard
+    /// now (behind, a segment in flight, a key it cannot open). The worker
+    /// retries on its next pass.
+    auto read_for_delivery(const stream_record& rec, const shard_entry& entry,
+                           std::uint64_t counter, std::int64_t min_timestamp_ms,
+                           std::size_t max_records, std::size_t max_bytes)
+        -> std::optional<delivery_page> {
+        const auto profile = profile_of(rec);
+        const auto key = routing_key(rec._id, entry._ordinal);
+        const segment_read_limits limits{._max_records = max_records, ._max_bytes = max_bytes};
+        std::optional<shard_read> got;
+        for (int attempt = 0; attempt < 2 && (!got || got->_missing); ++attempt) {
+            const auto state = read_shard_state(key);
+            if (!state || !state->_found || state->_store == nullptr) {
+                return std::nullopt;
+            }
+            try {
+                got = read_shard(*state->_store, state->_fetch, key, state->_state, counter,
+                                 min_timestamp_ms, limits, [&](std::span<const std::byte> bytes) {
+                                     const auto g = sealed_generation(bytes);
+                                     if (!g) {
+                                         throw record_open_error("kinesis: truncated record");
+                                     }
+                                     return open_record(data_key_of(rec, *g), key, bytes);
+                                 });
+            } catch (const std::exception&) {
+                return std::nullopt;
+            }
+        }
+        if (!got || got->_missing) {
+            return std::nullopt;
+        }
+        delivery_page out;
+        out._shard_id = format_shard_id(entry._ordinal, profile._id_format);
+        for (auto& rr : got->_records) {
+            out._records.push_back(
+                {._counter = rr._counter,
+                 ._sequence = format_sequence(
+                     sequence_number{._ordinal = entry._ordinal, ._counter = rr._counter},
+                     profile._id_format),
+                 ._arrival_ms = rr._arrival_ms,
+                 ._partition_key = std::move(rr._record._partition_key),
+                 ._data = std::move(rr._record._data)});
+        }
+        out._next_counter = got->_next_counter;
+        out._exhausted = entry._ending_counter && got->_next_counter > *entry._ending_counter;
+        return out;
+    }
+
 private:
     Cluster& _cluster;
     kinesis_service_config _config;

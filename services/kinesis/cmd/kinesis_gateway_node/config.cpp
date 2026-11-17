@@ -438,6 +438,9 @@ void read_kinesis_side(const reader& r, node_options& o) {
         o._tier_after_ms = static_cast<std::int64_t>(ms);
     }
     read_tier_store(r, o);
+    o._channel_delivery = r.flag("KINESIS_CHANNEL_DELIVERY", "true");
+    o._channel_s3_region = r.opt("KINESIS_CHANNEL_S3_REGION", o._region.c_str());
+    o._channel_s3_endpoint = r.opt("KINESIS_CHANNEL_S3_ENDPOINT", "");
 }
 
 }  // namespace
@@ -618,6 +621,13 @@ auto describe(const node_options& o) -> std::string {
     } else {
         out << "tier=off\n";
     }
+    out << "channel_delivery="
+        << (o._channel_delivery
+                ? "on region=" + o._channel_s3_region +
+                      (o._channel_s3_endpoint.empty() ? std::string()
+                                                      : " endpoint=" + o._channel_s3_endpoint)
+                : std::string("off"))
+        << '\n';
     for (const auto& [k, v] : o._compat) {
         out << "compat " << k << '=' << v << '\n';
     }

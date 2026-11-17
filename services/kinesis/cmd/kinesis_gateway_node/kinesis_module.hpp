@@ -39,6 +39,7 @@
 #include <kythira/kinesis/kinesis_kms_aws.hpp>
 #include <kythira/kinesis/kinesis_kms_pkcs11.hpp>
 #include <kythira/kinesis/kinesis_lease_api.hpp>
+#include <kythira/kinesis/kinesis_channel_delivery.hpp>
 #include <kythira/kinesis/kinesis_maintenance.hpp>
 #include <kythira/kinesis/kinesis_on_demand.hpp>
 #include <kythira/kinesis/kinesis_peer_client.hpp>
@@ -397,6 +398,24 @@ public:
         // leads.
         _on_demand =
             std::make_unique<kinesis::on_demand_controller<cluster_type>>(*_cluster, *_service);
+        // Channels (task 19): each node delivers the shards it leads.
+        if (_opt._channel_delivery) {
+            _channel_destinations = make_channel_destinations(_opt);
+            if (!_channel_destinations) {
+                log_info(
+                    "kinesis channels: this build has no S3 client (the AWS SDK's s3 "
+                    "component); channels are not delivered from this node");
+            }
+        }
+        kinesis::channel_delivery_config channels;
+        if (_channel_destinations) {
+            channels._destination = [d = _channel_destinations.get()](const std::string& b) {
+                return d->bucket(b);
+            };
+        }
+        _channels = std::make_unique<
+            kinesis::channel_delivery<cluster_type, kinesis::kinesis_service<cluster_type>>>(
+            *_cluster, *_service, std::move(channels));
         _maintaining = true;
         _maintainer = std::thread([this] { maintain(); });
         _started = true;
@@ -434,6 +453,8 @@ public:
         }
         _started = false;
         // Everything that refers to the host goes before it.
+        _channels.reset();
+        _channel_destinations.reset();
         _on_demand.reset();
         _maintenance.reset();
         _server.reset();
@@ -628,6 +649,14 @@ private:
             next = std::chrono::steady_clock::now() + _opt._maintenance_interval;
             const auto st = _maintenance->run_once();
             const auto od = _on_demand->run_once(_cluster->now_ms());
+            const auto ch = _channels->run_once();
+            if (ch._objects + ch._dead_letters + ch._failures + ch._failed_channels > 0) {
+                log_info("kinesis channels: objects=" + std::to_string(ch._objects) +
+                         " records=" + std::to_string(ch._records) +
+                         " dead_letters=" + std::to_string(ch._dead_letters) +
+                         " failures=" + std::to_string(ch._failures) +
+                         " failed_channels=" + std::to_string(ch._failed_channels));
+            }
             if (od._splits + od._failures > 0) {
                 log_info("kinesis on-demand: hot=" + std::to_string(od._hot) + " splits=" +
                          std::to_string(od._splits) + " failures=" + std::to_string(od._failures));
@@ -704,6 +733,9 @@ private:
     std::atomic<bool> _driving{false};
     std::thread _driver;
     std::unique_ptr<kinesis::stream_maintenance<cluster_type>> _maintenance;
+    std::unique_ptr<channel_destinations> _channel_destinations;
+    std::unique_ptr<kinesis::channel_delivery<cluster_type, kinesis::kinesis_service<cluster_type>>>
+        _channels;
     std::unique_ptr<kinesis::on_demand_controller<cluster_type>> _on_demand;
     std::atomic<bool> _maintaining{false};
     std::thread _maintainer;

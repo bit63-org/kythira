@@ -28,6 +28,29 @@ if(TARGET kythira_nghttp2)
     target_link_libraries(kythira_kinesis INTERFACE kythira_nghttp2)
 endif()
 
+# Channel delivery (task 19, kinesis_channel_delivery.hpp): GZIP objects
+# through zlib and ZSTD objects through libzstd, both optional. vcpkg builds
+# have both (gRPC, Folly and proxygen pull them in); a node without one
+# sets a channel asking for it to FAILED with the reason.
+find_package(ZLIB QUIET)
+if(ZLIB_FOUND)
+    target_link_libraries(kythira_kinesis INTERFACE ZLIB::ZLIB)
+    target_compile_definitions(kythira_kinesis INTERFACE KYTHIRA_KINESIS_HAS_ZLIB)
+endif()
+find_package(zstd CONFIG QUIET)
+if(TARGET zstd::libzstd_shared)
+    set(_KYTHIRA_KINESIS_ZSTD zstd::libzstd_shared)
+elseif(TARGET zstd::libzstd_static)
+    set(_KYTHIRA_KINESIS_ZSTD zstd::libzstd_static)
+elseif(TARGET zstd::libzstd)
+    set(_KYTHIRA_KINESIS_ZSTD zstd::libzstd)
+endif()
+if(_KYTHIRA_KINESIS_ZSTD)
+    target_link_libraries(kythira_kinesis INTERFACE ${_KYTHIRA_KINESIS_ZSTD})
+    target_compile_definitions(kythira_kinesis INTERFACE KYTHIRA_KINESIS_HAS_ZSTD)
+endif()
+message(STATUS "kythira_kinesis: channel gzip ${ZLIB_FOUND}, zstd ${_KYTHIRA_KINESIS_ZSTD}")
+
 # kinesis_gateway_node (task 1 placeholder; the daemon is task 6), before
 # the tests, which run it.
 add_subdirectory(cmd)

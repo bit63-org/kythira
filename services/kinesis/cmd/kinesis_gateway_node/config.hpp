@@ -142,6 +142,17 @@ struct node_options {
     std::string _tier_azure_account;
     /// `GOOGLE_CLOUD_PROJECT`, for GCS.
     std::string _tier_gcs_project;
+
+    // ── channel delivery (task 19) ───────────────────────────────────────────
+    /// `KINESIS_CHANNEL_DELIVERY`: deliver ACTIVE channels to S3 on the
+    /// maintenance pass (default on; needs the AWS SDK's s3 component, and
+    /// a build without it logs that channels are not delivered).
+    bool _channel_delivery{true};
+    /// `KINESIS_CHANNEL_S3_REGION` (default: the region above) and
+    /// `KINESIS_CHANNEL_S3_ENDPOINT` (an S3-compatible endpoint; AWS's when
+    /// empty): where channel destination buckets are written.
+    std::string _channel_s3_region;
+    std::string _channel_s3_endpoint;
 };
 
 /// Whether this build can tier to `provider`, and if not, what would
