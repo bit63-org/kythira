@@ -1961,16 +1961,21 @@ auto boost_beast_server<Types, NodeId>::stop() -> void {
     // session's own strand, not delivered out from under an in-progress
     // write). Never touch _ioc itself (Requirement 8.3); that stays the
     // caller's own, separate responsibility.
-    boost::system::error_code ec;
-    for (const auto& acceptor : _acceptors) {
-        (void)acceptor->close(ec);
+    {
+        // Under _accept_mutex: an accept handler on an io thread may be
+        // re-arming one of these acceptors right now (see the member).
+        const std::lock_guard accept_lock(_accept_mutex);
+        boost::system::error_code ec;
+        for (const auto& acceptor : _acceptors) {
+            (void)acceptor->close(ec);
+        }
+        _acceptors.clear();
+        for (const auto& timer : _accept_backoff_timers) {
+            (void)timer->cancel();
+        }
+        _accept_backoff_timers.clear();
+        _running.store(false);
     }
-    _acceptors.clear();
-    for (const auto& timer : _accept_backoff_timers) {
-        (void)timer->cancel();
-    }
-    _accept_backoff_timers.clear();
-    _running.store(false);
 
     {
         std::lock_guard<std::mutex> sessions_lock(_sessions_mutex);
@@ -2199,6 +2204,12 @@ requires kythira::future_default_transport_types<Types>
 auto boost_beast_server<Types, NodeId>::do_accept(std::shared_ptr<net::ip::tcp::acceptor> acceptor,
                                                   std::shared_ptr<net::steady_timer> backoff_timer,
                                                   std::chrono::milliseconds backoff) -> void {
+    // Re-armed from accept handlers on any io thread while stop() may be
+    // closing the acceptor on another: see _accept_mutex.
+    const std::lock_guard accept_lock(_accept_mutex);
+    if (!_running.load()) {
+        return;
+    }
     auto& a = *acceptor;
     a.async_accept(
         net::make_strand(_ioc),
@@ -2227,6 +2238,10 @@ auto boost_beast_server<Types, NodeId>::do_accept(std::shared_ptr<net::ip::tcp::
                     // loop that pins a core. Wait for finished sessions to give
                     // descriptors back instead.
                     auto next = std::min(backoff * 2, beast_detail::accept_backoff_max);
+                    const std::lock_guard accept_lock(_accept_mutex);
+                    if (!_running.load()) {
+                        return;  // stop() ran since the check above.
+                    }
                     backoff_timer->expires_after(backoff);
                     auto& timer = *backoff_timer;
                     timer.async_wait([this, acceptor = std::move(acceptor),
