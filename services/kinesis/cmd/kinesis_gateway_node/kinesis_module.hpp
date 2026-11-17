@@ -231,6 +231,9 @@ public:
             // The Lease API authorizes on the DynamoDB actions KCL needs on
             // AWS.
             _authorizer->register_service(kinesis::lease_static_roles());
+            // CreateChannel's iam:PassRole on the service execution role
+            // (task 19): admin keys only.
+            _authorizer->register_service(kinesis::channel_role_static_roles());
             if (!_iam_in_process) {
                 _authorizer->set_mode(_opt._auth, std::move(hooks));
                 if (auto clash = key_clash()) {

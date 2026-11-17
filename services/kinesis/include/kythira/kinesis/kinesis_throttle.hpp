@@ -292,9 +292,12 @@ private:
 struct control_plane_limits {
     std::map<std::string, double, std::less<>> _rates{
         {"AddTagsToStream", 5.0},
+        {"CreateChannel", 5.0},
         {"CreateStream", 5.0},
         {"DecreaseStreamRetentionPeriod", 5.0},
+        {"DeleteChannel", 5.0},
         {"DeleteStream", 5.0},
+        {"DescribeChannel", 5.0},
         {"DeregisterStreamConsumer", 5.0},
         {"DescribeLimits", 1.0},
         {"DescribeStream", 10.0},
@@ -303,6 +306,7 @@ struct control_plane_limits {
         {"DisableEnhancedMonitoring", 5.0},
         {"EnableEnhancedMonitoring", 5.0},
         {"IncreaseStreamRetentionPeriod", 5.0},
+        {"ListChannels", 5.0},
         {"ListStreamConsumers", 5.0},
         {"ListStreams", 5.0},
         {"ListTagsForStream", 5.0},
@@ -310,6 +314,7 @@ struct control_plane_limits {
         {"RegisterStreamConsumer", 5.0},
         {"RemoveTagsFromStream", 5.0},
         {"SplitShard", 5.0},
+        {"UpdateChannel", 5.0},
     };
 
     /// The rate for `operation`; 0 when it has no per-account rate.

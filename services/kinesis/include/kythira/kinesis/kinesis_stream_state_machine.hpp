@@ -45,6 +45,7 @@
 /// shard (Requirement 8.3; the clock assumption is in doc/sequence-numbers.md).
 
 #include <kythira/kinesis/kinesis_catalog.hpp>
+#include <kythira/kinesis/kinesis_channels.hpp>
 #include <kythira/kinesis/kinesis_hash.hpp>
 #include <kythira/kinesis/kinesis_leases.hpp>
 #include <raft/record_segment_store.hpp>
@@ -370,6 +371,34 @@ struct consumer_command {
     std::uint32_t _max = 0;
 };
 
+enum class channel_op : std::uint8_t {
+    /// Add `_record` under its name; the catalog assigns its id.
+    create = 0,
+    /// Replace the destination and logging configuration with `_record`'s,
+    /// where those are non-empty.
+    update = 1,
+    /// Remove the channel.
+    remove = 2,
+    /// Set `_set` and drop `_remove` among its tags, at most `_max` after.
+    retag = 3,
+};
+
+/// The Channel calls (task 19), at the catalog group. Every op but `create`
+/// names the channel by name and `_id`, so a call made against a channel
+/// that was deleted and created again meets `not_found`. Creating needs a
+/// free name and every source stream present, under the id the caller
+/// resolved, ACTIVE or UPDATING and in on-demand mode.
+struct channel_command {
+    std::string _account{};
+    std::string _name{};
+    channel_op _op = channel_op::create;
+    std::uint64_t _id = 0;
+    channel_record _record{};
+    std::map<std::string, std::string> _set{};
+    std::vector<std::string> _remove{};
+    std::uint32_t _max = 0;
+};
+
 /// What a lease write requires of the lease's current state.
 enum class lease_condition : std::uint8_t {
     /// Whatever is there (or nothing).
@@ -436,7 +465,7 @@ using stream_command = std::variant<
     append_batch_command, lease_write_command, lease_read_command, lease_drop_application_command,
     set_retention_command, seal_shard_command, tier_segment_command, reshard_catalog_command,
     set_ending_counters_command, set_stream_mode_command, tag_stream_command, set_policy_command,
-    set_monitoring_command, set_encryption_command, consumer_command>;
+    set_monitoring_command, set_encryption_command, consumer_command, channel_command>;
 
 inline constexpr std::uint8_t stream_command_version = 1;
 
@@ -457,6 +486,8 @@ inline constexpr std::uint8_t stream_command_version = 1;
                           std::is_same_v<T, set_encryption_command> ||
                           std::is_same_v<T, consumer_command>) {
                 return stream_key(v._account, v._name);
+            } else if constexpr (std::is_same_v<T, channel_command>) {
+                return channel_key(v._account, v._name);
             } else if constexpr (std::is_same_v<T, append_batch_command>) {
                 return v._appends.empty() ? std::string() : v._appends.front()._key;
             } else if constexpr (std::is_same_v<T, lease_write_command>) {
@@ -616,6 +647,18 @@ inline auto decode_append(codec::reader& r) -> append_records_command {
                 w.u8(v._policy ? 1 : 0);
                 if (v._policy) {
                     w.str(*v._policy);
+                }
+                w.u32(v._max);
+            } else if constexpr (std::is_same_v<T, channel_command>) {
+                w.str(v._account).str(v._name).u8(static_cast<std::uint8_t>(v._op)).u64(v._id);
+                encode(w, v._record);
+                w.u32(static_cast<std::uint32_t>(v._set.size()));
+                for (const auto& [k, val] : v._set) {
+                    w.str(k).str(val);
+                }
+                w.u32(static_cast<std::uint32_t>(v._remove.size()));
+                for (const auto& k : v._remove) {
+                    w.str(k);
                 }
                 w.u32(v._max);
             } else {
@@ -893,6 +936,27 @@ inline auto decode_append(codec::reader& r) -> append_records_command {
             out = std::move(c);
             break;
         }
+        case 23: {
+            channel_command c;
+            c._account = r.str();
+            c._name = r.str();
+            c._op = r.enumeration<channel_op>(3);
+            c._id = r.u64();
+            c._record = decode_channel_record(r);
+            const auto n = r.u32();
+            for (std::uint32_t i = 0; i < n; ++i) {
+                auto k = r.str();
+                c._set[std::move(k)] = r.str();
+            }
+            const auto m = r.u32();
+            c._remove.reserve(std::min<std::size_t>(m, r.remaining() / 4));
+            for (std::uint32_t i = 0; i < m; ++i) {
+                c._remove.push_back(r.str());
+            }
+            c._max = r.u32();
+            out = std::move(c);
+            break;
+        }
         default:
             throw kinesis_codec_error("kinesis codec: unknown command kind");
     }
@@ -1009,7 +1073,8 @@ requires log_index<LogIndex>
 class stream_state_machine {
 public:
     using key_type = std::string;
-    using entry = std::variant<std::uint64_t, stream_record, shard_state, lease_record>;
+    using entry =
+        std::variant<std::uint64_t, stream_record, shard_state, lease_record, channel_record>;
     using map_type = std::map<std::string, entry, std::less<>>;
 
     stream_state_machine() = default;
@@ -1180,6 +1245,40 @@ public:
         return out;
     }
 
+    [[nodiscard]] auto find_channel(std::string_view account, std::string_view name) const
+        -> const channel_record* {
+        auto it = _map.find(channel_key(account, name));
+        return it == _map.end() ? nullptr : std::get_if<channel_record>(&it->second);
+    }
+
+    /// One account's channels in name order, from `start_after`.
+    [[nodiscard]] auto list_channels(std::string_view account, std::string_view start_after = {},
+                                     std::size_t limit = SIZE_MAX) const
+        -> std::vector<const channel_record*> {
+        std::vector<const channel_record*> out;
+        const auto prefix = account_channels_prefix(account);
+        auto it = start_after.empty() ? _map.lower_bound(prefix)
+                                      : _map.upper_bound(channel_key(account, start_after));
+        for (; it != _map.end() && out.size() < limit && it->first.starts_with(prefix); ++it) {
+            if (const auto* c = std::get_if<channel_record>(&it->second)) {
+                out.push_back(c);
+            }
+        }
+        return out;
+    }
+
+    /// The account's channel with catalog id `id` (a channel ARN names the
+    /// id, not the name), or null.
+    [[nodiscard]] auto find_channel_by_id(std::string_view account, std::uint64_t id) const
+        -> const channel_record* {
+        for (const auto* c : list_channels(account)) {
+            if (c->_id == id) {
+                return c;
+            }
+        }
+        return nullptr;
+    }
+
     [[nodiscard]] auto find_lease(std::string_view account, std::string_view application,
                                   std::string_view key) const -> const lease_record* {
         auto it = _map.find(lease_storage_key(account, application, key));
@@ -1224,6 +1323,8 @@ public:
                 encode(w, *s);
             } else if (const auto* l = std::get_if<lease_record>(&e)) {
                 encode(w, *l);
+            } else if (const auto* ch = std::get_if<channel_record>(&e)) {
+                encode(w, *ch);
             } else {
                 const auto& sh = std::get<shard_state>(e);
                 w.u64(sh._last_counter).i64(sh._last_arrival_ms).u8(sh._open ? 1 : 0);
@@ -1290,6 +1391,9 @@ public:
                 }
                 case 3:
                     into.insert_or_assign(std::move(key), entry{decode_lease_record(r)});
+                    break;
+                case 4:
+                    into.insert_or_assign(std::move(key), entry{decode_channel_record(r)});
                     break;
                 default:
                     throw kinesis_codec_error("kinesis codec: unknown entry kind");
@@ -1699,6 +1803,84 @@ private:
                 it->_policy = c._policy;
                 break;
             case consumer_op::register_consumer:
+                break;
+        }
+        return {._id = rec->_id};
+    }
+
+    /// `already_exists` for a name in use, `not_found` for a source stream
+    /// that is gone (or recreated: another id) or a channel that is,
+    /// `bad_transition` for a source stream that is neither ACTIVE nor
+    /// UPDATING or a channel not ACTIVE, `invalid` for a provisioned-mode
+    /// source, a malformed record or too many tags.
+    auto apply_one(const channel_command& c) -> apply_result {
+        const auto key = channel_key(c._account, c._name);
+        if (c._op == channel_op::create) {
+            if (!valid_account(c._account) || !valid_stream_name(c._name) ||
+                c._record._streams.empty() || c._record._tags.size() > 50) {
+                return {._status = apply_status::invalid};
+            }
+            if (_map.contains(key)) {
+                return {._status = apply_status::already_exists};
+            }
+            for (const auto& src : c._record._streams) {
+                const auto* s = stream_at(c._account, src._stream, src._stream_id);
+                if (s == nullptr) {
+                    return {._status = apply_status::not_found};
+                }
+                if (s->_status != stream_status::active && s->_status != stream_status::updating) {
+                    return {._status = apply_status::bad_transition};
+                }
+                if (s->_mode != stream_mode::on_demand) {
+                    return {._status = apply_status::invalid};
+                }
+            }
+            const auto id = next_stream_id();
+            auto rec = c._record;
+            rec._id = id;
+            rec._account = c._account;
+            rec._name = c._name;
+            _map.insert_or_assign(key, entry{std::move(rec)});
+            _map.insert_or_assign(next_id_key(), entry{id + 1});
+            return {._id = id};
+        }
+        auto it = _map.find(key);
+        auto* rec = it == _map.end() ? nullptr : std::get_if<channel_record>(&it->second);
+        if (rec == nullptr || rec->_id != c._id) {
+            return {._status = apply_status::not_found};
+        }
+        switch (c._op) {
+            case channel_op::update:
+                if (rec->_status != channel_status::active) {
+                    return {._status = apply_status::bad_transition};
+                }
+                if (!c._record._destination_config.empty()) {
+                    rec->_destination_config = c._record._destination_config;
+                }
+                if (!c._record._logging_config.empty()) {
+                    rec->_logging_config = c._record._logging_config;
+                }
+                break;
+            case channel_op::remove: {
+                const auto id = rec->_id;
+                _map.erase(it);
+                return {._id = id};
+            }
+            case channel_op::retag: {
+                auto tags = rec->_tags;
+                for (const auto& [k, v] : c._set) {
+                    tags[k] = v;
+                }
+                for (const auto& k : c._remove) {
+                    tags.erase(k);
+                }
+                if (tags.size() > c._max) {
+                    return {._status = apply_status::invalid};
+                }
+                rec->_tags = std::move(tags);
+                break;
+            }
+            case channel_op::create:
                 break;
         }
         return {._id = rec->_id};

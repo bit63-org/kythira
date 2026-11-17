@@ -60,3 +60,10 @@ TagResource
 UntagResource
 UpdateAccountSettings
 UpdateMaxRecordSize
+
+# Task 19: channels (catalog and API; delivery follows).
+CreateChannel
+DeleteChannel
+DescribeChannel
+ListChannels
+UpdateChannel

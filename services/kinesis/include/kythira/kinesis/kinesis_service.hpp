@@ -364,6 +364,11 @@ public:
         on("DescribeStreamConsumer", &kinesis_service::describe_stream_consumer);
         on("ListStreamConsumers", &kinesis_service::list_stream_consumers);
         on("SubscribeToShard", &kinesis_service::subscribe_to_shard);
+        on("CreateChannel", &kinesis_service::create_channel);
+        on("UpdateChannel", &kinesis_service::update_channel);
+        on("DescribeChannel", &kinesis_service::describe_channel);
+        on("ListChannels", &kinesis_service::list_channels);
+        on("DeleteChannel", &kinesis_service::delete_channel);
         if constexpr (transacts<Cluster>) {
             on("SplitShard", &kinesis_service::split_shard);
             on("MergeShards", &kinesis_service::merge_shards);
@@ -372,13 +377,16 @@ public:
     }
 
     /// The operations `register_with` adds, for implemented-operations.txt.
-    static constexpr std::array<std::string_view, 38> k_operations{"AddTagsToStream",
+    static constexpr std::array<std::string_view, 43> k_operations{"AddTagsToStream",
+                                                                   "CreateChannel",
                                                                    "CreateStream",
                                                                    "DecreaseStreamRetentionPeriod",
+                                                                   "DeleteChannel",
                                                                    "DeleteResourcePolicy",
                                                                    "DeleteStream",
                                                                    "DeregisterStreamConsumer",
                                                                    "DescribeAccountSettings",
+                                                                   "DescribeChannel",
                                                                    "DescribeLimits",
                                                                    "DescribeStream",
                                                                    "DescribeStreamConsumer",
@@ -389,6 +397,7 @@ public:
                                                                    "GetResourcePolicy",
                                                                    "GetShardIterator",
                                                                    "IncreaseStreamRetentionPeriod",
+                                                                   "ListChannels",
                                                                    "ListShards",
                                                                    "ListStreamConsumers",
                                                                    "ListStreams",
@@ -406,6 +415,7 @@ public:
                                                                    "SubscribeToShard",
                                                                    "TagResource",
                                                                    "UntagResource",
+                                                                   "UpdateChannel",
                                                                    "UpdateAccountSettings",
                                                                    "UpdateMaxRecordSize",
                                                                    "UpdateShardCount",
@@ -565,6 +575,17 @@ public:
             return service_detail::in_use("Stream " + rec._name + " under account " + rec._account +
                                           " has registered consumers. Deregister them first, or "
                                           "set EnforceConsumerDeletion.");
+        }
+        // AWS: a stream cannot be deleted while it has channels (task 19).
+        bool has_channels = false;
+        (void)read_catalog([&](const auto& sm) {
+            for (const auto* c : sm.list_channels(rec._account)) {
+                has_channels = has_channels || c->delivers_from(rec._id);
+            }
+        });
+        if (has_channels) {
+            return service_detail::in_use("Stream " + rec._name + " under account " + rec._account +
+                                          " has channels. Delete them first.");
         }
         if (rec._status != stream_status::deleting) {
             const auto r = propose(set_stream_status_command{rec._account, rec._name, rec._id,
@@ -728,6 +749,9 @@ public:
         if (is_consumer_arn(in)) {
             return consumer_resource(ctx, in, consumer_resource_op::tag);
         }
+        if (is_channel_arn(in)) {
+            return channel_tags(ctx, in, consumer_resource_op::tag);
+        }
         auto s = find_resource(ctx, in);
         if (!s) {
             return s.error();
@@ -742,6 +766,9 @@ public:
         if (is_consumer_arn(in)) {
             return consumer_resource(ctx, in, consumer_resource_op::untag);
         }
+        if (is_channel_arn(in)) {
+            return channel_tags(ctx, in, consumer_resource_op::untag);
+        }
         auto s = find_resource(ctx, in);
         if (!s) {
             return s.error();
@@ -755,6 +782,9 @@ public:
         }
         if (is_consumer_arn(in)) {
             return consumer_resource(ctx, in, consumer_resource_op::list_tags);
+        }
+        if (is_channel_arn(in)) {
+            return channel_tags(ctx, in, consumer_resource_op::list_tags);
         }
         auto s = find_resource(ctx, in);
         if (!s) {
@@ -1063,6 +1093,357 @@ public:
         if (sorted.size() > limit) {
             out["NextToken"] = service_detail::base64_encode(consumers_token_prefix(rec) +
                                                              sorted[limit - 1]->_name);
+        }
+        return out;
+    }
+
+    // ---- channels (task 19) -------------------------------------------------
+
+    /// `DataFreshnessInSeconds`: the model documents 300 to 900 seconds,
+    /// 300 when left out.
+    static constexpr std::int64_t k_default_channel_freshness_s = 300;
+    static constexpr std::int64_t k_min_channel_freshness_s = 300;
+    static constexpr std::int64_t k_max_channel_freshness_s = 900;
+
+    /// `CreateChannel`. The channel is ACTIVE from the start (AWS shows
+    /// CREATING while it provisions; clients wait for ACTIVE), and its
+    /// ARN names the catalog id, so the id is known only once the create
+    /// commits: the create is authorized on `channel/*`, and associating
+    /// each stream on that stream's ARN.
+    auto create_channel(call_context& ctx, boost::json::object& in) -> result {
+        const std::string name(*detail::string_member(in, "ChannelName"));
+        const std::string role(*detail::string_member(in, "ServiceExecutionRoleARN"));
+        auto tags = tag_map_of(in);
+        if (tags.size() > k_max_tags) {
+            return invalid_argument("A channel can have at most " + std::to_string(k_max_tags) +
+                                    " tags.");
+        }
+        const auto* s3 = object_member(in, "S3DestinationConfiguration");
+        const auto* tables = object_member(in, "S3TablesDestinationConfiguration");
+        if ((s3 == nullptr) == (tables == nullptr)) {
+            return invalid_argument(
+                "Specify exactly one of S3DestinationConfiguration and "
+                "S3TablesDestinationConfiguration.");
+        }
+        const auto destination =
+            s3 != nullptr ? channel_destination::s3 : channel_destination::s3_tables;
+        boost::json::object dest = s3 != nullptr ? *s3 : *tables;
+        if (auto e = check_freshness(dest)) {
+            return *e;
+        }
+        if (tables != nullptr && dest.at("S3TablesConfigurationList").as_array().size() != 1) {
+            // The model: "Currently, one table is supported per channel."
+            return invalid_argument("A channel delivers to exactly one table.");
+        }
+        if (!dest.contains("DataFreshnessInSeconds")) {
+            dest["DataFreshnessInSeconds"] = k_default_channel_freshness_s;
+        }
+        std::string encryption;
+        if (const auto* enc = object_member(in, "EncryptionConfiguration")) {
+            const auto key = detail::string_member(*enc, "KeyId");
+            if (key && (*key == "alias/aws/kinesis" || *key == "aws/kinesis")) {
+                return invalid_argument(
+                    "A channel cannot use the AWS managed key aws/kinesis; "
+                    "name a customer managed key.");
+            }
+            encryption = boost::json::serialize(*enc);
+        }
+        std::string logging = R"({"CloudWatchLogs":{"Enabled":false}})";
+        if (const auto* log = object_member(in, "LoggingConfiguration")) {
+            logging = boost::json::serialize(*log);
+        }
+
+        // The sources: in the caller's account and region, each once, with
+        // a record format the destination takes.
+        struct source {
+            std::string _name;
+            std::string _arn;
+            std::string _record_config;
+        };
+        std::vector<source> sources;
+        std::set<std::string> seen;
+        for (const auto& v : in.at("StreamConfigurationList").as_array()) {
+            const auto& sc = v.as_object();
+            const std::string arn(*detail::string_member(sc, "StreamARN"));
+            const auto parts = parse_kinesis_arn(arn);
+            const auto stream = stream_name_of(arn);
+            if (!parts || !stream || parts->_partition != ctx._partition ||
+                parts->_region != ctx._region || parts->_account != ctx._principal.account) {
+                return invalid_argument("StreamARN " + arn + " is not a stream of account " +
+                                        ctx._principal.account + " in " + ctx._region + ".");
+            }
+            if (!seen.insert(std::string(*stream)).second) {
+                return invalid_argument("Stream " + std::string(*stream) +
+                                        " is listed more than once.");
+            }
+            const auto& rc = sc.at("RecordConfiguration").as_object();
+            if (auto e = check_record_format(rc, destination)) {
+                return *e;
+            }
+            sources.push_back({std::string(*stream), arn, boost::json::serialize(rc)});
+        }
+
+        const auto channels_arn = "arn:" + ctx._partition + ":kinesis:" + ctx._region + ":" +
+                                  ctx._principal.account + ":channel/*";
+        if (auto denied = authorize_channel(ctx, "kinesis:CreateChannel", channels_arn, &in)) {
+            return *denied;
+        }
+        if (!tags.empty()) {
+            if (auto denied = authorize_channel(ctx, "kinesis:TagResource", channels_arn, &in)) {
+                return *denied;
+            }
+        }
+        for (const auto& src : sources) {
+            if (auto denied = authorize_channel(ctx, "kinesis:AssociateStreamsWithChannel",
+                                                src._arn, nullptr)) {
+                return *denied;
+            }
+        }
+        if (auto denied = authorize_channel(ctx, "iam:PassRole", role, nullptr)) {
+            return *denied;
+        }
+
+        channel_record rec;
+        rec._account = ctx._principal.account;
+        rec._name = name;
+        rec._status = channel_status::active;
+        rec._created_ms = _cluster.now_ms();
+        rec._role_arn = role;
+        rec._destination = destination;
+        rec._destination_config = boost::json::serialize(dest);
+        rec._encryption_config = std::move(encryption);
+        rec._logging_config = std::move(logging);
+        rec._tags = std::move(tags);
+        std::optional<aws_json::error> refused;
+        if (!read_catalog([&](const auto& sm) {
+                if (sm.find_channel(rec._account, name) != nullptr) {
+                    refused = service_detail::in_use("Channel " + name + " under account " +
+                                                     rec._account + " already exists.");
+                    return;
+                }
+                for (const auto& src : sources) {
+                    const auto* s = sm.find_stream(rec._account, src._name);
+                    if (s == nullptr) {
+                        refused = service_detail::not_found(src._name, rec._account);
+                        return;
+                    }
+                    if (s->_status != stream_status::active &&
+                        s->_status != stream_status::updating) {
+                        refused = not_active(*s);
+                        return;
+                    }
+                    if (s->_mode != stream_mode::on_demand) {
+                        refused = on_demand_only(*s);
+                        return;
+                    }
+                    rec._streams.push_back({._stream = s->_name,
+                                            ._stream_id = s->_id,
+                                            ._stream_created_ms = s->_created_ms,
+                                            ._record_config = src._record_config});
+                }
+            })) {
+            return internal_failure();
+        }
+        if (refused) {
+            return *refused;
+        }
+        const auto r = propose(channel_command{
+            ._account = rec._account, ._name = name, ._op = channel_op::create, ._record = rec});
+        if (!r) {
+            return internal_failure();
+        }
+        switch (r->_status) {
+            case apply_status::ok:
+                break;
+            case apply_status::already_exists:
+                return service_detail::in_use("Channel " + name + " under account " + rec._account +
+                                              " already exists.");
+            case apply_status::not_found:
+            case apply_status::bad_transition:
+            case apply_status::invalid:
+                // A source changed between the read and the commit.
+                return service_detail::in_use("A source stream of channel " + name +
+                                              " changed while it was created; retry.");
+            default:
+                return internal_failure();
+        }
+        rec._id = r->_id;
+        boost::json::object out;
+        out["ChannelDescription"] = channel_json(ctx, rec);
+        return out;
+    }
+
+    /// `UpdateChannel`: the data freshness of the channel's own destination
+    /// type, and the logging configuration. Applied at once, so the channel
+    /// never shows UPDATING.
+    auto update_channel(call_context& ctx, boost::json::object& in) -> result {
+        auto found = find_channel(ctx, in);
+        if (!found) {
+            return found.error();
+        }
+        const auto& rec = *found;
+        channel_record change;
+        const auto* s3 = object_member(in, "S3DestinationConfiguration");
+        const auto* tables = object_member(in, "S3TablesDestinationConfiguration");
+        if (s3 != nullptr && tables != nullptr) {
+            return invalid_argument(
+                "Specify at most one of S3DestinationConfiguration and "
+                "S3TablesDestinationConfiguration.");
+        }
+        if (const auto* upd = s3 != nullptr ? s3 : tables) {
+            const auto wanted =
+                s3 != nullptr ? channel_destination::s3 : channel_destination::s3_tables;
+            if (wanted != rec._destination) {
+                return invalid_argument("Channel " + rec._name + " delivers to " +
+                                        std::string(channel_destination_name(rec._destination)) +
+                                        "; its destination cannot be changed.");
+            }
+            if (auto e = check_freshness(*upd)) {
+                return *e;
+            }
+            auto dest = boost::json::parse(rec._destination_config).as_object();
+            dest["DataFreshnessInSeconds"] = upd->at("DataFreshnessInSeconds");
+            change._destination_config = boost::json::serialize(dest);
+        }
+        if (const auto* log = object_member(in, "LoggingConfiguration")) {
+            change._logging_config = boost::json::serialize(*log);
+        }
+        if (change._destination_config.empty() && change._logging_config.empty()) {
+            return invalid_argument("UpdateChannel needs a destination or logging change.");
+        }
+        auto r = change_channel(rec, channel_op::update, std::move(change), {}, {});
+        if (!r) {
+            return r.error();
+        }
+        boost::json::object out;
+        out["ChannelDescription"] = channel_json(ctx, *r);
+        return out;
+    }
+
+    auto describe_channel(call_context& ctx, boost::json::object& in) -> result {
+        auto found = find_channel(ctx, in);
+        if (!found) {
+            return found.error();
+        }
+        boost::json::object out;
+        out["ChannelDescription"] = channel_json(ctx, *found);
+        return out;
+    }
+
+    /// Delivery stops at once; objects already delivered stay.
+    auto delete_channel(call_context& ctx, boost::json::object& in) -> result {
+        auto found = find_channel(ctx, in);
+        if (!found) {
+            return found.error();
+        }
+        auto r = change_channel(*found, channel_op::remove, {}, {}, {});
+        if (!r) {
+            return r.error();
+        }
+        return boost::json::object{};
+    }
+
+    /// By name, `MaxResults` at a time (100 when absent). A `StreamFilter`
+    /// keeps the channels that deliver from any stream it names (and, with
+    /// a creation time, from that incarnation of it).
+    auto list_channels(call_context& ctx, boost::json::object& in) -> result {
+        const auto& account = ctx._principal.account;
+        struct filter {
+            std::string _name;
+            std::optional<std::int64_t> _created_s;
+        };
+        std::vector<filter> filters;
+        if (const auto* f = in.if_contains("StreamFilter"); f != nullptr && f->is_array()) {
+            for (const auto& v : f->get_array()) {
+                const auto& o = v.as_object();
+                const std::string arn(*detail::string_member(o, "StreamARN"));
+                const auto parts = parse_kinesis_arn(arn);
+                const auto stream = stream_name_of(arn);
+                if (!parts || !stream) {
+                    return invalid_argument("StreamARN " + arn + " is not a stream ARN.");
+                }
+                filter flt{std::string(*stream), std::nullopt};
+                if (parts->_account != account || parts->_partition != ctx._partition ||
+                    parts->_region != ctx._region) {
+                    // Another account's stream feeds none of this account's
+                    // channels.
+                    flt._name.clear();
+                }
+                if (const auto t = service_detail::number_member(o, "StreamCreationTimestamp")) {
+                    flt._created_s = static_cast<std::int64_t>(*t);
+                }
+                filters.push_back(std::move(flt));
+            }
+        }
+        const auto limit = static_cast<std::size_t>(std::clamp<std::int64_t>(
+            service_detail::int_member(in, "MaxResults").value_or(100), 1, 10'000));
+        const auto token_prefix = "channels/" + account + "/";
+        std::string after;
+        if (const auto token = detail::string_member(in, "NextToken")) {
+            const auto decoded = service_detail::base64_decode(*token);
+            if (!decoded || !decoded->starts_with(token_prefix) ||
+                decoded->size() == token_prefix.size()) {
+                return kinesis_error_style().modeled("ExpiredNextTokenException",
+                                                     "The NextToken is invalid or has expired.");
+            }
+            after = decoded->substr(token_prefix.size());
+        }
+        const auto keep = [&](const channel_record& c) {
+            if (filters.empty()) {
+                return true;
+            }
+            for (const auto& f : filters) {
+                for (const auto& s : c._streams) {
+                    if (!f._name.empty() && s._stream == f._name &&
+                        (!f._created_s || *f._created_s == s._stream_created_ms / 1000)) {
+                        return true;
+                    }
+                }
+            }
+            return false;
+        };
+        std::vector<channel_record> page;
+        bool more = false;
+        if (!read_catalog([&](const auto& sm) {
+                for (const auto* c : sm.list_channels(account, after)) {
+                    if (!keep(*c)) {
+                        continue;
+                    }
+                    if (page.size() == limit) {
+                        more = true;
+                        return;
+                    }
+                    page.push_back(*c);
+                }
+            })) {
+            return internal_failure();
+        }
+        boost::json::array list;
+        for (const auto& c : page) {
+            boost::json::object o;
+            o["ChannelName"] = c._name;
+            o["ChannelARN"] = channel_arn_of(ctx, c);
+            o["ChannelId"] = channel_id_text(c._id);
+            o["ChannelStatus"] = channel_status_name(c._status);
+            if (!c._status_reason.empty()) {
+                o["ChannelStatusReason"] = c._status_reason;
+            }
+            o["ChannelCreationTimestamp"] = service_detail::epoch_seconds(c._created_ms);
+            o["ChannelDestinationType"] = channel_destination_name(c._destination);
+            boost::json::array streams;
+            for (const auto& s : c._streams) {
+                streams.push_back(
+                    boost::json::object{{"StreamARN", channel_stream_arn(ctx, c, s)},
+                                        {"StreamCreationTimestamp",
+                                         service_detail::epoch_seconds(s._stream_created_ms)}});
+            }
+            o["Streams"] = std::move(streams);
+            list.push_back(std::move(o));
+        }
+        boost::json::object out;
+        out["ChannelSummaries"] = std::move(list);
+        if (more) {
+            out["NextToken"] = service_detail::base64_encode(token_prefix + page.back()._name);
         }
         return out;
     }
@@ -1500,7 +1881,13 @@ public:
         // and the channel count, and no StreamId, which the model lists but
         // AWS does not return.
         d["MaxRecordSizeInKiB"] = 1024;
-        d["ChannelCount"] = 0;
+        std::size_t channels = 0;
+        (void)read_catalog([&](const auto& sm) {
+            for (const auto* c : sm.list_channels(rec._account)) {
+                channels += c->delivers_from(rec._id) ? 1 : 0;
+            }
+        });
+        d["ChannelCount"] = channels;
         if (const auto relaxed = profile.relaxed(); !relaxed.empty()) {
             // Kythira's extension (Requirement 3.3): which AWS behaviours
             // this stream runs without. Absent when it runs as AWS.
@@ -2700,6 +3087,228 @@ private:
         get_policy,
         delete_policy
     };
+
+    // ---- channel helpers (task 19) ------------------------------------------
+
+    [[nodiscard]] static auto object_member(const boost::json::object& o, std::string_view key)
+        -> const boost::json::object* {
+        const auto* v = o.if_contains(key);
+        return v != nullptr && v->is_object() ? &v->get_object() : nullptr;
+    }
+
+    /// The model documents `DataFreshnessInSeconds` as 300 to 900 seconds,
+    /// 300 by default.
+    [[nodiscard]] static auto check_freshness(const boost::json::object& dest)
+        -> std::optional<aws_json::error> {
+        if (const auto f = service_detail::int_member(dest, "DataFreshnessInSeconds");
+            f && (*f < k_min_channel_freshness_s || *f > k_max_channel_freshness_s)) {
+            return invalid_argument("DataFreshnessInSeconds must be between " +
+                                    std::to_string(k_min_channel_freshness_s) + " and " +
+                                    std::to_string(k_max_channel_freshness_s) + ".");
+        }
+        return std::nullopt;
+    }
+
+    /// The model's rules for `RecordFormatType` by destination: GSR_JSON
+    /// only to S3 Tables, STRING and BYTE_ARRAY only to S3, JSON to both;
+    /// S3 Tables needs a Glue schema for JSON and GSR_JSON alike.
+    [[nodiscard]] static auto check_record_format(const boost::json::object& rc,
+                                                  channel_destination d)
+        -> std::optional<aws_json::error> {
+        const std::string format(*detail::string_member(rc, "RecordFormatType"));
+        const bool schema = rc.contains("GSRSchemaARN");
+        if (d == channel_destination::s3) {
+            if (format == "GSR_JSON") {
+                return invalid_argument(
+                    "RecordFormatType GSR_JSON is supported only for S3 Tables destinations.");
+            }
+            if (schema) {
+                return invalid_argument("GSRSchemaARN applies only to S3 Tables destinations.");
+            }
+            return std::nullopt;
+        }
+        if (format == "STRING" || format == "BYTE_ARRAY") {
+            return invalid_argument("RecordFormatType " + format +
+                                    " is supported only for general purpose S3 destinations.");
+        }
+        if (!schema) {
+            return invalid_argument("GSRSchemaARN is required for S3 Tables destinations.");
+        }
+        return std::nullopt;
+    }
+
+    [[nodiscard]] static auto on_demand_only(const stream_record& s) -> aws_json::error {
+        return invalid_argument("Stream " + s._name + " under account " + s._account +
+                                " is in provisioned mode; channels deliver only from on-demand "
+                                "streams.");
+    }
+
+    /// One more action the handler authorizes, with the request's tags when
+    /// `in` is given.
+    static auto authorize_channel(call_context& ctx, std::string action, std::string resource,
+                                  const boost::json::object* in) -> std::optional<aws_json::error> {
+        aws_auth::authz_request r;
+        r.action = std::move(action);
+        r.resource = std::move(resource);
+        if (in != nullptr) {
+            if (const auto tags = tag_map_of(*in); !tags.empty()) {
+                r.request_tags =
+                    std::vector<std::pair<std::string, std::string>>(tags.begin(), tags.end());
+            }
+        }
+        return ctx.authorize(std::move(r));
+    }
+
+    [[nodiscard]] static auto channel_arn_of(const call_context& ctx, const channel_record& c)
+        -> std::string {
+        return "arn:" + ctx._partition + ":kinesis:" + ctx._region + ":" + c._account +
+               ":channel/" + channel_id_text(c._id);
+    }
+
+    [[nodiscard]] static auto channel_stream_arn(const call_context& ctx, const channel_record& c,
+                                                 const channel_stream& s) -> std::string {
+        return "arn:" + ctx._partition + ":kinesis:" + ctx._region + ":" + c._account + ":stream/" +
+               s._stream;
+    }
+
+    [[nodiscard]] static auto channel_json(const call_context& ctx, const channel_record& c)
+        -> boost::json::object {
+        boost::json::object o;
+        o["ChannelName"] = c._name;
+        o["ChannelARN"] = channel_arn_of(ctx, c);
+        o["ChannelId"] = channel_id_text(c._id);
+        o["ChannelStatus"] = channel_status_name(c._status);
+        if (!c._status_reason.empty()) {
+            o["ChannelStatusReason"] = c._status_reason;
+        }
+        o["ChannelCreationTimestamp"] = service_detail::epoch_seconds(c._created_ms);
+        o["ServiceExecutionRoleARN"] = c._role_arn;
+        boost::json::array streams;
+        for (const auto& s : c._streams) {
+            streams.push_back(boost::json::object{
+                {"StreamARN", channel_stream_arn(ctx, c, s)},
+                {"StreamCreationTimestamp", service_detail::epoch_seconds(s._stream_created_ms)},
+                {"RecordConfiguration", boost::json::parse(s._record_config)}});
+        }
+        o["StreamConfigurationList"] = std::move(streams);
+        o[c._destination == channel_destination::s3 ? "S3DestinationConfiguration"
+                                                    : "S3TablesDestinationConfiguration"] =
+            boost::json::parse(c._destination_config);
+        if (!c._encryption_config.empty()) {
+            o["EncryptionConfiguration"] = boost::json::parse(c._encryption_config);
+        }
+        o["LoggingConfiguration"] = boost::json::parse(c._logging_config);
+        return o;
+    }
+
+    /// The channel `ChannelARN` names, in the caller's partition and
+    /// region; its account is the ARN's, which the front end authorized.
+    auto find_channel(const call_context& ctx, const boost::json::object& in)
+        -> aws_json::result<channel_record> {
+        const std::string arn(*detail::string_member(in, "ChannelARN"));
+        return channel_by_arn(ctx, arn);
+    }
+
+    auto channel_by_arn(const call_context& ctx, const std::string& arn)
+        -> aws_json::result<channel_record> {
+        const auto parts = parse_kinesis_arn(arn);
+        if (!parts || parts->_partition != ctx._partition || parts->_region != ctx._region ||
+            !parts->_resource.starts_with("channel/")) {
+            return invalid_argument("ChannelARN " + arn + " is not a channel ARN in " +
+                                    ctx._region + ".");
+        }
+        const auto id = parse_channel_id(parts->_resource.substr(8));
+        std::optional<channel_record> found;
+        if (id && !read_catalog([&](const auto& sm) {
+                if (const auto* c = sm.find_channel_by_id(parts->_account, *id)) {
+                    found = *c;
+                }
+            })) {
+            return internal_failure();
+        }
+        if (!found) {
+            return resource_not_found("Channel " + arn + " not found.");
+        }
+        return *found;
+    }
+
+    [[nodiscard]] static auto is_channel_arn(const boost::json::object& in) -> bool {
+        const auto arn = detail::string_member(in, "ResourceARN");
+        const auto parts = arn ? parse_kinesis_arn(*arn) : std::nullopt;
+        return parts && parts->_resource.starts_with("channel/");
+    }
+
+    /// Proposes `op` on `rec` and answers the channel as it is after.
+    auto change_channel(const channel_record& rec, channel_op op, channel_record change,
+                        std::map<std::string, std::string> set, std::vector<std::string> remove)
+        -> aws_json::result<channel_record> {
+        auto after = rec;
+        if (!change._destination_config.empty()) {
+            after._destination_config = change._destination_config;
+        }
+        if (!change._logging_config.empty()) {
+            after._logging_config = change._logging_config;
+        }
+        for (const auto& [k, v] : set) {
+            after._tags[k] = v;
+        }
+        for (const auto& k : remove) {
+            after._tags.erase(k);
+        }
+        const auto r = propose(channel_command{._account = rec._account,
+                                               ._name = rec._name,
+                                               ._op = op,
+                                               ._id = rec._id,
+                                               ._record = std::move(change),
+                                               ._set = std::move(set),
+                                               ._remove = std::move(remove),
+                                               ._max = static_cast<std::uint32_t>(k_max_tags)});
+        if (!r) {
+            return internal_failure();
+        }
+        switch (r->_status) {
+            case apply_status::ok:
+                return after;
+            case apply_status::not_found:
+                return resource_not_found("Channel " + rec._name + " under account " +
+                                          rec._account + " not found.");
+            case apply_status::bad_transition:
+                return service_detail::in_use("Channel " + rec._name + " under account " +
+                                              rec._account + " not ACTIVE, instead in state " +
+                                              std::string(channel_status_name(rec._status)));
+            case apply_status::invalid:
+                return invalid_argument("A channel can have at most " + std::to_string(k_max_tags) +
+                                        " tags.");
+            default:
+                return internal_failure();
+        }
+    }
+
+    /// `TagResource`, `UntagResource` and `ListTagsForResource` on a
+    /// channel ARN. The front end authorized the ARN.
+    auto channel_tags(const call_context& ctx, const boost::json::object& in,
+                      consumer_resource_op op) -> result {
+        auto found = channel_by_arn(ctx, std::string(*detail::string_member(in, "ResourceARN")));
+        if (!found) {
+            return found.error();
+        }
+        if (op == consumer_resource_op::list_tags) {
+            boost::json::array tags;
+            for (const auto& [k, v] : found->_tags) {
+                tags.push_back(boost::json::object{{"Key", k}, {"Value", v}});
+            }
+            boost::json::object out;
+            out["Tags"] = std::move(tags);
+            return out;
+        }
+        auto r = op == consumer_resource_op::tag
+                     ? change_channel(*found, channel_op::retag, {}, tag_map_of(in), {})
+                     : change_channel(*found, channel_op::retag, {}, {}, tag_keys_of(in));
+        if (!r) {
+            return r.error();
+        }
+        return boost::json::object{};
+    }
 
     [[nodiscard]] static auto consumer_arn_of(const call_context& ctx, const stream_record& s,
                                               const consumer_record& c) -> std::string {
