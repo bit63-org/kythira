@@ -3,6 +3,7 @@
 
 #define BOOST_TEST_MODULE ca_service_serve_integration_test
 
+#include "test_ports.hpp"
 #include <boost/test/unit_test.hpp>
 
 #include <raft/certificate_authority.hpp>
@@ -57,18 +58,10 @@ auto load_cert_pem(const std::string& pem) -> x509_ptr {
 }
 
 auto find_free_port() -> int {
-    int fd = ::socket(AF_INET, SOCK_STREAM, 0);
-    BOOST_REQUIRE(fd >= 0);
-    sockaddr_in addr{};
-    addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    addr.sin_port = 0;
-    BOOST_REQUIRE(::bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0);
-    socklen_t len = sizeof(addr);
-    BOOST_REQUIRE(::getsockname(fd, reinterpret_cast<sockaddr*>(&addr), &len) == 0);
-    int port = ntohs(addr.sin_port);
-    ::close(fd);
-    return port;
+    // Below the ephemeral range and claimed for this process; a port
+    // from bind(0) is ephemeral and unclaimed, so another test (or an
+    // outgoing connection) can take it before the server binds.
+    return static_cast<int>(kythira::testing::free_port());
 }
 
 // Launches `ca_service --serve 127.0.0.1:<port> --provider local --auth-token

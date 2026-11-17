@@ -8,6 +8,7 @@
 // connection to the id that SAN names.
 // **Validates: Requirements 9.1, 12.2**
 #define BOOST_TEST_MODULE tls_tcp_rpc_textual_node_id_test
+#include "test_ports.hpp"
 #include <boost/test/unit_test.hpp>
 
 #include <raft/ca_http_helpers.hpp>
@@ -35,18 +36,10 @@ namespace {
 constexpr auto k_rpc_timeout = std::chrono::milliseconds(5000);
 
 auto find_free_port() -> std::uint16_t {
-    int fd = ::socket(AF_INET, SOCK_STREAM, 0);
-    BOOST_REQUIRE(fd >= 0);
-    sockaddr_in addr{};
-    addr.sin_family = AF_INET;
-    addr.sin_port = 0;
-    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    BOOST_REQUIRE(::bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0);
-    socklen_t len = sizeof(addr);
-    BOOST_REQUIRE(::getsockname(fd, reinterpret_cast<sockaddr*>(&addr), &len) == 0);
-    auto port = static_cast<std::uint16_t>(ntohs(addr.sin_port));
-    ::close(fd);
-    return port;
+    // Below the ephemeral range and claimed for this process; a port
+    // from bind(0) is ephemeral and unclaimed, so another test (or an
+    // outgoing connection) can take it before the server binds.
+    return static_cast<std::uint16_t>(kythira::testing::free_port());
 }
 
 // A CA-issued certificate and key on disk, where the transport loads them.
