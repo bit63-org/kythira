@@ -10,6 +10,7 @@
 #include <boost/test/unit_test.hpp>
 
 #include <kythira/kinesis/kinesis_actions.hpp>
+#include <kythira/kinesis/kinesis_channels.hpp>
 #include <kythira/kinesis/kinesis_operations.hpp>
 
 #include <raft/static_key_authorizer.hpp>
@@ -116,4 +117,18 @@ BOOST_AUTO_TEST_CASE(static_roles_split_reads_writes_and_admin) {
         BOOST_TEST(!allowed("w", admin));
         BOOST_TEST(allowed("a", admin));
     }
+
+    // CreateChannel's iam:PassRole: denied to every role until the iam
+    // table is registered, then admin's alone.
+    const auto pass_role = [&](std::string_view who) {
+        az::authz_request r;
+        r.action = "iam:PassRole";
+        r.resource = "arn:aws:iam::111122223333:role/channel-delivery";
+        return auth.authorize(principal(who), r).allowed;
+    };
+    BOOST_TEST(!pass_role("a"));
+    auth.register_service(kin::channel_role_static_roles());
+    BOOST_TEST(!pass_role("r"));
+    BOOST_TEST(!pass_role("w"));
+    BOOST_TEST(pass_role("a"));
 }

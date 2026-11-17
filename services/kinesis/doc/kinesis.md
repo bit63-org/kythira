@@ -188,8 +188,9 @@ under Docker and rootless Podman.
 
 `doc/unsupported.md` lists every operation of the pinned model that is not
 implemented, with the error it returns (Requirement 2.1). Today that is
-the five Channel operations, which deliver records to S3 and S3 Tables and
-are planned as spec task 19, and `UpdateStreamWarmThroughput`. `tools/check_coverage.py`
+`UpdateStreamWarmThroughput` alone. The Channel operations are implemented
+but do not deliver records yet; see [channels.md](channels.md).
+`tools/check_coverage.py`
 keeps the list complete. Other differences from AWS are noted on each
 subject's page under "Limits and differences" or "Not yet checked against
 AWS".

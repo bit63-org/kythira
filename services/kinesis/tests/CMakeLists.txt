@@ -173,6 +173,9 @@ kythira_kinesis_test(kinesis_on_demand_test kinesis_on_demand_test.cpp)
 # Task 15: tags (both forms), resource policies, enhanced monitoring, the
 # account calls and the Prometheus metrics.
 kythira_kinesis_test(kinesis_tags_test kinesis_tags_test.cpp)
+# Task 19: channels (catalog records, the five Channel operations, tags
+# on channel ARNs, no deleting a stream that feeds a channel).
+kythira_kinesis_test(kinesis_channels_test kinesis_channels_test.cpp)
 # Task 14: encryption at rest (the local key provider, sealed records, the
 # AWS KMS adapter against a fake KMS, Start/StopStreamEncryption).
 kythira_kinesis_test(kinesis_encryption_test kinesis_encryption_test.cpp)

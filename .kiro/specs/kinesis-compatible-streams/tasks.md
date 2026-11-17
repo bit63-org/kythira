@@ -516,3 +516,16 @@ asked.
   - A recording or delivery run against real AWS needs Clark's go in his
     own words (Requirement 17.4)
   - _Requirements: 18.1-18.5_
+  - Progress (November 17, 2026): the catalog and the API. Channel
+    records live under `\0meta/kinesis/channels/<account>/<name>` in the
+    catalog range, with ids from the stream id counter
+    (`kinesis_channels.hpp`); the stream state machine applies a
+    `channel_command` (create, update, remove, retag) and snapshots the
+    records. The five operations answer with the model's shapes and the
+    rules its documentation states, tags work on channel ARNs,
+    `DeleteStream` refuses a stream that feeds a channel and
+    `DescribeStreamSummary` counts them, and each call has AWS's 5 TPS
+    per-account rate. `kinesis_channels_test` covers it, and
+    `services/kinesis/doc/channels.md` says plainly that records are not
+    delivered yet. Left: the delivery worker, S3 Tables commits, KMS for
+    delivered objects, the container scenario and conformance runs.
