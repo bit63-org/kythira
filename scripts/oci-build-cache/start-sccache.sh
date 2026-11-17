@@ -44,6 +44,19 @@ set -uo pipefail
 probe_dir=$(mktemp -d)
 trap 'rm -rf "$probe_dir"' EXIT
 
+# KYTHIRA_SCCACHE_LOG names a file for the server's per-compile log, which
+# scripts/oci-build-cache/sccache_misses.py reads to name every miss. The
+# statistics only count misses; the log is the one place sccache says which
+# object missed. A server the vcpkg install already started was launched
+# without that log, so it is stopped first and the new one inherits the
+# variables below. Only the compiler module logs at debug: one line per
+# lookup, plus the arguments and hash key behind it.
+if [ -n "${KYTHIRA_SCCACHE_LOG:-}" ]; then
+    sccache --stop-server >/dev/null 2>&1 || true
+    export SCCACHE_ERROR_LOG="$KYTHIRA_SCCACHE_LOG"
+    export SCCACHE_LOG="warn,sccache::compiler::compiler=debug"
+fi
+
 # Best effort: on a job where the vcpkg install already started a server this
 # exits non-zero with "Address in use", which is not a failure. The probe
 # below is what decides.
