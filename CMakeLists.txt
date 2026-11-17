@@ -180,6 +180,21 @@ else()
 endif()
 unset(_kythira_launcher)
 
+# Clang writes the modification time of every input header into a
+# precompiled header unless told not to. sccache computes a PCH compile's
+# key by re-running the compile with -E, but -Xclang -emit-pch wins over -E,
+# so the "preprocessor output" it hashes is the PCH itself. Every fresh
+# configure rewrites cmake_pch.hxx, so its mtime, and with it the key,
+# changed on every CI run: tests/'s kythira_test_pch was the one clang++-18
+# miss per warm build (.kiro/specs/disk-backed-build-cache/ task 11, named
+# by sccache_misses.py on PR #827). Dropping the timestamp makes the PCH a
+# function of its inputs. Nothing relies on it: ninja's depfile already
+# rebuilds the PCH when a header changes, and clang still checks each
+# input's size. GCC's .gch has no such field and needs nothing.
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    list(APPEND CMAKE_CXX_COMPILE_OPTIONS_CREATE_PCH -Xclang -fno-pch-timestamp)
+endif()
+
 # Linker. mold links in parallel; ld.bfd, which every Ubuntu toolchain uses
 # by default, does not. Link steps are about half of all build edges and no
 # compiler cache can skip them (.kiro/specs/mold-linker/ has the measured
