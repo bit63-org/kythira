@@ -647,6 +647,15 @@ A daemon built on the Boost future backend crashes (SIGSEGV in a pre-vote
 retry posting to a freed strand) as soon as peers are given by host name
 and are not yet up. It happens in memory mode too, so it predates this
 spec; Folly builds, which every image uses, are unaffected.
+Resolved 2026-11-17: the cause was fixed on November 10, 2026 in PR #759
+(commit b025e0e3, "keep a beast connection's executor alive on boost
+futures"). Boost's `then(Ex&, F)` holds the executor by reference; a
+failed connect released the connection, and its executor, from inside
+the request chain, so the next link posted to a freed strand. `via()` now
+pins an executor's `keep_alive()` owner for the whole chain. The
+`Future<void>` overload of `via()` had been left without the pin; it gets
+it too, with regression tests for both in
+`boost_future_continuation_and_collector_property_test`.
 
 - [x] 9. End-to-end test with the real clients
   - A container test: build a small CMake project twice through sccache
