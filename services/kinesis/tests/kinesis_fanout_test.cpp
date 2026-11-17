@@ -101,6 +101,10 @@ auto fast_config() -> kin::kinesis_service_config {
     c._subscription_heartbeat = std::chrono::milliseconds(200);
     c._subscription_poll = std::chrono::milliseconds(10);
     c._subscription_recheck = std::chrono::milliseconds(50);
+    // Faster than AWS's per-account control-plane rates, which the SDKs
+    // retry and these direct calls do not (kinesis_throttle_test covers
+    // them).
+    c._control_plane._rates.clear();
     return c;
 }
 

@@ -369,3 +369,82 @@ BOOST_AUTO_TEST_CASE(a_big_read_blocks_the_shard_until_its_bytes_refill) {
     f.mono += 200;
     BOOST_TEST(f.call("GetRecords", {{"ShardIterator", it}}).status == 200U);
 }
+
+// AWS's per-account control-plane rates (task 8): one bucket per account
+// and operation, one second deep.
+BOOST_AUTO_TEST_CASE(control_plane_buckets_are_per_account_and_operation) {
+    std::int64_t now = 5'000;
+    kin::control_throttle t({}, [&now] { return now; });
+    for (int i = 0; i < 5; ++i) {
+        BOOST_TEST(t.admit("111122223333", "CreateStream"));
+    }
+    BOOST_TEST(!t.admit("111122223333", "CreateStream"));
+    // Another account, and another operation of the same account, have
+    // their own buckets.
+    BOOST_TEST(t.admit("444455556666", "CreateStream"));
+    BOOST_TEST(t.admit("111122223333", "DeleteStream"));
+    // An operation with no per-account rate is never refused.
+    for (int i = 0; i < 100; ++i) {
+        BOOST_TEST(t.admit("111122223333", "PutRecords"));
+    }
+    BOOST_TEST(kin::control_plane_limits{}.rate("ListShards") == 0.0);
+    // 5 a second: one call's worth back after 200 ms.
+    now += 200;
+    BOOST_TEST(t.admit("111122223333", "CreateStream"));
+    BOOST_TEST(!t.admit("111122223333", "CreateStream"));
+    // A minute idle: the buckets are forgotten (they would be full anyway).
+    now += 61'000;
+    BOOST_TEST(t.admit("111122223333", "DescribeLimits"));
+    BOOST_TEST(t.size() == 1U);
+}
+
+BOOST_AUTO_TEST_CASE(control_plane_calls_past_the_rate_answer_limit_exceeded) {
+    fixture f;
+    f.create("s");
+    f.mono += 1000;
+    // DescribeStream: 10 a second per account.
+    for (int i = 0; i < 10; ++i) {
+        BOOST_TEST(f.call("DescribeStream", {{"StreamName", "s"}}).status == 200U);
+    }
+    const auto r = f.call("DescribeStream", {{"StreamName", "s"}});
+    BOOST_TEST(r.status == 400U);
+    BOOST_TEST(type_of(r) == "LimitExceededException");
+    BOOST_TEST(message_of(r) == "Rate exceeded for stream s under account 111122223333.");
+    // DescribeStreamSummary has its own bucket (20 a second).
+    BOOST_TEST(f.call("DescribeStreamSummary", {{"StreamName", "s"}}).status == 200U);
+    // A call that names no stream says so.
+    for (int i = 0; i < 5; ++i) {
+        BOOST_TEST(f.call("ListStreams", json::object{}).status == 200U);
+    }
+    const auto l = f.call("ListStreams", json::object{});
+    BOOST_TEST(type_of(l) == "LimitExceededException");
+    BOOST_TEST(message_of(l) == "Rate exceeded for account 111122223333.");
+    // The data plane is not a control-plane call.
+    BOOST_TEST(f.iterator("s").status == 200U);
+    f.mono += 100;
+    BOOST_TEST(f.call("DescribeStream", {{"StreamName", "s"}}).status == 200U);
+}
+
+BOOST_AUTO_TEST_CASE(control_plane_rates_follow_the_cluster_switch_not_a_streams) {
+    {
+        // A stream's tag turns its shard limits off, not the account's call
+        // rates.
+        fixture f;
+        f.create("free", {{"kythira:compat:throttling", "off"}});
+        f.mono += 1000;
+        for (int i = 0; i < 10; ++i) {
+            (void)f.call("DescribeStream", {{"StreamName", "free"}});
+        }
+        BOOST_TEST(type_of(f.call("DescribeStream", {{"StreamName", "free"}})) ==
+                   "LimitExceededException");
+    }
+    {
+        kin::kinesis_compat_profile off;
+        off._throttling = false;
+        fixture f(off);
+        f.create("s");
+        for (int i = 0; i < 50; ++i) {
+            BOOST_TEST(f.call("DescribeStream", {{"StreamName", "s"}}).status == 200U);
+        }
+    }
+}

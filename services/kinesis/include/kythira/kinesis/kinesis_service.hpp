@@ -136,7 +136,10 @@ struct kinesis_service_config {
     /// AWS's per-shard rates (task 8). Writes meet them on the proposing
     /// leader (the cluster's `write_throttle`); reads on this node.
     throughput_limits _throughput{};
-    /// The clock the read buckets refill by.
+    /// AWS's per-account control-plane call rates (task 8), met on this
+    /// node while the cluster's `throttling` switch is on.
+    control_plane_limits _control_plane{};
+    /// The clock the read and control-plane buckets refill by.
     monotonic_ms _monotonic = steady_now_ms;
     /// Wraps and unwraps encrypted streams' data keys (task 14). Empty:
     /// `StartStreamEncryption` is refused, and an encrypted stream's
@@ -303,7 +306,8 @@ public:
     kinesis_service(Cluster& cluster, kinesis_service_config config = {})
         : _cluster(cluster),
           _config(std::move(config)),
-          _reads(_config._throughput, _config._monotonic) {
+          _reads(_config._throughput, _config._monotonic),
+          _control(_config._control_plane, _config._monotonic) {
         if (_config._iterator_keys._keys.empty()) {
             std::array<unsigned char, 32> key{};
             if (RAND_bytes(key.data(), static_cast<int>(key.size())) != 1) {
@@ -316,52 +320,54 @@ public:
 
     /// Registers this service's operations with `fe`.
     template<typename FrontEnd> void register_with(FrontEnd& fe) {
-        const auto bind = [this](auto member) {
-            return [this, member](call_context& ctx, boost::json::object& in) {
-                return (this->*member)(ctx, in);
-            };
+        const auto on = [this, &fe](std::string_view operation, auto member) {
+            fe.on(operation,
+                  [this, member, operation](call_context& ctx, boost::json::object& in) -> result {
+                      if (auto e = control_rate_exceeded(ctx, operation, in)) {
+                          return *e;
+                      }
+                      return (this->*member)(ctx, in);
+                  });
         };
-        fe.on("CreateStream", bind(&kinesis_service::create_stream));
-        fe.on("DeleteStream", bind(&kinesis_service::delete_stream));
-        fe.on("DescribeStream", bind(&kinesis_service::describe_stream));
-        fe.on("DescribeStreamSummary", bind(&kinesis_service::describe_stream_summary));
-        fe.on("ListStreams", bind(&kinesis_service::list_streams));
-        fe.on("ListShards", bind(&kinesis_service::list_shards));
-        fe.on("DescribeLimits", bind(&kinesis_service::describe_limits));
-        fe.on("PutRecord", bind(&kinesis_service::put_record));
-        fe.on("PutRecords", bind(&kinesis_service::put_records));
-        fe.on("GetShardIterator", bind(&kinesis_service::get_shard_iterator));
-        fe.on("GetRecords", bind(&kinesis_service::get_records));
-        fe.on("IncreaseStreamRetentionPeriod",
-              bind(&kinesis_service::increase_stream_retention_period));
-        fe.on("DecreaseStreamRetentionPeriod",
-              bind(&kinesis_service::decrease_stream_retention_period));
-        fe.on("UpdateStreamMode", bind(&kinesis_service::update_stream_mode));
-        fe.on("AddTagsToStream", bind(&kinesis_service::add_tags_to_stream));
-        fe.on("RemoveTagsFromStream", bind(&kinesis_service::remove_tags_from_stream));
-        fe.on("ListTagsForStream", bind(&kinesis_service::list_tags_for_stream));
-        fe.on("TagResource", bind(&kinesis_service::tag_resource));
-        fe.on("UntagResource", bind(&kinesis_service::untag_resource));
-        fe.on("ListTagsForResource", bind(&kinesis_service::list_tags_for_resource));
-        fe.on("PutResourcePolicy", bind(&kinesis_service::put_resource_policy));
-        fe.on("GetResourcePolicy", bind(&kinesis_service::get_resource_policy));
-        fe.on("DeleteResourcePolicy", bind(&kinesis_service::delete_resource_policy));
-        fe.on("EnableEnhancedMonitoring", bind(&kinesis_service::enable_enhanced_monitoring));
-        fe.on("DisableEnhancedMonitoring", bind(&kinesis_service::disable_enhanced_monitoring));
-        fe.on("DescribeAccountSettings", bind(&kinesis_service::describe_account_settings));
-        fe.on("UpdateAccountSettings", bind(&kinesis_service::update_account_settings));
-        fe.on("UpdateMaxRecordSize", bind(&kinesis_service::update_max_record_size));
-        fe.on("StartStreamEncryption", bind(&kinesis_service::start_stream_encryption));
-        fe.on("StopStreamEncryption", bind(&kinesis_service::stop_stream_encryption));
-        fe.on("RegisterStreamConsumer", bind(&kinesis_service::register_stream_consumer));
-        fe.on("DeregisterStreamConsumer", bind(&kinesis_service::deregister_stream_consumer));
-        fe.on("DescribeStreamConsumer", bind(&kinesis_service::describe_stream_consumer));
-        fe.on("ListStreamConsumers", bind(&kinesis_service::list_stream_consumers));
-        fe.on("SubscribeToShard", bind(&kinesis_service::subscribe_to_shard));
+        on("CreateStream", &kinesis_service::create_stream);
+        on("DeleteStream", &kinesis_service::delete_stream);
+        on("DescribeStream", &kinesis_service::describe_stream);
+        on("DescribeStreamSummary", &kinesis_service::describe_stream_summary);
+        on("ListStreams", &kinesis_service::list_streams);
+        on("ListShards", &kinesis_service::list_shards);
+        on("DescribeLimits", &kinesis_service::describe_limits);
+        on("PutRecord", &kinesis_service::put_record);
+        on("PutRecords", &kinesis_service::put_records);
+        on("GetShardIterator", &kinesis_service::get_shard_iterator);
+        on("GetRecords", &kinesis_service::get_records);
+        on("IncreaseStreamRetentionPeriod", &kinesis_service::increase_stream_retention_period);
+        on("DecreaseStreamRetentionPeriod", &kinesis_service::decrease_stream_retention_period);
+        on("UpdateStreamMode", &kinesis_service::update_stream_mode);
+        on("AddTagsToStream", &kinesis_service::add_tags_to_stream);
+        on("RemoveTagsFromStream", &kinesis_service::remove_tags_from_stream);
+        on("ListTagsForStream", &kinesis_service::list_tags_for_stream);
+        on("TagResource", &kinesis_service::tag_resource);
+        on("UntagResource", &kinesis_service::untag_resource);
+        on("ListTagsForResource", &kinesis_service::list_tags_for_resource);
+        on("PutResourcePolicy", &kinesis_service::put_resource_policy);
+        on("GetResourcePolicy", &kinesis_service::get_resource_policy);
+        on("DeleteResourcePolicy", &kinesis_service::delete_resource_policy);
+        on("EnableEnhancedMonitoring", &kinesis_service::enable_enhanced_monitoring);
+        on("DisableEnhancedMonitoring", &kinesis_service::disable_enhanced_monitoring);
+        on("DescribeAccountSettings", &kinesis_service::describe_account_settings);
+        on("UpdateAccountSettings", &kinesis_service::update_account_settings);
+        on("UpdateMaxRecordSize", &kinesis_service::update_max_record_size);
+        on("StartStreamEncryption", &kinesis_service::start_stream_encryption);
+        on("StopStreamEncryption", &kinesis_service::stop_stream_encryption);
+        on("RegisterStreamConsumer", &kinesis_service::register_stream_consumer);
+        on("DeregisterStreamConsumer", &kinesis_service::deregister_stream_consumer);
+        on("DescribeStreamConsumer", &kinesis_service::describe_stream_consumer);
+        on("ListStreamConsumers", &kinesis_service::list_stream_consumers);
+        on("SubscribeToShard", &kinesis_service::subscribe_to_shard);
         if constexpr (transacts<Cluster>) {
-            fe.on("SplitShard", bind(&kinesis_service::split_shard));
-            fe.on("MergeShards", bind(&kinesis_service::merge_shards));
-            fe.on("UpdateShardCount", bind(&kinesis_service::update_shard_count));
+            on("SplitShard", &kinesis_service::split_shard);
+            on("MergeShards", &kinesis_service::merge_shards);
+            on("UpdateShardCount", &kinesis_service::update_shard_count);
         }
     }
 
@@ -2034,7 +2040,31 @@ private:
     Cluster& _cluster;
     kinesis_service_config _config;
     read_throttle _reads;
+    control_throttle _control;
     stream_metrics _metrics;
+
+    // AWS's per-account control-plane rate for `operation` (task 8), on
+    // this node and only while the cluster's `throttling` switch is on: the
+    // rates are the account's, not a stream's, so a stream's tag does not
+    // turn them off. The message is the one KCL logs for a throttled
+    // DescribeStream (`Rate exceeded for stream S under account A.`), and for
+    // account-wide calls the same without the stream.
+    [[nodiscard]] auto control_rate_exceeded(const call_context& ctx, std::string_view operation,
+                                             const boost::json::object& in)
+        -> std::optional<aws_json::error> {
+        if (!_config._cluster_profile._throttling ||
+            _control.admit(ctx._principal.account, operation)) {
+            return std::nullopt;
+        }
+        std::string message = "Rate exceeded for ";
+        if (const auto name = detail::string_member(in, "StreamName")) {
+            message += "stream " + std::string(*name) + " under account ";
+        } else {
+            message += "account ";
+        }
+        message += ctx._principal.account + ".";
+        return service_detail::limit_exceeded(std::move(message));
+    }
 
     [[nodiscard]] static auto shard_rate_exceeded(std::string_view shard, const stream_record& rec)
         -> std::string {
