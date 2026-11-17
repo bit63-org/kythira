@@ -55,3 +55,11 @@ secret:
     - services/kinesis/tests/docker/keys.txt
     - services/kinesis/tests/docker/compose.yml
     - services/kinesis/tests/docker/kinesis_node_scenario_test.cpp
+
+    # RFC 7512 section 3's example URIs, reproduced verbatim so the parser is
+    # checked against the standard's own text. The scanner reads the
+    # percent-encoded token name and id (%01%02%03%Ba%dd%Ca%fe...) as a high
+    # entropy string; it is the RFC's example, not a credential, and the only
+    # PINs in the file are the made-up "the-pin" style values the refusal
+    # cases need. Flagged on PR #826 (commit e88f2e5c).
+    - tests/pkcs11_uri_test.cpp
