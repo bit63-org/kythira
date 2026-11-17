@@ -1,0 +1,2337 @@
+{
+ "botocore": "1.44.4",
+ "recorded_at": 1794932445,
+ "region": "us-east-1",
+ "steps": [
+  {
+   "case": "create symmetric key",
+   "op": "CreateKey",
+   "request": {
+    "Description": "kythira differential K1"
+   },
+   "response": {
+    "KeyMetadata": {
+     "CustomerMasterKeySpec": "SYMMETRIC_DEFAULT",
+     "Enabled": true,
+     "EncryptionAlgorithms": [
+      "SYMMETRIC_DEFAULT"
+     ],
+     "KeyManager": "CUSTOMER",
+     "KeySpec": "SYMMETRIC_DEFAULT",
+     "KeyState": "Enabled",
+     "KeyUsage": "ENCRYPT_DECRYPT",
+     "MultiRegion": false,
+     "Origin": "AWS_KMS"
+    },
+    "fields": [
+     "KeyMetadata"
+    ]
+   }
+  },
+  {
+   "case": "create rsa signing key",
+   "op": "CreateKey",
+   "request": {
+    "Description": "kythira differential K2",
+    "KeySpec": "RSA_2048",
+    "KeyUsage": "SIGN_VERIFY"
+   },
+   "response": {
+    "KeyMetadata": {
+     "CustomerMasterKeySpec": "RSA_2048",
+     "Enabled": true,
+     "KeyManager": "CUSTOMER",
+     "KeySpec": "RSA_2048",
+     "KeyState": "Enabled",
+     "KeyUsage": "SIGN_VERIFY",
+     "MultiRegion": false,
+     "Origin": "AWS_KMS",
+     "SigningAlgorithms": [
+      "RSASSA_PKCS1_V1_5_SHA_256",
+      "RSASSA_PKCS1_V1_5_SHA_384",
+      "RSASSA_PKCS1_V1_5_SHA_512",
+      "RSASSA_PSS_SHA_256",
+      "RSASSA_PSS_SHA_384",
+      "RSASSA_PSS_SHA_512"
+     ]
+    },
+    "fields": [
+     "KeyMetadata"
+    ]
+   }
+  },
+  {
+   "case": "create hmac key",
+   "op": "CreateKey",
+   "request": {
+    "Description": "kythira differential K3",
+    "KeySpec": "HMAC_256",
+    "KeyUsage": "GENERATE_VERIFY_MAC"
+   },
+   "response": {
+    "KeyMetadata": {
+     "CustomerMasterKeySpec": "HMAC_256",
+     "Enabled": true,
+     "KeyManager": "CUSTOMER",
+     "KeySpec": "HMAC_256",
+     "KeyState": "Enabled",
+     "KeyUsage": "GENERATE_VERIFY_MAC",
+     "MacAlgorithms": [
+      "HMAC_SHA_256"
+     ],
+     "MultiRegion": false,
+     "Origin": "AWS_KMS"
+    },
+    "fields": [
+     "KeyMetadata"
+    ]
+   }
+  },
+  {
+   "case": "create victim key",
+   "op": "CreateKey",
+   "request": {
+    "Description": "kythira differential K4"
+   },
+   "response": {
+    "KeyMetadata": {
+     "CustomerMasterKeySpec": "SYMMETRIC_DEFAULT",
+     "Enabled": true,
+     "EncryptionAlgorithms": [
+      "SYMMETRIC_DEFAULT"
+     ],
+     "KeyManager": "CUSTOMER",
+     "KeySpec": "SYMMETRIC_DEFAULT",
+     "KeyState": "Enabled",
+     "KeyUsage": "ENCRYPT_DECRYPT",
+     "MultiRegion": false,
+     "Origin": "AWS_KMS"
+    },
+    "fields": [
+     "KeyMetadata"
+    ]
+   }
+  },
+  {
+   "case": "createkey unknown key spec",
+   "op": "CreateKey",
+   "request": {
+    "KeySpec": "NOPE_1"
+   },
+   "response": {
+    "error": "ValidationException",
+    "message": "1 validation error detected: Value 'NOPE_1' at 'keySpec' failed to satisfy constraint: Member must satisfy enum value set: [RSA_2048, RSA_3072, RSA_4096, ECC_NIST_P256, ECC_NIST_P384, ECC_NIST_P521, ECC_SECG_P256K1, ECC_NIST_EDWARDS25519, SYMMETRIC_DEFAULT, HMAC_224, HMAC_256, HMAC_384, HMAC_512, SM2, ML_DSA_44, ML_DSA_65, ML_DSA_87]",
+    "status": 400
+   }
+  },
+  {
+   "case": "createkey signing usage on symmetric",
+   "op": "CreateKey",
+   "request": {
+    "KeySpec": "SYMMETRIC_DEFAULT",
+    "KeyUsage": "SIGN_VERIFY"
+   },
+   "response": {
+    "error": "ValidationException",
+    "message": "The operation failed because the KeyUsage value of the CMK is SIGN_VERIFY. To perform this operation, the KeyUsage value must be ENCRYPT_DECRYPT.",
+    "status": 400
+   }
+  },
+  {
+   "case": "createkey hmac without mac usage",
+   "op": "CreateKey",
+   "request": {
+    "KeySpec": "HMAC_256"
+   },
+   "response": {
+    "error": "ValidationException",
+    "message": "You must specify a KeyUsage value for all KMS keys except for symmetric encryption keys.",
+    "status": 400
+   }
+  },
+  {
+   "case": "createkey policy not json",
+   "op": "CreateKey",
+   "request": {
+    "Policy": "not a policy"
+   },
+   "response": {
+    "error": "MalformedPolicyDocumentException",
+    "message": "",
+    "status": 400
+   }
+  },
+  {
+   "case": "createkey description too long",
+   "op": "CreateKey",
+   "request": {
+    "Description": "ddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+   },
+   "response": {
+    "error": "ValidationException",
+    "message": "1 validation error detected: Value 'ddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd' at 'description' failed to satisfy constraint: Member must have length less than or equal to 8192",
+    "status": 400
+   }
+  },
+  {
+   "case": "createkey unknown origin",
+   "op": "CreateKey",
+   "request": {
+    "Origin": "BOGUS"
+   },
+   "response": {
+    "error": "ValidationException",
+    "message": "1 validation error detected: Value 'BOGUS' at 'origin' failed to satisfy constraint: Member must satisfy enum value set: [AWS_KMS, EXTERNAL, AWS_CLOUDHSM, EXTERNAL_KEY_STORE]",
+    "status": 400
+   }
+  },
+  {
+   "case": "createkey bad tag",
+   "op": "CreateKey",
+   "request": {
+    "Tags": [
+     {
+      "TagKey": "aws:reserved",
+      "TagValue": "x"
+     }
+    ]
+   },
+   "response": {
+    "error": "TagException",
+    "message": "Tags beginning with aws: are reserved",
+    "status": 400
+   }
+  },
+  {
+   "case": "describekey no key id",
+   "op": "DescribeKey",
+   "request": {},
+   "response": {
+    "error": "ValidationException",
+    "message": "1 validation error detected: Value null at 'keyId' failed to satisfy constraint: Member must not be null",
+    "status": 400
+   }
+  },
+  {
+   "case": "describekey empty key id",
+   "op": "DescribeKey",
+   "request": {
+    "KeyId": ""
+   },
+   "response": {
+    "error": "ValidationException",
+    "message": "2 validation errors detected: Value '' at 'keyId' failed to satisfy constraint: Member must have length greater than or equal to 1; Value '' at 'keyId' failed to satisfy constraint: Member must satisfy regular expression pattern: ^\\p{ASCII}+$",
+    "status": 400
+   }
+  },
+  {
+   "case": "describekey missing key",
+   "op": "DescribeKey",
+   "request": {
+    "KeyId": "00000000-0000-4000-8000-000000000000"
+   },
+   "response": {
+    "error": "NotFoundException",
+    "message": "Key 'arn:aws:kms:REGION:ACCOUNT:key/<uuid>' does not exist",
+    "status": 400
+   }
+  },
+  {
+   "case": "describekey missing alias",
+   "op": "DescribeKey",
+   "request": {
+    "KeyId": "alias/kythira-diff-absent"
+   },
+   "response": {
+    "error": "NotFoundException",
+    "message": "Alias arn:aws:kms:REGION:ACCOUNT:alias/kythira-diff-absent is not found.",
+    "status": 400
+   }
+  },
+  {
+   "case": "describekey malformed arn",
+   "op": "DescribeKey",
+   "request": {
+    "KeyId": "arn:aws:kms:nowhere"
+   },
+   "response": {
+    "error": "NotFoundException",
+    "message": "Invalid arn arn:aws:kms:nowhere",
+    "status": 400
+   }
+  },
+  {
+   "case": "describekey symmetric",
+   "op": "DescribeKey",
+   "request": {
+    "KeyId": "$K1"
+   },
+   "response": {
+    "KeyMetadata": {
+     "CustomerMasterKeySpec": "SYMMETRIC_DEFAULT",
+     "Enabled": true,
+     "EncryptionAlgorithms": [
+      "SYMMETRIC_DEFAULT"
+     ],
+     "KeyManager": "CUSTOMER",
+     "KeySpec": "SYMMETRIC_DEFAULT",
+     "KeyState": "Enabled",
+     "KeyUsage": "ENCRYPT_DECRYPT",
+     "MultiRegion": false,
+     "Origin": "AWS_KMS"
+    },
+    "fields": [
+     "KeyMetadata"
+    ]
+   }
+  },
+  {
+   "case": "describekey by arn",
+   "op": "DescribeKey",
+   "request": {
+    "KeyId": "$K2.arn"
+   },
+   "response": {
+    "KeyMetadata": {
+     "CustomerMasterKeySpec": "RSA_2048",
+     "Enabled": true,
+     "KeyManager": "CUSTOMER",
+     "KeySpec": "RSA_2048",
+     "KeyState": "Enabled",
+     "KeyUsage": "SIGN_VERIFY",
+     "MultiRegion": false,
+     "Origin": "AWS_KMS",
+     "SigningAlgorithms": [
+      "RSASSA_PKCS1_V1_5_SHA_256",
+      "RSASSA_PKCS1_V1_5_SHA_384",
+      "RSASSA_PKCS1_V1_5_SHA_512",
+      "RSASSA_PSS_SHA_256",
+      "RSASSA_PSS_SHA_384",
+      "RSASSA_PSS_SHA_512"
+     ]
+    },
+    "fields": [
+     "KeyMetadata"
+    ]
+   }
+  },
+  {
+   "case": "describekey hmac",
+   "op": "DescribeKey",
+   "request": {
+    "KeyId": "$K3"
+   },
+   "response": {
+    "KeyMetadata": {
+     "CustomerMasterKeySpec": "HMAC_256",
+     "Enabled": true,
+     "KeyManager": "CUSTOMER",
+     "KeySpec": "HMAC_256",
+     "KeyState": "Enabled",
+     "KeyUsage": "GENERATE_VERIFY_MAC",
+     "MacAlgorithms": [
+      "HMAC_SHA_256"
+     ],
+     "MultiRegion": false,
+     "Origin": "AWS_KMS"
+    },
+    "fields": [
+     "KeyMetadata"
+    ]
+   }
+  },
+  {
+   "case": "listkeys limit zero",
+   "op": "ListKeys",
+   "request": {
+    "Limit": 0
+   },
+   "response": {
+    "error": "ValidationException",
+    "message": "1 validation error detected: Value '0' at 'limit' failed to satisfy constraint: Member must have value greater than or equal to 1",
+    "status": 400
+   }
+  },
+  {
+   "case": "listkeys limit too big",
+   "op": "ListKeys",
+   "request": {
+    "Limit": 1001
+   },
+   "response": {
+    "error": "ValidationException",
+    "message": "1 validation error detected: Value '1001' at 'limit' failed to satisfy constraint: Member must have value less than or equal to 1000",
+    "status": 400
+   }
+  },
+  {
+   "case": "listkeys bad marker",
+   "op": "ListKeys",
+   "request": {
+    "Marker": "not-a-marker"
+   },
+   "response": {
+    "error": "InvalidMarkerException",
+    "message": "",
+    "status": 400
+   }
+  },
+  {
+   "case": "listkeys one",
+   "op": "ListKeys",
+   "request": {
+    "Limit": 1
+   },
+   "response": {
+    "Truncated": true,
+    "fields": [
+     "Keys",
+     "NextMarker",
+     "Truncated"
+    ]
+   }
+  },
+  {
+   "case": "encrypt empty plaintext",
+   "op": "Encrypt",
+   "request": {
+    "KeyId": "$K1",
+    "Plaintext": "n:0"
+   },
+   "response": {
+    "error": "ValidationException",
+    "message": "1 validation error detected: Value at 'plaintext' failed to satisfy constraint: Member must have length greater than or equal to 1",
+    "status": 400
+   }
+  },
+  {
+   "case": "encrypt plaintext too big",
+   "op": "Encrypt",
+   "request": {
+    "KeyId": "$K1",
+    "Plaintext": "n:4097"
+   },
+   "response": {
+    "error": "ValidationException",
+    "message": "1 validation error detected: Value at 'plaintext' failed to satisfy constraint: Member must have length less than or equal to 4096",
+    "status": 400
+   }
+  },
+  {
+   "case": "encrypt with signing key",
+   "op": "Encrypt",
+   "request": {
+    "KeyId": "$K2",
+    "Plaintext": "b:secret"
+   },
+   "response": {
+    "error": "InvalidKeyUsageException",
+    "message": "$K2.arn key usage is SIGN_VERIFY which is not valid for Encrypt.",
+    "status": 400
+   }
+  },
+  {
+   "case": "encrypt with hmac key",
+   "op": "Encrypt",
+   "request": {
+    "KeyId": "$K3",
+    "Plaintext": "b:secret"
+   },
+   "response": {
+    "error": "InvalidKeyUsageException",
+    "message": "$K3.arn key usage is GENERATE_VERIFY_MAC which is not valid for Encrypt.",
+    "status": 400
+   }
+  },
+  {
+   "case": "encrypt rsa algorithm on symmetric",
+   "op": "Encrypt",
+   "request": {
+    "EncryptionAlgorithm": "RSAES_OAEP_SHA_256",
+    "KeyId": "$K1",
+    "Plaintext": "b:secret"
+   },
+   "response": {
+    "error": "InvalidKeyUsageException",
+    "message": "Algorithm RSAES_OAEP_SHA_256 is incompatible with key spec SYMMETRIC_DEFAULT.",
+    "status": 400
+   }
+  },
+  {
+   "case": "encrypt unknown algorithm",
+   "op": "Encrypt",
+   "request": {
+    "EncryptionAlgorithm": "ROT13",
+    "KeyId": "$K1",
+    "Plaintext": "b:secret"
+   },
+   "response": {
+    "error": "ValidationException",
+    "message": "1 validation error detected: Value 'ROT13' at 'encryptionAlgorithm' failed to satisfy constraint: Member must satisfy enum value set: [RSAES_OAEP_SHA_1, RSAES_OAEP_SHA_256, SM2PKE, SYMMETRIC_DEFAULT]",
+    "status": 400
+   }
+  },
+  {
+   "case": "encrypt missing key",
+   "op": "Encrypt",
+   "request": {
+    "KeyId": "00000000-0000-4000-8000-000000000000",
+    "Plaintext": "b:secret"
+   },
+   "response": {
+    "error": "NotFoundException",
+    "message": "Key 'arn:aws:kms:REGION:ACCOUNT:key/<uuid>' does not exist",
+    "status": 400
+   }
+  },
+  {
+   "case": "encrypt no key id",
+   "op": "Encrypt",
+   "request": {
+    "Plaintext": "b:secret"
+   },
+   "response": {
+    "error": "ValidationException",
+    "message": "1 validation error detected: Value null at 'keyId' failed to satisfy constraint: Member must not be null",
+    "status": 400
+   }
+  },
+  {
+   "case": "encrypt with context",
+   "op": "Encrypt",
+   "request": {
+    "EncryptionContext": {
+     "purpose": "diff"
+    },
+    "KeyId": "$K1",
+    "Plaintext": "b:secret"
+   },
+   "response": {
+    "EncryptionAlgorithm": "SYMMETRIC_DEFAULT",
+    "fields": [
+     "CiphertextBlob",
+     "EncryptionAlgorithm",
+     "KeyId"
+    ]
+   }
+  },
+  {
+   "case": "decrypt garbage",
+   "op": "Decrypt",
+   "request": {
+    "CiphertextBlob": "b:not a ciphertext at all"
+   },
+   "response": {
+    "error": "InvalidCiphertextException",
+    "message": "",
+    "status": 400
+   }
+  },
+  {
+   "case": "decrypt empty blob",
+   "op": "Decrypt",
+   "request": {
+    "CiphertextBlob": "n:0"
+   },
+   "response": {
+    "error": "ValidationException",
+    "message": "1 validation error detected: Value at 'ciphertextBlob' failed to satisfy constraint: Member must have length greater than or equal to 1",
+    "status": 400
+   }
+  },
+  {
+   "case": "decrypt wrong context",
+   "op": "Decrypt",
+   "request": {
+    "CiphertextBlob": "$CT1",
+    "EncryptionContext": {
+     "purpose": "other"
+    }
+   },
+   "response": {
+    "error": "InvalidCiphertextException",
+    "message": "",
+    "status": 400
+   }
+  },
+  {
+   "case": "decrypt no context",
+   "op": "Decrypt",
+   "request": {
+    "CiphertextBlob": "$CT1"
+   },
+   "response": {
+    "error": "InvalidCiphertextException",
+    "message": "",
+    "status": 400
+   }
+  },
+  {
+   "case": "decrypt names another key",
+   "op": "Decrypt",
+   "request": {
+    "CiphertextBlob": "$CT1",
+    "EncryptionContext": {
+     "purpose": "diff"
+    },
+    "KeyId": "$K4"
+   },
+   "response": {
+    "error": "IncorrectKeyException",
+    "message": "The key ID in the request does not identify a CMK that can perform this operation.",
+    "status": 400
+   }
+  },
+  {
+   "case": "decrypt rsa algorithm",
+   "op": "Decrypt",
+   "request": {
+    "CiphertextBlob": "$CT1",
+    "EncryptionAlgorithm": "RSAES_OAEP_SHA_1",
+    "EncryptionContext": {
+     "purpose": "diff"
+    }
+   },
+   "response": {
+    "error": "ValidationException",
+    "message": "EncryptionContext is not supported when encrypting/decrypting with asymmetric CMKs.",
+    "status": 400
+   }
+  },
+  {
+   "case": "decrypt",
+   "op": "Decrypt",
+   "request": {
+    "CiphertextBlob": "$CT1",
+    "EncryptionContext": {
+     "purpose": "diff"
+    }
+   },
+   "response": {
+    "EncryptionAlgorithm": "SYMMETRIC_DEFAULT",
+    "Plaintext": "<bytes:6>",
+    "fields": [
+     "EncryptionAlgorithm",
+     "KeyId",
+     "KeyMaterialId",
+     "Plaintext"
+    ]
+   }
+  },
+  {
+   "case": "decrypt naming the key",
+   "op": "Decrypt",
+   "request": {
+    "CiphertextBlob": "$CT1",
+    "EncryptionContext": {
+     "purpose": "diff"
+    },
+    "KeyId": "$K1.arn"
+   },
+   "response": {
+    "EncryptionAlgorithm": "SYMMETRIC_DEFAULT",
+    "Plaintext": "<bytes:6>",
+    "fields": [
+     "EncryptionAlgorithm",
+     "KeyId",
+     "KeyMaterialId",
+     "Plaintext"
+    ]
+   }
+  },
+  {
+   "case": "reencrypt garbage",
+   "op": "ReEncrypt",
+   "request": {
+    "CiphertextBlob": "b:not a ciphertext at all",
+    "DestinationKeyId": "$K1"
+   },
+   "response": {
+    "error": "InvalidCiphertextException",
+    "message": "",
+    "status": 400
+   }
+  },
+  {
+   "case": "reencrypt to signing key",
+   "op": "ReEncrypt",
+   "request": {
+    "CiphertextBlob": "$CT1",
+    "DestinationKeyId": "$K2",
+    "SourceEncryptionContext": {
+     "purpose": "diff"
+    }
+   },
+   "response": {
+    "error": "InvalidKeyUsageException",
+    "message": "$K2.arn key usage is SIGN_VERIFY which is not valid for ReEncryptTo.",
+    "status": 400
+   }
+  },
+  {
+   "case": "reencrypt no destination",
+   "op": "ReEncrypt",
+   "request": {
+    "CiphertextBlob": "$CT1",
+    "SourceEncryptionContext": {
+     "purpose": "diff"
+    }
+   },
+   "response": {
+    "error": "ValidationException",
+    "message": "1 validation error detected: Value null at 'destinationKeyId' failed to satisfy constraint: Member must not be null",
+    "status": 400
+   }
+  },
+  {
+   "case": "reencrypt",
+   "op": "ReEncrypt",
+   "request": {
+    "CiphertextBlob": "$CT1",
+    "DestinationEncryptionContext": {
+     "purpose": "again"
+    },
+    "DestinationKeyId": "$K1",
+    "SourceEncryptionContext": {
+     "purpose": "diff"
+    }
+   },
+   "response": {
+    "DestinationEncryptionAlgorithm": "SYMMETRIC_DEFAULT",
+    "SourceEncryptionAlgorithm": "SYMMETRIC_DEFAULT",
+    "fields": [
+     "CiphertextBlob",
+     "DestinationEncryptionAlgorithm",
+     "DestinationKeyMaterialId",
+     "KeyId",
+     "SourceEncryptionAlgorithm",
+     "SourceKeyId",
+     "SourceKeyMaterialId"
+    ]
+   }
+  },
+  {
+   "case": "generatedatakey no size",
+   "op": "GenerateDataKey",
+   "request": {
+    "KeyId": "$K1"
+   },
+   "response": {
+    "error": "ValidationException",
+    "message": "Please specify either number of bytes or key spec.",
+    "status": 400
+   }
+  },
+  {
+   "case": "generatedatakey spec and bytes",
+   "op": "GenerateDataKey",
+   "request": {
+    "KeyId": "$K1",
+    "KeySpec": "AES_256",
+    "NumberOfBytes": 32
+   },
+   "response": {
+    "error": "ValidationException",
+    "message": "Please specify either number of bytes or key spec.",
+    "status": 400
+   }
+  },
+  {
+   "case": "generatedatakey zero bytes",
+   "op": "GenerateDataKey",
+   "request": {
+    "KeyId": "$K1",
+    "NumberOfBytes": 0
+   },
+   "response": {
+    "error": "ValidationException",
+    "message": "1 validation error detected: Value '0' at 'numberOfBytes' failed to satisfy constraint: Member must have value greater than or equal to 1",
+    "status": 400
+   }
+  },
+  {
+   "case": "generatedatakey too many bytes",
+   "op": "GenerateDataKey",
+   "request": {
+    "KeyId": "$K1",
+    "NumberOfBytes": 1025
+   },
+   "response": {
+    "error": "ValidationException",
+    "message": "1 validation error detected: Value '1025' at 'numberOfBytes' failed to satisfy constraint: Member must have value less than or equal to 1024",
+    "status": 400
+   }
+  },
+  {
+   "case": "generatedatakey unknown spec",
+   "op": "GenerateDataKey",
+   "request": {
+    "KeyId": "$K1",
+    "KeySpec": "AES_512"
+   },
+   "response": {
+    "error": "ValidationException",
+    "message": "1 validation error detected: Value 'AES_512' at 'keySpec' failed to satisfy constraint: Member must satisfy enum value set: [RSA_2048, RSA_3072, RSA_4096, ECC_NIST_P256, ECC_NIST_P384, ECC_NIST_P521, ECC_SECG_P256K1, ECC_NIST_EDWARDS25519, SYMMETRIC_DEFAULT, HMAC_224, HMAC_256, HMAC_384, HMAC_512, SM2, ML_DSA_44, ML_DSA_65, ML_DSA_87]",
+    "status": 400
+   }
+  },
+  {
+   "case": "generatedatakey signing key",
+   "op": "GenerateDataKey",
+   "request": {
+    "KeyId": "$K2",
+    "KeySpec": "AES_256"
+   },
+   "response": {
+    "error": "InvalidKeyUsageException",
+    "message": "$K2.arn key usage is SIGN_VERIFY which is not valid for GenerateDataKey.",
+    "status": 400
+   }
+  },
+  {
+   "case": "generatedatakey missing key",
+   "op": "GenerateDataKey",
+   "request": {
+    "KeyId": "00000000-0000-4000-8000-000000000000",
+    "KeySpec": "AES_256"
+   },
+   "response": {
+    "error": "NotFoundException",
+    "message": "Key 'arn:aws:kms:REGION:ACCOUNT:key/<uuid>' does not exist",
+    "status": 400
+   }
+  },
+  {
+   "case": "generatedatakey aes 128",
+   "op": "GenerateDataKey",
+   "request": {
+    "KeyId": "$K1",
+    "KeySpec": "AES_128"
+   },
+   "response": {
+    "Plaintext": "<bytes:16>",
+    "fields": [
+     "CiphertextBlob",
+     "KeyId",
+     "KeyMaterialId",
+     "Plaintext"
+    ]
+   }
+  },
+  {
+   "case": "generatedatakey 64 bytes",
+   "op": "GenerateDataKey",
+   "request": {
+    "KeyId": "$K1",
+    "NumberOfBytes": 64
+   },
+   "response": {
+    "Plaintext": "<bytes:64>",
+    "fields": [
+     "CiphertextBlob",
+     "KeyId",
+     "KeyMaterialId",
+     "Plaintext"
+    ]
+   }
+  },
+  {
+   "case": "generatedatakeywithoutplaintext no size",
+   "op": "GenerateDataKeyWithoutPlaintext",
+   "request": {
+    "KeyId": "$K1"
+   },
+   "response": {
+    "error": "ValidationException",
+    "message": "Please specify either number of bytes or key spec.",
+    "status": 400
+   }
+  },
+  {
+   "case": "generatedatakeywithoutplaintext",
+   "op": "GenerateDataKeyWithoutPlaintext",
+   "request": {
+    "KeyId": "$K1",
+    "KeySpec": "AES_256"
+   },
+   "response": {
+    "fields": [
+     "CiphertextBlob",
+     "KeyId",
+     "KeyMaterialId"
+    ]
+   }
+  },
+  {
+   "case": "generatedatakeypair unknown spec",
+   "op": "GenerateDataKeyPair",
+   "request": {
+    "KeyId": "$K1",
+    "KeyPairSpec": "RSA_1024"
+   },
+   "response": {
+    "error": "ValidationException",
+    "message": "1 validation error detected: Value 'RSA_1024' at 'keyPairSpec' failed to satisfy constraint: Member must satisfy enum value set: [RSA_2048, ECC_NIST_P384, ML_KEM_512, ECC_NIST_EDWARDS25519, ML_DSA_87, ML_DSA_65, ECC_NIST_P256, ML_KEM_1024, ML_KEM_768, ML_DSA_44, ECC_NIST_P521, RSA_3072, SM2, ECC_SECG_P256K1, RSA_4096]",
+    "status": 400
+   }
+  },
+  {
+   "case": "generatedatakeypair signing key",
+   "op": "GenerateDataKeyPair",
+   "request": {
+    "KeyId": "$K2",
+    "KeyPairSpec": "ECC_NIST_P256"
+   },
+   "response": {
+    "error": "InvalidKeyUsageException",
+    "message": "$K2.arn key usage is SIGN_VERIFY which is not valid for GenerateDataKeyPair.",
+    "status": 400
+   }
+  },
+  {
+   "case": "generatedatakeypair",
+   "op": "GenerateDataKeyPair",
+   "request": {
+    "KeyId": "$K1",
+    "KeyPairSpec": "ECC_NIST_P256"
+   },
+   "response": {
+    "KeyPairSpec": "ECC_NIST_P256",
+    "fields": [
+     "KeyId",
+     "KeyMaterialId",
+     "KeyPairSpec",
+     "PrivateKeyCiphertextBlob",
+     "PrivateKeyPlaintext",
+     "PublicKey"
+    ]
+   }
+  },
+  {
+   "case": "generatedatakeypairwithoutplaintext",
+   "op": "GenerateDataKeyPairWithoutPlaintext",
+   "request": {
+    "KeyId": "$K1",
+    "KeyPairSpec": "ECC_NIST_P384"
+   },
+   "response": {
+    "KeyPairSpec": "ECC_NIST_P384",
+    "fields": [
+     "KeyId",
+     "KeyMaterialId",
+     "KeyPairSpec",
+     "PrivateKeyCiphertextBlob",
+     "PublicKey"
+    ]
+   }
+  },
+  {
+   "case": "generaterandom zero",
+   "op": "GenerateRandom",
+   "request": {
+    "NumberOfBytes": 0
+   },
+   "response": {
+    "error": "ValidationException",
+    "message": "1 validation error detected: Value '0' at 'numberOfBytes' failed to satisfy constraint: Member must have value greater than or equal to 1",
+    "status": 400
+   }
+  },
+  {
+   "case": "generaterandom too many",
+   "op": "GenerateRandom",
+   "request": {
+    "NumberOfBytes": 1025
+   },
+   "response": {
+    "error": "ValidationException",
+    "message": "1 validation error detected: Value '1025' at 'numberOfBytes' failed to satisfy constraint: Member must have value less than or equal to 1024",
+    "status": 400
+   }
+  },
+  {
+   "case": "generaterandom",
+   "op": "GenerateRandom",
+   "request": {
+    "NumberOfBytes": 32
+   },
+   "response": {
+    "Plaintext": "<bytes:32>",
+    "fields": [
+     "Plaintext"
+    ]
+   }
+  },
+  {
+   "case": "sign with symmetric key",
+   "op": "Sign",
+   "request": {
+    "KeyId": "$K1",
+    "Message": "b:message",
+    "SigningAlgorithm": "RSASSA_PSS_SHA_256"
+   },
+   "response": {
+    "error": "InvalidKeyUsageException",
+    "message": "$K1.arn key usage is ENCRYPT_DECRYPT which is not valid for Sign.",
+    "status": 400
+   }
+  },
+  {
+   "case": "sign ecdsa on rsa",
+   "op": "Sign",
+   "request": {
+    "KeyId": "$K2",
+    "Message": "b:message",
+    "SigningAlgorithm": "ECDSA_SHA_256"
+   },
+   "response": {
+    "error": "InvalidKeyUsageException",
+    "message": "Algorithm ECDSA_SHA_256 is incompatible with key spec RSA_2048.",
+    "status": 400
+   }
+  },
+  {
+   "case": "sign unknown algorithm",
+   "op": "Sign",
+   "request": {
+    "KeyId": "$K2",
+    "Message": "b:message",
+    "SigningAlgorithm": "RSA_MD5"
+   },
+   "response": {
+    "error": "ValidationException",
+    "message": "1 validation error detected: Value 'RSA_MD5' at 'signingAlgorithm' failed to satisfy constraint: Member must satisfy enum value set: [RSASSA_PSS_SHA_256, RSASSA_PSS_SHA_384, RSASSA_PSS_SHA_512, RSASSA_PKCS1_V1_5_SHA_256, RSASSA_PKCS1_V1_5_SHA_384, RSASSA_PKCS1_V1_5_SHA_512, ECDSA_SHA_256, ECDSA_SHA_384, ECDSA_SHA_512, ED25519_SHA_512, ED25519_PH_SHA_512, SM2DSA, ML_DSA_SHAKE_256]",
+    "status": 400
+   }
+  },
+  {
+   "case": "sign message too big",
+   "op": "Sign",
+   "request": {
+    "KeyId": "$K2",
+    "Message": "n:4097",
+    "SigningAlgorithm": "RSASSA_PSS_SHA_256"
+   },
+   "response": {
+    "error": "ValidationException",
+    "message": "1 validation error detected: Value at 'message' failed to satisfy constraint: Member must have length less than or equal to 4096",
+    "status": 400
+   }
+  },
+  {
+   "case": "sign digest of wrong length",
+   "op": "Sign",
+   "request": {
+    "KeyId": "$K2",
+    "Message": "n:20",
+    "MessageType": "DIGEST",
+    "SigningAlgorithm": "RSASSA_PSS_SHA_256"
+   },
+   "response": {
+    "error": "ValidationException",
+    "message": "Digest is invalid length for algorithm RSASSA_PSS_SHA_256.",
+    "status": 400
+   }
+  },
+  {
+   "case": "sign no algorithm",
+   "op": "Sign",
+   "request": {
+    "KeyId": "$K2",
+    "Message": "b:message"
+   },
+   "response": {
+    "error": "ValidationException",
+    "message": "1 validation error detected: Value null at 'signingAlgorithm' failed to satisfy constraint: Member must not be null",
+    "status": 400
+   }
+  },
+  {
+   "case": "sign",
+   "op": "Sign",
+   "request": {
+    "KeyId": "$K2",
+    "Message": "b:message",
+    "SigningAlgorithm": "RSASSA_PSS_SHA_256"
+   },
+   "response": {
+    "SigningAlgorithm": "RSASSA_PSS_SHA_256",
+    "fields": [
+     "KeyId",
+     "Signature",
+     "SigningAlgorithm"
+    ]
+   }
+  },
+  {
+   "case": "verify wrong signature",
+   "op": "Verify",
+   "request": {
+    "KeyId": "$K2",
+    "Message": "b:message",
+    "Signature": "n:256",
+    "SigningAlgorithm": "RSASSA_PSS_SHA_256"
+   },
+   "response": {
+    "error": "KMSInvalidSignatureException",
+    "message": "",
+    "status": 400
+   }
+  },
+  {
+   "case": "verify other message",
+   "op": "Verify",
+   "request": {
+    "KeyId": "$K2",
+    "Message": "b:other",
+    "Signature": "$SIG2",
+    "SigningAlgorithm": "RSASSA_PSS_SHA_256"
+   },
+   "response": {
+    "error": "KMSInvalidSignatureException",
+    "message": "",
+    "status": 400
+   }
+  },
+  {
+   "case": "verify",
+   "op": "Verify",
+   "request": {
+    "KeyId": "$K2",
+    "Message": "b:message",
+    "Signature": "$SIG2",
+    "SigningAlgorithm": "RSASSA_PSS_SHA_256"
+   },
+   "response": {
+    "SignatureValid": true,
+    "SigningAlgorithm": "RSASSA_PSS_SHA_256",
+    "fields": [
+     "KeyId",
+     "SignatureValid",
+     "SigningAlgorithm"
+    ]
+   }
+  },
+  {
+   "case": "generatemac with symmetric key",
+   "op": "GenerateMac",
+   "request": {
+    "KeyId": "$K1",
+    "MacAlgorithm": "HMAC_SHA_256",
+    "Message": "b:message"
+   },
+   "response": {
+    "error": "InvalidKeyUsageException",
+    "message": "$K1.arn key usage is ENCRYPT_DECRYPT which is not valid for GenerateMac.",
+    "status": 400
+   }
+  },
+  {
+   "case": "generatemac other algorithm",
+   "op": "GenerateMac",
+   "request": {
+    "KeyId": "$K3",
+    "MacAlgorithm": "HMAC_SHA_384",
+    "Message": "b:message"
+   },
+   "response": {
+    "error": "InvalidKeyUsageException",
+    "message": "Algorithm HMAC_SHA_384 is incompatible with key spec HMAC_256.",
+    "status": 400
+   }
+  },
+  {
+   "case": "generatemac empty message",
+   "op": "GenerateMac",
+   "request": {
+    "KeyId": "$K3",
+    "MacAlgorithm": "HMAC_SHA_256",
+    "Message": "n:0"
+   },
+   "response": {
+    "error": "ValidationException",
+    "message": "1 validation error detected: Value at 'message' failed to satisfy constraint: Member must have length greater than or equal to 1",
+    "status": 400
+   }
+  },
+  {
+   "case": "generatemac",
+   "op": "GenerateMac",
+   "request": {
+    "KeyId": "$K3",
+    "MacAlgorithm": "HMAC_SHA_256",
+    "Message": "b:message"
+   },
+   "response": {
+    "MacAlgorithm": "HMAC_SHA_256",
+    "fields": [
+     "KeyId",
+     "Mac",
+     "MacAlgorithm"
+    ]
+   }
+  },
+  {
+   "case": "verifymac wrong mac",
+   "op": "VerifyMac",
+   "request": {
+    "KeyId": "$K3",
+    "Mac": "n:32",
+    "MacAlgorithm": "HMAC_SHA_256",
+    "Message": "b:message"
+   },
+   "response": {
+    "error": "KMSInvalidMacException",
+    "message": "",
+    "status": 400
+   }
+  },
+  {
+   "case": "verifymac",
+   "op": "VerifyMac",
+   "request": {
+    "KeyId": "$K3",
+    "Mac": "$MAC3",
+    "MacAlgorithm": "HMAC_SHA_256",
+    "Message": "b:message"
+   },
+   "response": {
+    "MacAlgorithm": "HMAC_SHA_256",
+    "MacValid": true,
+    "fields": [
+     "KeyId",
+     "MacAlgorithm",
+     "MacValid"
+    ]
+   }
+  },
+  {
+   "case": "getpublickey symmetric",
+   "op": "GetPublicKey",
+   "request": {
+    "KeyId": "$K1"
+   },
+   "response": {
+    "error": "UnsupportedOperationException",
+    "message": "",
+    "status": 400
+   }
+  },
+  {
+   "case": "getpublickey hmac",
+   "op": "GetPublicKey",
+   "request": {
+    "KeyId": "$K3"
+   },
+   "response": {
+    "error": "KMSInternalException",
+    "message": "",
+    "status": 500
+   }
+  },
+  {
+   "case": "getpublickey",
+   "op": "GetPublicKey",
+   "request": {
+    "KeyId": "$K2"
+   },
+   "response": {
+    "CustomerMasterKeySpec": "RSA_2048",
+    "KeySpec": "RSA_2048",
+    "KeyUsage": "SIGN_VERIFY",
+    "SigningAlgorithms": [
+     "RSASSA_PKCS1_V1_5_SHA_256",
+     "RSASSA_PKCS1_V1_5_SHA_384",
+     "RSASSA_PKCS1_V1_5_SHA_512",
+     "RSASSA_PSS_SHA_256",
+     "RSASSA_PSS_SHA_384",
+     "RSASSA_PSS_SHA_512"
+    ],
+    "fields": [
+     "CustomerMasterKeySpec",
+     "KeyId",
+     "KeySpec",
+     "KeyUsage",
+     "PublicKey",
+     "SigningAlgorithms"
+    ]
+   }
+  },
+  {
+   "case": "createalias without prefix",
+   "op": "CreateAlias",
+   "request": {
+    "AliasName": "kythira-diff",
+    "TargetKeyId": "$K1"
+   },
+   "response": {
+    "error": "ValidationException",
+    "message": "Alias must start with the prefix \"alias/\". Please see https://docs.aws.amazon.com/kms/latest/developerguide/kms-alias.html",
+    "status": 400
+   }
+  },
+  {
+   "case": "createalias reserved prefix",
+   "op": "CreateAlias",
+   "request": {
+    "AliasName": "alias/aws/kythira-diff",
+    "TargetKeyId": "$K1"
+   },
+   "response": {
+    "error": "NotAuthorizedException",
+    "message": "The alias name for a customer managed CMK cannot begin with alias/aws/.",
+    "status": 400
+   }
+  },
+  {
+   "case": "createalias bad characters",
+   "op": "CreateAlias",
+   "request": {
+    "AliasName": "alias/no spaces!",
+    "TargetKeyId": "$K1"
+   },
+   "response": {
+    "error": "ValidationException",
+    "message": "1 validation error detected: Value 'alias/no spaces!' at 'aliasName' failed to satisfy constraint: Member must satisfy regular expression pattern: ^[a-zA-Z0-9:/_-]+$",
+    "status": 400
+   }
+  },
+  {
+   "case": "createalias missing target",
+   "op": "CreateAlias",
+   "request": {
+    "AliasName": "$ALIAS",
+    "TargetKeyId": "00000000-0000-4000-8000-000000000000"
+   },
+   "response": {
+    "error": "NotFoundException",
+    "message": "Key 'arn:aws:kms:REGION:ACCOUNT:key/<uuid>' does not exist",
+    "status": 400
+   }
+  },
+  {
+   "case": "createalias to an alias",
+   "op": "CreateAlias",
+   "request": {
+    "AliasName": "$ALIAS",
+    "TargetKeyId": "alias/kythira-diff-absent"
+   },
+   "response": {
+    "error": "ValidationException",
+    "message": "Aliases must refer to keys. Not aliases",
+    "status": 400
+   }
+  },
+  {
+   "case": "createalias",
+   "op": "CreateAlias",
+   "request": {
+    "AliasName": "$ALIAS",
+    "TargetKeyId": "$K1"
+   },
+   "response": {
+    "fields": []
+   }
+  },
+  {
+   "case": "createalias again",
+   "op": "CreateAlias",
+   "request": {
+    "AliasName": "$ALIAS",
+    "TargetKeyId": "$K4"
+   },
+   "response": {
+    "error": "AlreadyExistsException",
+    "message": "An alias with the name arn:aws:kms:REGION:ACCOUNT:alias/kythira-diff-RUN already exists",
+    "status": 400
+   }
+  },
+  {
+   "case": "describekey by alias",
+   "op": "DescribeKey",
+   "request": {
+    "KeyId": "$ALIAS"
+   },
+   "response": {
+    "KeyMetadata": {
+     "CustomerMasterKeySpec": "SYMMETRIC_DEFAULT",
+     "Enabled": true,
+     "EncryptionAlgorithms": [
+      "SYMMETRIC_DEFAULT"
+     ],
+     "KeyManager": "CUSTOMER",
+     "KeySpec": "SYMMETRIC_DEFAULT",
+     "KeyState": "Enabled",
+     "KeyUsage": "ENCRYPT_DECRYPT",
+     "MultiRegion": false,
+     "Origin": "AWS_KMS"
+    },
+    "fields": [
+     "KeyMetadata"
+    ]
+   }
+  },
+  {
+   "case": "updatealias missing alias",
+   "op": "UpdateAlias",
+   "request": {
+    "AliasName": "alias/kythira-diff-absent",
+    "TargetKeyId": "$K1"
+   },
+   "response": {
+    "error": "NotFoundException",
+    "message": "Alias arn:aws:kms:REGION:ACCOUNT:alias/kythira-diff-absent is not found.",
+    "status": 400
+   }
+  },
+  {
+   "case": "updatealias to signing key",
+   "op": "UpdateAlias",
+   "request": {
+    "AliasName": "$ALIAS",
+    "TargetKeyId": "$K2"
+   },
+   "response": {
+    "error": "ValidationException",
+    "message": "Alias alias/kythira-diff-RUN cannot be changed from a CMK with key usage ENCRYPT_DECRYPT to a CMK with key usage SIGN_VERIFY. The key usage of the current CMK and the new CMK must be the same.",
+    "status": 400
+   }
+  },
+  {
+   "case": "updatealias",
+   "op": "UpdateAlias",
+   "request": {
+    "AliasName": "$ALIAS",
+    "TargetKeyId": "$K4"
+   },
+   "response": {
+    "fields": []
+   }
+  },
+  {
+   "case": "listaliases missing key",
+   "op": "ListAliases",
+   "request": {
+    "KeyId": "00000000-0000-4000-8000-000000000000"
+   },
+   "response": {
+    "Truncated": false,
+    "fields": [
+     "Aliases",
+     "Truncated"
+    ]
+   }
+  },
+  {
+   "case": "listaliases limit zero",
+   "op": "ListAliases",
+   "request": {
+    "Limit": 0
+   },
+   "response": {
+    "error": "ValidationException",
+    "message": "1 validation error detected: Value '0' at 'limit' failed to satisfy constraint: Member must have value greater than or equal to 1",
+    "status": 400
+   }
+  },
+  {
+   "case": "listaliases for key",
+   "op": "ListAliases",
+   "request": {
+    "KeyId": "$K4"
+   },
+   "response": {
+    "Truncated": false,
+    "fields": [
+     "Aliases",
+     "Truncated"
+    ]
+   }
+  },
+  {
+   "case": "deletealias missing",
+   "op": "DeleteAlias",
+   "request": {
+    "AliasName": "alias/kythira-diff-absent"
+   },
+   "response": {
+    "error": "NotFoundException",
+    "message": "Alias arn:aws:kms:REGION:ACCOUNT:alias/kythira-diff-absent is not found.",
+    "status": 400
+   }
+  },
+  {
+   "case": "deletealias without prefix",
+   "op": "DeleteAlias",
+   "request": {
+    "AliasName": "kythira-diff"
+   },
+   "response": {
+    "error": "ValidationException",
+    "message": "Alias must start with the prefix \"alias/\". Please see https://docs.aws.amazon.com/kms/latest/developerguide/kms-alias.html",
+    "status": 400
+   }
+  },
+  {
+   "case": "disablekey missing key",
+   "op": "DisableKey",
+   "request": {
+    "KeyId": "00000000-0000-4000-8000-000000000000"
+   },
+   "response": {
+    "error": "NotFoundException",
+    "message": "Key 'arn:aws:kms:REGION:ACCOUNT:key/<uuid>' does not exist",
+    "status": 400
+   }
+  },
+  {
+   "case": "enablekey missing key",
+   "op": "EnableKey",
+   "request": {
+    "KeyId": "00000000-0000-4000-8000-000000000000"
+   },
+   "response": {
+    "error": "NotFoundException",
+    "message": "Key 'arn:aws:kms:REGION:ACCOUNT:key/<uuid>' does not exist",
+    "status": 400
+   }
+  },
+  {
+   "case": "disablekey",
+   "op": "DisableKey",
+   "request": {
+    "KeyId": "$K4"
+   },
+   "response": {
+    "fields": []
+   }
+  },
+  {
+   "case": "describekey disabled",
+   "op": "DescribeKey",
+   "request": {
+    "KeyId": "$K4"
+   },
+   "response": {
+    "KeyMetadata": {
+     "CustomerMasterKeySpec": "SYMMETRIC_DEFAULT",
+     "Enabled": false,
+     "EncryptionAlgorithms": [
+      "SYMMETRIC_DEFAULT"
+     ],
+     "KeyManager": "CUSTOMER",
+     "KeySpec": "SYMMETRIC_DEFAULT",
+     "KeyState": "Disabled",
+     "KeyUsage": "ENCRYPT_DECRYPT",
+     "MultiRegion": false,
+     "Origin": "AWS_KMS"
+    },
+    "fields": [
+     "KeyMetadata"
+    ]
+   }
+  },
+  {
+   "case": "encrypt disabled",
+   "op": "Encrypt",
+   "request": {
+    "KeyId": "$K4",
+    "Plaintext": "b:secret"
+   },
+   "response": {
+    "error": "DisabledException",
+    "message": "$K4.arn is disabled.",
+    "status": 400
+   }
+  },
+  {
+   "case": "generatedatakey disabled",
+   "op": "GenerateDataKey",
+   "request": {
+    "KeyId": "$K4",
+    "KeySpec": "AES_256"
+   },
+   "response": {
+    "error": "DisabledException",
+    "message": "$K4.arn is disabled.",
+    "status": 400
+   }
+  },
+  {
+   "case": "encrypt through alias of disabled",
+   "op": "Encrypt",
+   "request": {
+    "KeyId": "$ALIAS",
+    "Plaintext": "b:secret"
+   },
+   "response": {
+    "error": "DisabledException",
+    "message": "$K4.arn is disabled.",
+    "status": 400
+   }
+  },
+  {
+   "case": "enablekey",
+   "op": "EnableKey",
+   "request": {
+    "KeyId": "$K4"
+   },
+   "response": {
+    "fields": []
+   }
+  },
+  {
+   "case": "enablekeyrotation signing key",
+   "op": "EnableKeyRotation",
+   "request": {
+    "KeyId": "$K2"
+   },
+   "response": {
+    "error": "UnsupportedOperationException",
+    "message": "",
+    "status": 400
+   }
+  },
+  {
+   "case": "enablekeyrotation hmac key",
+   "op": "EnableKeyRotation",
+   "request": {
+    "KeyId": "$K3"
+   },
+   "response": {
+    "error": "UnsupportedOperationException",
+    "message": "",
+    "status": 400
+   }
+  },
+  {
+   "case": "enablekeyrotation period too short",
+   "op": "EnableKeyRotation",
+   "request": {
+    "KeyId": "$K1",
+    "RotationPeriodInDays": 5
+   },
+   "response": {
+    "error": "ValidationException",
+    "message": "1 validation error detected: Value '5' at 'rotationPeriodInDays' failed to satisfy constraint: Member must have value greater than or equal to 90",
+    "status": 400
+   }
+  },
+  {
+   "case": "enablekeyrotation period too long",
+   "op": "EnableKeyRotation",
+   "request": {
+    "KeyId": "$K1",
+    "RotationPeriodInDays": 2561
+   },
+   "response": {
+    "error": "ValidationException",
+    "message": "1 validation error detected: Value '2561' at 'rotationPeriodInDays' failed to satisfy constraint: Member must have value less than or equal to 2560",
+    "status": 400
+   }
+  },
+  {
+   "case": "getkeyrotationstatus before",
+   "op": "GetKeyRotationStatus",
+   "request": {
+    "KeyId": "$K1"
+   },
+   "response": {
+    "KeyRotationEnabled": false,
+    "fields": [
+     "KeyId",
+     "KeyRotationEnabled"
+    ]
+   }
+  },
+  {
+   "case": "enablekeyrotation",
+   "op": "EnableKeyRotation",
+   "request": {
+    "KeyId": "$K1",
+    "RotationPeriodInDays": 90
+   },
+   "response": {
+    "fields": []
+   }
+  },
+  {
+   "case": "getkeyrotationstatus after",
+   "op": "GetKeyRotationStatus",
+   "request": {
+    "KeyId": "$K1"
+   },
+   "response": {
+    "KeyRotationEnabled": true,
+    "RotationPeriodInDays": 90,
+    "fields": [
+     "KeyId",
+     "KeyRotationEnabled",
+     "NextRotationDate",
+     "RotationPeriodInDays"
+    ]
+   }
+  },
+  {
+   "case": "getkeyrotationstatus signing key",
+   "op": "GetKeyRotationStatus",
+   "request": {
+    "KeyId": "$K2"
+   },
+   "response": {
+    "KeyRotationEnabled": false,
+    "fields": [
+     "KeyId",
+     "KeyRotationEnabled"
+    ]
+   }
+  },
+  {
+   "case": "disablekeyrotation signing key",
+   "op": "DisableKeyRotation",
+   "request": {
+    "KeyId": "$K2"
+   },
+   "response": {
+    "fields": []
+   }
+  },
+  {
+   "case": "disablekeyrotation",
+   "op": "DisableKeyRotation",
+   "request": {
+    "KeyId": "$K1"
+   },
+   "response": {
+    "fields": []
+   }
+  },
+  {
+   "case": "rotatekeyondemand signing key",
+   "op": "RotateKeyOnDemand",
+   "request": {
+    "KeyId": "$K2"
+   },
+   "response": {
+    "error": "UnsupportedOperationException",
+    "message": "",
+    "status": 400
+   }
+  },
+  {
+   "case": "listkeyrotations signing key",
+   "op": "ListKeyRotations",
+   "request": {
+    "KeyId": "$K2"
+   },
+   "response": {
+    "Truncated": false,
+    "fields": [
+     "Rotations",
+     "Truncated"
+    ]
+   }
+  },
+  {
+   "case": "listkeyrotations",
+   "op": "ListKeyRotations",
+   "request": {
+    "KeyId": "$K1"
+   },
+   "response": {
+    "Truncated": false,
+    "fields": [
+     "Rotations",
+     "Truncated"
+    ]
+   }
+  },
+  {
+   "case": "getkeypolicy other name",
+   "op": "GetKeyPolicy",
+   "request": {
+    "KeyId": "$K1",
+    "PolicyName": "other"
+   },
+   "response": {
+    "error": "ValidationException",
+    "message": "Invalid policy name",
+    "status": 400
+   }
+  },
+  {
+   "case": "getkeypolicy",
+   "op": "GetKeyPolicy",
+   "request": {
+    "KeyId": "$K1",
+    "PolicyName": "default"
+   },
+   "response": {
+    "fields": [
+     "Policy",
+     "PolicyName"
+    ]
+   }
+  },
+  {
+   "case": "listkeypolicies",
+   "op": "ListKeyPolicies",
+   "request": {
+    "KeyId": "$K1"
+   },
+   "response": {
+    "PolicyNames": [
+     "default"
+    ],
+    "Truncated": false,
+    "fields": [
+     "PolicyNames",
+     "Truncated"
+    ]
+   }
+  },
+  {
+   "case": "putkeypolicy not json",
+   "op": "PutKeyPolicy",
+   "request": {
+    "KeyId": "$K1",
+    "Policy": "{",
+    "PolicyName": "default"
+   },
+   "response": {
+    "error": "MalformedPolicyDocumentException",
+    "message": "",
+    "status": 400
+   }
+  },
+  {
+   "case": "putkeypolicy other name",
+   "op": "PutKeyPolicy",
+   "request": {
+    "KeyId": "$K1",
+    "Policy": "$POLICY",
+    "PolicyName": "other"
+   },
+   "response": {
+    "error": "ValidationException",
+    "message": "Invalid policy name",
+    "status": 400
+   }
+  },
+  {
+   "case": "putkeypolicy no statement",
+   "op": "PutKeyPolicy",
+   "request": {
+    "KeyId": "$K1",
+    "Policy": "{\"Version\":\"2012-10-17\"}",
+    "PolicyName": "default"
+   },
+   "response": {
+    "error": "MalformedPolicyDocumentException",
+    "message": "",
+    "status": 400
+   }
+  },
+  {
+   "case": "putkeypolicy",
+   "op": "PutKeyPolicy",
+   "request": {
+    "KeyId": "$K1",
+    "Policy": "$POLICY",
+    "PolicyName": "default"
+   },
+   "response": {
+    "fields": []
+   }
+  },
+  {
+   "case": "creategrant unknown operation",
+   "op": "CreateGrant",
+   "request": {
+    "GranteePrincipal": "$ROOT",
+    "KeyId": "$K1",
+    "Operations": [
+     "Bogus"
+    ]
+   },
+   "response": {
+    "error": "ValidationException",
+    "message": "1 validation error detected: Value '[Bogus]' at 'operations' failed to satisfy constraint: Member must satisfy constraint: [Member must satisfy enum value set: [Decrypt, DeriveSharedSecret, Encrypt, GenerateDataKey, GenerateDataKeyWithoutPlaintext, ReEncryptFrom, ReEncryptTo, Sign, Verify, GetPublicKey, CreateGrant, RetireGrant, DescribeKey, GenerateDataKeyPair, GenerateDataKeyPairWithoutPlaintext, GenerateMac, VerifyMac]]",
+    "status": 400
+   }
+  },
+  {
+   "case": "creategrant no operations",
+   "op": "CreateGrant",
+   "request": {
+    "GranteePrincipal": "$ROOT",
+    "KeyId": "$K1",
+    "Operations": []
+   },
+   "response": {
+    "error": "ValidationException",
+    "message": "No operations specified",
+    "status": 400
+   }
+  },
+  {
+   "case": "creategrant sign on symmetric",
+   "op": "CreateGrant",
+   "request": {
+    "GranteePrincipal": "$ROOT",
+    "KeyId": "$K1",
+    "Operations": [
+     "Sign"
+    ]
+   },
+   "response": {
+    "error": "ValidationException",
+    "message": "Operations [Sign] are not supported when creating a grant for a symmetric KMS key with key usage ENCRYPT_DECRYPT. Valid operations are [CreateGrant, RetireGrant, DescribeKey, Decrypt, Encrypt, ReEncryptFrom, ReEncryptTo, GenerateDataKey, GenerateDataKeyWithoutPlaintext, GenerateDataKeyPair, GenerateDataKeyPairWithoutPlaintext]",
+    "status": 400
+   }
+  },
+  {
+   "case": "creategrant missing key",
+   "op": "CreateGrant",
+   "request": {
+    "GranteePrincipal": "$ROOT",
+    "KeyId": "00000000-0000-4000-8000-000000000000",
+    "Operations": [
+     "Decrypt"
+    ]
+   },
+   "response": {
+    "error": "NotFoundException",
+    "message": "Key 'arn:aws:kms:REGION:ACCOUNT:key/<uuid>' does not exist",
+    "status": 400
+   }
+  },
+  {
+   "case": "creategrant",
+   "op": "CreateGrant",
+   "request": {
+    "GranteePrincipal": "$ROOT",
+    "KeyId": "$K1",
+    "Name": "kythira-diff",
+    "Operations": [
+     "Decrypt",
+     "Encrypt"
+    ]
+   },
+   "response": {
+    "fields": [
+     "GrantId",
+     "GrantToken"
+    ]
+   }
+  },
+  {
+   "case": "listgrants limit zero",
+   "op": "ListGrants",
+   "request": {
+    "KeyId": "$K1",
+    "Limit": 0
+   },
+   "response": {
+    "error": "ValidationException",
+    "message": "1 validation error detected: Value '0' at 'limit' failed to satisfy constraint: Member must have value greater than or equal to 1",
+    "status": 400
+   }
+  },
+  {
+   "case": "listgrants",
+   "op": "ListGrants",
+   "request": {
+    "KeyId": "$K1"
+   },
+   "response": {
+    "Truncated": false,
+    "fields": [
+     "Grants",
+     "Truncated"
+    ]
+   }
+  },
+  {
+   "case": "listgrants missing key",
+   "op": "ListGrants",
+   "request": {
+    "KeyId": "00000000-0000-4000-8000-000000000000"
+   },
+   "response": {
+    "error": "NotFoundException",
+    "message": "Key 'arn:aws:kms:REGION:ACCOUNT:key/<uuid>' does not exist",
+    "status": 400
+   }
+  },
+  {
+   "case": "listretirablegrants bad principal",
+   "op": "ListRetirableGrants",
+   "request": {
+    "RetiringPrincipal": "not an arn"
+   },
+   "response": {
+    "error": "ValidationException",
+    "message": "1 validation error detected: Value 'not an arn' at 'retiringPrincipal' failed to satisfy constraint: Member must satisfy regular expression pattern: ^[\\w+=,.@:/-]+$",
+    "status": 400
+   }
+  },
+  {
+   "case": "listretirablegrants limit zero",
+   "op": "ListRetirableGrants",
+   "request": {
+    "Limit": 0,
+    "RetiringPrincipal": "$ROOT"
+   },
+   "response": {
+    "error": "ValidationException",
+    "message": "1 validation error detected: Value '0' at 'limit' failed to satisfy constraint: Member must have value greater than or equal to 1",
+    "status": 400
+   }
+  },
+  {
+   "case": "listretirablegrants",
+   "op": "ListRetirableGrants",
+   "request": {
+    "RetiringPrincipal": "$ROOT"
+   },
+   "response": {
+    "Truncated": false,
+    "fields": [
+     "Grants",
+     "Truncated"
+    ]
+   }
+  },
+  {
+   "case": "retiregrant bad token",
+   "op": "RetireGrant",
+   "request": {
+    "GrantToken": "not-a-grant-token"
+   },
+   "response": {
+    "error": "InvalidGrantTokenException",
+    "message": "",
+    "status": 400
+   }
+  },
+  {
+   "case": "revokegrant missing grant",
+   "op": "RevokeGrant",
+   "request": {
+    "GrantId": "0000000000000000000000000000000000000000000000000000000000000000",
+    "KeyId": "$K1"
+   },
+   "response": {
+    "error": "NotFoundException",
+    "message": "Grant ID 0000000000000000000000000000000000000000000000000000000000000000 not found",
+    "status": 400
+   }
+  },
+  {
+   "case": "revokegrant",
+   "op": "RevokeGrant",
+   "request": {
+    "GrantId": "$GRANT",
+    "KeyId": "$K1"
+   },
+   "response": {
+    "fields": []
+   }
+  },
+  {
+   "case": "tagresource reserved key",
+   "op": "TagResource",
+   "request": {
+    "KeyId": "$K1",
+    "Tags": [
+     {
+      "TagKey": "aws:x",
+      "TagValue": "y"
+     }
+    ]
+   },
+   "response": {
+    "error": "TagException",
+    "message": "Tags beginning with aws: are reserved",
+    "status": 400
+   }
+  },
+  {
+   "case": "tagresource empty key",
+   "op": "TagResource",
+   "request": {
+    "KeyId": "$K1",
+    "Tags": [
+     {
+      "TagKey": "",
+      "TagValue": "y"
+     }
+    ]
+   },
+   "response": {
+    "error": "ValidationException",
+    "message": "1 validation error detected: Value '' at 'tags.1.member.tagKey' failed to satisfy constraint: Member must have length greater than or equal to 1",
+    "status": 400
+   }
+  },
+  {
+   "case": "tagresource",
+   "op": "TagResource",
+   "request": {
+    "KeyId": "$K1",
+    "Tags": [
+     {
+      "TagKey": "team",
+      "TagValue": "kythira"
+     }
+    ]
+   },
+   "response": {
+    "fields": []
+   }
+  },
+  {
+   "case": "listresourcetags",
+   "op": "ListResourceTags",
+   "request": {
+    "KeyId": "$K1"
+   },
+   "response": {
+    "Truncated": false,
+    "fields": [
+     "Tags",
+     "Truncated"
+    ]
+   }
+  },
+  {
+   "case": "untagresource",
+   "op": "UntagResource",
+   "request": {
+    "KeyId": "$K1",
+    "TagKeys": [
+     "team"
+    ]
+   },
+   "response": {
+    "fields": []
+   }
+  },
+  {
+   "case": "updatekeydescription missing key",
+   "op": "UpdateKeyDescription",
+   "request": {
+    "Description": "x",
+    "KeyId": "00000000-0000-4000-8000-000000000000"
+   },
+   "response": {
+    "error": "NotFoundException",
+    "message": "Key 'arn:aws:kms:REGION:ACCOUNT:key/<uuid>' does not exist",
+    "status": 400
+   }
+  },
+  {
+   "case": "updatekeydescription",
+   "op": "UpdateKeyDescription",
+   "request": {
+    "Description": "kythira differential K1, described again",
+    "KeyId": "$K1"
+   },
+   "response": {
+    "fields": []
+   }
+  },
+  {
+   "case": "schedulekeydeletion window too short",
+   "op": "ScheduleKeyDeletion",
+   "request": {
+    "KeyId": "$K4",
+    "PendingWindowInDays": 6
+   },
+   "response": {
+    "error": "ValidationException",
+    "message": "PendingWindowInDays must be between 7 and 30",
+    "status": 400
+   }
+  },
+  {
+   "case": "schedulekeydeletion window too long",
+   "op": "ScheduleKeyDeletion",
+   "request": {
+    "KeyId": "$K4",
+    "PendingWindowInDays": 31
+   },
+   "response": {
+    "error": "ValidationException",
+    "message": "PendingWindowInDays must be between 7 and 30",
+    "status": 400
+   }
+  },
+  {
+   "case": "schedulekeydeletion missing key",
+   "op": "ScheduleKeyDeletion",
+   "request": {
+    "KeyId": "00000000-0000-4000-8000-000000000000"
+   },
+   "response": {
+    "error": "NotFoundException",
+    "message": "Key 'arn:aws:kms:REGION:ACCOUNT:key/<uuid>' does not exist",
+    "status": 400
+   }
+  },
+  {
+   "case": "cancelkeydeletion not pending",
+   "op": "CancelKeyDeletion",
+   "request": {
+    "KeyId": "$K4"
+   },
+   "response": {
+    "error": "KMSInvalidStateException",
+    "message": "$K4.arn is not pending deletion.",
+    "status": 400
+   }
+  },
+  {
+   "case": "schedulekeydeletion",
+   "op": "ScheduleKeyDeletion",
+   "request": {
+    "KeyId": "$K4",
+    "PendingWindowInDays": 7
+   },
+   "response": {
+    "KeyState": "PendingDeletion",
+    "fields": [
+     "DeletionDate",
+     "KeyId",
+     "KeyState",
+     "PendingWindowInDays"
+    ]
+   }
+  },
+  {
+   "case": "describekey pending deletion",
+   "op": "DescribeKey",
+   "request": {
+    "KeyId": "$K4"
+   },
+   "response": {
+    "KeyMetadata": {
+     "CustomerMasterKeySpec": "SYMMETRIC_DEFAULT",
+     "Enabled": false,
+     "EncryptionAlgorithms": [
+      "SYMMETRIC_DEFAULT"
+     ],
+     "KeyManager": "CUSTOMER",
+     "KeySpec": "SYMMETRIC_DEFAULT",
+     "KeyState": "PendingDeletion",
+     "KeyUsage": "ENCRYPT_DECRYPT",
+     "MultiRegion": false,
+     "Origin": "AWS_KMS"
+    },
+    "fields": [
+     "KeyMetadata"
+    ]
+   }
+  },
+  {
+   "case": "encrypt pending deletion",
+   "op": "Encrypt",
+   "request": {
+    "KeyId": "$K4",
+    "Plaintext": "b:secret"
+   },
+   "response": {
+    "error": "KMSInvalidStateException",
+    "message": "$K4.arn is pending deletion.",
+    "status": 400
+   }
+  },
+  {
+   "case": "enablekey pending deletion",
+   "op": "EnableKey",
+   "request": {
+    "KeyId": "$K4"
+   },
+   "response": {
+    "error": "KMSInvalidStateException",
+    "message": "$K4.arn is pending deletion.",
+    "status": 400
+   }
+  },
+  {
+   "case": "schedulekeydeletion again",
+   "op": "ScheduleKeyDeletion",
+   "request": {
+    "KeyId": "$K4",
+    "PendingWindowInDays": 7
+   },
+   "response": {
+    "error": "KMSInvalidStateException",
+    "message": "$K4.arn is pending deletion.",
+    "status": 400
+   }
+  },
+  {
+   "case": "cancelkeydeletion",
+   "op": "CancelKeyDeletion",
+   "request": {
+    "KeyId": "$K4"
+   },
+   "response": {
+    "fields": [
+     "KeyId"
+    ]
+   }
+  },
+  {
+   "case": "describekey after cancel",
+   "op": "DescribeKey",
+   "request": {
+    "KeyId": "$K4"
+   },
+   "response": {
+    "KeyMetadata": {
+     "CustomerMasterKeySpec": "SYMMETRIC_DEFAULT",
+     "Enabled": false,
+     "EncryptionAlgorithms": [
+      "SYMMETRIC_DEFAULT"
+     ],
+     "KeyManager": "CUSTOMER",
+     "KeySpec": "SYMMETRIC_DEFAULT",
+     "KeyState": "Disabled",
+     "KeyUsage": "ENCRYPT_DECRYPT",
+     "MultiRegion": false,
+     "Origin": "AWS_KMS"
+    },
+    "fields": [
+     "KeyMetadata"
+    ]
+   }
+  },
+  {
+   "case": "deletealias",
+   "op": "DeleteAlias",
+   "request": {
+    "AliasName": "$ALIAS"
+   },
+   "response": {
+    "fields": []
+   }
+  },
+  {
+   "case": "deletealias again",
+   "op": "DeleteAlias",
+   "request": {
+    "AliasName": "$ALIAS"
+   },
+   "response": {
+    "error": "NotFoundException",
+    "message": "Alias arn:aws:kms:REGION:ACCOUNT:alias/kythira-diff-RUN is not found.",
+    "status": 400
+   }
+  }
+ ],
+ "target": "aws",
+ "version": 1
+}

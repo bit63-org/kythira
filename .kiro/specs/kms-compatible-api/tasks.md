@@ -263,7 +263,7 @@ is one PR unless noted.
     `KMSMasterKeyId` its `ReplicaUpdates` `Create` named (kept in the
     replica's catalog entry, format 13) or that region's managed key.
 
-- [ ] 18. Client suites and differential fixtures
+- [x] 18. Client suites and differential fixtures
   - AWS CLI v2, boto3 and AWS Encryption SDK suites in CI against
     `kms_node`
   - Differential fixtures from real AWS KMS for request validation and
@@ -273,9 +273,24 @@ is one PR unless noted.
   - Progress: the client suites are in (`services/kms/tests/clients/`,
     run by `kms_node_cluster_test` in kms-module.yml's node job: boto3
     over every key spec and operation family, the AWS CLI v2 through
-    files, the AWS Encryption SDK with one and two keys). Left: the
-    differential fixtures, waiting on the maintainer's approval of the
-    AWS spend.
+    files, the AWS Encryption SDK with one and two keys).
+  - Differential: `services/kms/tests/differential/kms_differential.py`
+    runs 159 named cases (every operation in implemented-operations.txt)
+    against real AWS KMS in us-east-1, recorded 2026-11-17 with the
+    maintainer's approval (8 keys, all scheduled for deletion), and
+    `kms_node_cluster_test` replays them against the cluster. Errors
+    compare as type and status, successes as fields and the values the
+    request fixes. The replay found 15 differences, all fixed to AWS's
+    answers: RSA signing algorithm order, ValidationException and
+    NotAuthorizedException (not InvalidAliasNameException) for bad alias
+    names, alias targets that are aliases, "Invalid policy name",
+    policies without statements, rotation status, listing and disabling
+    on keys that cannot rotate (answered, not refused), the ListKeys
+    marker, ListAliases for a missing key, an RSA algorithm with a
+    context on Decrypt, and KeyMaterialId on Decrypt, ReEncrypt and the
+    data key operations (CurrentKeyMaterialId in KeyMetadata). One AWS
+    answer is listed in recordings/allow.json rather than copied:
+    GetPublicKey on an HMAC key gave KMSInternalException (500).
 
 - [x] 19. docker-chaos and plaintext scan
   - A scenario killing and partitioning KMS and HSM nodes under encrypted
