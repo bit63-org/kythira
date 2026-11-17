@@ -349,6 +349,22 @@ BOOST_AUTO_TEST_CASE(size_limit_writes_before_freshness) {
     BOOST_TEST(all_lines(f.buckets.at("delivered")).size() == 3U);
 }
 
+BOOST_AUTO_TEST_CASE(max_delay_shortens_the_freshness_window) {
+    fixture f;
+    f.on_demand("s");
+    kin::channel_delivery_config cfg = f.delivery_config();
+    cfg._max_delay_ms = 5000;
+    delivery_t quick{f.cluster, f.service, cfg};
+    f.channel("c", "s", "STRING", "NONE");
+    f.advance_s(1);
+    (void)f.put("s", "soon");
+    f.advance_s(4);
+    BOOST_TEST(quick.run_once()._objects == 0U);
+    f.advance_s(1);
+    BOOST_TEST(quick.run_once()._objects == 1U);
+    BOOST_TEST(all_lines(f.buckets.at("delivered")) == (std::vector<std::string>{"soon"}));
+}
+
 BOOST_AUTO_TEST_CASE(byte_array_is_base64_and_key_template_applies) {
     fixture f;
     f.on_demand("s");

@@ -121,6 +121,12 @@ naming it, rather than leaving it ACTIVE and silently idle.
 | `KINESIS_CHANNEL_DELIVERY` | `true` | Deliver channels from this node |
 | `KINESIS_CHANNEL_S3_REGION` | `KINESIS_REGION` | Region of the destination buckets |
 | `KINESIS_CHANNEL_S3_ENDPOINT` | AWS's | An S3-compatible endpoint (MinIO, Kythira's own S3) |
+| `KINESIS_CHANNEL_MAX_DELAY_MS` | `0` | When set (1000 to 900000), write a batch once it is this old even inside the channel's freshness window: seconds-scale delivery for tests and demos |
+
+The container scenario (`services/kinesis/tests/docker/`) delivers a
+channel to its S3 mock with a five-second delay while every node is
+killed in turn, and checks that every record reaches the bucket in order
+under each key within a shard.
 
 Credentials come from the AWS SDK's usual chain. A build without the AWS
 SDK's s3 component logs at start that it does not deliver channels.

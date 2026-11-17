@@ -408,6 +408,7 @@ public:
             }
         }
         kinesis::channel_delivery_config channels;
+        channels._max_delay_ms = _opt._channel_max_delay_ms;
         if (_channel_destinations) {
             channels._destination = [d = _channel_destinations.get()](const std::string& b) {
                 return d->bucket(b);
