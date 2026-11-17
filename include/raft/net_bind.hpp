@@ -468,8 +468,12 @@ inline auto open_listeners(const std::vector<bind_endpoint>& endpoints, std::uin
             reinterpret_cast<sockaddr_in&>(at.addr).sin_port = htons(port);
         }
         if (::bind(fd, reinterpret_cast<const sockaddr*>(&at.addr), at.len) < 0) {
+            // Kept before close(), which may overwrite errno. Without it
+            // "bind() on port N" in a CI log could not tell another
+            // process holding the port (EADDRINUSE) from anything else.
+            const int err = errno;
             ::close(fd);
-            fail("bind()");
+            fail(std::string("bind() (") + std::strerror(err) + ")");
         }
         if (port == 0) {
             // An ephemeral port: every later address listens on the one the
