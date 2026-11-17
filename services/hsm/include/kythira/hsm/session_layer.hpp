@@ -894,8 +894,19 @@ public:
         if (!o->attributes.get_bool(CKA_COPYABLE, true).value_or(true)) {
             return unexpected(CKR_ACTION_PROHIBITED);
         }
+        const bool data_object =
+            o->attributes.get_ulong(CKA_CLASS).value_or(std::nullopt) == CKO_DATA;
         for (const auto& [type, value] : tmpl) {
             switch (type) {
+                // A data object's attributes may all be changed (PKCS#11
+                // 2.40 table 24), its value on a copy included.
+                case CKA_VALUE:
+                case CKA_APPLICATION:
+                case CKA_OBJECT_ID:
+                    if (!data_object) {
+                        return unexpected(CKR_ATTRIBUTE_READ_ONLY);
+                    }
+                    break;
                 case CKA_TOKEN:
                 case CKA_PRIVATE:
                 case CKA_MODIFIABLE:
@@ -923,9 +934,14 @@ public:
             return unexpected(token.error());
         }
         built_object copy;
-        copy.record.attributes = std::move(t);
         copy.record.public_der = o->public_der;
-        if (has_material(cls)) {
+        if (data_object && t.has(CKA_VALUE)) {
+            // The new value is sealed material, as C_CreateObject keeps it.
+            const auto v = t.bytes(CKA_VALUE);
+            copy.material = v ? secret_bytes(*v) : secret_bytes{};
+            t.erase(CKA_VALUE);
+            copy.record.attributes = std::move(t);
+        } else if (copy.record.attributes = std::move(t); has_material(cls)) {
             auto v = value_of(*ctx, *o);
             if (!v) {
                 return unexpected(v.error());

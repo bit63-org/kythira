@@ -262,6 +262,9 @@ BOOST_AUTO_TEST_CASE(initialize_needs_a_configuration_and_answers_once) {
     BOOST_TEST(f().C_Finalize(nullptr) == CKR_CRYPTOKI_NOT_INITIALIZED);
     CK_ULONG n = 0;
     BOOST_TEST(f().C_GetSlotList(CK_FALSE, nullptr, &n) == CKR_CRYPTOKI_NOT_INITIALIZED);
+    CK_SLOT_ID event = 0;
+    BOOST_TEST(f().C_WaitForSlotEvent(CKF_DONT_BLOCK, &event, nullptr) ==
+               CKR_CRYPTOKI_NOT_INITIALIZED);
 
     // Mutex callbacks without all four are refused.
     CK_C_INITIALIZE_ARGS half{};
@@ -395,6 +398,64 @@ BOOST_AUTO_TEST_CASE(sign_keeps_its_output_through_the_length_query) {
     std::array<CK_BYTE, 16> rnd{};
     BOOST_TEST(f().C_GenerateRandom(h, rnd.data(), rnd.size()) == CKR_OK);
     BOOST_TEST(rnd != (std::array<CK_BYTE, 16>{}));
+}
+
+/// What Google's pkcs11test found: the termination rules for output
+/// calls, slot ids for unbound tokens, and argument order.
+BOOST_AUTO_TEST_CASE(output_calls_end_on_error_and_never_mix_single_and_multi_part) {
+    node n;
+    socket_server a(n.layer);
+    loaded lib({a.cfg.socket_path});
+    const auto h = open_rw();
+    CK_MECHANISM sha{CKM_SHA256, nullptr, 0};
+    auto data = bytes_of("hello");
+    std::array<CK_BYTE, 32> out{};
+
+    // A missing length ends the operation, here and on the node: a new
+    // C_DigestInit then succeeds.
+    BOOST_REQUIRE(f().C_DigestInit(h, &sha) == CKR_OK);
+    BOOST_TEST(f().C_Digest(h, data.data(), data.size(), out.data(), nullptr) == CKR_ARGUMENTS_BAD);
+    CK_ULONG len = out.size();
+    BOOST_TEST(f().C_Digest(h, data.data(), data.size(), out.data(), &len) ==
+               CKR_OPERATION_NOT_INITIALIZED);
+    BOOST_REQUIRE(f().C_DigestInit(h, &sha) == CKR_OK);
+    BOOST_TEST(f().C_DigestFinal(h, out.data(), nullptr) == CKR_ARGUMENTS_BAD);
+    BOOST_TEST(f().C_DigestFinal(h, out.data(), &len) == CKR_OPERATION_NOT_INITIALIZED);
+
+    // An update, then C_Digest: refused, and the operation is over.
+    BOOST_REQUIRE(f().C_DigestInit(h, &sha) == CKR_OK);
+    BOOST_REQUIRE(f().C_DigestUpdate(h, data.data(), 1) == CKR_OK);
+    len = 0;
+    BOOST_REQUIRE(f().C_DigestFinal(h, nullptr, &len) == CKR_OK);
+    BOOST_TEST(len == 32U);
+    len = out.size();
+    BOOST_TEST(f().C_Digest(h, data.data(), data.size(), out.data(), &len) == CKR_OPERATION_ACTIVE);
+    BOOST_TEST(f().C_DigestFinal(h, out.data(), &len) == CKR_OPERATION_NOT_INITIALIZED);
+
+    // A length query by C_Digest, then C_DigestFinal: the same.
+    BOOST_REQUIRE(f().C_DigestInit(h, &sha) == CKR_OK);
+    len = 0;
+    BOOST_REQUIRE(f().C_Digest(h, data.data(), data.size(), nullptr, &len) == CKR_OK);
+    len = out.size();
+    BOOST_TEST(f().C_DigestFinal(h, out.data(), &len) == CKR_OPERATION_ACTIVE);
+    BOOST_TEST(f().C_DigestFinal(h, out.data(), &len) == CKR_OPERATION_NOT_INITIALIZED);
+    BOOST_TEST(f().C_DigestInit(h, &sha) == CKR_OK);
+
+    // A token this application is not bound to is no slot of its own.
+    CK_SESSION_HANDLE other = 0;
+    BOOST_TEST(f().C_OpenSession(k_other_token, CKF_SERIAL_SESSION, nullptr, nullptr, &other) ==
+               CKR_SLOT_ID_INVALID);
+    BOOST_TEST(f().C_CloseAllSessions(k_other_token) == CKR_SLOT_ID_INVALID);
+
+    // C_SeedRandom checks the session and its arguments before refusing.
+    std::array<CK_BYTE, 8> seed{};
+    BOOST_TEST(f().C_SeedRandom(h + 1000, seed.data(), seed.size()) == CKR_SESSION_HANDLE_INVALID);
+    BOOST_TEST(f().C_SeedRandom(h, nullptr, 1) == CKR_ARGUMENTS_BAD);
+    BOOST_TEST(f().C_SeedRandom(h, seed.data(), seed.size()) == CKR_RANDOM_SEED_NOT_SUPPORTED);
+
+    // C_GetObjectSize knows the size of nothing, but knows its objects.
+    CK_ULONG size = 0;
+    BOOST_TEST(f().C_GetObjectSize(h, 0xdead, &size) == CKR_OBJECT_HANDLE_INVALID);
 }
 
 BOOST_AUTO_TEST_CASE(aes_gcm_attributes_and_find) {

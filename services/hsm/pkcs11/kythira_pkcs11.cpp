@@ -201,6 +201,9 @@ struct operation {
     bool lost = false;
     /// The output the node produced, waiting for a buffer large enough.
     std::optional<bytes> output;
+    /// Whether a single-part call (C_Encrypt, ...) produced `output`, not
+    /// a final call: the other kind may not collect it.
+    bool output_single = false;
 
     operation() = default;
     operation(const operation&) = delete;
@@ -528,7 +531,8 @@ public:
         }
         auto r = call([&](wire_client& c) { return c.open_session(slot, flags); }, true);
         if (!r) {
-            return r.error();
+            // A token this client is not bound to is not in its slot list.
+            return r.error() == CKR_TOKEN_NOT_PRESENT ? CKR_SLOT_ID_INVALID : r.error();
         }
         const CK_SESSION_HANDLE h = ++_next_session;
         session s;
@@ -560,7 +564,7 @@ public:
     auto close_all_sessions(CK_SLOT_ID slot) -> CK_RV {
         auto r = call([&](wire_client& c) { return c.close_all_sessions(slot); }, true);
         if (!r && r.error() != CKR_DEVICE_ERROR) {
-            return r.error();
+            return r.error() == CKR_TOKEN_NOT_PRESENT ? CKR_SLOT_ID_INVALID : r.error();
         }
         std::erase_if(_sessions, [&](const auto& e) { return e.second.slot == slot; });
         _logins.erase(slot);
@@ -719,12 +723,23 @@ public:
             true));
     }
 
-    auto get_object_size(CK_SESSION_HANDLE h, CK_ULONG_PTR size) -> CK_RV {
-        if (live(h) == nullptr) {
+    /// The size is not known, but the object must be one the session can
+    /// see: an unknown handle answers CKR_OBJECT_HANDLE_INVALID.
+    auto get_object_size(CK_SESSION_HANDLE h, CK_OBJECT_HANDLE o, CK_ULONG_PTR size) -> CK_RV {
+        auto* s = live(h);
+        if (s == nullptr) {
             return CKR_SESSION_HANDLE_INVALID;
         }
         if (size == nullptr) {
             return CKR_ARGUMENTS_BAD;
+        }
+        const std::vector<CK_ATTRIBUTE_TYPE> types{CKA_CLASS};
+        auto r =
+            call(on(*s, [&](wire_client& c,
+                            CK_SESSION_HANDLE rh) { return c.get_attribute_value(rh, o, types); }),
+                 true);
+        if (!r) {
+            return r.error();
         }
         *size = CK_UNAVAILABLE_INFORMATION;
         return CKR_OK;
@@ -987,6 +1002,18 @@ public:
         return made(*s, r, !tmpl->flag(CKA_TOKEN), out);
     }
 
+    /// The node keeps its own entropy; a seed is refused, after the
+    /// session and argument checks every call makes first.
+    auto seed_random(CK_SESSION_HANDLE h, const CK_BYTE* seed, CK_ULONG len) -> CK_RV {
+        if (live(h) == nullptr) {
+            return CKR_SESSION_HANDLE_INVALID;
+        }
+        if (seed == nullptr && len != 0) {
+            return CKR_ARGUMENTS_BAD;
+        }
+        return CKR_RANDOM_SEED_NOT_SUPPORTED;
+    }
+
     auto generate_random(CK_SESSION_HANDLE h, CK_BYTE_PTR out, CK_ULONG len) -> CK_RV {
         auto* s = live(h);
         if (s == nullptr) {
@@ -1043,23 +1070,35 @@ public:
 
     /// A one-shot call or a final call with output: run once, keep the
     /// output until a buffer large enough takes it.
+    ///
+    /// PKCS#11 ends the operation on any answer but CKR_OK and
+    /// CKR_BUFFER_TOO_SMALL, a missing length included, and refuses to mix
+    /// a single-part call (`single`) with a multi-part one: an update
+    /// followed by C_Digest, or a length query by C_Digest followed by
+    /// C_DigestFinal, answers CKR_OPERATION_ACTIVE and ends it too.
     template<class Run>
-    auto output_call(CK_SESSION_HANDLE h, op_kind kind, CK_BYTE_PTR out, CK_ULONG_PTR len, Run run)
-        -> CK_RV {
+    auto output_call(CK_SESSION_HANDLE h, op_kind kind, bool single, CK_BYTE_PTR out,
+                     CK_ULONG_PTR len, Run run) -> CK_RV {
         auto* s = live(h);
         if (s == nullptr) {
             return CKR_SESSION_HANDLE_INVALID;
-        }
-        if (len == nullptr) {
-            return CKR_ARGUMENTS_BAD;
         }
         auto* op = active(*s, kind);
         if (op == nullptr) {
             return CKR_OPERATION_NOT_INITIALIZED;
         }
+        if (len == nullptr) {
+            end_operation(*s, kind);
+            return CKR_ARGUMENTS_BAD;
+        }
         if (op->lost) {
             s->ops.erase(kind);
             return CKR_DEVICE_ERROR;
+        }
+        if (op->output && op->output_single != single) {
+            // The node ended the operation when it produced the output.
+            s->ops.erase(kind);
+            return CKR_OPERATION_ACTIVE;
         }
         if (!op->output) {
             // A one-shot call, or a final call no update came before, can
@@ -1073,6 +1112,7 @@ public:
             }
             op = active(*s, kind);
             op->output = std::move(*r);
+            op->output_single = single;
         }
         const auto rv = give(*op->output, out, len);
         if (out != nullptr && rv == CKR_OK) {
@@ -1161,6 +1201,44 @@ private:
     static auto active(session& s, op_kind kind) -> operation* {
         auto it = s.ops.find(kind);
         return it == s.ops.end() ? nullptr : &it->second;
+    }
+
+    /// Ends an operation a local check refused, here and, unless the node
+    /// already ended it by producing its output, on the node.
+    void end_operation(session& s, op_kind kind) {
+        auto* op = active(s, kind);
+        if (op == nullptr) {
+            return;
+        }
+        const bool on_node = !op->output && !op->lost;
+        s.ops.erase(kind);
+        if (!on_node) {
+            return;
+        }
+        const CK_FLAGS flag = flag_of(kind);
+        // A failure leaves the operation on the node until the session
+        // closes; the caller is told about its own mistake either way.
+        (void)call(on(s, [flag](wire_client& c,
+                                CK_SESSION_HANDLE rh) { return c.session_cancel(rh, flag); }),
+                   true);
+    }
+
+    static constexpr auto flag_of(op_kind kind) -> CK_FLAGS {
+        switch (kind) {
+            case op_kind::sign:
+                return CKF_SIGN;
+            case op_kind::verify:
+                return CKF_VERIFY;
+            case op_kind::encrypt:
+                return CKF_ENCRYPT;
+            case op_kind::decrypt:
+                return CKF_DECRYPT;
+            case op_kind::digest:
+                return CKF_DIGEST;
+            case op_kind::find:
+                return CKF_FIND_OBJECTS;
+        }
+        return 0;
     }
 
     /// A slot the node shows this client.
@@ -1532,9 +1610,9 @@ CK_RV C_DestroyObject(CK_SESSION_HANDLE h, CK_OBJECT_HANDLE o) {
     return lib().destroy_object(h, o);
 }
 
-CK_RV C_GetObjectSize(CK_SESSION_HANDLE h, CK_OBJECT_HANDLE /*o*/, CK_ULONG_PTR size) {
+CK_RV C_GetObjectSize(CK_SESSION_HANDLE h, CK_OBJECT_HANDLE o, CK_ULONG_PTR size) {
     KYTHIRA_GUARD();
-    return lib().get_object_size(h, size);
+    return lib().get_object_size(h, o, size);
 }
 
 CK_RV C_GetAttributeValue(CK_SESSION_HANDLE h, CK_OBJECT_HANDLE o, CK_ATTRIBUTE_PTR t, CK_ULONG n) {
@@ -1577,7 +1655,7 @@ CK_RV C_Encrypt(CK_SESSION_HANDLE h, CK_BYTE_PTR data, CK_ULONG len, CK_BYTE_PTR
     if (!d) {
         return CKR_ARGUMENTS_BAD;
     }
-    return lib().output_call(h, op_kind::encrypt, out, out_len,
+    return lib().output_call(h, op_kind::encrypt, true, out, out_len,
                              [d](wire_client& c, CK_SESSION_HANDLE r) { return c.encrypt(r, *d); });
 }
 
@@ -1599,7 +1677,7 @@ CK_RV C_EncryptUpdate(CK_SESSION_HANDLE h, CK_BYTE_PTR data, CK_ULONG len, CK_BY
 CK_RV C_EncryptFinal(CK_SESSION_HANDLE h, CK_BYTE_PTR out, CK_ULONG_PTR out_len) {
     KYTHIRA_GUARD();
     return lib().output_call(
-        h, op_kind::encrypt, out, out_len,
+        h, op_kind::encrypt, false, out, out_len,
         [](wire_client& c, CK_SESSION_HANDLE r) { return c.encrypt_final(r); });
 }
 
@@ -1617,7 +1695,7 @@ CK_RV C_Decrypt(CK_SESSION_HANDLE h, CK_BYTE_PTR data, CK_ULONG len, CK_BYTE_PTR
     if (!d) {
         return CKR_ARGUMENTS_BAD;
     }
-    return lib().output_call(h, op_kind::decrypt, out, out_len,
+    return lib().output_call(h, op_kind::decrypt, true, out, out_len,
                              [d](wire_client& c, CK_SESSION_HANDLE r) { return c.decrypt(r, *d); });
 }
 
@@ -1637,7 +1715,7 @@ CK_RV C_DecryptUpdate(CK_SESSION_HANDLE h, CK_BYTE_PTR data, CK_ULONG len, CK_BY
 CK_RV C_DecryptFinal(CK_SESSION_HANDLE h, CK_BYTE_PTR out, CK_ULONG_PTR out_len) {
     KYTHIRA_GUARD();
     return lib().output_call(
-        h, op_kind::decrypt, out, out_len,
+        h, op_kind::decrypt, false, out, out_len,
         [](wire_client& c, CK_SESSION_HANDLE r) { return c.decrypt_final(r); });
 }
 
@@ -1655,7 +1733,7 @@ CK_RV C_Digest(CK_SESSION_HANDLE h, CK_BYTE_PTR data, CK_ULONG len, CK_BYTE_PTR 
     if (!d) {
         return CKR_ARGUMENTS_BAD;
     }
-    return lib().output_call(h, op_kind::digest, out, out_len,
+    return lib().output_call(h, op_kind::digest, true, out, out_len,
                              [d](wire_client& c, CK_SESSION_HANDLE r) { return c.digest(r, *d); });
 }
 
@@ -1676,7 +1754,7 @@ CK_RV C_DigestKey(CK_SESSION_HANDLE, CK_OBJECT_HANDLE) {
 
 CK_RV C_DigestFinal(CK_SESSION_HANDLE h, CK_BYTE_PTR out, CK_ULONG_PTR out_len) {
     KYTHIRA_GUARD();
-    return lib().output_call(h, op_kind::digest, out, out_len,
+    return lib().output_call(h, op_kind::digest, false, out, out_len,
                              [](wire_client& c, CK_SESSION_HANDLE r) { return c.digest_final(r); });
 }
 
@@ -1694,7 +1772,7 @@ CK_RV C_Sign(CK_SESSION_HANDLE h, CK_BYTE_PTR data, CK_ULONG len, CK_BYTE_PTR ou
     if (!d) {
         return CKR_ARGUMENTS_BAD;
     }
-    return lib().output_call(h, op_kind::sign, out, out_len,
+    return lib().output_call(h, op_kind::sign, true, out, out_len,
                              [d](wire_client& c, CK_SESSION_HANDLE r) { return c.sign(r, *d); });
 }
 
@@ -1711,7 +1789,7 @@ CK_RV C_SignUpdate(CK_SESSION_HANDLE h, CK_BYTE_PTR data, CK_ULONG len) {
 
 CK_RV C_SignFinal(CK_SESSION_HANDLE h, CK_BYTE_PTR out, CK_ULONG_PTR out_len) {
     KYTHIRA_GUARD();
-    return lib().output_call(h, op_kind::sign, out, out_len,
+    return lib().output_call(h, op_kind::sign, false, out, out_len,
                              [](wire_client& c, CK_SESSION_HANDLE r) { return c.sign_final(r); });
 }
 
@@ -1819,10 +1897,9 @@ CK_RV C_DeriveKey(CK_SESSION_HANDLE h, CK_MECHANISM_PTR m, CK_OBJECT_HANDLE base
     return lib().derive_key(h, m, base, t, n, out);
 }
 
-CK_RV C_SeedRandom(CK_SESSION_HANDLE h, CK_BYTE_PTR, CK_ULONG) {
+CK_RV C_SeedRandom(CK_SESSION_HANDLE h, CK_BYTE_PTR seed, CK_ULONG len) {
     KYTHIRA_GUARD();
-    (void)h;
-    return CKR_RANDOM_SEED_NOT_SUPPORTED;
+    return lib().seed_random(h, seed, len);
 }
 
 CK_RV C_GenerateRandom(CK_SESSION_HANDLE h, CK_BYTE_PTR out, CK_ULONG len) {
@@ -1831,14 +1908,18 @@ CK_RV C_GenerateRandom(CK_SESSION_HANDLE h, CK_BYTE_PTR out, CK_ULONG len) {
 }
 
 CK_RV C_GetFunctionStatus(CK_SESSION_HANDLE) {
+    KYTHIRA_GUARD();
     return CKR_FUNCTION_NOT_PARALLEL;
 }
 
 CK_RV C_CancelFunction(CK_SESSION_HANDLE) {
+    KYTHIRA_GUARD();
     return CKR_FUNCTION_NOT_PARALLEL;
 }
 
+// Even an unsupported call reports a library not yet initialized first.
 CK_RV C_WaitForSlotEvent(CK_FLAGS, CK_SLOT_ID_PTR, CK_VOID_PTR) {
+    KYTHIRA_GUARD();
     return CKR_FUNCTION_NOT_SUPPORTED;
 }
 

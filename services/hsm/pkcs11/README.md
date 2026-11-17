@@ -62,7 +62,18 @@ stderr.
   functions and `C_LoginUser`/`C_SessionCancel` answer
   `CKR_FUNCTION_NOT_SUPPORTED`; `C_SeedRandom` answers
   `CKR_RANDOM_SEED_NOT_SUPPORTED`. `C_GetObjectSize` answers
-  `CK_UNAVAILABLE_INFORMATION`.
+  `CK_UNAVAILABLE_INFORMATION`. Each still checks the session, the
+  handle and its arguments first.
+- **Slots.** A token the client is not bound to is not in its slot list,
+  so `C_OpenSession` and `C_CloseAllSessions` answer
+  `CKR_SLOT_ID_INVALID` for it (the node itself says
+  `CKR_TOKEN_NOT_PRESENT`).
+- **Ending operations.** Any answer from `C_Encrypt`, `C_Sign`,
+  `C_Digest` and their final calls other than `CKR_OK` and
+  `CKR_BUFFER_TOO_SMALL` ends the operation, a missing length included.
+  A single-part call after an update, or a final call after a length
+  query by the single-part call, answers `CKR_OPERATION_ACTIVE` and
+  ends it too.
 
 ## Building
 
