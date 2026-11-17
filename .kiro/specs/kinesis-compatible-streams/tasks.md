@@ -20,7 +20,7 @@ asked.
 
 ### Phase 0: evidence
 
-- [ ] 1. Module skeleton and evidence tables
+- [x] 1. Module skeleton and evidence tables
   - `KINESIS` Kconfig option (default off), `services/kinesis/` CMake
     targets, boundary allow list, path-filtered `kinesis-module.yml`
   - Pinned botocore `kinesis` model, generated operation list and the
@@ -46,6 +46,11 @@ asked.
     when there is a daemon to run. The model's five Channel
     operations (delivery to S3 and S3 Tables) are not in the spec and are
     listed as unplanned pending the owner's call.
+  - Closed November 17, 2026. Every deferred piece of evidence landed with
+    its task: aws-sdk-cpp (7), KCL 2.x (9) and 3.x (16), `SubscribeToShard`
+    (13), the Flink connector and KPL (17), and the container job. Clark
+    chose on November 17, 2026 to support the Channel operations; they are
+    task 19 (Requirement 18), after the open Kinesis tasks.
 
 ### Phase 1: core pieces
 
@@ -468,3 +473,46 @@ asked.
   - Progress: `services/kinesis/doc/kinesis.md` is the operator's page and
     links to the per-subject pages. Its lease-backend table marks the
     DynamoDB backends as planned until task 16 lands; update it then.
+
+### Phase 9: Channel delivery
+
+- [ ] 19. Channels: delivery to S3 and S3 Tables
+  - Added November 17, 2026 at Clark's call, after the open Kinesis tasks
+    (task 8's separate-disk measurement re-run). The pinned model
+    (botocore 1.43.100) has five Channel operations: `CreateChannel`,
+    `DescribeChannel`, `ListChannels`, `UpdateChannel`, `DeleteChannel`.
+  - Channel catalog in the stream state machine: name, ARN, state
+    (`CREATING`, `ACTIVE`, `UPDATING`, `DELETING`), source stream
+    configuration list, one destination, encryption, logging and tags.
+    The five operations with the model's validation and errors,
+    including `ResourceInUseException`, refusal on provisioned-mode
+    streams (AWS supports channels on on-demand streams only), the
+    per-account 5 TPS control-plane rate (`LimitExceededException`,
+    through task 8's control_throttle), `ExpiredNextTokenException` on
+    `ListChannels`, and the IAM authorizer hook, `iam:PassRole` on
+    `ServiceExecutionRoleARN` included
+  - A delivery worker per channel, run by the source shards' leaders: it
+    reads each shard from a checkpoint kept in Raft, batches by
+    `DataFreshnessInSeconds`, and writes objects through the object-store
+    providers tiering already uses (task 10), honouring
+    `OutputKeyTemplate`, `CompressionType` and `StorageClass`. Records it
+    cannot deliver go to the dead-letter S3 location with
+    `ErrorOutputPrefix`. Delivery is at-least-once across leader changes;
+    the object key carries the shard and sequence range so a retried
+    batch overwrites rather than duplicates
+  - S3 Tables (Iceberg) destination: append data files and commit table
+    snapshots through the Iceberg REST catalog interface S3 Tables
+    exposes, so a Kythira deployment can target real S3 Tables or a local
+    Iceberg REST catalog
+  - Encryption of delivered objects with the shared kms_key_provider
+    (kythira, aws or local), as the stream's own encryption at rest does
+  - Tests: unit tests for the catalog, validation and key layout; a
+    container scenario that delivers to MinIO and to a local Iceberg REST
+    catalog and checks every acknowledged record arrives, in shard order,
+    across a leader kill, under Docker and rootless Podman; botocore
+    model-shaped responses checked by the differential harness
+  - Docs: a `services/kinesis/doc/channels.md` page; move the five
+    operations from `doc/unsupported.md` to `implemented-operations.txt`
+  - A recording or delivery run against real AWS needs Clark's go in his
+    own words (Requirement 17.4)
+  - _Requirements: 18.1-18.5_
