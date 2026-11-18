@@ -55,6 +55,7 @@
 #include <kythira/sqs/sqs_actions.hpp>
 #include <kythira/sqs/sqs_availability.hpp>
 #include <kythira/sqs/sqs_compat_profile.hpp>
+#include <kythira/sqs/sqs_evacuate.hpp>
 #include <kythira/sqs/sqs_forward.hpp>
 #include <kythira/sqs/sqs_front_end.hpp>
 #include <kythira/sqs/sqs_gateway.hpp>
@@ -87,6 +88,8 @@
 #include <raft/static_key_authorizer.hpp>
 #include <raft/static_keys_file.hpp>
 
+#include <boost/json.hpp>
+
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -95,8 +98,10 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <iterator>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <sstream>
 #include <stdexcept>
@@ -124,6 +129,11 @@ struct cluster_options {
     std::chrono::milliseconds _heartbeat_interval{75};
     std::chrono::milliseconds _rpc_timeout{2000};
     kythira::log_level _log_level{kythira::log_level::info};
+    /// SQS_JOIN: this data node joins a running group as a learner
+    /// (an evacuation's target) instead of founding it with its peers.
+    bool _join = false;
+    /// How long one `evacuate` admin call may run.
+    std::chrono::milliseconds _evacuate_timeout{300000};
 };
 
 namespace module_detail {
@@ -476,6 +486,12 @@ public:
             [this](const https::request& req, const https::request_context& ctx) {
                 if (auto* h = _handler.load(std::memory_order_acquire)) {
                     ++_requests;
+                    _in_flight.fetch_add(1, std::memory_order_acq_rel);
+                    const auto done =
+                        std::unique_ptr<std::atomic<int>, void (*)(std::atomic<int>*)>(
+                            &_in_flight, [](std::atomic<int>* n) {
+                                n->fetch_sub(1, std::memory_order_acq_rel);
+                            });
                     return (*h)(req, ctx);
                 }
                 https::response r{boost::beast::http::status::service_unavailable, req.version()};
@@ -530,6 +546,8 @@ public:
                     return _cluster->query(q);
                 });
             _handler_owner->set_availability_feed(_feed.get(), k_feed_wait);
+            _handler_owner->set_admin(
+                [this](std::string_view path, std::string_view body) { return admin(path, body); });
         }
         if (_opt._sns_bridge && _service) {
             _bridge = std::make_unique<bridge_type>(*_service,
@@ -557,6 +575,20 @@ public:
             f->close();  // front ends' availability calls answer now
         }
         if (_server) {
+            // Stopping the listener drops every connection, answered or
+            // not: let the woken polls answer first (bounded, as clients
+            // that keep sending can hold requests in flight). A gateway
+            // without the front end cannot end a poll parked on a front
+            // end, so it waits out the longest one.
+            const auto wait =
+                _opt.has(layers::role::front_end) ? k_drain_wait : k_gateway_drain_wait;
+            const auto end = std::chrono::steady_clock::now() + wait;
+            while (_in_flight.load(std::memory_order_acquire) > 0 &&
+                   std::chrono::steady_clock::now() < end) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            }
+            // The last answers are written after their handlers return.
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
             _server->stop();
         }
     }
@@ -644,6 +676,7 @@ public:
                  {"ticks_proposed", static_cast<double>(_worker ? _worker->ticks() : 0), {}},
                  {"messages_moved", static_cast<double>(_mover ? _mover->moved() : 0), {}},
                  {"partitions_grown", static_cast<double>(_grower ? _grower->grown() : 0), {}},
+                 {"evacuation_steps", static_cast<double>(_evacuation_steps.load()), {}},
                  {"raft_term_sum", service_node::raft_term_sum(*_raft), {}},
              }) {
             out.push_back(std::move(m));
@@ -698,7 +731,28 @@ private:
     bool _started = false;
     std::atomic<std::uint64_t> _requests{0};
     std::atomic<std::uint64_t> _peer_requests{0};
+    /// Requests in a handler now, for the drain.
+    std::atomic<int> _in_flight{0};
     std::atomic<std::uint64_t> _forward_failures{0};
+    /// The data role's Raft transport, for peers an evacuation announces.
+    typename Host::client_type* _raft_client = nullptr;
+    std::uint64_t _group = 0;
+    /// Guards `_cluster_opt._peer_endpoints`, which `peer` admin calls add
+    /// to, and `_announced`.
+    mutable std::mutex _peer_mutex;
+    /// Every peer an admin call announced, by id, kept in `peers_file()`
+    /// so that a restarted data node still reaches the members that joined
+    /// after its KYTHIRA_NODE_PEERS was written.
+    std::map<std::string, sqs::peer_announcement> _announced;
+    std::atomic<std::uint64_t> _evacuation_steps{0};
+
+    /// How far behind the leader a learner may be when promoted.
+    static constexpr std::uint64_t k_promote_lag = 64;
+
+    /// The longest a drain waits for answers already being written.
+    static constexpr std::chrono::milliseconds k_drain_wait{5000};
+    /// A gateway's: the longest long poll (20 s) and a commit.
+    static constexpr std::chrono::milliseconds k_gateway_drain_wait{25000};
 
     /// How long a data node holds a front end's availability call.
     static constexpr std::chrono::milliseconds k_feed_wait{10000};
@@ -709,11 +763,32 @@ private:
             std::filesystem::create_directories(_cluster_opt._data_dir / sub);
         }
         _raft = std::make_unique<raft_host>(make_raft_config(host, space));
+        _raft_client = &host.client();
+        _group = space.to_host(k_first_group);
+        load_peers();
         auto voters = _cluster_opt._voters;
         if (voters.empty()) {
             voters.push_back(_self);
         }
-        _raft->create_group(space.to_host(k_first_group), voters);
+        if (_cluster_opt._join) {
+            // A learner of the group its peers already run: it never
+            // campaigns, and the leader's snapshot and log replace this
+            // first configuration (a restart keeps the stored one).
+            std::erase(voters, _self);
+            if (voters.empty()) {
+                throw std::invalid_argument(
+                    "SQS_JOIN needs KYTHIRA_NODE_PEERS to name the group's current members");
+            }
+            _raft->create_group(typename raft_host::descriptor_type{
+                ._group_id = _group,
+                ._range = kythira::unbounded_shard_range<std::string>(),
+                ._epoch = kythira::shard_epoch{},
+                ._voters = voters,
+                ._learners = {_self},
+                ._leader_hint = std::nullopt});
+        } else {
+            _raft->create_group(_group, voters);
+        }
 
         auto pc = internal_client_config();
         pc.timeout = _cluster_opt._propose_timeout + std::chrono::seconds(2);
@@ -798,6 +873,27 @@ private:
             throw std::invalid_argument(
                 "SQS_PEER_CA (or KYTHIRA_NODE_TLS_CA) is required to call other nodes over TLS");
         }
+        if (const auto v = env("SQS_JOIN")) {
+            const auto f = sqs::node_options_detail::parse_flag(*v);
+            if (!f) {
+                throw std::invalid_argument("SQS_JOIN must be on or off");
+            }
+            c._join = *f;
+        }
+        c._evacuate_timeout = millis(env, "SQS_EVACUATE_TIMEOUT_MS", c._evacuate_timeout);
+        if (!_opt.has(layers::role::data)) {
+            // A replica left behind would still count toward its group's
+            // quorum with nobody running it.
+            const auto raft_dir = c._data_dir / "raft";
+            std::error_code ec;
+            if (std::filesystem::is_directory(raft_dir, ec) &&
+                !std::filesystem::is_empty(raft_dir, ec)) {
+                throw std::invalid_argument(
+                    "this node holds a data replica in " + raft_dir.string() +
+                    ": evacuate it (POST /_kythira/sqs/v1/admin/evacuate) and remove the "
+                    "directory before starting without the data role");
+            }
+        }
         c._propose_timeout = millis(env, "SQS_PROPOSE_TIMEOUT_MS", c._propose_timeout);
         c._tick_interval = millis(env, "KYTHIRA_TICK_INTERVAL_MS", c._tick_interval);
         c._election_timeout_min =
@@ -824,6 +920,7 @@ private:
                     return
                         typename types::persistence_engine_type{raft_dir / std::to_string(group)};
                 },
+            .on_group_destroyed = {},
         };
         if constexpr (std::is_constructible_v<Engine, std::filesystem::path>) {
             cfg.state_engine = std::make_shared<Engine>(_cluster_opt._data_dir / "engine");
@@ -862,17 +959,271 @@ private:
 
     /// Sends `entry` to the leader's listener; what it committed, or
     /// nothing (the client retries).
+    [[nodiscard]] auto peer_url(const kythira::host_node_id& id) const
+        -> std::optional<std::string> {
+        const std::lock_guard lock(_peer_mutex);
+        const auto it = _cluster_opt._peer_endpoints.find(id);
+        if (it == _cluster_opt._peer_endpoints.end()) {
+            return std::nullopt;
+        }
+        return it->second;
+    }
+
+    /// The bootstrap group's membership, as its leader here sees it.
+    auto membership() -> sqs::membership_ops<kythira::host_node_id> {
+        sqs::membership_ops<kythira::host_node_id> ops;
+        const auto node = [this] { return _raft->group_node(_group); };
+        ops.is_leader = [node] {
+            auto* n = node();
+            return n != nullptr && n->is_leader();
+        };
+        ops.self = [this] { return _self; };
+        ops.changing = [node] {
+            auto* n = node();
+            return n != nullptr && n->current_membership().joint;
+        };
+        ops.members = [node] {
+            auto* n = node();
+            if (n == nullptr) {
+                return std::pair<std::vector<kythira::host_node_id>,
+                                 std::vector<kythira::host_node_id>>{};
+            }
+            auto m = n->current_membership();
+            return std::pair{std::move(m.voters), std::move(m.learners)};
+        };
+        ops.match_index = [node](const kythira::host_node_id& id) -> std::optional<std::uint64_t> {
+            auto* n = node();
+            if (n == nullptr) {
+                return std::nullopt;
+            }
+            const auto m = n->match_index_of(id);
+            if (!m) {
+                return std::nullopt;
+            }
+            return static_cast<std::uint64_t>(*m);
+        };
+        ops.last_index = [node] {
+            auto* n = node();
+            return n == nullptr ? std::uint64_t{0}
+                                : static_cast<std::uint64_t>(n->last_log_index());
+        };
+        // Each change commits asynchronously; the next step sees where it
+        // landed, so the futures are not waited on.
+        ops.add_learner = [node](const kythira::host_node_id& id) {
+            (void)node()->add_learner(id);
+        };
+        ops.promote = [node](const kythira::host_node_id& id) {
+            (void)node()->promote_to_voter(id);
+        };
+        ops.remove_voter = [node](const kythira::host_node_id& id) {
+            (void)node()->remove_server(id);
+        };
+        ops.remove_learner = [node](const kythira::host_node_id& id) {
+            (void)node()->remove_learner(id);
+        };
+        ops.transfer_to = [this, node](const kythira::host_node_id& id) {
+            (void)node()->transfer_leadership(id, _cluster_opt._election_timeout_max * 4);
+        };
+        return ops;
+    }
+
+    /// One evacuation step on this node's replica.
+    auto step_here(const kythira::host_node_id& from, const kythira::host_node_id& to)
+        -> sqs::step_result {
+        try {
+            auto r = sqs::evacuate_step<kythira::host_node_id>(
+                membership(), from, to, k_promote_lag, [](const kythira::host_node_id& id) {
+                    return "node " + kythira::host_node_id_text(id);
+                });
+            if (r._kind == sqs::step_kind::progressed) {
+                ++_evacuation_steps;
+            }
+            return r;
+        } catch (const std::exception& e) {
+            // A change the core refused now (another in progress): retry.
+            return {sqs::step_kind::waiting, e.what()};
+        }
+    }
+
+    /// One evacuation step on `at`'s replica, over its admin endpoint.
+    auto step_at(const std::string& at, const std::string& body)
+        -> std::optional<sqs::step_result> {
+        const auto signature =
+            sqs::forward::sign(_opt._forward_secret, body, std::chrono::system_clock::now());
+        const auto r = _peers->request("POST", at, std::string(sqs::k_admin_step_path), body,
+                                       "application/json", "kythira-sqs",
+                                       {{std::string(sqs::forward::k_header), signature}});
+        if (!r || r->first != 200) {
+            return std::nullopt;
+        }
+        return sqs::decode_step(r->second);
+    }
+
+    /// Runs an evacuation to its end: each step on the group's leader, here
+    /// or on the node this replica believes leads, else on any peer that
+    /// answers as leader.
+    auto evacuate(const kythira::host_node_id& from, const kythira::host_node_id& to,
+                  const std::string& body) -> std::pair<unsigned, std::string> {
+        const auto deadline = std::chrono::steady_clock::now() + _cluster_opt._evacuate_timeout;
+        boost::json::array steps;
+        sqs::step_result last{sqs::step_kind::waiting, "not started"};
+        while (std::chrono::steady_clock::now() < deadline) {
+            auto* n = _raft->group_node(_group);
+            if (n != nullptr && n->is_leader()) {
+                last = step_here(from, to);
+            } else {
+                std::vector<std::string> candidates;
+                if (const auto hint = n != nullptr ? n->known_leader() : std::nullopt) {
+                    if (auto url = peer_url(*hint)) {
+                        candidates.push_back(*url);
+                    }
+                }
+                {
+                    const std::lock_guard lock(_peer_mutex);
+                    for (const auto& [id, url] : _cluster_opt._peer_endpoints) {
+                        if (id != _self) {
+                            candidates.push_back(url);
+                        }
+                    }
+                }
+                last = {sqs::step_kind::waiting, "no leader answered"};
+                for (const auto& at : candidates) {
+                    if (auto r = step_at(at, body); r && r->_kind != sqs::step_kind::not_leader) {
+                        last = std::move(*r);
+                        break;
+                    }
+                }
+            }
+            if (last._kind == sqs::step_kind::progressed) {
+                steps.emplace_back(last._what);
+            }
+            if (last._kind == sqs::step_kind::done || last._kind == sqs::step_kind::refused) {
+                break;
+            }
+            std::this_thread::sleep_for(
+                std::chrono::milliseconds(last._kind == sqs::step_kind::progressed ? 300 : 200));
+        }
+        boost::json::object o;
+        o["result"] = sqs::to_string(last._kind);
+        o["what"] = last._what;
+        o["steps"] = std::move(steps);
+        const unsigned status = last._kind == sqs::step_kind::done      ? 200
+                                : last._kind == sqs::step_kind::refused ? 409
+                                                                        : 504;
+        return {status, boost::json::serialize(o)};
+    }
+
+    /// The admin calls (`sqs_evacuate.hpp`).
+    [[nodiscard]] auto peers_file() const -> std::filesystem::path {
+        return _cluster_opt._data_dir / "peers.json";
+    }
+
+    /// Use `p`'s listeners from now on: the Raft transport, forwarding to a
+    /// leader and (co-located) the data layer's endpoints.
+    void learn_peer(const sqs::peer_announcement& p) {
+        const auto id = module_detail::peer_id("peer", p._id);
+        if (_raft_client != nullptr && id != _self) {
+            _raft_client->add_peer(id, p._raft_url);
+        }
+        {
+            const std::lock_guard lock(_peer_mutex);
+            _cluster_opt._peer_endpoints[id] = p._sqs_url;
+            _announced[p._id] = p;
+        }
+        if (_remote && id != _self) {
+            _remote->add_endpoint(p._sqs_url);
+        }
+    }
+
+    /// Writes `_announced` to `peers_file()` (replaced whole, by rename).
+    void save_peers() {
+        boost::json::array a;
+        {
+            const std::lock_guard lock(_peer_mutex);
+            for (const auto& [id, p] : _announced) {
+                a.emplace_back(boost::json::parse(sqs::encode_peer(p)));
+            }
+        }
+        const auto path = peers_file();
+        auto tmp = path;
+        tmp += ".tmp";
+        {
+            std::ofstream out(tmp, std::ios::trunc);
+            out << boost::json::serialize(a);
+            if (!out.flush()) {
+                throw std::runtime_error("cannot write " + tmp.string());
+            }
+        }
+        std::filesystem::rename(tmp, path);
+    }
+
+    /// The peers announced before a restart (see `_announced`).
+    void load_peers() {
+        std::ifstream in(peers_file());
+        if (!in) {
+            return;
+        }
+        const std::string text{std::istreambuf_iterator<char>(in),
+                               std::istreambuf_iterator<char>()};
+        boost::system::error_code ec;
+        const auto v = boost::json::parse(text, ec);
+        if (ec || !v.is_array()) {
+            throw std::invalid_argument(peers_file().string() + " is not a list of peers");
+        }
+        for (const auto& e : v.as_array()) {
+            const auto p = sqs::decode_peer(boost::json::serialize(e));
+            if (!p) {
+                throw std::invalid_argument(peers_file().string() + " holds a malformed peer");
+            }
+            learn_peer(*p);
+        }
+    }
+
+    auto admin(std::string_view path, std::string_view body) -> std::pair<unsigned, std::string> {
+        const auto refuse = [](unsigned status, const std::string& why) {
+            boost::json::object o;
+            o["error"] = why;
+            return std::pair{status, boost::json::serialize(o)};
+        };
+        try {
+            if (path == sqs::k_admin_peer_path) {
+                const auto p = sqs::decode_peer(body);
+                if (!p) {
+                    return refuse(400, "expected {\"id\", \"raft\", \"sqs\"} with URLs");
+                }
+                learn_peer(*p);
+                save_peers();
+                return {200, "{}"};
+            }
+            if (path == sqs::k_admin_step_path || path == sqs::k_admin_evacuate_path) {
+                const auto r = sqs::decode_evacuate(body);
+                if (!r) {
+                    return refuse(400, "expected {\"from\", \"to\"}");
+                }
+                const auto from = module_detail::peer_id("from", r->_from);
+                const auto to = module_detail::peer_id("to", r->_to);
+                if (path == sqs::k_admin_step_path) {
+                    return {200, sqs::encode_step(step_here(from, to))};
+                }
+                return evacuate(from, to, std::string(body));
+            }
+        } catch (const std::invalid_argument& e) {
+            return refuse(400, e.what());
+        }
+        return refuse(404, "no such admin call");
+    }
+
     auto forward(const kythira::host_node_id& leader, const std::string& key,
                  const std::vector<std::byte>& entry) -> std::optional<std::vector<std::byte>> {
-        const auto it = _cluster_opt._peer_endpoints.find(leader);
-        if (it == _cluster_opt._peer_endpoints.end() || _opt._forward_secret.empty()) {
+        const auto url = peer_url(leader);
+        if (!url || _opt._forward_secret.empty()) {
             ++_forward_failures;
             return std::nullopt;
         }
         auto body = sqs::forward::encode_body({._key = key, ._entry = entry});
         const auto signature =
             sqs::forward::sign(_opt._forward_secret, body, std::chrono::system_clock::now());
-        const auto r = _peers->request("POST", it->second, std::string(sqs::forward::k_path),
+        const auto r = _peers->request("POST", *url, std::string(sqs::forward::k_path),
                                        std::move(body), "application/octet-stream", "kythira-sqs",
                                        {{std::string(sqs::forward::k_header), signature}});
         if (!r || r->first != 200) {

@@ -17,6 +17,8 @@
 /// | `/_kythira/sqs/v1/query` | front ends, on a data node | front_end, data |
 /// | `/_kythira/sqs/v1/availability` | front ends, on a data node | front_end, data |
 /// | `/_kythira/sqs/v1/call` | gateways, on a front end | gateway |
+/// | `/_kythira/sqs/v1/admin/...` | operators and data nodes, on a data node (`sqs_evacuate.hpp`) |
+/// data |
 ///
 /// A caller whose verified certificate names an identity of this cluster
 /// is held to its roles: a front end's certificate cannot make a gateway's
@@ -30,6 +32,7 @@
 
 #include <kythira/sqs/sqs_availability.hpp>
 #include <kythira/sqs/sqs_data_access.hpp>
+#include <kythira/sqs/sqs_evacuate.hpp>
 #include <kythira/sqs/sqs_forward.hpp>
 #include <kythira/sqs/sqs_gateway.hpp>
 #include <kythira/sqs/sqs_listener.hpp>
@@ -57,6 +60,7 @@ inline constexpr std::string_view k_identity_service = "sqs";
         {.path_prefix = std::string(data_wire::k_query_path), .allowed = replicas},
         {.path_prefix = std::string(k_availability_path), .allowed = replicas},
         {.path_prefix = std::string(k_call_path), .allowed = layers::role_set{role::gateway}},
+        {.path_prefix = std::string(k_admin_prefix), .allowed = layers::role_set{role::data}},
     };
 }
 
