@@ -200,3 +200,24 @@ BOOST_AUTO_TEST_CASE(action_globs_match_like_iam) {
     BOOST_TEST(d::glob_match("*a*b*", "xxaxxbxx"));
     BOOST_TEST(!d::glob_match("*a*b", "xxaxxbxx"));
 }
+
+// aws_claim_resolver: the key's principal and the signing key that
+// verifies its claims, with authenticate()'s errors.
+BOOST_AUTO_TEST_CASE(resolve_gives_the_principal_and_the_signing_key) {
+    auto a = make_authorizer();
+    const auto req = signed_request("AKIDREAD");
+    const auto parsed = sv4::parse(req.view(), rules(), k_now);
+    BOOST_REQUIRE(parsed.has_value());
+    const auto r = a->resolve(*parsed, sv4::error_protocol::s3);
+    BOOST_REQUIRE_MESSAGE(r.has_value(), r.error().message);
+    BOOST_TEST(r->who.username == "reader");
+    BOOST_TEST(r->who.account == "111122223333");
+    BOOST_TEST(sv4::verify(*parsed, r->key));
+
+    auto other = *parsed;
+    other.access_key_id = "AKIDNOBODY";
+    BOOST_TEST(a->resolve(other, sv4::error_protocol::s3).error().code == "InvalidAccessKeyId");
+    other.access_key_id = "AKIDREAD";
+    other.security_token = "token";
+    BOOST_TEST(a->resolve(other, sv4::error_protocol::s3).error().code == "InvalidAccessKeyId");
+}
