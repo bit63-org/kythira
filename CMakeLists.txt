@@ -959,6 +959,20 @@ else()
     message(STATUS "SQS module disabled (CONFIG_SQS=n, or OpenSSL/Boost not found)")
 endif()
 kythira_kconfig_require(SQS KYTHIRA_BUILD_SQS "OpenSSL and Boost")
+# s3-compatible-storage spec: the services/s3/ module (an Amazon
+# S3-compatible object store). Off unless CONFIG_S3=y, like every new module;
+# needs OpenSSL (SigV4, chunk digests, server-side encryption). Entered with
+# add_subdirectory(services/s3) below, after tests/. Not to be confused with
+# AWS_S3_PERSISTENCE, Kythira's own use of S3 for storage.
+kythira_kconfig_gate(S3)
+set(KYTHIRA_BUILD_S3 FALSE)
+if(_KYTHIRA_GATE_S3 AND DEFINED KCONFIG_S3 AND OpenSSL_FOUND)
+    set(KYTHIRA_BUILD_S3 TRUE)
+    message(STATUS "S3 module enabled (services/s3/, .kiro/specs/s3-compatible-storage/)")
+else()
+    message(STATUS "S3 module disabled (CONFIG_S3=n, or OpenSSL not found)")
+endif()
+kythira_kconfig_require(S3 KYTHIRA_BUILD_S3 "OpenSSL")
 
 # Core's generator of AWS JSON service models (include/raft/aws_json_protocol.hpp),
 # exported for the modules that pin a botocore model (DynamoDB, Kinesis), so
@@ -2403,6 +2417,12 @@ endif()
 # entered likewise.
 if(KYTHIRA_BUILD_SNS)
     add_subdirectory(services/sns)
+endif()
+
+# The S3 module (services/README.md, .kiro/specs/s3-compatible-storage/),
+# entered likewise.
+if(KYTHIRA_BUILD_S3)
+    add_subdirectory(services/s3)
 endif()
 
 # kythira_node, the composite daemon (.kiro/specs/service-colocation/),
