@@ -67,6 +67,7 @@
 #include <boost/thread/executors/generic_executor_ref.hpp>
 #include <boost/exception_ptr.hpp>
 #include <boost/asio/io_context.hpp>
+#include <boost/asio/post.hpp>
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/executor_work_guard.hpp>
 
@@ -413,9 +414,19 @@ namespace detail {
 // reasons) instead of inventing a new primitive.
 class timer_service {
 public:
+    // Intentionally leaked, never destroyed. A function-local static was
+    // destroyed at exit while boost::async continuations were still
+    // running: ~io_context destroyed the pending delay() handlers, their
+    // bridge promises broke, and the within() continuations that woke on
+    // those broken promises called cancel() on timers whose service was
+    // already freed (ASan: heap-use-after-free in
+    // deadline_timer_service::cancel on a boost::async thread;
+    // raft_collection_cancellation_cleanup_property_test segfaulted at
+    // exit in the No Folly CI job). The io thread is simply left running
+    // when the process ends.
     static auto instance() -> timer_service& {
-        static timer_service svc;
-        return svc;
+        static auto* svc = new timer_service();
+        return *svc;
     }
 
     // Fires callback (on the timer thread) after `d` has elapsed. Returns
@@ -438,6 +449,17 @@ public:
         return timer;
     }
 
+    // Cancels `timer` on the timer thread. A steady_timer is not safe to
+    // cancel from one thread while its wait completes on another, and
+    // within()'s completion path runs on whatever thread fulfilled the
+    // source future, so the cancel is posted rather than called directly.
+    auto cancel(std::shared_ptr<boost::asio::steady_timer> timer) -> void {
+        if (!timer) {
+            return;
+        }
+        boost::asio::post(_ctx, [timer = std::move(timer)] { timer->cancel(); });
+    }
+
     timer_service(const timer_service&) = delete;
     auto operator=(const timer_service&) -> timer_service& = delete;
 
@@ -445,6 +467,7 @@ private:
     timer_service() : _work(boost::asio::make_work_guard(_ctx)) {
         _thread = std::thread([this] { _ctx.run(); });
     }
+    // Not reached through instance(), which leaks the service (see there).
     ~timer_service() {
         _work.reset();
         _ctx.stop();
@@ -793,7 +816,7 @@ public:
             }
         });
         then_on([bridge, timer_holder](boost::future<T> completed) mutable {
-            (*timer_holder)->cancel();
+            detail::timer_service::instance().cancel(*timer_holder);
             try {
                 if (completed.has_exception()) {
                     bridge->setException(
@@ -984,7 +1007,7 @@ public:
             }
         });
         then_on([bridge, timer_holder](boost::future<void> completed) mutable {
-            (*timer_holder)->cancel();
+            detail::timer_service::instance().cancel(*timer_holder);
             try {
                 if (completed.has_exception()) {
                     bridge->setException(
