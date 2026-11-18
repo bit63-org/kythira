@@ -21,6 +21,7 @@
 #include <kythira/dynamodb/export_import.hpp>
 #include <kythira/dynamodb/pitr.hpp>
 #include <kythira/dynamodb/raft_backend.hpp>
+#include <kythira/dynamodb/remote_backend.hpp>
 
 #include <raft/console_logger.hpp>
 #include <raft/future_default.hpp>
@@ -36,6 +37,7 @@
 #endif
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -126,8 +128,8 @@ constexpr std::uint64_t k_catalog_group = 1;
 constexpr std::uint64_t k_item_group = 2;
 
 /// The handlers over one node's backend, as a gateway registers them.
-struct stack {
-    explicit stack(backend_type& backend)
+template<typename Backend> struct basic_stack {
+    explicit basic_stack(Backend& backend)
         : guard("/data", 1024,
                 [](const std::filesystem::path&) {
                     return std::optional<std::uintmax_t>(std::uintmax_t{1} << 40U);
@@ -184,13 +186,16 @@ struct stack {
                                      "admin", az::static_role::admin}},
         "aws", [] { return std::chrono::system_clock::time_point(k_now); }};
     std::unique_ptr<ddb::front_end<az::static_key_authorizer>> fe;
-    ddb::table_api<backend_type> tables;
-    ddb::item_api<backend_type> items;
-    ddb::query_api<backend_type> queries;
-    ddb::batch_api<backend_type> batches;
-    ddb::txn_api<backend_type> transactions;
-    ddb::streams_api<backend_type> streams;
+    ddb::table_api<Backend> tables;
+    ddb::item_api<Backend> items;
+    ddb::query_api<Backend> queries;
+    ddb::batch_api<Backend> batches;
+    ddb::txn_api<Backend> transactions;
+    ddb::streams_api<Backend> streams;
 };
+using stack = basic_stack<backend_type>;
+using remote_type = ddb::remote_backend<std::uint64_t, std::uint64_t>;
+using hybrid_type = ddb::hybrid_backend<backend_type>;
 
 auto test_options(std::size_t page_bytes = std::size_t{1} << 20U) -> ddb::raft_backend_options {
     ddb::raft_backend_options o;
@@ -240,6 +245,10 @@ public:
                     -> std::optional<std::string> { return forward(id, to, op); },
                 options));
             _backends.back()->set_change_log(_logs[id - 1].get());
+            _backends.back()->set_route_addresses(
+                [](const std::uint64_t& n) -> std::optional<std::string> {
+                    return "node-" + std::to_string(n) + ":8000";
+                });
         }
         for (auto& b : _backends) {
             _stacks.push_back(std::make_unique<stack>(*b));
@@ -271,6 +280,36 @@ public:
         return *_engines.at(id - 1);
     }
     [[nodiscard]] auto fabric() -> message_fabric& { return _fabric; }
+
+    /// A front end without the data role (.kiro/specs/
+    /// dynamodb-independent-layers/ task 3): a remote_backend that knows
+    /// the data nodes by address only, as `node-<id>:8000`, and reaches
+    /// them through `send` (a killed node does not answer).
+    [[nodiscard]] auto make_remote(std::vector<std::string> seeds = {"node-1:8000"},
+                                   ddb::raft_backend_options o = test_options())
+        -> std::unique_ptr<remote_type> {
+        return std::make_unique<remote_type>(
+            std::move(seeds),
+            [this](const std::string& address, const std::string& op) { return send(address, op); },
+            o);
+    }
+
+    /// Ops a remote_backend sent to node `id`.
+    [[nodiscard]] auto sent_to(std::uint64_t id) const -> std::uint64_t {
+        return _sent.at(id - 1).load();
+    }
+
+    auto send(const std::string& address, const std::string& op) -> std::optional<std::string> {
+        if (!address.starts_with("node-")) {
+            return std::nullopt;
+        }
+        const auto id = std::stoull(address.substr(5, address.find(':') - 5));
+        if (id == 0 || id > k_nodes || !_fabric.is_running(id)) {
+            return std::nullopt;
+        }
+        _sent.at(id - 1).fetch_add(1);
+        return _backends[id - 1]->serve(op);
+    }
     [[nodiscard]] auto change_log(std::uint64_t id) -> kythira::record_segment_store& {
         return *_logs.at(id - 1);
     }
@@ -398,6 +437,7 @@ private:
     std::vector<std::unique_ptr<stack>> _stacks;
     std::vector<std::thread> _drivers;
     std::atomic<bool> _running{false};
+    std::array<std::atomic<std::uint64_t>, k_nodes> _sent{};
 };
 
 const std::string k_create =
@@ -406,7 +446,7 @@ const std::string k_create =
     R"("KeySchema":[{"AttributeName":"pk","KeyType":"HASH"},)"
     R"({"AttributeName":"sk","KeyType":"RANGE"}],"BillingMode":"PAY_PER_REQUEST"})";
 
-auto status_of(stack& s, const std::string& table) -> std::string {
+auto status_of(auto& s, const std::string& table) -> std::string {
     const auto r = s.call("DescribeTable", R"({"TableName":")" + table + R"("})");
     if (r.status != 200U) {
         return r.type();
@@ -414,7 +454,7 @@ auto status_of(stack& s, const std::string& table) -> std::string {
     return std::string(r.body.at("Table").as_object().at("TableStatus").as_string());
 }
 
-auto put(stack& s, const std::string& pk, int sk, const std::string& extra = "") -> void {
+auto put(auto& s, const std::string& pk, int sk, const std::string& extra = "") -> void {
     s.ok("PutItem", R"({"TableName":"Music","Item":{"pk":{"S":")" + pk + R"("},"sk":{"N":")" +
                         std::to_string(sk) + R"("})" + extra + "}}");
 }
@@ -425,7 +465,7 @@ auto get_body(bool consistent, const std::string& pk, int sk) -> std::string {
            R"("},"sk":{"N":")" + std::to_string(sk) + R"("}}})";
 }
 
-auto count_all(stack& s, bool consistent, std::set<std::string>* seen = nullptr) -> std::size_t {
+auto count_all(auto& s, bool consistent, std::set<std::string>* seen = nullptr) -> std::size_t {
     std::size_t total = 0;
     std::string start;
     for (;;) {
@@ -761,7 +801,7 @@ auto split_apart(cluster& c, const std::vector<std::string>& pks) -> void {
     }));
 }
 
-auto value_of(stack& s, const std::string& pk, int sk) -> std::string {
+auto value_of(auto& s, const std::string& pk, int sk) -> std::string {
     const auto r = s.ok("GetItem", get_body(true, pk, sk));
     if (!r.contains("Item")) {
         return "<none>";
@@ -1051,7 +1091,7 @@ const std::string k_create_with_gsi =
     R"([{"AttributeName":"g","KeyType":"HASH"}],"Projection":{"ProjectionType":"ALL"}}]})";
 
 /// `pk/sk=v` of every entry of `by_g` with partition `g`, through `s`.
-auto index_items(stack& s, const std::string& g) -> std::set<std::string> {
+auto index_items(auto& s, const std::string& g) -> std::set<std::string> {
     std::set<std::string> out;
     std::string start;
     for (;;) {
@@ -1078,7 +1118,7 @@ auto index_items(stack& s, const std::string& g) -> std::set<std::string> {
     }
 }
 
-auto put_g(stack& s, const std::string& pk, int sk, const std::string& g, int v) -> void {
+auto put_g(auto& s, const std::string& pk, int sk, const std::string& g, int v) -> void {
     put(s, pk, sk, R"(,"g":{"S":")" + g + R"("},"v":{"N":")" + std::to_string(v) + R"("})");
 }
 
@@ -1746,4 +1786,175 @@ BOOST_AUTO_TEST_CASE(an_export_spans_a_split_and_imports_on_another_node) {
     }
     std::ranges::sort(got);
     BOOST_TEST((got == pks));
+}
+
+// .kiro/specs/dynamodb-independent-layers/ task 3: a front end without the
+// data role. Its handlers run over a remote_backend that knows the data
+// nodes by address only, learns the routes from them and sends each op to
+// the group's leader (or any replica, for an eventual read) wrapped with the
+// route's epoch.
+BOOST_AUTO_TEST_CASE(a_front_end_without_the_data_role_serves_through_a_remote_backend) {
+    cluster c;
+    auto remote = c.make_remote();
+    basic_stack<remote_type> fe(*remote);
+    fe.ok("CreateTable", k_create);
+    BOOST_TEST_REQUIRE(cluster::await([&] { return status_of(fe, "Music") == "ACTIVE"; }));
+    BOOST_TEST(fe.ok("ListTables", "{}").at("TableNames").as_array().size() == 1U);
+    for (int p = 0; p < 9; ++p) {
+        for (int sk = 0; sk < 2; ++sk) {
+            put(fe, "p" + std::to_string(p), sk, R"(,"v":{"N":"1"})");
+        }
+    }
+    // What the front end wrote, every data node reads, and the other way.
+    BOOST_TEST(count_all(c.node(2), true) == 18U);
+    put(c.node(3), "p0", 9, R"(,"v":{"N":"3"})");
+    BOOST_TEST(value_of(fe, "p0", 9) == "3");
+    BOOST_TEST(cluster::await(
+        [&] { return fe.ok("GetItem", get_body(false, "p0", 9)).contains("Item"); }));
+    std::set<std::string> seen;
+    BOOST_TEST(count_all(fe, true, &seen) == 19U);
+    BOOST_TEST(seen.size() == 19U);
+    BOOST_TEST(cluster::await([&] { return count_all(fe, false) == 19U; }));
+
+    // A conditional failure comes back as the handler's error.
+    const auto failed =
+        fe.call("PutItem", R"({"TableName":"Music","Item":{"pk":{"S":"p1"},"sk":{"N":"1"}},)"
+                           R"x("ConditionExpression":"attribute_not_exists(pk)"})x");
+    BOOST_TEST(failed.status == 400U);
+    BOOST_TEST(failed.type() == "ConditionalCheckFailedException");
+
+    // A split: the front end's cached route is stale, the data node answers
+    // with the current one and the op is served on the new group.
+    split_apart(c, {"p1", "p5", "p8"});
+    BOOST_TEST(count_all(fe, true) == 19U);
+    put(fe, "p8", 5, R"(,"v":{"N":"8"})");
+    BOOST_TEST(value_of(c.node(1), "p8", 5) == "8");
+    const std::string q = R"({"TableName":"Music","KeyConditionExpression":"pk = :p",)"
+                          R"("ExpressionAttributeValues":{":p":{"S":"p8"}},"ConsistentRead":true,)"
+                          R"("ScanIndexForward":false})";
+    const auto down = fe.ok("Query", q);
+    BOOST_TEST_REQUIRE(down.at("Items").as_array().size() == 3U);
+    BOOST_TEST(
+        down.at("Items").as_array()[0].as_object().at("sk").as_object().at("N").as_string() == "5");
+
+    // A transaction across three groups, prepared and committed from the
+    // front end.
+    fe.ok(
+        "TransactWriteItems",
+        R"({"TransactItems":[)" + put_action("p1", 1, 10) + "," + put_action("p5", 1, 50) + "," +
+            R"({"Update":{"TableName":"Music","Key":)" + key_json("p8", 1) +
+            R"(,"UpdateExpression":"SET v = v + :n","ExpressionAttributeValues":{":n":{"N":"79"}}}}]})");
+    for (std::uint64_t id = 1; id <= k_nodes; ++id) {
+        BOOST_TEST(value_of(c.node(id), "p1", 1) == "10");
+        BOOST_TEST(value_of(c.node(id), "p5", 1) == "50");
+        BOOST_TEST(value_of(c.node(id), "p8", 1) == "80");
+    }
+    const auto got =
+        fe.ok("TransactGetItems", R"({"TransactItems":[{"Get":{"TableName":"Music","Key":)" +
+                                      key_json("p5", 1) + R"(}}]})");
+    BOOST_TEST(got.at("Responses")
+                   .as_array()[0]
+                   .as_object()
+                   .at("Item")
+                   .as_object()
+                   .at("v")
+                   .as_object()
+                   .at("N")
+                   .as_string() == "50");
+
+    // The streams calls see the same shards as a data node's.
+    const auto d = remote->describe("Music");
+    BOOST_TEST_REQUIRE(d.has_value());
+    BOOST_TEST(remote->change_shards(ddb::table_range(d->table_id)).size() ==
+               c.backend(1).change_shards(ddb::table_range(d->table_id)).size());
+
+    // The leader of a group is cut off: the front end finds the new one.
+    const auto old =
+        c.leader(c.host(1)
+                     .shard_map_snapshot()
+                     .lookup(ddb::partition_prefix(d->table_id, ddb::attribute_value::string("p5")))
+                     ->_group_id);
+    BOOST_TEST_REQUIRE(old != 0U);
+    c.fabric().kill(old);
+    put(fe, "p5", 7, R"(,"v":{"N":"7"})");
+    BOOST_TEST(value_of(fe, "p5", 7) == "7");
+    BOOST_TEST(value_of(fe, "p1", 1) == "10");
+    c.fabric().revive(old);
+
+    // Every op reached a data node through `send`; none ran on the front
+    // end, which holds no replica.
+    BOOST_TEST(c.sent_to(1) + c.sent_to(2) + c.sent_to(3) > 0U);
+
+    fe.ok("DeleteTable", R"({"TableName":"Music"})");
+    BOOST_TEST(cluster::await(
+        [&] { return fe.ok("ListTables", "{}").at("TableNames").as_array().empty(); }));
+}
+
+// A data node checks a routed op's epoch before serving it: one routed by
+// a layout from before a split is answered with the current route.
+BOOST_AUTO_TEST_CASE(an_op_routed_by_an_old_layout_is_answered_with_the_current_route) {
+    cluster c;
+    c.node(1).ok("CreateTable", k_create);
+    BOOST_TEST_REQUIRE(cluster::await([&] { return status_of(c.node(1), "Music") == "ACTIVE"; }));
+    put(c.node(1), "p1", 1);
+    put(c.node(1), "p9", 1);
+    const auto d = c.backend(1).describe("Music");
+    BOOST_TEST_REQUIRE(d.has_value());
+    const auto key = ddb::partition_prefix(d->table_id, ddb::attribute_value::string("p9"));
+    const auto before = c.host(1).shard_map_snapshot().lookup(key);
+    BOOST_TEST_REQUIRE(before.has_value());
+    split_apart(c, {"p1", "p9"});
+
+    namespace wire = ddb::raft_backend_detail;
+    const std::string inner(1, static_cast<char>(wire::op_tag::routes));
+    const auto answer = c.backend(1).serve(wire::routed_op(*before, key, inner));
+    BOOST_TEST_REQUIRE(!answer.empty());
+    BOOST_TEST(static_cast<int>(answer[0]) == static_cast<int>(wire::answer_tag::stale_epoch));
+    ddb::detail::reader in(std::string_view(answer).substr(1));
+    const auto current = wire::get_descriptor<host_type::descriptor_type>(in);
+    BOOST_TEST_REQUIRE(current.has_value());
+    BOOST_TEST(current->_range.contains(key));
+    BOOST_TEST(current->_epoch._version > before->_epoch._version);
+
+    // A routed op inside a routed op is refused.
+    const auto nested =
+        c.backend(1).serve(wire::routed_op(*current, key, wire::routed_op(*current, key, inner)));
+    BOOST_TEST(static_cast<int>(nested[0]) == static_cast<int>(wire::answer_tag::error));
+}
+
+// A node with both roles runs a hybrid backend: an op on a group this node
+// holds runs here (a leader op only where it leads), any other goes to the
+// data node leading the group.
+BOOST_AUTO_TEST_CASE(a_hybrid_backend_runs_held_groups_here_and_the_rest_remotely) {
+    cluster c;
+    c.node(1).ok("CreateTable", k_create);
+    BOOST_TEST_REQUIRE(cluster::await([&] { return status_of(c.node(1), "Music") == "ACTIVE"; }));
+    // On a follower of the item group, writes and consistent reads go to
+    // the leader and eventual reads are served from the local replica.
+    const auto via = c.follower(k_item_group);
+    BOOST_TEST_REQUIRE(via != 0U);
+    std::vector<std::string> seeds;
+    for (std::uint64_t id = 1; id <= k_nodes; ++id) {
+        if (id != via) {
+            seeds.push_back("node-" + std::to_string(id) + ":8000");
+        }
+    }
+    auto remote = c.make_remote(seeds);
+    hybrid_type hybrid(c.backend(via), *remote, test_options());
+    basic_stack<hybrid_type> s(hybrid);
+    for (int p = 0; p < 4; ++p) {
+        put(s, "p" + std::to_string(p), 1, R"(,"v":{"N":"2"})");
+    }
+    for (int p = 0; p < 4; ++p) {
+        BOOST_TEST(value_of(s, "p" + std::to_string(p), 1) == "2");
+        BOOST_TEST(value_of(c.node(1), "p" + std::to_string(p), 1) == "2");
+    }
+    BOOST_TEST(count_all(s, true) == 4U);
+    const auto remote_before = hybrid.remote_ops();
+    BOOST_TEST(remote_before > 0U);
+    const auto local_before = hybrid.local_ops();
+    BOOST_TEST(cluster::await([&] { return count_all(s, false) == 4U; }));
+    BOOST_TEST(hybrid.local_ops() > local_before);
+    // Ops peers forward to this node run on its local backend.
+    BOOST_TEST(!hybrid.serve(std::string(1, '\xff')).empty());
 }

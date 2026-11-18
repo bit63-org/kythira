@@ -33,12 +33,25 @@ built by `.kiro/specs/kinesis-independent-layers/` tasks 1, 3, 5, 9 and
     gateway's settled table names; a node without a front end (a data
     node) still has the gateway object for its forward listener.
 
-- [ ] 3. Op additions, epochs and `remote_backend`
+- [x] 3. Op additions, epochs and `remote_backend`
   - Ops for `change_shards`, `read_changes` and `read_stamped_range`;
     route epoch on every op; `remote_backend` and `hybrid_backend` over
     the route cache
   - Handler tests over both backends against an in-process data cluster
   - _Requirements: 3.1-3.6, 7.3, 12.1_
+  - Built as `op_wire.hpp` (the op protocol, moved out of
+    `raft_backend.hpp`, plus the `routes` and `routed` ops and the
+    `stale_epoch` and `unknown_group` answers), `op_client.hpp` (the
+    client half of `raft_backend` as a CRTP base, so the three backends
+    share one encoding of every call) and `remote_backend.hpp`
+    (`remote_backend` and `hybrid_backend`). The three ops named above
+    already existed as forwarded ops; what was missing was a way to run
+    them on a node with no replica. A data node checks a routed op's
+    epoch with the core `check_route` and answers a stale one with the
+    current route. Tests in `dynamodb_raft_backend_test.cpp`: the
+    handler stack over a `remote_backend` through a split, a
+    cross-group transaction and a leader loss; an old-layout routed op;
+    a `hybrid_backend` on a follower.
 
 - [ ] 4. Front end without the data role
   - Wire `remote_backend` when the node lacks `data`; capacity share over
