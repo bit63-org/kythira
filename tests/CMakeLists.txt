@@ -1207,6 +1207,9 @@ set_tests_properties(raft_object_store_segment_liveness_test PROPERTIES
 add_raft_completion_test(shard_types_unit_test shard_types_unit_test.cpp)
 add_raft_completion_test(shard_map_unit_test shard_map_unit_test.cpp)
 add_raft_completion_test(shard_exceptions_unit_test shard_exceptions_unit_test.cpp)
+# kinesis-independent-layers task 5: the route cache a node without Raft
+# membership routes by, and the data node's routes answer and epoch check.
+add_raft_completion_test(route_cache_test route_cache_test.cpp)
 # The group_id wire guarantee is split by serializer availability on purpose:
 # JSON and CBOR ship in every configuration and must be tested in every
 # configuration, so gating all of it on protobuf or ionc would quietly stop
