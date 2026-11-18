@@ -42,7 +42,10 @@ Built when `CONFIG_SQS=y` (`services/sqs/Kconfig`, off by default).
 | `include/kythira/sqs/sqs_catalog.hpp` | the queue catalog's keys, records and entries, applied by the queue state machine: never-reused ids, the deletion and purge cool-downs, compare-and-set settings changes | 4 |
 | `include/kythira/sqs/sqs_cluster.hpp` | `queue_cluster`, what the handlers need from the data layer, and `local_queue_cluster` over one in-process state machine | 4 |
 | `include/kythira/sqs/sqs_service.hpp` | the queue and message handlers: queue lifecycle, attributes, permissions, tags, purge; send, receive, delete and visibility with batches; partition choice; receipt handles | 4 |
-| `cmd/sqs_node/` | the daemon; a placeholder whose `--self-test` checks the operation table until tasks 3 and 4 | 1 |
+| `include/kythira/sqs/sqs_raft_cluster.hpp`, `include/kythira/sqs/sqs_forward.hpp` | `queue_cluster` over a `multi_raft` host, and node-to-node forwarding of entries to a group's leader (HMAC over the cluster's forwarding secret) | 4 |
+| `include/kythira/sqs/sqs_listener.hpp` | the API and the forwarding endpoint as a handler for core's Beast HTTPS server | 4 |
+| `include/kythira/sqs/sqs_node_options.hpp` | `sqs_node`'s settings from `SQS_*` variables | 4 |
+| `cmd/sqs_node/` | the daemon: today one node with its queues in memory serving the whole API (`SQS_LISTEN`, `SQS_STATIC_KEYS_FILE`, ...); `--self-test` checks the operation table | 1, 4 |
 
 ## Core pieces used
 

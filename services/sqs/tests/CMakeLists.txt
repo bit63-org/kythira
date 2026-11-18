@@ -103,6 +103,13 @@ kythira_sqs_test(sqs_service_test sqs_service_test.cpp)
 # raft_queue_cluster over a stand-in multi-raft host.
 kythira_sqs_test(sqs_forward_test sqs_forward_test.cpp)
 
+# Task 4: the API over core's Beast server with real sockets and SigV4 in
+# both protocols, the forwarding endpoint and its refusals, and sqs_node's
+# settings.
+find_package(Threads REQUIRED)
+kythira_sqs_test(sqs_listener_test sqs_listener_test.cpp)
+target_link_libraries(sqs_listener_test PRIVATE OpenSSL::SSL Threads::Threads)
+
 # Task 3: the checked-in model, query-name and action headers are what their
 # generators make of the pinned inputs, so an upgrade of any input carries
 # its regenerated header and diff.

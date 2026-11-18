@@ -89,7 +89,12 @@ PR unless noted.
     (`sqs_queue_attributes.hpp`); the catalog in the queue state machine
     (`sqs_catalog.hpp`); every queue and message handler including
     AddPermission and RemovePermission (`sqs_service.hpp`) over
-    `queue_cluster`. Left: the HTTP listener and `sqs_node`
+    `queue_cluster`; `raft_queue_cluster` and leader forwarding; the
+    listener (`sqs_listener.hpp`) and `sqs_node` serving the API from one
+    in-memory node (checked end to end with AWS CLI v2). Left: the
+    kythira_node module on `multi_raft`, so a send is acknowledged only
+    once committed (Requirement 5.2) and sqs_node runs durable and
+    multi-node
   - _Requirements: 4.1, 5.1, 5.3, 5.5_
 
 - [ ] 5. Long polling
