@@ -1,0 +1,9 @@
+{
+  "name": "sns-evidence-js-sdk-v3",
+  "private": true,
+  "type": "module",
+  "description": "The SNS evidence scenario through the AWS SDK for JavaScript v3 (see ../../README.md).",
+  "dependencies": {
+    "@aws-sdk/client-sns": "3.1166.0"
+  }
+}
