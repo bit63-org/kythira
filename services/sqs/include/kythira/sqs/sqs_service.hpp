@@ -30,8 +30,14 @@
 /// nothing visible and nothing due, until it has as many messages as were
 /// asked for.
 ///
-/// Not yet here: long polling (task 5; `WaitTimeSeconds` is checked and a
-/// receive answers at once), dead-letter moves and the source listing
+/// Long polling (task 5): a receive that finds nothing and may wait
+/// (`WaitTimeSeconds`, else the queue's `ReceiveMessageWaitTimeSeconds`)
+/// subscribes to all its queue's partitions on the configured
+/// `availability_hub` and tries again only when one gains visible messages,
+/// until the wait ends or the hub drains (`sqs_long_poll.hpp`). Without a
+/// hub a receive answers at once.
+///
+/// Not yet here: dead-letter moves and the source listing
 /// (task 6), sealing bodies (task 7), partition growth, throttling and
 /// fair queues (task 8). FIFO `ReceiveRequestAttemptId` is accepted and
 /// not yet honoured.
@@ -41,6 +47,7 @@
 #include <kythira/sqs/sqs_compat_profile.hpp>
 #include <kythira/sqs/sqs_errors.hpp>
 #include <kythira/sqs/sqs_front_end.hpp>
+#include <kythira/sqs/sqs_long_poll.hpp>
 #include <kythira/sqs/sqs_messages.hpp>
 #include <kythira/sqs/sqs_queue_attributes.hpp>
 #include <kythira/sqs/sqs_queue_commands.hpp>
@@ -56,6 +63,7 @@
 #include <openssl/rand.h>
 
 #include <algorithm>
+#include <chrono>
 #include <array>
 #include <atomic>
 #include <cstddef>
@@ -83,6 +91,9 @@ struct sqs_service_config {
     /// How many times a settings change retries when another change to the
     /// same queue committed between its read and its write.
     int _cas_attempts = 8;
+    /// Where long polls park; the replica's state machines notify it. Null:
+    /// every receive answers at once. Outlives the service.
+    availability_hub* _waits = nullptr;
 };
 
 namespace service_detail {
@@ -1144,12 +1155,15 @@ private:
                                  "Must be >= 0 and <= 43200, if provided.");
         }
         const auto profile = profile_of(*q);
-        if (const auto wait = int_member(in, "WaitTimeSeconds");
-            wait && (*wait < 0 || *wait > profile._max_wait_s)) {
+        const auto wait_member = int_member(in, "WaitTimeSeconds");
+        if (wait_member && (*wait_member < 0 || *wait_member > profile._max_wait_s)) {
             return invalid_value(
-                "WaitTimeSeconds", std::to_string(*wait),
+                "WaitTimeSeconds", std::to_string(*wait_member),
                 "Must be >= 0 and <= " + std::to_string(profile._max_wait_s) + ", if provided.");
         }
+        const auto wait_s =
+            wait_member ? static_cast<std::uint32_t>(*wait_member)
+                        : std::min<std::uint32_t>(q->_settings._wait_s, profile._max_wait_s);
         std::set<std::string, std::less<>> system_names;
         for (const auto* member : {"AttributeNames", "MessageSystemAttributeNames"}) {
             for (auto& n : strings_member(in, member)) {
@@ -1160,33 +1174,58 @@ private:
 
         boost::json::array messages;
         const auto n = std::max<std::uint16_t>(q->_partitions, 1);
-        const auto start = next_rotation();
-        auto remaining = static_cast<std::uint32_t>(max);
-        for (std::uint16_t i = 0; i < n && remaining > 0; ++i) {
-            const auto part = static_cast<std::uint16_t>((start + i) % n);
-            const auto t = q->target(part);
-            const auto now = _cluster.now_ms();
-            if (!worth_receiving(t, now)) {
-                continue;
+        // One pass over the partitions; false when nothing could commit.
+        const auto pass = [&]() -> bool {
+            const auto start = next_rotation();
+            auto remaining = static_cast<std::uint32_t>(max);
+            for (std::uint16_t i = 0; i < n && remaining > 0; ++i) {
+                const auto part = static_cast<std::uint16_t>((start + i) % n);
+                const auto t = q->target(part);
+                const auto now = _cluster.now_ms();
+                if (!worth_receiving(t, now)) {
+                    continue;
+                }
+                queue_command c;
+                c.op = queue_command::kind::receive;
+                c.target = t;
+                c.now_ms = now;
+                c.max_messages = remaining;
+                c.visibility_timeout_s = static_cast<std::uint32_t>(visibility);
+                const auto r = commit_queue(c);
+                if (!r) {
+                    return !messages.empty();
+                }
+                for (const auto& m : r->messages) {
+                    messages.push_back(render_message(*q, part, m, system_names, attribute_names));
+                }
+                remaining -= std::min<std::uint32_t>(
+                    remaining, static_cast<std::uint32_t>(r->messages.size()));
             }
-            queue_command c;
-            c.op = queue_command::kind::receive;
-            c.target = t;
-            c.now_ms = now;
-            c.max_messages = remaining;
-            c.visibility_timeout_s = static_cast<std::uint32_t>(visibility);
-            const auto r = commit_queue(c);
-            if (!r) {
-                if (messages.empty()) {
+            return true;
+        };
+        if (wait_s == 0 || _config._waits == nullptr) {
+            if (!pass()) {
+                return internal_failure();
+            }
+        } else {
+            // Subscribed before the first pass, so a send committed between
+            // a pass that found nothing and the wait still wakes it.
+            std::vector<std::string> keys;
+            keys.reserve(n);
+            for (std::uint16_t part = 0; part < n; ++part) {
+                keys.push_back(queue_keys::partition_prefix(q->target(part)));
+            }
+            auto sub = _config._waits->subscribe(std::move(keys));
+            const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(wait_s);
+            for (;;) {
+                if (!pass()) {
                     return internal_failure();
                 }
-                break;
+                if (!messages.empty() ||
+                    sub.wait_until(deadline) != availability_hub::wake::ready) {
+                    break;
+                }
             }
-            for (const auto& m : r->messages) {
-                messages.push_back(render_message(*q, part, m, system_names, attribute_names));
-            }
-            remaining -=
-                std::min<std::uint32_t>(remaining, static_cast<std::uint32_t>(r->messages.size()));
         }
         boost::json::object out;
         if (!messages.empty()) {

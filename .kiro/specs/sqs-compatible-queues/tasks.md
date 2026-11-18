@@ -100,8 +100,16 @@ PR unless noted.
     partitions over groups
   - _Requirements: 1.2, 4.1, 5.1, 5.2, 5.3, 5.5_
 
-- [ ] 5. Long polling
+- [x] 5. Long polling
   - Parking, availability subscriptions, leader deadline ticks
+  - Done: `sqs_long_poll.hpp` (the availability hub: a parked receive
+    subscribes to every partition of its queue before its first pass, so
+    no notification is lost; a drain answers parked receives empty);
+    the state machine's availability listener, called after each commit;
+    `sqs_workers.hpp` (the tick worker on each partition group's leader,
+    woken by the earliest deadline and by every commit, idle-capped at
+    1 s); wired into the module and both `sqs_node` modes. Co-located
+    only: the notifications cross layers as a stream with task 12
   - _Requirements: 6.1-6.3_
 
 - [ ] 6. Dead-letter queues and move tasks

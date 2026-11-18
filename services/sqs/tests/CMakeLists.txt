@@ -110,6 +110,13 @@ find_package(Threads REQUIRED)
 kythira_sqs_test(sqs_listener_test sqs_listener_test.cpp)
 target_link_libraries(sqs_listener_test PRIVATE OpenSSL::SSL Threads::Threads)
 
+# Task 5: long polling. The availability hub, and receives parked on it
+# over a local_queue_cluster whose state machine notifies the hub and whose
+# tick worker ends delays and visibility timeouts. Timing checks on the
+# real clock, with wide margins.
+kythira_sqs_test(sqs_long_poll_test sqs_long_poll_test.cpp)
+target_link_libraries(sqs_long_poll_test PRIVATE Threads::Threads)
+
 # Task 4: the module on multi_raft, as whole in-process nodes over the Beast
 # Raft transport (sqs_module.hpp on memory_kv_engine): a restart, three
 # nodes forwarding to their leader, and the settings a durable node refuses.

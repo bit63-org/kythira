@@ -83,6 +83,17 @@ public:
 
     [[nodiscard]] auto now_ms() -> std::uint64_t { return _clock(); }
 
+    /// Whether this node's replica leads the group owning `key` (the tick
+    /// worker's test, `sqs_workers.hpp`).
+    [[nodiscard]] auto leads(const std::string& key) -> bool {
+        const auto d = _host.resolve(key);
+        if (!d) {
+            return false;
+        }
+        auto* node = _host.group_node(d->_group_id);
+        return node != nullptr && node->is_leader();
+    }
+
     [[nodiscard]] auto forwarded_count() const -> std::uint64_t { return _forwarded; }
 
     [[nodiscard]] static auto system_clock_ms() -> std::uint64_t {

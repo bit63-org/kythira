@@ -25,9 +25,11 @@
 #include <kythira/sqs/sqs_compat_profile.hpp>
 #include <kythira/sqs/sqs_front_end.hpp>
 #include <kythira/sqs/sqs_listener.hpp>
+#include <kythira/sqs/sqs_long_poll.hpp>
 #include <kythira/sqs/sqs_node_options.hpp>
 #include <kythira/sqs/sqs_receipts.hpp>
 #include <kythira/sqs/sqs_service.hpp>
+#include <kythira/sqs/sqs_workers.hpp>
 
 #include <raft/beast_https_server.hpp>
 #include <raft/static_key_authorizer.hpp>
@@ -211,9 +213,23 @@ auto serve() -> int {
         }
 
         s::local_queue_cluster cluster;
+        // Long polls park on the hub; the state machine tells it which
+        // partitions have visible messages, and the worker commits the
+        // ticks that end delays and visibility timeouts.
+        s::availability_hub hub;
+        s::tick_worker<s::local_queue_cluster> worker(cluster,
+                                                      [](const std::string&) { return true; });
+        cluster.set_availability_listener([&hub, &worker](const s::queue_target& t, bool visible) {
+            if (visible) {
+                hub.notify(s::queue_keys::partition_prefix(t));
+            }
+            worker.wake();
+        });
+        worker.start();
         s::sqs_service_config sc;
         sc._receipt_keys = receipt_keys(opt);
         sc._profile = *profile;
+        sc._waits = &hub;
         s::sqs_service<s::local_queue_cluster> service(cluster, sc);
 
         kythira::https::server_config hc;
@@ -265,7 +281,10 @@ auto serve() -> int {
                   << server.port() << ", queue URLs on " << fc._endpoint
                   << " (single node, queues kept in memory)" << std::endl;
         wait_for_signal();
+        hub.close();  // parked long polls answer empty before the listener stops
         server.stop();
+        worker.stop();
+        cluster.set_availability_listener({});
         std::cout << "sqs_node stopped" << std::endl;
         return 0;
     } catch (const std::exception& e) {
