@@ -30,6 +30,7 @@
 /// 32-bit length and their bytes. Decoding is bounded and never throws; a
 /// malformed entry yields `std::nullopt`.
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
@@ -93,6 +94,50 @@ struct receipt_ref {
     friend auto operator==(const receipt_ref&, const receipt_ref&) -> bool = default;
 };
 
+/// FNV-1a, for spreading message groups over partitions; stable across
+/// builds and nodes, which `std::hash` is not.
+[[nodiscard]] inline auto group_hash(std::string_view s) -> std::uint64_t {
+    std::uint64_t h = 14695981039346656037ULL;
+    for (const char c : s) {
+        h ^= static_cast<unsigned char>(c);
+        h *= 1099511628211ULL;
+    }
+    return h;
+}
+
+/// A receive's redrive policy (Requirement 7.1): a message received
+/// `max_receive_count` times already moves to the dead-letter queue instead
+/// of being delivered again, in the same entry.
+struct redrive_target {
+    std::uint32_t max_receive_count = 0;
+    /// The dead-letter queue; `partition` is chosen per message.
+    queue_target dlq;
+    std::uint16_t dlq_partitions = 1;
+    /// The source queue's ARN, which a moved message carries
+    /// (`DeadLetterQueueSourceArn`).
+    std::string source_arn;
+
+    friend auto operator==(const redrive_target&, const redrive_target&) -> bool = default;
+};
+
+/// The dead-letter partition a moved message goes to: its group's on a
+/// FIFO queue, so a group keeps its order there, else by sequence.
+[[nodiscard]] inline auto dead_letter_partition(const redrive_target& r, std::string_view group,
+                                                std::uint64_t sequence) -> std::uint16_t {
+    const auto n = std::max<std::uint16_t>(r.dlq_partitions, 1);
+    return static_cast<std::uint16_t>((r.dlq.fifo ? group_hash(group) : sequence) % n);
+}
+
+/// One message of a move task's batch: from the command's partition to
+/// `dest` (a queue; the partition is chosen as for a dead-letter move).
+struct move_entry {
+    std::uint64_t sequence = 0;
+    queue_target dest;
+    std::uint16_t dest_partitions = 1;
+
+    friend auto operator==(const move_entry&, const move_entry&) -> bool = default;
+};
+
 struct queue_command {
     enum class kind : std::uint8_t {
         send = 1,
@@ -110,6 +155,10 @@ struct queue_command {
         /// becomes visible again is a committed fact (design "Long polling
         /// without polling").
         tick = 7,
+        /// A move task's batch (Requirement 7.3): each of `moves` that is
+        /// still visible leaves this partition and joins its destination in
+        /// this entry; any other is answered `stale`.
+        move = 8,
     };
 
     kind op = kind::tick;
@@ -122,6 +171,10 @@ struct queue_command {
     /// they get.
     std::uint32_t max_messages = 1;
     std::uint32_t visibility_timeout_s = 30;
+    /// Receive: the source queue's redrive policy, when it has one whose
+    /// dead-letter queue exists.
+    std::optional<redrive_target> redrive;
+    std::vector<move_entry> moves;
 
     friend auto operator==(const queue_command&, const queue_command&) -> bool = default;
 };
@@ -145,6 +198,8 @@ struct received_message {
     std::uint64_t sent_ms = 0;
     std::uint64_t first_receive_ms = 0;
     std::uint32_t receive_count = 0;
+    /// The queue it was moved from, on a dead-letter queue; else empty.
+    std::string dead_letter_source;
 
     friend auto operator==(const received_message&, const received_message&) -> bool = default;
 };
@@ -315,6 +370,19 @@ inline auto get_target(reader& r, queue_target& t) -> bool {
         put_le(out, r.receive_sequence);
         put_le(out, r.visibility_timeout_s);
     }
+    put_u8(out, c.redrive ? 1 : 0);
+    if (c.redrive) {
+        put_le(out, c.redrive->max_receive_count);
+        put_target(out, c.redrive->dlq);
+        put_le(out, c.redrive->dlq_partitions);
+        put_str(out, c.redrive->source_arn);
+    }
+    put_le<std::uint32_t>(out, static_cast<std::uint32_t>(c.moves.size()));
+    for (const auto& m : c.moves) {
+        put_le(out, m.sequence);
+        put_target(out, m.dest);
+        put_le(out, m.dest_partitions);
+    }
     return out;
 }
 
@@ -327,7 +395,7 @@ inline auto get_target(reader& r, queue_target& t) -> bool {
     std::uint8_t op = 0;
     if (!r.u8(format) || format != k_command_format || !r.u8(op) ||
         op < static_cast<std::uint8_t>(queue_command::kind::send) ||
-        op > static_cast<std::uint8_t>(queue_command::kind::tick)) {
+        op > static_cast<std::uint8_t>(queue_command::kind::move)) {
         return std::nullopt;
     }
     c.op = static_cast<queue_command::kind>(op);
@@ -356,6 +424,27 @@ inline auto get_target(reader& r, queue_target& t) -> bool {
         r.le(x.sequence);
         r.le(x.receive_sequence);
         r.le(x.visibility_timeout_s);
+    }
+    std::uint8_t has_redrive = 0;
+    if (!r.u8(has_redrive) || has_redrive > 1) {
+        return std::nullopt;
+    }
+    if (has_redrive == 1) {
+        redrive_target t;
+        if (!r.le(t.max_receive_count) || !get_target(r, t.dlq) || !r.le(t.dlq_partitions) ||
+            !r.str(t.source_arn)) {
+            return std::nullopt;
+        }
+        c.redrive = std::move(t);
+    }
+    if (!r.count(n)) {
+        return std::nullopt;
+    }
+    c.moves.resize(n);
+    for (auto& m : c.moves) {
+        if (!r.le(m.sequence) || !get_target(r, m.dest) || !r.le(m.dest_partitions)) {
+            return std::nullopt;
+        }
     }
     if (!r.done()) {
         return std::nullopt;
@@ -388,6 +477,7 @@ inline auto get_target(reader& r, queue_target& t) -> bool {
         put_le(out, m.sent_ms);
         put_le(out, m.first_receive_ms);
         put_le(out, m.receive_count);
+        put_str(out, m.dead_letter_source);
     }
     return out;
 }
@@ -431,6 +521,7 @@ inline auto get_target(reader& r, queue_target& t) -> bool {
         r.le(m.sent_ms);
         r.le(m.first_receive_ms);
         r.le(m.receive_count);
+        r.str(m.dead_letter_source);
     }
     if (!r.done()) {
         return std::nullopt;

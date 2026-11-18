@@ -179,6 +179,7 @@ BOOST_AUTO_TEST_CASE(commands_and_results_round_trip) {
     c.now_ms = k_t0;
     c.sends = {message("a", "g", "d", 3), message(std::string("\0\xff", 2))};
     c.receipts = {sqs::receipt_ref{"e", 4, 5, 6}};
+    c.redrive = sqs::redrive_target{3, fifo(10), 2, "arn:aws:sqs:us-east-1:1:src"};
     const auto enc = sqs::encode_queue_command(c);
     BOOST_TEST((sqs::decode_queue_command(enc) == c));
     // Every truncation, and trailing garbage, is refused without throwing.
@@ -189,8 +190,8 @@ BOOST_AUTO_TEST_CASE(commands_and_results_round_trip) {
 
     sqs::queue_result r;
     r.entries = {sqs::entry_result{"e", status::duplicate, "m", 7}};
-    r.messages.push_back(
-        sqs::received_message{1, 2, 3, "m", "b", "a", "s", "5", "6", "7", "g", "d", 8, 9, 10});
+    r.messages.push_back(sqs::received_message{1, 2, 3, "m", "b", "a", "s", "5", "6", "7", "g", "d",
+                                               8, 9, 10, "arn:aws:sqs:us-east-1:1:src"});
     const auto renc = sqs::encode_queue_result(r);
     BOOST_TEST((sqs::decode_queue_result(renc) == r));
     for (std::size_t n = 0; n < renc.size(); ++n) {

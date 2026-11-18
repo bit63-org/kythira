@@ -78,6 +78,29 @@ namespace catalog_keys {
     return prefix() + "deleted/" + std::string(account) + "/" + std::string(name);
 }
 
+/// Every message move task (Requirement 7.3).
+[[nodiscard]] inline auto moves_prefix() -> std::string {
+    return prefix() + "moves/";
+}
+
+/// The move tasks of one source queue, oldest first.
+[[nodiscard]] inline auto moves_of(std::string_view account, std::string_view name) -> std::string {
+    return moves_prefix() + std::string(account) + "/" + std::string(name) + "/";
+}
+
+/// One move task, by when it started (16 hex digits, so key order is
+/// start order).
+[[nodiscard]] inline auto move(std::string_view account, std::string_view name,
+                               std::uint64_t started_ms) -> std::string {
+    static constexpr std::string_view hex = "0123456789abcdef";
+    std::string h(16, '0');
+    for (int i = 15; i >= 0; --i) {
+        h[static_cast<std::size_t>(i)] = hex[started_ms & 0xFU];
+        started_ms >>= 4U;
+    }
+    return moves_of(account, name) + h;
+}
+
 /// An account the catalog can key on: non-empty, at most 64 bytes, no '/'
 /// or NUL (12 digits from IAM or a static key in practice).
 [[nodiscard]] inline auto valid_account(std::string_view account) -> bool {
@@ -253,6 +276,107 @@ inline auto get_record(reader& r, queue_record& q) -> bool {
 // ---- entries --------------------------------------------------------------
 
 /// One change to the catalog.
+/// A message move task (StartMessageMoveTask): messages go from a
+/// dead-letter queue back to their sources or to one destination, at a
+/// rate, moved by the catalog leader's worker (`sqs_workers.hpp`), which a
+/// new leader resumes because the task lives here.
+struct move_task {
+    enum class state : std::uint8_t {
+        running = 0,
+        completed = 1,
+        cancelling = 2,
+        cancelled = 3,
+        failed = 4,
+    };
+
+    std::string _account;
+    /// The source (dead-letter) queue's name.
+    std::string _name;
+    std::uint64_t _started_ms = 0;
+    state _status = state::running;
+    std::string _source_arn;
+    /// Empty: each message goes back to the queue it was moved from.
+    std::string _destination_arn;
+    /// Messages per second; 0 when not given (the system's rate).
+    std::uint32_t _rate = 0;
+    std::uint64_t _moved = 0;
+    std::uint64_t _to_move = 0;
+    std::string _failure;
+
+    [[nodiscard]] auto active() const -> bool {
+        return _status == state::running || _status == state::cancelling;
+    }
+
+    friend auto operator==(const move_task&, const move_task&) -> bool = default;
+};
+
+/// The most recent tasks a source queue keeps (ListMessageMoveTasks shows
+/// up to 10).
+inline constexpr std::size_t k_max_move_tasks = 10;
+
+[[nodiscard]] inline auto move_state_name(move_task::state s) -> std::string_view {
+    switch (s) {
+        case move_task::state::running:
+            return "RUNNING";
+        case move_task::state::completed:
+            return "COMPLETED";
+        case move_task::state::cancelling:
+            return "CANCELLING";
+        case move_task::state::cancelled:
+            return "CANCELLED";
+        case move_task::state::failed:
+            return "FAILED";
+    }
+    return "FAILED";
+}
+
+namespace catalog_detail {
+
+inline void put_move(std::string& out, const move_task& m) {
+    put_str(out, m._account);
+    put_str(out, m._name);
+    put_le(out, m._started_ms);
+    put_u8(out, static_cast<std::uint8_t>(m._status));
+    put_str(out, m._source_arn);
+    put_str(out, m._destination_arn);
+    put_le(out, m._rate);
+    put_le(out, m._moved);
+    put_le(out, m._to_move);
+    put_str(out, m._failure);
+}
+
+[[nodiscard]] inline auto get_move(reader& r, move_task& m) -> bool {
+    std::uint8_t st = 0;
+    if (!r.str(m._account) || !r.str(m._name) || !r.le(m._started_ms) || !r.u8(st) ||
+        st > static_cast<std::uint8_t>(move_task::state::failed) || !r.str(m._source_arn) ||
+        !r.str(m._destination_arn) || !r.le(m._rate) || !r.le(m._moved) || !r.le(m._to_move) ||
+        !r.str(m._failure)) {
+        return false;
+    }
+    m._status = static_cast<move_task::state>(st);
+    return true;
+}
+
+}  // namespace catalog_detail
+
+[[nodiscard]] inline auto encode_move_task(const move_task& m) -> std::string {
+    std::string out;
+    catalog_detail::put_u8(out, catalog_detail::k_record_format);
+    catalog_detail::put_move(out, m);
+    return out;
+}
+
+[[nodiscard]] inline auto decode_move_task(std::string_view in) -> std::optional<move_task> {
+    catalog_detail::reader r(in);
+    std::uint8_t format = 0;
+    move_task m;
+    if (!r.u8(format) || format != catalog_detail::k_record_format ||
+        !catalog_detail::get_move(r, m) || !r.done()) {
+        return std::nullopt;
+    }
+    return m;
+}
+
 struct catalog_command {
     enum class kind : std::uint8_t {
         /// CreateQueue: `_settings`, `_tags`, `_partitions`; answered
@@ -273,6 +397,17 @@ struct catalog_command {
         /// PurgeQueue: accepted at most once per cooldown; the reply
         /// carries the record so the front end purges its partitions.
         purge = 6,
+        /// StartMessageMoveTask on queue `_name`: `_move` (started now);
+        /// `move_in_progress` while another of the queue's tasks is active.
+        /// The oldest finished tasks beyond `k_max_move_tasks` go.
+        move_start = 7,
+        /// The worker's progress on task `_move._started_ms`: adds
+        /// `_move._moved`, and takes `_move._status` and `_move._failure`
+        /// when the status is not running. Only an active task changes.
+        move_update = 8,
+        /// CancelMessageMoveTask: a running task becomes cancelling (the
+        /// worker then cancels it); `does_not_exist` for any other.
+        move_cancel = 9,
     };
 
     kind _op = kind::create;
@@ -289,6 +424,8 @@ struct catalog_command {
     /// create: how long after a deletion the name stays refused.
     /// purge: how long after a purge another is refused.
     std::uint64_t _cooldown_ms = 0;
+    /// The move_* kinds' task.
+    move_task _move;
 
     friend auto operator==(const catalog_command&, const catalog_command&) -> bool = default;
 };
@@ -313,12 +450,16 @@ struct catalog_result {
         /// The entry did not decode, or is for a range this group does
         /// not hold.
         malformed = 8,
+        /// move_start: another task of the queue is active.
+        move_in_progress = 9,
     };
 
     status _outcome = status::ok;
     /// The record after the change (or as found, for `exists`; as it was,
     /// for delete and purge).
     std::optional<queue_record> _record;
+    /// The move_* kinds: the task after the change.
+    std::optional<move_task> _move;
 
     friend auto operator==(const catalog_result&, const catalog_result&) -> bool = default;
 };
@@ -343,6 +484,7 @@ struct catalog_result {
     put_le(out, c._partitions);
     put_le(out, c._expected_version);
     put_le(out, c._cooldown_ms);
+    put_move(out, c._move);
     return out;
 }
 
@@ -353,13 +495,14 @@ struct catalog_result {
     std::uint8_t format = 0;
     std::uint8_t op = 0;
     catalog_command c;
-    if (!r.u8(format) || format != k_command_format || !r.u8(op) || op < 1 || op > 6) {
+    if (!r.u8(format) || format != k_command_format || !r.u8(op) || op < 1 || op > 9) {
         return std::nullopt;
     }
     c._op = static_cast<catalog_command::kind>(op);
     if (!r.str(c._account) || !r.str(c._name) || !r.le(c._now_ms) ||
         !get_settings(r, c._settings) || !get_tags(r, c._tags) || !get_strings(r, c._tag_keys) ||
-        !r.le(c._partitions) || !r.le(c._expected_version) || !r.le(c._cooldown_ms) || !r.done()) {
+        !r.le(c._partitions) || !r.le(c._expected_version) || !r.le(c._cooldown_ms) ||
+        !get_move(r, c._move) || !r.done()) {
         return std::nullopt;
     }
     return c;
@@ -374,6 +517,10 @@ struct catalog_result {
     if (c._record) {
         put_record(out, *c._record);
     }
+    put_u8(out, c._move ? 1 : 0);
+    if (c._move) {
+        put_move(out, *c._move);
+    }
     return out;
 }
 
@@ -385,7 +532,7 @@ struct catalog_result {
     std::uint8_t outcome = 0;
     bool has_record = false;
     catalog_result c;
-    if (!r.u8(format) || format != k_result_format || !r.u8(outcome) || outcome > 8 ||
+    if (!r.u8(format) || format != k_result_format || !r.u8(outcome) || outcome > 9 ||
         !r.boolean(has_record)) {
         return std::nullopt;
     }
@@ -396,6 +543,17 @@ struct catalog_result {
             return std::nullopt;
         }
         c._record = std::move(q);
+    }
+    bool has_move = false;
+    if (!r.boolean(has_move)) {
+        return std::nullopt;
+    }
+    if (has_move) {
+        move_task m;
+        if (!get_move(r, m)) {
+            return std::nullopt;
+        }
+        c._move = std::move(m);
     }
     if (!r.done()) {
         return std::nullopt;

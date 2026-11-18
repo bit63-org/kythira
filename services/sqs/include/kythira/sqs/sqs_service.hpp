@@ -37,8 +37,12 @@
 /// until the wait ends or the hub drains (`sqs_long_poll.hpp`). Without a
 /// hub a receive answers at once.
 ///
-/// Not yet here: dead-letter moves and the source listing
-/// (task 6), sealing bodies (task 7), partition growth, throttling and
+/// Dead-letter queues (task 6): a receive carries its queue's redrive
+/// target, so a message received `maxReceiveCount` times moves in the same
+/// entry. The move-task operations keep their tasks in the catalog; the
+/// move worker (`sqs_workers.hpp`) does the moving.
+///
+/// Not yet here: sealing bodies (task 7), partition growth, throttling and
 /// fair queues (task 8). FIFO `ReceiveRequestAttemptId` is accepted and
 /// not yet honoured.
 
@@ -67,8 +71,10 @@
 #include <array>
 #include <atomic>
 #include <cstddef>
+#include <cstdlib>
 #include <cstdint>
 #include <functional>
+#include <limits>
 #include <map>
 #include <optional>
 #include <set>
@@ -222,17 +228,6 @@ using front_end_detail::string_member;
     return std::string(20 - std::min<std::size_t>(s.size(), 20), '0') + s;
 }
 
-/// FNV-1a, for spreading message groups over partitions; stable across
-/// builds and nodes, which `std::hash` is not.
-[[nodiscard]] inline auto group_hash(std::string_view s) -> std::uint64_t {
-    std::uint64_t h = 14695981039346656037ULL;
-    for (const char c : s) {
-        h ^= static_cast<unsigned char>(c);
-        h *= 1099511628211ULL;
-    }
-    return h;
-}
-
 /// The stored system attributes: the sender and what the client sent as
 /// `MessageSystemAttributes` (only `AWSTraceHeader` today).
 [[nodiscard]] inline auto encode_system(std::string_view sender, const boost::json::object& sys)
@@ -285,8 +280,9 @@ public:
     }
 
     /// The operations this service implements, as the model names them.
-    static constexpr std::array<std::string_view, 19> k_operations{
+    static constexpr std::array<std::string_view, 23> k_operations{
         "AddPermission",
+        "CancelMessageMoveTask",
         "ChangeMessageVisibility",
         "ChangeMessageVisibilityBatch",
         "CreateQueue",
@@ -295,6 +291,8 @@ public:
         "DeleteQueue",
         "GetQueueAttributes",
         "GetQueueUrl",
+        "ListDeadLetterSourceQueues",
+        "ListMessageMoveTasks",
         "ListQueueTags",
         "ListQueues",
         "PurgeQueue",
@@ -303,6 +301,7 @@ public:
         "SendMessage",
         "SendMessageBatch",
         "SetQueueAttributes",
+        "StartMessageMoveTask",
         "TagQueue",
         "UntagQueue",
     };
@@ -314,6 +313,7 @@ public:
             fe.on(op, [this, method](ctx_t& ctx, in_t& in) { return (this->*method)(ctx, in); });
         };
         bind("AddPermission", &sqs_service::add_permission_op);
+        bind("CancelMessageMoveTask", &sqs_service::cancel_message_move_task_op);
         bind("ChangeMessageVisibility", &sqs_service::change_visibility_op);
         bind("ChangeMessageVisibilityBatch", &sqs_service::change_visibility_batch_op);
         bind("CreateQueue", &sqs_service::create_queue_op);
@@ -322,6 +322,8 @@ public:
         bind("DeleteQueue", &sqs_service::delete_queue_op);
         bind("GetQueueAttributes", &sqs_service::get_queue_attributes_op);
         bind("GetQueueUrl", &sqs_service::get_queue_url_op);
+        bind("ListDeadLetterSourceQueues", &sqs_service::list_dead_letter_source_queues_op);
+        bind("ListMessageMoveTasks", &sqs_service::list_message_move_tasks_op);
         bind("ListQueueTags", &sqs_service::list_queue_tags_op);
         bind("ListQueues", &sqs_service::list_queues_op);
         bind("PurgeQueue", &sqs_service::purge_queue_op);
@@ -330,6 +332,7 @@ public:
         bind("SendMessage", &sqs_service::send_message_op);
         bind("SendMessageBatch", &sqs_service::send_message_batch_op);
         bind("SetQueueAttributes", &sqs_service::set_queue_attributes_op);
+        bind("StartMessageMoveTask", &sqs_service::start_message_move_task_op);
         bind("TagQueue", &sqs_service::tag_queue_op);
         bind("UntagQueue", &sqs_service::untag_queue_op);
         fe.set_queue_lookup([this](std::string_view arn) { return lookup(arn); });
@@ -436,7 +439,11 @@ private:
 
     /// Checks a `RedrivePolicy`'s target: an existing queue of the same
     /// kind in the same account (task 6 moves messages to it).
-    [[nodiscard]] auto check_redrive(const queue_settings& s, std::string_view account)
+    /// A redrive policy names an existing queue of the same account and
+    /// type whose redrive allow policy lets `source_arn` use it
+    /// (Requirement 7.2).
+    [[nodiscard]] auto check_redrive(const queue_settings& s, std::string_view account,
+                                     std::string_view source_arn)
         -> std::optional<aws_json::error> {
         if (s._redrive_policy.empty()) {
             return std::nullopt;
@@ -456,7 +463,75 @@ private:
                 "RedrivePolicy", s._redrive_policy,
                 "Dead-letter queue must be same type of queue as the source.");
         }
+        if (!redrive_allowed(dlq->_settings._redrive_allow_policy, source_arn)) {
+            return service_detail::invalid_value(
+                "RedrivePolicy", s._redrive_policy,
+                "Queue " + std::string(*target) +
+                    " does not allow this queue to use it as a dead-letter queue.");
+        }
         return std::nullopt;
+    }
+
+    /// Whether a dead-letter queue's redrive allow policy admits
+    /// `source_arn`: no policy or allowAll admits every queue of the
+    /// account, denyAll none, byQueue those listed.
+    [[nodiscard]] static auto redrive_allowed(std::string_view allow, std::string_view source_arn)
+        -> bool {
+        if (allow.empty()) {
+            return true;
+        }
+        const auto o = attribute_detail::parse_object(allow);
+        if (!o) {
+            return false;
+        }
+        const auto perm = service_detail::string_member(*o, "redrivePermission").value_or("");
+        if (perm == "allowAll") {
+            return true;
+        }
+        if (perm != "byQueue") {
+            return false;
+        }
+        const auto* arns = o->if_contains("sourceQueueArns");
+        if (arns == nullptr || !arns->is_array()) {
+            return false;
+        }
+        return std::any_of(arns->get_array().begin(), arns->get_array().end(),
+                           [&](const boost::json::value& v) {
+                               return v.is_string() && v.get_string() == source_arn;
+                           });
+    }
+
+    /// The receive's redrive target from `q`'s policy, when its dead-letter
+    /// queue exists.
+    [[nodiscard]] auto redrive_of(const queue_record& q, std::string_view source_arn)
+        -> std::optional<redrive_target> {
+        if (q._settings._redrive_policy.empty()) {
+            return std::nullopt;
+        }
+        const auto o = attribute_detail::parse_object(q._settings._redrive_policy);
+        if (!o) {
+            return std::nullopt;
+        }
+        const auto target = service_detail::string_member(*o, "deadLetterTargetArn");
+        const auto arn = target ? parse_sqs_arn(*target) : std::nullopt;
+        const auto dlq = arn ? find(arn->_account, arn->_name) : std::nullopt;
+        if (!dlq) {
+            return std::nullopt;
+        }
+        std::uint32_t count = 0;
+        if (const auto* v = o->if_contains("maxReceiveCount")) {
+            if (v->is_int64()) {
+                count = static_cast<std::uint32_t>(std::max<std::int64_t>(v->get_int64(), 0));
+            } else if (v->is_string()) {
+                count = static_cast<std::uint32_t>(
+                    std::strtoul(std::string(v->get_string()).c_str(), nullptr, 10));
+            }
+        }
+        if (count == 0) {
+            return std::nullopt;
+        }
+        return redrive_target{count, dlq->target(0), std::max<std::uint16_t>(dlq->_partitions, 1),
+                              std::string(source_arn)};
     }
 
     // -- queues -----------------------------------------------------------------
@@ -487,7 +562,7 @@ private:
         if (auto e = apply_attributes(s, attrs, true, profile)) {
             return *e;
         }
-        if (auto e = check_redrive(s, ctx._queue->_account)) {
+        if (auto e = check_redrive(s, ctx._queue->_account, ctx._queue->_arn)) {
             return *e;
         }
         auto c = catalog_base(ctx, catalog_command::kind::create);
@@ -622,6 +697,297 @@ private:
         return out;
     }
 
+    /// The account's queues whose redrive policy names this queue, in name
+    /// order, paged like ListQueues.
+    auto list_dead_letter_source_queues_op(sqs_call_context& ctx, boost::json::object& in)
+        -> result {
+        using namespace service_detail;
+        const auto q = queue_of(ctx);
+        if (!q) {
+            return q.error();
+        }
+        const auto max = int_member(in, "MaxResults");
+        if (max && (*max < 1 || *max > 1000)) {
+            return invalid_value("MaxResults", std::to_string(*max),
+                                 "MaxResults must be an integer between 1 and 1000.");
+        }
+        std::string after;
+        if (const auto token = string_member(in, "NextToken")) {
+            const auto raw = aws_json::base64_decode(*token);
+            if (!raw || raw->empty()) {
+                return make_error(k_validation_error, "Invalid NextToken value.");
+            }
+            after.assign(reinterpret_cast<const char*>(raw->data()), raw->size());  // NOLINT
+        }
+        const auto& account = ctx._queue->_account;
+        const auto& arn = ctx._queue->_arn;
+        const auto limit = static_cast<std::size_t>(max.value_or(1000));
+        std::vector<std::string> sources;
+        bool more = false;
+        if (!_cluster.read(catalog_keys::queues_prefix(account), [&](const state_machine_type& sm) {
+                for (const auto& r :
+                     sm.list_queues(account, "", after, std::numeric_limits<std::size_t>::max())) {
+                    const auto o = attribute_detail::parse_object(r._settings._redrive_policy);
+                    if (!o || string_member(*o, "deadLetterTargetArn").value_or("") != arn) {
+                        continue;
+                    }
+                    if (sources.size() == limit) {
+                        more = true;
+                        break;
+                    }
+                    sources.push_back(r._name);
+                }
+            })) {
+            return internal_failure();
+        }
+        boost::json::object out;
+        boost::json::array urls;
+        for (const auto& name : sources) {
+            urls.emplace_back(ctx.queue_url(account, name));
+        }
+        out["queueUrls"] = std::move(urls);
+        if (max && more) {
+            const auto& last = sources.back();
+            out["NextToken"] = aws_json::base64_encode(
+                std::as_bytes(std::span<const char>(last.data(), last.size())));
+        }
+        return out;
+    }
+
+    // -- move tasks (Requirement 7.3) -------------------------------------------
+
+    /// The source queue of a move-task operation, or ResourceNotFound.
+    [[nodiscard]] auto move_source(const sqs_call_context& ctx) -> aws_json::result<queue_record> {
+        if (!ctx._queue) {
+            return service_detail::missing("SourceArn");
+        }
+        auto q = find(ctx._queue->_account, ctx._queue->_name);
+        if (!q) {
+            return modeled_error("ResourceNotFoundException",
+                                 "The resource that you specified for the SourceArn parameter "
+                                 "doesn't exist.");
+        }
+        return std::move(*q);
+    }
+
+    /// Whether some queue of `account` names `arn` as its dead-letter queue.
+    [[nodiscard]] auto is_dead_letter_queue(std::string_view account, std::string_view arn)
+        -> bool {
+        bool found = false;
+        (void)_cluster.read(
+            catalog_keys::queues_prefix(account), [&](const state_machine_type& sm) {
+                for (const auto& r :
+                     sm.list_queues(account, "", "", std::numeric_limits<std::size_t>::max())) {
+                    const auto o = attribute_detail::parse_object(r._settings._redrive_policy);
+                    if (o &&
+                        service_detail::string_member(*o, "deadLetterTargetArn").value_or("") ==
+                            arn) {
+                        found = true;
+                        return;
+                    }
+                }
+            });
+        return found;
+    }
+
+    /// Visible messages across `q`'s partitions, as this replica has them.
+    [[nodiscard]] auto visible_count(const queue_record& q) -> std::uint64_t {
+        std::uint64_t n = 0;
+        for (std::uint16_t p = 0; p < std::max<std::uint16_t>(q._partitions, 1); ++p) {
+            const auto t = q.target(p);
+            (void)_cluster.read(queue_keys::partition_prefix(t),
+                                [&](const state_machine_type& sm) { n += sm.counts(t).visible; });
+        }
+        return n;
+    }
+
+    /// A task handle: the source ARN and the start time, base64.
+    [[nodiscard]] static auto task_handle(const move_task& m) -> std::string {
+        const auto raw = m._source_arn + "\n" + std::to_string(m._started_ms);
+        return aws_json::base64_encode(
+            std::as_bytes(std::span<const char>(raw.data(), raw.size())));
+    }
+
+    [[nodiscard]] static auto parse_task_handle(std::string_view handle)
+        -> std::optional<std::pair<std::string, std::uint64_t>> {
+        const auto raw = aws_json::base64_decode(handle);
+        if (!raw) {
+            return std::nullopt;
+        }
+        const std::string s(reinterpret_cast<const char*>(raw->data()), raw->size());  // NOLINT
+        const auto nl = s.rfind('\n');
+        if (nl == std::string::npos || nl + 1 == s.size() || nl + 21 < s.size()) {
+            return std::nullopt;
+        }
+        std::uint64_t started = 0;
+        for (const char ch : std::string_view(s).substr(nl + 1)) {
+            if (ch < '0' || ch > '9') {
+                return std::nullopt;
+            }
+            started = started * 10 + static_cast<std::uint64_t>(ch - '0');
+        }
+        return std::pair{s.substr(0, nl), started};
+    }
+
+    [[nodiscard]] static auto move_task_not_found() -> aws_json::error {
+        return modeled_error("ResourceNotFoundException",
+                             "The task handle doesn't refer to a running task.");
+    }
+
+    auto start_message_move_task_op(sqs_call_context& ctx, boost::json::object& in) -> result {
+        using namespace service_detail;
+        const auto q = move_source(ctx);
+        if (!q) {
+            return q.error();
+        }
+        const auto& account = ctx._queue->_account;
+        const auto& source_arn = ctx._queue->_arn;
+        if (!is_dead_letter_queue(account, source_arn)) {
+            return invalid_value("SourceArn", source_arn,
+                                 "Source queue must be configured as a Dead Letter Queue.");
+        }
+        move_task m;
+        m._source_arn = source_arn;
+        if (const auto dest = string_member(in, "DestinationArn")) {
+            const auto parts = parse_sqs_arn(*dest);
+            const auto d = parts ? find(parts->_account, parts->_name) : std::nullopt;
+            if (!d) {
+                return modeled_error("ResourceNotFoundException",
+                                     "The resource that you specified for the DestinationArn "
+                                     "parameter doesn't exist.");
+            }
+            if (*dest == source_arn) {
+                return invalid_value("DestinationArn", *dest,
+                                     "Source queue and destination queue can not be the same.");
+            }
+            if (d->_settings._fifo != q->_settings._fifo) {
+                return invalid_value("DestinationArn", *dest,
+                                     "Destination queue must be same type of queue as the source.");
+            }
+            // Moving in sends to the destination: the caller needs that too.
+            aws_auth::authz_request r;
+            r.action = "sqs:SendMessage";
+            r.resource = std::string(*dest);
+            if (auto denied = ctx.authorize(std::move(r))) {
+                return *denied;
+            }
+            m._destination_arn = std::string(*dest);
+        }
+        if (const auto rate = int_member(in, "MaxNumberOfMessagesPerSecond")) {
+            if (*rate < 1 || *rate > 500) {
+                return invalid_value("MaxNumberOfMessagesPerSecond", std::to_string(*rate),
+                                     "Value must be between 1 and 500.");
+            }
+            m._rate = static_cast<std::uint32_t>(*rate);
+        }
+        m._to_move = visible_count(*q);
+        auto c = catalog_base(ctx, catalog_command::kind::move_start);
+        c._move = std::move(m);
+        const auto r = commit_catalog(c);
+        if (!r) {
+            return internal_failure();
+        }
+        if (r->_outcome == status::does_not_exist) {
+            return move_source(ctx).error();
+        }
+        if (r->_outcome == status::move_in_progress) {
+            return modeled_error("UnsupportedOperation",
+                                 "There is already a task running. Only one active task is "
+                                 "allowed for each source queue arn at a given time.");
+        }
+        if (r->_outcome != status::ok || !r->_move) {
+            return internal_failure();
+        }
+        boost::json::object out;
+        out["TaskHandle"] = task_handle(*r->_move);
+        return out;
+    }
+
+    auto list_message_move_tasks_op(sqs_call_context& ctx, boost::json::object& in) -> result {
+        using namespace service_detail;
+        const auto q = move_source(ctx);
+        if (!q) {
+            return q.error();
+        }
+        const auto max = int_member(in, "MaxResults");
+        if (max && (*max < 1 || *max > 10)) {
+            return invalid_value("MaxResults", std::to_string(*max),
+                                 "Value must be between 1 and 10.");
+        }
+        std::vector<move_task> tasks;
+        if (!_cluster.read(catalog_keys::moves_of(q->_account, q->_name),
+                           [&](const state_machine_type& sm) {
+                               tasks = sm.move_tasks(q->_account, q->_name);
+                           })) {
+            return internal_failure();
+        }
+        boost::json::array results;
+        for (const auto& m : tasks) {
+            if (results.size() == static_cast<std::size_t>(max.value_or(1))) {
+                break;
+            }
+            boost::json::object o;
+            if (m._status == move_task::state::running) {
+                o["TaskHandle"] = task_handle(m);
+            }
+            o["Status"] = move_state_name(m._status);
+            o["SourceArn"] = m._source_arn;
+            if (!m._destination_arn.empty()) {
+                o["DestinationArn"] = m._destination_arn;
+            }
+            if (m._rate != 0) {
+                o["MaxNumberOfMessagesPerSecond"] = m._rate;
+            }
+            o["ApproximateNumberOfMessagesMoved"] = m._moved;
+            o["ApproximateNumberOfMessagesToMove"] = m._to_move;
+            if (!m._failure.empty()) {
+                o["FailureReason"] = m._failure;
+            }
+            o["StartedTimestamp"] = m._started_ms;
+            results.emplace_back(std::move(o));
+        }
+        boost::json::object out;
+        out["Results"] = std::move(results);
+        return out;
+    }
+
+    auto cancel_message_move_task_op(sqs_call_context& ctx, boost::json::object& in) -> result {
+        using namespace service_detail;
+        const auto handle = string_member(in, "TaskHandle");
+        if (!handle) {
+            return missing("TaskHandle");
+        }
+        const auto parsed = parse_task_handle(*handle);
+        const auto arn = parsed ? parse_sqs_arn(parsed->first) : std::nullopt;
+        if (!arn) {
+            return move_task_not_found();
+        }
+        // The handle names the queue: authorize on it (the front end could
+        // not).
+        aws_auth::authz_request r;
+        r.action = "sqs:CancelMessageMoveTask";
+        r.resource = parsed->first;
+        if (auto denied = ctx.authorize(std::move(r))) {
+            return *denied;
+        }
+        catalog_command c;
+        c._op = catalog_command::kind::move_cancel;
+        c._account = std::string(arn->_account);
+        c._name = std::string(arn->_name);
+        c._now_ms = _cluster.now_ms();
+        c._move._started_ms = parsed->second;
+        const auto res = commit_catalog(c);
+        if (!res) {
+            return internal_failure();
+        }
+        if (res->_outcome != status::ok || !res->_move) {
+            return move_task_not_found();
+        }
+        boost::json::object out;
+        out["ApproximateNumberOfMessagesMoved"] = res->_move->_moved;
+        return out;
+    }
+
     auto get_queue_attributes_op(sqs_call_context& ctx, boost::json::object& in) -> result {
         const auto q = queue_of(ctx);
         if (!q) {
@@ -692,7 +1058,7 @@ private:
                     return e;
                 }
                 if (attrs.contains("RedrivePolicy")) {
-                    return check_redrive(s, q._account);
+                    return check_redrive(s, q._account, ctx._queue->_arn);
                 }
                 return std::nullopt;
             });
@@ -923,7 +1289,7 @@ private:
                                       std::uint64_t rotation) const -> std::uint16_t {
         const auto n = std::max<std::uint16_t>(q._partitions, 1);
         if (q._settings._fifo) {
-            return static_cast<std::uint16_t>(service_detail::group_hash(e.group_id) % n);
+            return static_cast<std::uint16_t>(group_hash(e.group_id) % n);
         }
         return static_cast<std::uint16_t>(rotation % n);
     }
@@ -1115,6 +1481,9 @@ private:
         if (!m.group_id.empty() && want("MessageGroupId")) {
             out["MessageGroupId"] = m.group_id;
         }
+        if (!m.dead_letter_source.empty() && want("DeadLetterQueueSourceArn")) {
+            out["DeadLetterQueueSourceArn"] = m.dead_letter_source;
+        }
         if (q._settings._fifo) {
             if (want("MessageDeduplicationId")) {
                 out["MessageDeduplicationId"] = m.dedup_id;
@@ -1174,6 +1543,7 @@ private:
 
         boost::json::array messages;
         const auto n = std::max<std::uint16_t>(q->_partitions, 1);
+        const auto redrive = redrive_of(*q, ctx._queue->_arn);
         // One pass over the partitions; false when nothing could commit.
         const auto pass = [&]() -> bool {
             const auto start = next_rotation();
@@ -1191,6 +1561,7 @@ private:
                 c.now_ms = now;
                 c.max_messages = remaining;
                 c.visibility_timeout_s = static_cast<std::uint32_t>(visibility);
+                c.redrive = redrive;
                 const auto r = commit_queue(c);
                 if (!r) {
                     return !messages.empty();

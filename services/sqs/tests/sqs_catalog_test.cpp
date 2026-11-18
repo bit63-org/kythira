@@ -109,8 +109,28 @@ BOOST_AUTO_TEST_CASE(records_and_entries_round_trip) {
     BOOST_TEST(sqs::is_catalog_entry(sqs::encode_catalog_command(c)));
     BOOST_TEST(!sqs::is_catalog_entry(sqs::encode_queue_command(sqs::queue_command{})));
 
-    sqs::catalog_result r{status::name_exists, q};
+    sqs::catalog_result r{status::name_exists, q, {}};
     BOOST_TEST((sqs::decode_catalog_result(sqs::encode_catalog_result(r)) == std::optional(r)));
+
+    // Move tasks travel in commands, results and their own records.
+    sqs::move_task m;
+    m._account = "1";
+    m._name = "dlq";
+    m._started_ms = 99;
+    m._status = sqs::move_task::state::cancelling;
+    m._source_arn = "arn:aws:sqs:us-east-1:1:dlq";
+    m._destination_arn = "arn:aws:sqs:us-east-1:1:src";
+    m._rate = 50;
+    m._moved = 7;
+    m._to_move = 9;
+    m._failure = "gone";
+    BOOST_TEST((sqs::decode_move_task(sqs::encode_move_task(m)) == std::optional(m)));
+    auto mc = c;
+    mc._op = sqs::catalog_command::kind::move_update;
+    mc._move = m;
+    BOOST_TEST((sqs::decode_catalog_command(sqs::encode_catalog_command(mc)) == std::optional(mc)));
+    sqs::catalog_result mr{status::move_in_progress, std::nullopt, m};
+    BOOST_TEST((sqs::decode_catalog_result(sqs::encode_catalog_result(mr)) == std::optional(mr)));
 
     // Truncations and trailing bytes never decode.
     const auto e = sqs::encode_catalog_command(c);
