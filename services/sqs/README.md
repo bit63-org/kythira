@@ -45,6 +45,8 @@ Built when `CONFIG_SQS=y` (`services/sqs/Kconfig`, off by default).
 | `include/kythira/sqs/sqs_raft_cluster.hpp`, `include/kythira/sqs/sqs_forward.hpp` | `queue_cluster` over a `multi_raft` host, and node-to-node forwarding of entries to a group's leader (HMAC over the cluster's forwarding secret) | 4 |
 | `include/kythira/sqs/sqs_listener.hpp` | the API and the forwarding endpoint as a handler for core's Beast HTTPS server | 4 |
 | `include/kythira/sqs/sqs_node_options.hpp` | `sqs_node`'s settings from `SQS_*` variables | 4 |
+| `include/kythira/sqs/sqs_long_poll.hpp` | where long polls park: subscriptions to a queue's partitions, woken when a committed entry leaves one with visible messages, closed by a drain | 5 |
+| `include/kythira/sqs/sqs_workers.hpp` | the leader's tick worker: proposes a `tick` when a partition's earliest deadline passes, so ended delays and visibility timeouts become committed facts that wake long polls | 5 |
 | `cmd/sqs_node/sqs_module.hpp`, `cmd/sqs_node/sqs_module_registrar.cpp` | the service module, number 9: the queues on a `multi_raft` host in the node's engine (RocksDB), one group over every node of `KYTHIRA_NODE_PEERS`, followers forwarding to the leader's listener; registered for `kythira_node` (`KYTHIRA_SERVICES=sqs`) | 4 |
 | `cmd/sqs_node/` | the daemon: with `KYTHIRA_NODE_DATA_DIR` set, the module alone on a node (durable, one or more nodes); otherwise one node with its queues in memory, for development (`SQS_LISTEN`, `SQS_STATIC_KEYS_FILE`, ...); `--self-test` checks the operation table | 1, 4 |
 

@@ -74,6 +74,13 @@ public:
 
     [[nodiscard]] auto now_ms() -> std::uint64_t { return _clock(); }
 
+    /// Sets the state machine's listener (`sqs_long_poll.hpp`). It runs
+    /// under this cluster's lock, so it must not call back into it.
+    auto set_availability_listener(state_machine_type::availability_listener listener) -> void {
+        const std::scoped_lock lock(_mutex);
+        _sm.set_availability_listener(std::move(listener));
+    }
+
     [[nodiscard]] static auto system_clock_ms() -> std::uint64_t {
         return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
                                               std::chrono::system_clock::now().time_since_epoch())
