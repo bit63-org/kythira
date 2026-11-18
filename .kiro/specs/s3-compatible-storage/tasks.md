@@ -109,10 +109,29 @@ builds it to that design). Each task is one PR unless noted.
     continues identically, and every count equals a recount of the
     manifests.
 
-- [ ] 5. Write and read path
+- [x] 5. Write and read path
   - Chunking, SHA-256, write quorum, manifest commit, chunk verification
     and repair on read; co-located placement
   - _Requirements: 7.1, 10.1, 10.2, 10.5, 15.1_
+  - Done: `s3_placement.hpp` (one `placement_map` with an epoch for both
+    rules: co-located copies are the owning group's replicas with a
+    majority quorum; rendezvous is weighted rendezvous hashing over blob
+    nodes, one copy per placement group first, so task 18 only has to
+    replicate and move between maps) and `s3_data_path.hpp`. A body is cut
+    into 8 MiB chunks as it streams, each hashed and written to all of its
+    placement's copies in parallel; a chunk counts at a write quorum of
+    durable answers, and `put_object` calls the commit only after every
+    chunk has its quorum. A missed quorum is `503 SlowDown` and commits
+    nothing; a refused chunk is `500` (configuration, not load). The body's
+    MD5 is the single-part ETag. Reads fetch only the chunks a range
+    overlaps, take the first copy whose bytes hash to the name, rewrite
+    the missing or corrupt copies read before it and report each; no good
+    copy is `500 InternalError` and nothing bad is served. A node drops a
+    corrupt copy of its own as it reads it (`local_chunk_access`), so the
+    repair write stores the good bytes instead of being answered
+    `present`. The write waits for every copy, not just the quorum, since
+    the bytes are the caller's; acknowledging at quorum is left for
+    measurement. Wiring into handlers is task 7.
 
 - [ ] 6. Gateway, authentication and authorization
   - SigV4 in headers, query and streaming chunks with trailers, POST
