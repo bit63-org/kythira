@@ -243,7 +243,7 @@ PR unless noted.
   - Progress (November 18, 2026): `services/sqs/doc/` has configuration,
     delivery semantics and clocks, encryption and the SNS bridge beside
     `unsupported.md`. `tools/sqs_load.py` and `doc/measurements.md` with
-    the in-memory and co-located rows from a development container (a
-    lower bound; a production-hardware row is still wanted). Left: the
-    layers and sizing page and the migration runbook (after tasks 10 and
-    11), and the split row.
+    the in-memory, co-located and three-layer split rows from a
+    development container (a lower bound; a production-hardware row is
+    still wanted). Left: the layers and sizing page and the migration
+    runbook (after task 11).
