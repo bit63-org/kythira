@@ -348,6 +348,23 @@ private:
     boost::asio::io_context::executor_type _ex;
 };
 
+// Whether the executor is destroyed within a few seconds. get() returns
+// once the last link has set its value, which happens inside the task the
+// io thread is still running; that task (and the keep-alive pin it holds)
+// is destroyed only after it returns. A check straight after get() races
+// the io thread's teardown of the task, and lost once in CI (the void
+// chain read "not destroyed" and passed on retry).
+auto eventually_destroyed() -> bool {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{5};
+    while (!tracking_executor_destroyed.load()) {
+        if (std::chrono::steady_clock::now() >= deadline) {
+            return false;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds{1});
+    }
+    return true;
+}
+
 struct io_thread {
     boost::asio::io_context io;
     boost::asio::executor_work_guard<boost::asio::io_context::executor_type> guard{
@@ -383,7 +400,7 @@ BOOST_AUTO_TEST_CASE(via_keeps_released_executor_alive_for_value_chain,
         BOOST_CHECK(!owner);
     }
     BOOST_CHECK_EQUAL(submits_after_destroy.load(), 0);
-    BOOST_CHECK(tracking_executor_destroyed.load());  // pinned, not leaked
+    BOOST_CHECK(eventually_destroyed());  // pinned, not leaked
 }
 
 BOOST_AUTO_TEST_CASE(via_keeps_released_executor_alive_for_void_chain,
@@ -410,7 +427,7 @@ BOOST_AUTO_TEST_CASE(via_keeps_released_executor_alive_for_void_chain,
     }
     BOOST_CHECK_EQUAL(links.load(), 3);
     BOOST_CHECK_EQUAL(submits_after_destroy.load(), 0);
-    BOOST_CHECK(tracking_executor_destroyed.load());
+    BOOST_CHECK(eventually_destroyed());
 }
 
 BOOST_AUTO_TEST_SUITE_END()
