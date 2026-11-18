@@ -466,7 +466,12 @@ echo
 # clang-tidy/ (the clang-tidy result cache, .kiro/specs/clang-tidy-result-cache/
 # Requirement 4.2) is on the sccache side of that line: one small JSON object
 # per clean translation unit, re-analysed in about a minute if it expires.
-echo "4. Lifecycle rules (sccache/ and clang-tidy/ 30 days, vcpkg/ 90 days)"
+# sccache-measure-3/ is task 1's measurement prefix, which no rule covered and
+# nobody can delete (OBJECT_DELETE is granted to nobody, above). A one-day
+# rule is how it goes without granting that: found by listing the bucket on
+# 2026-11-18, 4,421 objects and 2.1 GiB, two months after the measurement.
+# audit.sh now warns about any top-level prefix outside the three below.
+echo "4. Lifecycle rules (sccache/ and clang-tidy/ 30 days, vcpkg/ 90 days, sccache-measure-3/ 1 day)"
 # A bare JSON ARRAY in camelCase, which is what --items wants. Both halves of
 # that were learned from the live service rejecting the alternatives: an
 # object wrapped as {"items": [...]}, and kebab-case keys, are each refused
@@ -484,7 +489,10 @@ LIFECYCLE_JSON=$(cat <<'JSON'
    "objectNameFilter": {"inclusionPrefixes": ["vcpkg/"]}},
   {"name": "expire-clang-tidy-results", "action": "DELETE", "timeAmount": 30,
    "timeUnit": "DAYS", "isEnabled": true,
-   "objectNameFilter": {"inclusionPrefixes": ["clang-tidy/"]}}
+   "objectNameFilter": {"inclusionPrefixes": ["clang-tidy/"]}},
+  {"name": "expire-measurement-leftovers", "action": "DELETE", "timeAmount": 1,
+   "timeUnit": "DAYS", "isEnabled": true,
+   "objectNameFilter": {"inclusionPrefixes": ["sccache-measure-3/"]}}
 ]
 JSON
 )

@@ -93,6 +93,12 @@ JSON
 JSON
                  exit 0 ;;
       esac ;;
+  *"os object list"*"--delimiter"*)
+      if [ "${STUB_SCENARIO:-clean}" = "strayprefix" ]; then
+          echo '{"data":[],"prefixes":["clang-tidy/","sccache-measure-3/","sccache/","vcpkg/"]}'
+      else
+          echo '{"data":[],"prefixes":["clang-tidy/","sccache/","vcpkg/"]}'
+      fi ;;
   *"os object list"*)
       if [ "${STUB_SCENARIO:-clean}" = "infofail" ]; then
           echo "ServiceError: BucketNotFound" >&2; exit 1
@@ -211,6 +217,9 @@ check stderrnoise 0 "tenancy id unavailable"         "a command that exits 0 whi
 check clean    0 "clang-tidy/: 2 objects"            "the clang-tidy result cache prefix is counted"
 check clean    0 "expire-clang-tidy-results: DELETE objects under clang-tidy/ after 30 days" \
                                                      "the clang-tidy lifecycle rule is reported"
+check clean    0 "no other top-level prefixes"       "a bucket holding only the known prefixes says so"
+check strayprefix 0 "unexpected top-level entry sccache-measure-3/" \
+                                                     "a prefix no lifecycle rule covers is named, not skipped"
 
 # The month-one bill. All three fail against the version before this one, which
 # asked the Usage API for an ungrouped total and then filtered it by a field
