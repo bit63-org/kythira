@@ -790,6 +790,13 @@ if(FIU_FOUND)
     target_include_directories(raft_log_encryption_unit_test PRIVATE ${FIU_INCLUDE_DIRS})
 endif()
 
+# raft-log-encryption task 7: appends (with their barrier) and reads, plain
+# against sealed, per command size. Prints a table; a few seconds.
+add_raft_completion_test(raft_log_encryption_bench raft_log_encryption_bench.cpp)
+target_link_libraries(raft_log_encryption_bench PRIVATE OpenSSL::Crypto)
+set_tests_properties(raft_log_encryption_bench PROPERTIES
+    LABELS "benchmark;persistence" TIMEOUT 600)
+
 # .kiro/specs/durable-append-barrier/ — the barrier-coverage, crash, group-commit
 # and ordering tests. Drives a real `node<Types>` over a file-backed engine, so
 # it is registered beside file_persistence_unit_test rather than with the
