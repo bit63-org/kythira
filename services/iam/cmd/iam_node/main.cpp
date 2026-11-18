@@ -60,12 +60,7 @@
 #include <openssl/pem.h>
 #include <openssl/x509v3.h>
 
-// Present in every CMake build, which links folly whatever the future
-// backend; absent only in a folly-free build of the Boost backend.
-#if __has_include(<folly/init/Init.h>)
-#include <folly/init/Init.h>
-#define KYTHIRA_IAM_NODE_HAS_FOLLY_INIT 1
-#endif
+#include <raft/process_init.hpp>
 
 #include <atomic>
 #include <condition_variable>
@@ -193,15 +188,10 @@ auto run(const iam_node::config& cfg, std::string passphrase) -> int {
 }  // namespace
 
 int main(int argc, char** argv) {
-#ifdef KYTHIRA_IAM_NODE_HAS_FOLLY_INIT
-    // As in ca_cluster_node: folly::Init with only the program name, so its
-    // flag parser never sees this binary's flags. It registers the
-    // Timekeeper the RPC client's retries use.
-    int folly_argc = 1;
-    char* folly_argv_storage[] = {argv[0]};
-    char** folly_argv = folly_argv_storage;
-    folly::Init folly_init(&folly_argc, &folly_argv, false);
-#endif
+    // As in ca_cluster_node: folly::Init (where Folly is linked) with only
+    // the program name, so its flag parser never sees this binary's flags.
+    // It registers the Timekeeper the RPC client's retries use.
+    const kythira::process_init process_init(argv[0]);
 
     iam_node::config cfg;
     try {

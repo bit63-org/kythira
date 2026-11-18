@@ -1,8 +1,10 @@
 # Copyright (c) 2026 Clark Rawlins
 # SPDX-License-Identifier: Apache-2.0
 
-if(NOT LIBLDNS_FOUND OR NOT folly_FOUND OR NOT httplib_FOUND)
-    message(STATUS "dns_sd_discovery_node: skipped (requires libldns + folly + httplib)")
+# No folly_FOUND: main() initialises Folly through raft/process_init.hpp only
+# where it is linked; the parent CMakeLists.txt requires a future backend.
+if(NOT LIBLDNS_FOUND OR NOT httplib_FOUND)
+    message(STATUS "dns_sd_discovery_node: skipped (requires libldns + httplib)")
     return()
 endif()
 

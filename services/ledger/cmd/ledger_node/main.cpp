@@ -12,9 +12,8 @@
 #include <kythira/ledger/ion_hash.hpp>
 #include <kythira/ledger/merkle.hpp>
 
-#if defined(KYTHIRA_LEDGER_NODE_DAEMON) && !defined(KYTHIRA_FUTURE_BACKEND_STDEXEC) && \
-    !defined(KYTHIRA_FUTURE_BACKEND_BOOST)
-#include <folly/init/Init.h>
+#if defined(KYTHIRA_LEDGER_NODE_DAEMON)
+#include <raft/process_init.hpp>
 #endif
 
 #include <cstdio>
@@ -70,9 +69,7 @@ auto main(int argc, char** argv) -> int {
     return argc == 2 && (arg == "--help" || arg == "-h") ? 0 : 2;
 #endif
 #if defined(KYTHIRA_LEDGER_NODE_DAEMON)
-#if !defined(KYTHIRA_FUTURE_BACKEND_STDEXEC) && !defined(KYTHIRA_FUTURE_BACKEND_BOOST)
-    folly::Init init(&argc, &argv);
-#endif
+    const kythira::process_init process_init(argv[0]);
     kythira::ledger_node::node_options opt;
     try {
         opt = kythira::ledger_node::from_env(kythira::ledger_node::process_env());
