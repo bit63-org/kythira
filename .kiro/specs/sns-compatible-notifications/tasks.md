@@ -37,11 +37,25 @@ first builds it to that design). Each task is one PR unless noted.
     `Unsubscribe` on either of two runs, although the documentation lists
     one; task 6 follows the recording.
 
-- [ ] 2. Topic state machine and publish log
+- [x] 2. Topic state machine and publish log
   - Topics, subscriptions, FIFO dedup, publish into the record segment
     store, delivery partitions, leases with fencing, cursors and retry
     state; property tests
   - _Requirements: 4.3, 5.1, 5.3_
+  - Done (November 18, 2026): `sns_topic_state_machine.hpp` and
+    `sns_codec.hpp`. Topic ids come from a counter and are never reused;
+    `CreateTopic` and `Subscribe` are idempotent on identical attributes;
+    a publish (up to ten entries) appends to `t/<topic id>/<partition>`
+    and barriers before `apply()` returns; FIFO dedup records (five
+    minutes of leader time) are in the state and its snapshots; a
+    delivery partition is (topic, log partition, subscription bucket)
+    under a lease whose token fences cursor and retry commits. The
+    snapshot carries segment descriptors, never message bytes, and a
+    restore truncates a tail past it and fetches the active segment it
+    lacks. `sns_topic_state_machine_test` runs random command mixes
+    through two replicas, and through a replica restored midway, and
+    requires identical results, state and logs. Splitting a topic's
+    state across groups (task 9) is not done yet.
 
 - [ ] 3. Gateway, protocol and authorization
   - Query codec, SigV4, `sns` action table, topic policies, static keys,
