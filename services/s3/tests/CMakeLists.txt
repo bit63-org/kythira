@@ -58,6 +58,14 @@ target_compile_definitions(s3_routing_test PRIVATE
     KYTHIRA_S3_EVIDENCE_DIR_DEFAULT="${_s3_dir}tests/evidence/data")
 add_test(NAME s3_routing_test COMMAND s3_routing_test)
 
+# Task 4: the object index state machine (buckets, versioning, conditions
+# in apply, copies, multipart uploads, listings, reference counts with
+# grace) and its replica, snapshot and recount properties. It includes the
+# persistent state machine contract (raft/types.hpp), hence the shared test
+# PCH target like the other modules' state machine tests.
+add_raft_completion_test(s3_index_state_machine_test s3_index_state_machine_test.cpp)
+target_link_libraries(s3_index_state_machine_test PRIVATE kythira_s3)
+
 set_tests_properties(
     s3_model_coverage
     s3_model_coverage_checker
@@ -65,6 +73,7 @@ set_tests_properties(
     s3_wire_evidence
     s3_gateway_node_self_test
     s3_routing_test
+    s3_index_state_machine_test
     PROPERTIES LABELS "unit;s3;s3-module" TIMEOUT 60)
 
 kythira_scale_test_timeouts()
