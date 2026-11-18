@@ -57,8 +57,10 @@
 #include <chrono>
 #include <csignal>
 #include <cstdint>
+#include <cstdlib>
 #include <filesystem>
 #include <functional>
+#include <iostream>
 #include <optional>
 #include <set>
 #include <string>
@@ -278,7 +280,7 @@ public:
         p.pid = pid;
     }
 
-    static void stop(node_proc& p) {
+    void stop(node_proc& p) const {
         if (p.pid <= 0) {
             return;
         }
@@ -294,6 +296,7 @@ public:
             std::this_thread::sleep_for(20ms);
         }
         BOOST_ERROR("kythira_node " << p.pid << " ignored SIGTERM; killing it");
+        dump_stuck(p);
         ::kill(p.pid, SIGKILL);
         ::waitpid(p.pid, &status, 0);
         p.pid = -1;
@@ -313,6 +316,25 @@ public:
             std::this_thread::sleep_for(200ms);
         }
         return nullptr;
+    }
+
+    /// What a kythira_node that did not stop was doing, on stderr: its log's
+    /// tail (the directory is removed afterwards, and dump_logs() has run by
+    /// then and only on a failed case) and every thread's stack through gdb
+    /// when installed and allowed to attach (Yama's ptrace_scope may refuse
+    /// it, since gdb is not the node's ancestor), after each thread's name
+    /// and wait channel, which need no permission. CI saw one node ignore
+    /// SIGTERM for 30 s (2026-11-18) and left nothing else to go on.
+    void dump_stuck(const node_proc& p) const {
+        const auto log = slurp(_dir / ("node-" + std::to_string(p.n)) / "node.log");
+        std::cerr << "---- kythira_node " << p.n << " (pid " << p.pid << ") log tail ----\n"
+                  << (log.size() > 6000 ? log.substr(log.size() - 6000) : log) << '\n';
+        const auto pid = std::to_string(p.pid);
+        const auto cmd = "for t in /proc/" + pid +
+                         "/task/*; do echo \"$t $(cat $t/comm) $(cat $t/wchan)\" 1>&2; done; "
+                         "if command -v gdb >/dev/null 2>&1; then gdb -p " +
+                         pid + " -batch -nx -ex 'thread apply all bt' 1>&2 2>/dev/null; fi";
+        std::ignore = std::system(cmd.c_str());  // NOLINT(cert-env33-c): diagnostics only
     }
 
     void dump_logs() const {
