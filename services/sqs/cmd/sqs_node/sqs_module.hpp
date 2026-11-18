@@ -261,6 +261,7 @@ public:
     using service_type = sqs::sqs_service<cluster_type>;
     using worker_type = sqs::tick_worker<cluster_type>;
     using mover_type = sqs::move_worker<cluster_type>;
+    using grower_type = sqs::grow_worker<cluster_type>;
 
     /// The local id of the bootstrap group.
     static constexpr std::uint64_t k_first_group = 1;
@@ -376,6 +377,8 @@ public:
         _mover = std::make_unique<mover_type>(
             *_cluster, [this](const std::string& key) { return _cluster->leads(key); },
             sqs::sqs_arn_queue);
+        _grower = std::make_unique<grower_type>(
+            *_cluster, [this](const std::string& key) { return _cluster->leads(key); });
     }
 
     void publish(service_node::module_registry& /*registry*/) override {}
@@ -385,6 +388,7 @@ public:
         _raft->start();
         _worker->start();
         _mover->start();
+        _grower->start();
         _driving = true;
         _driver = std::thread([this] {
             while (_driving.load(std::memory_order_acquire)) {
@@ -464,6 +468,9 @@ public:
         if (_mover) {
             _mover->stop();
         }
+        if (_grower) {
+            _grower->stop();
+        }
         _driving.store(false, std::memory_order_release);
         if (_driver.joinable()) {
             _driver.join();
@@ -480,6 +487,7 @@ public:
         _worker_ptr.store(nullptr, std::memory_order_release);
         _worker.reset();
         _mover.reset();
+        _grower.reset();
         _cluster.reset();
         _peers.reset();
         _raft.reset();
@@ -509,6 +517,7 @@ public:
             {"long_polls_woken", static_cast<double>(_hub.notified()), {}},
             {"ticks_proposed", static_cast<double>(_worker ? _worker->ticks() : 0), {}},
             {"messages_moved", static_cast<double>(_mover ? _mover->moved() : 0), {}},
+            {"partitions_grown", static_cast<double>(_grower ? _grower->grown() : 0), {}},
             {"raft_term_sum", service_node::raft_term_sum(*_raft), {}},
         };
     }
@@ -532,6 +541,8 @@ private:
     std::atomic<worker_type*> _worker_ptr{nullptr};
     /// Runs the message move tasks of the queues this node leads.
     std::unique_ptr<mover_type> _mover;
+    /// Grows standard queues' partition counts with their send rates.
+    std::unique_ptr<grower_type> _grower;
     std::unique_ptr<front_end_type> _front_end;
     std::unique_ptr<handler_type> _handler_owner;
     std::atomic<handler_type*> _handler{nullptr};

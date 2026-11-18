@@ -822,3 +822,62 @@ BOOST_AUTO_TEST_CASE(model_check_fifo) {
 }
 
 BOOST_AUTO_TEST_SUITE_END()
+
+// -- task 8: fair queues ------------------------------------------------------------
+
+BOOST_AUTO_TEST_CASE(a_noisy_group_does_not_starve_a_quiet_one) {
+    replica r;
+    const auto t = standard();
+    for (int i = 0; i < 40; ++i) {
+        (void)r.send(t, 1000, {message("noisy-" + std::to_string(i), "noisy")});
+    }
+    (void)r.send(t, 1000, {message("quiet-0", "quiet")});
+    const auto got = r.receive(t, 2000, 10);
+    BOOST_TEST_REQUIRE(got.size() == 10U);
+    std::size_t quiet = 0;
+    for (const auto& m : got) {
+        quiet += m.body.starts_with("quiet") ? 1 : 0;
+    }
+    BOOST_TEST(quiet == 1U);
+    // Within a group, oldest first.
+    BOOST_TEST((got.front().body == "noisy-0" || got.front().body == "quiet-0"));
+}
+
+BOOST_AUTO_TEST_CASE(the_turn_goes_on_across_receives_when_groups_outnumber_places) {
+    replica r;
+    const auto t = standard();
+    std::vector<std::string> groups;
+    for (char g = 'a'; g <= 'l'; ++g) {
+        groups.emplace_back(1, g);
+        for (int i = 0; i < 3; ++i) {
+            (void)r.send(t, 1000, {message(std::string(1, g) + std::to_string(i), groups.back())});
+        }
+    }
+    std::set<std::string> first;
+    for (const auto& m : r.receive(t, 2000, 10)) {
+        first.insert(m.group_id);
+    }
+    BOOST_TEST(first.size() == 10U);
+    std::set<std::string> second;
+    for (const auto& m : r.receive(t, 2000, 10)) {
+        second.insert(m.group_id);
+    }
+    // The two groups the first receive did not reach come first now.
+    for (const auto& g : groups) {
+        if (!first.contains(g)) {
+            BOOST_TEST(second.contains(g));
+        }
+    }
+}
+
+BOOST_AUTO_TEST_CASE(ungrouped_standard_messages_stay_oldest_first) {
+    replica r;
+    const auto t = standard();
+    for (int i = 0; i < 5; ++i) {
+        (void)r.send(t, 1000, {message("m" + std::to_string(i))});
+    }
+    const auto got = r.receive(t, 2000, 3);
+    BOOST_TEST_REQUIRE(got.size() == 3U);
+    BOOST_TEST(got[0].body == "m0");
+    BOOST_TEST(got[2].body == "m2");
+}
