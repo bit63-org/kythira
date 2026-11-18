@@ -316,6 +316,17 @@ public:
         return *this;
     }
 
+    /// `<tag xmlns="ns">`: a document root with its namespace.
+    auto open(std::string_view tag, std::string_view xmlns) -> xml_writer& {
+        _out += '<';
+        _out += tag;
+        _out += " xmlns=\"";
+        _out += xml_escape(xmlns);
+        _out += "\">";
+        _stack.emplace_back(tag);
+        return *this;
+    }
+
     auto close() -> xml_writer& {
         _out += "</";
         _out += _stack.back();
