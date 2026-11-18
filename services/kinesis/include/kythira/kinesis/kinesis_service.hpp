@@ -33,10 +33,13 @@
 /// (`kinesis_iterators.hpp`); GetRecords checks it, authorizes
 /// `kinesis:GetRecords` on the token's stream, and reads the shard from
 /// this replica's segment store (`kinesis_records.hpp`), so any node
-/// answers. An iterator's expiry is the stream's `iterator-lifetime` switch
-/// at read time: five minutes, or a day relaxed. A closed shard read to its
-/// end answers no NextShardIterator and its ChildShards; closing shards
-/// comes with resharding (task 11).
+/// answers. LATEST is the exception: on an open shard it asks the shard's
+/// group for its tip through the log (`shard_tip_command`), so an iterator
+/// never starts before an append already acknowledged to anyone, even on a
+/// replica that has not applied it yet. An iterator's expiry is the
+/// stream's `iterator-lifetime` switch at read time: five minutes, or a day
+/// relaxed. A closed shard read to its end answers no NextShardIterator and
+/// its ChildShards; closing shards comes with resharding (task 11).
 ///
 /// Reads of the catalog are served by the local replica, so a describe right
 /// after a write on another node may briefly show the old state, as AWS's
@@ -1471,15 +1474,20 @@ public:
             return shard_not_found(shard_text, rec);
         }
         const auto& position = in.at("StartingPosition").as_object();
-        const auto state = read_shard_state(routing_key(rec._id, entry->_ordinal));
+        const auto shard_key = routing_key(rec._id, entry->_ordinal);
+        const auto state = read_shard_state(shard_key);
         if (!state || !state->_found) {
             return internal_failure();
         }
-        auto start =
-            start_position(rec, *entry, state->_state, *detail::string_member(position, "Type"),
-                           detail::string_member(position, "SequenceNumber"),
-                           service_detail::number_member(position, "Timestamp"), "SequenceNumber",
-                           "SubscribeToShard");
+        const std::string position_type(*detail::string_member(position, "Type"));
+        auto shard = state->_state;
+        if (position_type == "LATEST" && !latest_tip(shard_key, *entry, shard)) {
+            return internal_failure();
+        }
+        auto start = start_position(rec, *entry, shard, position_type,
+                                    detail::string_member(position, "SequenceNumber"),
+                                    service_detail::number_member(position, "Timestamp"),
+                                    "SequenceNumber", "SubscribeToShard");
         if (!start) {
             return start.error();
         }
@@ -2258,7 +2266,11 @@ public:
         it._stream_id = rec._id;
         it._ordinal = entry->_ordinal;
         const std::string type(*detail::string_member(in, "ShardIteratorType"));
-        auto start = start_position(rec, *entry, state->_state, type,
+        auto shard = state->_state;
+        if (type == "LATEST" && !latest_tip(key, *entry, shard)) {
+            return internal_failure();
+        }
+        auto start = start_position(rec, *entry, shard, type,
                                     detail::string_member(in, "StartingSequenceNumber"),
                                     service_detail::number_member(in, "Timestamp"),
                                     "StartingSequenceNumber", "GetShardIterator");
@@ -2817,6 +2829,24 @@ private:
             return std::nullopt;
         }
         return snap;
+    }
+
+    /// LATEST on an open shard starts after the tip as the shard's group
+    /// leader has it (`shard_tip_command`), not as this replica has it: a
+    /// replica that has not applied an append the caller already saw
+    /// acknowledged would otherwise hand out an iterator that reads it.
+    /// A closed shard's end is in the catalog entry and needs no proposal.
+    /// False when the group did not answer (retryable).
+    auto latest_tip(const std::string& key, const shard_entry& entry, shard_state& shard) -> bool {
+        if (entry._ending_counter) {
+            return true;
+        }
+        const auto r = propose(shard_tip_command{key});
+        if (!r || r->_status != apply_status::ok) {
+            return false;
+        }
+        shard._last_counter = std::max(shard._last_counter, r->_last_counter);
+        return true;
     }
 
     [[nodiscard]] static auto lifetime_of(const kinesis_compat_profile& p) -> std::int64_t {

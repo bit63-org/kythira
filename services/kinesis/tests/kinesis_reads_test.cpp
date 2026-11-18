@@ -428,6 +428,94 @@ BOOST_AUTO_TEST_CASE(latest_and_the_sequence_number_types) {
                "InvalidArgumentException");
 }
 
+namespace {
+
+// A node whose replica stops applying: proposals commit at the leader (a
+// local cluster), reads see the replica as of the freeze. The case below
+// is the replay's step that caught a LATEST iterator landing before an
+// acknowledged append.
+class lagging_cluster {
+public:
+    lagging_cluster(kythira::record_segment_store* store, kin::local_stream_cluster::clock_fn clock)
+        : _leader(store, std::move(clock)) {}
+
+    auto propose(const std::string& key, std::vector<std::byte> command,
+                 kin::admission mode = kin::admission::none) -> std::optional<kin::apply_result> {
+        auto r = _leader.propose(key, command, mode);
+        if (r && !_frozen) {
+            (void)_replica.apply(command, ++_replica_index);
+        }
+        return r;
+    }
+
+    auto read(const std::string& /*key*/, const kin::stream_reader& f) -> bool {
+        f(_replica);
+        return true;
+    }
+
+    [[nodiscard]] auto now_ms() const -> std::int64_t { return _leader.now_ms(); }
+
+    void freeze() { _frozen = true; }
+
+private:
+    kin::local_stream_cluster _leader;
+    kin::stream_state_machine<std::uint64_t> _replica;
+    std::uint64_t _replica_index = 0;
+    bool _frozen = false;
+};
+
+}  // namespace
+
+BOOST_AUTO_TEST_CASE(latest_never_starts_before_an_acknowledged_append) {
+    temp_dir dir;
+    const auto store = make_store(dir);
+    const std::int64_t clock = 1'762'776'000'000;
+    lagging_cluster cluster{store.get(), [clock] { return clock; }};
+    allow_all auth;
+    kin::front_end<allow_all> fe{kin::front_end_config{}, auth};
+    const auto config = service_config();
+    kin::kinesis_service<lagging_cluster> service{cluster, config};
+    service.register_with(fe);
+    const auto ok = [&](std::string_view op, const json::object& body) {
+        kin::front_end_request r;
+        r._method = "POST";
+        r._path = "/";
+        r._body = json::serialize(body);
+        r._headers = {{"Content-Type", "application/x-amz-json-1.1"},
+                      {"X-Amz-Target", "Kinesis_20131202." + std::string(op)}};
+        const auto res = fe.handle(r);
+        BOOST_REQUIRE_MESSAGE(res.status == 200U, std::string(op) + ": " + res.body);
+        return json::parse(res.body).as_object();
+    };
+
+    (void)ok("CreateStream", {{"StreamName", "s"}, {"ShardCount", 1}});
+    cluster.freeze();
+    (void)ok("PutRecords",
+             {{"StreamName", "s"},
+              {"Records", json::array{json::object{{"PartitionKey", "a"}, {"Data", b64("1")}},
+                                      json::object{{"PartitionKey", "b"}, {"Data", b64("2")}},
+                                      json::object{{"PartitionKey", "c"}, {"Data", b64("3")}}}}});
+
+    // The replica still has the shard empty; the iterator must start after
+    // the three acknowledged records anyway.
+    const auto token = ok("GetShardIterator", {{"StreamName", "s"},
+                                               {"ShardId", "shardId-000000000000"},
+                                               {"ShardIteratorType", "LATEST"}})
+                           .at("ShardIterator")
+                           .as_string();
+    const auto it = kin::decode_iterator(token, config._iterator_keys);
+    BOOST_REQUIRE(it.has_value());
+    BOOST_TEST(it->_counter == 4U);
+
+    // TRIM_HORIZON is unaffected: it reads from the first record kept.
+    const auto horizon = ok("GetShardIterator", {{"StreamName", "s"},
+                                                 {"ShardId", "shardId-000000000000"},
+                                                 {"ShardIteratorType", "TRIM_HORIZON"}})
+                             .at("ShardIterator")
+                             .as_string();
+    BOOST_TEST(kin::decode_iterator(horizon, config._iterator_keys)->_counter == 1U);
+}
+
 BOOST_AUTO_TEST_CASE(at_timestamp_starts_at_the_first_record_at_or_after_it) {
     fixture f;
     f.create();
