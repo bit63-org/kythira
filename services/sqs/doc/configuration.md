@@ -55,9 +55,42 @@ The node's own settings are core's: `KYTHIRA_NODE_ID`,
 | `SQS_PEER_CA` | `KYTHIRA_NODE_TLS_CA` | The CA a forward checks the leader's certificate against. |
 | `SQS_PROPOSE_TIMEOUT_MS` | 5000 | How long a write waits to commit before the client gets a retryable error. |
 
-Every node of `KYTHIRA_NODE_PEERS` is a voter of the one SQS group. Task 10
-(independent layers) adds `KYTHIRA_SQS_ROLES` and spreads queues over more
-groups.
+Every node of `KYTHIRA_NODE_PEERS` is a voter of the one SQS group.
+
+## Layers
+
+A node runs every layer by default. `KYTHIRA_SQS_ROLES` splits them:
+
+| Variable | Default | Notes |
+|---|---|---|
+| `KYTHIRA_SQS_ROLES` | `gateway,front_end,data` | The layers this node runs, comma-separated. On this release `gateway` and `front_end` go together. |
+| `SQS_DATA_ENDPOINTS` | | Base URLs of the data nodes' SQS listeners, comma-separated. Required without `data`. |
+
+- **data** holds a replica of the queues, runs the leader-side workers
+  (delays and visibility ends, message moves, partition growth) and
+  serves the internal endpoints under `/_kythira/sqs/v1/`: propose, named
+  reads, and the availability stream that wakes long polls on other nodes.
+  Without `gateway,front_end` its listener answers nothing else.
+- **gateway,front_end** serves the SQS API. With `data` it serves
+  everything in-process. Without it, every write and read goes to a data
+  node over `SQS_DATA_ENDPOINTS`, trying them in turn from the one that last
+  answered, and long polls park locally, woken by a stream from every data
+  node (any one of them suffices). Such a node holds no state, so it needs
+  `SQS_FORWARD_SECRET` (its calls are signed with it, and its receipt and
+  SSE-SQS keys derive from it unless their files are given) but no
+  `KYTHIRA_NODE_PEERS` beyond itself.
+
+Stopping a front end drains it first: parked long polls answer empty at
+once, which clients treat as an ordinary empty receive.
+
+```
+# data nodes 1-3: the durable cluster above, plus
+KYTHIRA_SQS_ROLES=data
+# a front end
+KYTHIRA_SQS_ROLES=gateway,front_end
+SQS_DATA_ENDPOINTS=https://d1:9324,https://d2:9324,https://d3:9324
+SQS_FORWARD_SECRET=...   # the data nodes' value
+```
 
 ## Encryption with KMS keys
 

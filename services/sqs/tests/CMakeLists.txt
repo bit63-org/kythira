@@ -116,6 +116,13 @@ find_package(Threads REQUIRED)
 kythira_sqs_test(sqs_listener_test sqs_listener_test.cpp)
 target_link_libraries(sqs_listener_test PRIVATE OpenSSL::SSL Threads::Threads)
 
+# Task 10: independent layers. Named reads on the wire, a front end
+# without the data role serving the API over remote_queue_cluster against a
+# data node's internal endpoints, the remote/hybrid routing, and the
+# availability stream that wakes long polls parked on such a front end.
+kythira_sqs_test(sqs_layers_test sqs_layers_test.cpp)
+target_link_libraries(sqs_layers_test PRIVATE OpenSSL::SSL Threads::Threads)
+
 # Task 5: long polling. The availability hub, and receives parked on it
 # over a local_queue_cluster whose state machine notifies the hub and whose
 # tick worker ends delays and visibility timeouts. Timing checks on the

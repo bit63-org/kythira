@@ -27,10 +27,14 @@
 /// | `SQS_SNS_CA` | `/etc/ssl/certs/ca-certificates.crt` | the roots those hosts' certificates chain to |
 /// | `SQS_COMPAT` | | compatibility switches, `name=value` comma-separated (`sqs_compat_profile.hpp`) |
 /// | `SQS_MAX_BODY_BYTES` | 4194304 | the largest request body the listener reads |
+/// | `KYTHIRA_SQS_ROLES` | `gateway,front_end,data` | the layers this node runs (`sqs_layers.md`); `gateway` and `front_end` go together for now |
+/// | `SQS_DATA_ENDPOINTS` | | base URLs of the data nodes' SQS listeners, comma-separated; required without the `data` role |
 // clang-format on
 ///
 /// Everything is checked here, before a port is bound; a refusal names the
 /// variable.
+
+#include <raft/layer_roles.hpp>
 
 #include <cstdint>
 #include <functional>
@@ -65,6 +69,10 @@ struct sqs_node_options {
     std::string _sns_ca = "/etc/ssl/certs/ca-certificates.crt";
     std::vector<std::pair<std::string, std::string>> _compat;
     std::uint64_t _max_body_bytes = std::uint64_t{4} * 1024 * 1024;
+    layers::role_set _roles{layers::role::gateway, layers::role::front_end, layers::role::data};
+    std::vector<std::string> _data_endpoints;
+
+    [[nodiscard]] auto has(layers::role r) const -> bool { return _roles.has(r); }
 };
 
 /// Reads one variable; nullopt when unset.
@@ -197,6 +205,50 @@ namespace node_options_detail {
             return std::string("SQS_MAX_BODY_BYTES must be a number of at least 1024");
         }
         o._max_body_bytes = *n;
+    }
+    if (const auto v = get("KYTHIRA_SQS_ROLES")) {
+        try {
+            o._roles = layers::role_set::parse(*v);
+        } catch (const std::invalid_argument& e) {
+            return std::string("KYTHIRA_SQS_ROLES: ") + e.what();
+        }
+        if (o._roles.has(layers::role::segments)) {
+            return std::string("KYTHIRA_SQS_ROLES: segments is not an SQS layer");
+        }
+        if (o._roles.empty()) {
+            return std::string(
+                "KYTHIRA_SQS_ROLES must name at least one of gateway, front_end, "
+                "data");
+        }
+        if (o._roles.has(layers::role::gateway) != o._roles.has(layers::role::front_end)) {
+            return std::string(
+                "KYTHIRA_SQS_ROLES: gateway and front_end run together on this "
+                "release");
+        }
+    }
+    if (const auto v = get("SQS_DATA_ENDPOINTS"); v && !v->empty()) {
+        std::string_view rest = *v;
+        while (!rest.empty()) {
+            const auto comma = rest.find(',');
+            const auto url = rest.substr(0, comma);
+            rest = comma == std::string_view::npos ? std::string_view() : rest.substr(comma + 1);
+            if (url.find("://") == std::string_view::npos || url.ends_with("/")) {
+                return std::string(
+                    "SQS_DATA_ENDPOINTS items must be scheme://host:port with no "
+                    "trailing slash");
+            }
+            o._data_endpoints.emplace_back(url);
+        }
+    }
+    if (!o._roles.has(layers::role::data)) {
+        if (o._data_endpoints.empty()) {
+            return std::string("SQS_DATA_ENDPOINTS is required without the data role");
+        }
+        if (o._forward_secret.empty()) {
+            return std::string(
+                "SQS_FORWARD_SECRET is required without the data role: calls to "
+                "the data nodes are signed with it");
+        }
     }
     return o;
 }
