@@ -648,6 +648,256 @@ BOOST_AUTO_TEST_CASE(checksums_are_verified_stored_and_returned) {
                    .code() == "BadDigest");
 }
 
+namespace {
+
+/// The text of the first `<tag>` in `xml`.
+auto element(const std::string& xml, const std::string& tag) -> std::string {
+    const auto a = xml.find("<" + tag + ">");
+    if (a == std::string::npos) {
+        return {};
+    }
+    const auto from = a + tag.size() + 2;
+    return xml.substr(from, xml.find("</" + tag + ">", from) - from);
+}
+
+auto count_of(const std::string& s, std::string_view part) -> std::size_t {
+    std::size_t n = 0;
+    for (auto at = s.find(part); at != std::string::npos; at = s.find(part, at + 1)) {
+        ++n;
+    }
+    return n;
+}
+
+auto random_bytes(std::size_t n, unsigned seed) -> std::string {
+    std::string out(n, '\0');
+    std::uint32_t x = seed * 2654435761U + 1;
+    for (auto& c : out) {
+        x = x * 1664525U + 1013904223U;
+        c = static_cast<char>(x >> 24U);
+    }
+    return out;
+}
+
+}  // namespace
+
+BOOST_AUTO_TEST_CASE(multipart_uploads_complete_list_and_abort) {
+    using s3::checksum_algorithm;
+    fixture f;
+    f.make_bucket("bkt");
+    // Small parts for the test: the bucket's profile tag lowers the minimum.
+    const std::string tagging =
+        "<Tagging><TagSet><Tag><Key>kythira:compat:min-part-bytes</Key><Value>100</Value></Tag>"
+        "</TagSet></Tagging>";
+    BOOST_TEST_REQUIRE(
+        f.send("PUT", "/bkt?tagging", {{"Content-MD5", md5_b64(tagging)}}, tagging).status == 204U);
+
+    const auto create = f.send("POST", "/bkt/big.bin?uploads",
+                               {{"Content-Type", "application/x-thing"}, {"x-amz-meta-k", "v"}});
+    BOOST_TEST_REQUIRE(create.status == 200U, create.body);
+    BOOST_TEST(create.header("x-amz-checksum-algorithm") == "CRC64NVME");
+    BOOST_TEST(create.header("x-amz-checksum-type") == "FULL_OBJECT");
+    const auto id = element(create.body, "UploadId");
+    BOOST_TEST_REQUIRE(!id.empty());
+    const auto at = [&](int n) {
+        return "/bkt/big.bin?partNumber=" + std::to_string(n) + "&uploadId=" + id;
+    };
+
+    const auto p1 = random_bytes(300, 1);
+    const auto p2 = random_bytes(250, 2);
+    const auto p3 = random_bytes(40, 3);
+    const auto put1 = f.send("PUT", at(1), {}, p1);
+    BOOST_TEST_REQUIRE(put1.status == 200U, put1.body);
+    BOOST_TEST(put1.header("x-amz-checksum-crc64nvme") ==
+               s3::checksum_of(checksum_algorithm::crc64nvme, p1));
+    // A part written again replaces the old one.
+    f.send("PUT", at(2), {}, "replaced");
+    const auto put2 = f.send("PUT", at(2), {}, p2);
+    // A part may name its own algorithm on a default upload; it is checked.
+    const auto put3 =
+        f.send("PUT", at(3),
+               {{"x-amz-checksum-crc32", s3::checksum_of(checksum_algorithm::crc32, p3)}}, p3);
+    BOOST_TEST_REQUIRE(put3.status == 200U, put3.body);
+    BOOST_TEST(f.send("PUT", at(4),
+                      {{"x-amz-checksum-crc32", s3::checksum_of(checksum_algorithm::crc32, "x")}},
+                      p3)
+                   .code() == "BadDigest");
+    BOOST_TEST(f.send("PUT", "/bkt/big.bin?partNumber=0&uploadId=" + id, {}, "x").code() ==
+               "InvalidArgument");
+    BOOST_TEST(
+        f.send("PUT", "/bkt/big.bin?partNumber=1&uploadId=00000000000000ff", {}, "x").code() ==
+        "NoSuchUpload");
+
+    // ListParts pages by part number.
+    const auto parts = f.send("GET", "/bkt/big.bin?uploadId=" + id + "&max-parts=2");
+    BOOST_TEST_REQUIRE(parts.status == 200U, parts.body);
+    BOOST_TEST(count_of(parts.body, "<Part>") == 2U);
+    BOOST_TEST(element(parts.body, "IsTruncated") == "true");
+    BOOST_TEST(element(parts.body, "NextPartNumberMarker") == "2");
+    BOOST_TEST(contains(parts.body, "<Size>250</Size>"));
+    const auto rest = f.send("GET", "/bkt/big.bin?uploadId=" + id + "&part-number-marker=2");
+    BOOST_TEST(count_of(rest.body, "<Part>") == 1U);
+    BOOST_TEST(element(rest.body, "PartNumber") == "3");
+
+    // ListMultipartUploads, with a second upload rolled into a prefix.
+    f.send("POST", "/bkt/dir/a?uploads");
+    f.send("POST", "/bkt/dir/b?uploads");
+    const auto ups = f.send("GET", "/bkt?uploads&delimiter=/");
+    BOOST_TEST_REQUIRE(ups.status == 200U, ups.body);
+    BOOST_TEST(count_of(ups.body, "<Upload>") == 1U);
+    BOOST_TEST(contains(ups.body, "<CommonPrefixes><Prefix>dir/</Prefix></CommonPrefixes>"));
+    const auto page = f.send("GET", "/bkt?uploads&max-uploads=1&prefix=dir/");
+    BOOST_TEST(element(page.body, "IsTruncated") == "true");
+    BOOST_TEST(element(page.body, "NextKeyMarker") == "dir/a");
+    const auto page2 = f.send("GET", "/bkt?uploads&prefix=dir/&key-marker=dir/a&upload-id-marker=" +
+                                         element(page.body, "NextUploadIdMarker"));
+    BOOST_TEST(element(page2.body, "Key") == "dir/b");
+
+    const auto complete_body = [&](bool with_checksums, bool order_ok = true) {
+        const std::vector<std::pair<int, reply>> chosen{{1, put1}, {2, put2}, {3, put3}};
+        std::string xml = "<CompleteMultipartUpload>";
+        for (std::size_t i = 0; i < chosen.size(); ++i) {
+            const auto& [n, r] = chosen[order_ok ? i : chosen.size() - 1 - i];
+            xml += "<Part><PartNumber>" + std::to_string(n) + "</PartNumber><ETag>" +
+                   r.header("ETag") + "</ETag>";
+            if (with_checksums) {
+                xml += "<ChecksumCRC64NVME>" + r.header("x-amz-checksum-crc64nvme") +
+                       "</ChecksumCRC64NVME>";
+            }
+            xml += "</Part>";
+        }
+        return xml + "</CompleteMultipartUpload>";
+    };
+    BOOST_TEST(
+        f.send("POST", "/bkt/big.bin?uploadId=" + id, {}, complete_body(false, false)).code() ==
+        "InvalidPartOrder");
+    const auto whole = p1 + p2 + p3;
+    const auto full = s3::checksum_of(checksum_algorithm::crc64nvme, whole);
+    BOOST_TEST(f.send("POST", "/bkt/big.bin?uploadId=" + id,
+                      {{"x-amz-checksum-crc64nvme",
+                        s3::checksum_of(checksum_algorithm::crc64nvme, "nope")}},
+                      complete_body(true))
+                   .code() == "BadDigest");
+    const auto done = f.send("POST", "/bkt/big.bin?uploadId=" + id,
+                             {{"x-amz-checksum-crc64nvme", full},
+                              {"x-amz-mp-object-size", std::to_string(whole.size())}},
+                             complete_body(true));
+    BOOST_TEST_REQUIRE(done.status == 200U, done.body);
+    BOOST_TEST(element(done.body, "ChecksumCRC64NVME") == full);
+    BOOST_TEST(element(done.body, "ETag").ends_with("-3&quot;"));
+
+    // The object reads back whole, by part, with its checksum.
+    const s3::header_list mode{{"x-amz-checksum-mode", "ENABLED"}};
+    const auto got = f.send("GET", "/bkt/big.bin", mode);
+    BOOST_TEST(got.body == whole);
+    BOOST_TEST(got.header("Content-Type") == "application/x-thing");
+    BOOST_TEST(got.header("x-amz-meta-k") == "v");
+    BOOST_TEST(got.header("x-amz-checksum-crc64nvme") == full);
+    BOOST_TEST(got.header("x-amz-checksum-type") == "FULL_OBJECT");
+    BOOST_TEST(got.header("x-amz-checksum-algorithm").empty());
+    BOOST_TEST(f.send("GET", "/bkt/big.bin?partNumber=2").body == p2);
+    BOOST_TEST(f.send("POST", "/bkt/big.bin?uploadId=" + id, {}, complete_body(true)).code() ==
+               "NoSuchUpload");
+
+    // Abort drops an upload; aborting again finds nothing.
+    const auto other = element(f.send("POST", "/bkt/dir/a?uploads").body, "UploadId");
+    BOOST_TEST(f.send("DELETE", "/bkt/dir/a?uploadId=" + other).status == 204U);
+    BOOST_TEST(f.send("DELETE", "/bkt/dir/a?uploadId=" + other).code() == "NoSuchUpload");
+}
+
+BOOST_AUTO_TEST_CASE(multipart_composite_checksums_part_copies_and_limits) {
+    using s3::checksum_algorithm;
+    fixture f;
+    f.make_bucket("bkt");
+    const auto src = random_bytes(6 * 1024 * 1024, 9);  // above S3's 5 MiB minimum
+    f.send("PUT", "/bkt/src", {}, src);
+
+    const auto create =
+        f.send("POST", "/bkt/dst?uploads", {{"x-amz-checksum-algorithm", "SHA256"}});
+    BOOST_TEST_REQUIRE(create.status == 200U, create.body);
+    BOOST_TEST(create.header("x-amz-checksum-type") == "COMPOSITE");
+    const auto id = element(create.body, "UploadId");
+    const auto at = [&](int n) {
+        return "/bkt/dst?partNumber=" + std::to_string(n) + "&uploadId=" + id;
+    };
+    // A part naming another algorithm than the upload's is refused.
+    BOOST_TEST(f.send("PUT", at(1),
+                      {{"x-amz-checksum-crc32", s3::checksum_of(checksum_algorithm::crc32, "x")}},
+                      "x")
+                   .code() == "InvalidRequest");
+
+    // Part 1 copies the whole source, part 2 a range of it.
+    const auto c1 = f.send("PUT", at(1), {{"x-amz-copy-source", "/bkt/src"}});
+    BOOST_TEST_REQUIRE(c1.status == 200U, c1.body);
+    const auto sha1 = s3::checksum_of(checksum_algorithm::sha256, src);
+    BOOST_TEST(element(c1.body, "ChecksumSHA256") == sha1);
+    BOOST_TEST(element(c1.body, "ETag") ==
+               "&quot;" + s3::multipart_detail::hex_of(s3::object_detail::md5_raw(src)) + "&quot;");
+    const auto c2 =
+        f.send("PUT", at(2),
+               {{"x-amz-copy-source", "/bkt/src"}, {"x-amz-copy-source-range", "bytes=10-109"}});
+    BOOST_TEST_REQUIRE(c2.status == 200U, c2.body);
+    const auto sha2 = s3::checksum_of(checksum_algorithm::sha256, src.substr(10, 100));
+    BOOST_TEST(element(c2.body, "ChecksumSHA256") == sha2);
+    BOOST_TEST(
+        f.send("PUT", at(3),
+               {{"x-amz-copy-source", "/bkt/src"}, {"x-amz-copy-source-range", "bytes=0-99999999"}})
+            .code() == "InvalidRange");
+    BOOST_TEST(f.send("PUT", at(3),
+                      {{"x-amz-copy-source", "/bkt/src"}, {"x-amz-copy-source-if-match", "\"no\""}})
+                   .code() == "PreconditionFailed");
+
+    const auto xml = [&](bool with_checksums) {
+        std::string out = "<CompleteMultipartUpload>";
+        int n = 1;
+        for (const auto* r : {&c1, &c2}) {
+            out += "<Part><PartNumber>" + std::to_string(n++) + "</PartNumber><ETag>" +
+                   element(r->body, "ETag") + "</ETag>";
+            if (with_checksums) {
+                out +=
+                    "<ChecksumSHA256>" + element(r->body, "ChecksumSHA256") + "</ChecksumSHA256>";
+            }
+            out += "</Part>";
+        }
+        return out + "</CompleteMultipartUpload>";
+    };
+    // A chosen algorithm needs every part's checksum in the request.
+    BOOST_TEST(f.send("POST", "/bkt/dst?uploadId=" + id, {}, xml(false)).code() ==
+               "InvalidRequest");
+    const auto done = f.send("POST", "/bkt/dst?uploadId=" + id, {}, xml(true));
+    BOOST_TEST_REQUIRE(done.status == 200U, done.body);
+    const auto composite = s3::composite_checksum(checksum_algorithm::sha256, {sha1, sha2});
+    BOOST_TEST_REQUIRE(composite.has_value());
+    BOOST_TEST(composite->ends_with("-2"));
+    BOOST_TEST(element(done.body, "ChecksumSHA256") == *composite);
+    BOOST_TEST(element(done.body, "ChecksumType") == "COMPOSITE");
+    BOOST_TEST(f.send("GET", "/bkt/dst").body == src + src.substr(10, 100));
+
+    // The default 5 MiB minimum applies to every part but the last.
+    const auto small = element(f.send("POST", "/bkt/small?uploads").body, "UploadId");
+    const auto s1 = f.send("PUT", "/bkt/small?partNumber=1&uploadId=" + small, {}, "tiny");
+    const auto s2 = f.send("PUT", "/bkt/small?partNumber=2&uploadId=" + small, {}, "end");
+    const auto small_xml = "<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>" +
+                           s1.header("ETag") +
+                           "</ETag></Part><Part><PartNumber>2</PartNumber><ETag>" +
+                           s2.header("ETag") + "</ETag></Part></CompleteMultipartUpload>";
+    BOOST_TEST(f.send("POST", "/bkt/small?uploadId=" + small, {}, small_xml).code() ==
+               "EntityTooSmall");
+    BOOST_TEST(
+        f.send("POST", "/bkt/x?uploads",
+               {{"x-amz-checksum-algorithm", "SHA1"}, {"x-amz-checksum-type", "FULL_OBJECT"}})
+            .code() == "InvalidRequest");
+
+    // The sweep aborts uploads older than its age, and only those.
+    const auto now_ms = static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::time_point(k_now).time_since_epoch())
+            .count());
+    BOOST_TEST(s3::sweep_stale_uploads(f.meta, now_ms + 1000, 5000) == 0U);
+    BOOST_TEST(s3::sweep_stale_uploads(f.meta, now_ms + 1000, 500) == 1U);
+    BOOST_TEST(f.send("POST", "/bkt/small?uploadId=" + small, {}, small_xml).code() ==
+               "NoSuchUpload");
+}
+
 BOOST_AUTO_TEST_CASE(access_follows_keys_roles_and_accounts) {
     fixture f;
     f.make_bucket("bkt");
@@ -685,7 +935,7 @@ BOOST_AUTO_TEST_CASE(authentication_failures_and_unbuilt_operations) {
     const auto r = f.send("GET", "/bkt?versioning");
     BOOST_TEST(r.status == 501U);
     BOOST_TEST(r.code() == "NotImplemented");
-    BOOST_TEST(f.send("POST", "/bkt/k?uploads").status == 501U);
+    BOOST_TEST(f.send("GET", "/bkt/k?legal-hold").status == 501U);
 }
 
 BOOST_AUTO_TEST_CASE(versioned_buckets_answer_with_version_ids_and_delete_markers) {

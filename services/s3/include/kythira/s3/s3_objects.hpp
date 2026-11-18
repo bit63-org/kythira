@@ -33,7 +33,7 @@
 /// PUT, by GetObjectAttributes, and on a whole-object GET or HEAD with
 /// `x-amz-checksum-mode: ENABLED` (never on a range). A copy keeps it.
 ///
-/// **Not here yet.** Multipart (9), object lock
+/// **Not here yet.** Object lock
 /// headers (10) and SSE (11): a request that asks for SSE-KMS or SSE-C
 /// is refused with `NotImplemented` rather than stored unencrypted.
 /// Storage classes other than `STANDARD` are stored and returned; their

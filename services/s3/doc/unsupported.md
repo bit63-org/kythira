@@ -13,18 +13,15 @@ implement: the XML error `NotImplemented` ("A header you provided implies
 functionality that is not implemented") with HTTP status 501, which every
 SDK surfaces as a non-retryable service error (`s3_service.hpp`).
 
-The model has 116 operations. 37 are implemented; of the other 79, 38 are
+The model has 116 operations. 44 are implemented; of the other 72, 31 are
 planned in a spec task and 41 (`none`) are out of the spec's scope, or
 were added to S3 after the spec was written and wait on the owner's
 decision.
 
 | Operation | Planned | Reason | Error |
 |---|---|---|---|
-| `AbortMultipartUpload` | task 9 | Not built yet (multipart upload). | `NotImplemented`, HTTP 501 |
-| `CompleteMultipartUpload` | task 9 | Not built yet (multipart upload). | `NotImplemented`, HTTP 501 |
 | `CreateBucketMetadataConfiguration` | none | Out of scope: S3 Metadata, which keeps its tables in S3 Tables. | `NotImplemented`, HTTP 501 |
 | `CreateBucketMetadataTableConfiguration` | none | Out of scope: S3 Metadata, which keeps its tables in S3 Tables. | `NotImplemented`, HTTP 501 |
-| `CreateMultipartUpload` | task 9 | Not built yet (multipart upload). | `NotImplemented`, HTTP 501 |
 | `CreateSession` | none | Out of scope: S3 Express One Zone directory buckets. | `NotImplemented`, HTTP 501 |
 | `DeleteBucketAnalyticsConfiguration` | none | Out of scope: S3 Analytics (storage class analysis). | `NotImplemented`, HTTP 501 |
 | `DeleteBucketCors` | task 15 | Not built yet (CORS and website hosting). | `NotImplemented`, HTTP 501 |
@@ -65,10 +62,8 @@ decision.
 | `ListBucketInventoryConfigurations` | none | Out of scope: S3 Inventory. | `NotImplemented`, HTTP 501 |
 | `ListBucketMetricsConfigurations` | none | Not in the spec: CloudWatch request-metrics filters. Kythira exports its own metrics instead. | `NotImplemented`, HTTP 501 |
 | `ListDirectoryBuckets` | none | Out of scope: S3 Express One Zone directory buckets. | `NotImplemented`, HTTP 501 |
-| `ListMultipartUploads` | task 9 | Not built yet (multipart upload). | `NotImplemented`, HTTP 501 |
 | `ListObjectAnnotations` | none | Not in the spec: object annotations, added to S3 after the spec was written. Open question for the owner. | `NotImplemented`, HTTP 501 |
 | `ListObjectVersions` | task 10 | Not built yet (versioning and object lock). | `NotImplemented`, HTTP 501 |
-| `ListParts` | task 9 | Not built yet (multipart upload). | `NotImplemented`, HTTP 501 |
 | `PutBucketAbac` | none | Not in the spec: bucket ABAC (tag-based access to general purpose buckets), added to S3 after the spec was written. Open question for the owner. | `NotImplemented`, HTTP 501 |
 | `PutBucketAccelerateConfiguration` | none | Out of scope: Transfer Acceleration. | `NotImplemented`, HTTP 501 |
 | `PutBucketAnalyticsConfiguration` | none | Out of scope: S3 Analytics (storage class analysis). | `NotImplemented`, HTTP 501 |
@@ -96,6 +91,4 @@ decision.
 | `UpdateBucketMetadataInventoryTableConfiguration` | none | Out of scope: S3 Metadata, which keeps its tables in S3 Tables. | `NotImplemented`, HTTP 501 |
 | `UpdateBucketMetadataJournalTableConfiguration` | none | Out of scope: S3 Metadata, which keeps its tables in S3 Tables. | `NotImplemented`, HTTP 501 |
 | `UpdateObjectEncryption` | none | Not in the spec: changing an existing object from SSE-S3 to SSE-KMS in place, added to S3 after the spec was written. Open question for the owner, after task 11. | `NotImplemented`, HTTP 501 |
-| `UploadPart` | task 9 | Not built yet (multipart upload). | `NotImplemented`, HTTP 501 |
-| `UploadPartCopy` | task 9 | Not built yet (multipart upload). | `NotImplemented`, HTTP 501 |
 | `WriteGetObjectResponse` | none | Out of scope: S3 Object Lambda. | `NotImplemented`, HTTP 501 |

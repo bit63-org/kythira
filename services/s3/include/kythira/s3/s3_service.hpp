@@ -26,7 +26,8 @@
 ///    the bucket's policy, ownership, ACLs and Block Public Access
 ///    (`s3_access.hpp`); a copy's source is checked against its own
 ///    bucket. DeleteObjects authorizes each key as it goes.
-/// 5. **Handle** (`s3_buckets.hpp`, `s3_objects.hpp`, `s3_listings.hpp`).
+/// 5. **Handle** (`s3_buckets.hpp`, `s3_objects.hpp`, `s3_listings.hpp`,
+///    `s3_multipart.hpp`).
 ///    Operations not built yet answer `501 NotImplemented`
 ///    (`doc/unsupported.md`).
 ///
@@ -41,6 +42,7 @@
 #include <kythira/s3/s3_http.hpp>
 #include <kythira/s3/s3_listings.hpp>
 #include <kythira/s3/s3_metadata.hpp>
+#include <kythira/s3/s3_multipart.hpp>
 #include <kythira/s3/s3_objects.hpp>
 #include <kythira/s3/s3_post_policy.hpp>
 #include <kythira/s3/s3_routes.hpp>
@@ -84,7 +86,10 @@ struct http_request {
         // Objects.
         "PutObject", "GetObject", "HeadObject", "DeleteObject", "DeleteObjects", "CopyObject",
         "GetObjectAttributes", "GetObjectTagging", "PutObjectTagging", "DeleteObjectTagging",
-        "GetObjectAcl", "PutObjectAcl", "ListObjects", "ListObjectsV2"};
+        "GetObjectAcl", "PutObjectAcl", "ListObjects", "ListObjectsV2",
+        // Multipart upload.
+        "CreateMultipartUpload", "UploadPart", "UploadPartCopy", "ListParts",
+        "ListMultipartUploads", "CompleteMultipartUpload", "AbortMultipartUpload"};
     return ops;
 }
 
@@ -138,6 +143,12 @@ private:
             {"DeleteBucketOwnershipControls", &delete_bucket_ownership_controls<M>},
             {"GetPublicAccessBlock", &get_public_access_block<M>},
             {"PutPublicAccessBlock", &put_public_access_block<M>},
+            {"CreateMultipartUpload", &create_multipart_upload<M>},
+            {"UploadPart", &upload_part<M>},
+            {"ListParts", &list_parts<M>},
+            {"ListMultipartUploads", &list_multipart_uploads<M>},
+            {"CompleteMultipartUpload", &complete_multipart_upload<M>},
+            {"AbortMultipartUpload", &abort_multipart_upload<M>},
             {"DeletePublicAccessBlock", &delete_public_access_block<M>},
             {"PutObject", &put_object<M>},
             {"GetObject", &get_object<M>},
@@ -409,7 +420,7 @@ private:
             return delete_objects(_ctx, req, auth, b, may_delete);
         }
 
-        if (op == "CopyObject") {
+        if (op == "CopyObject" || op == "UploadPartCopy") {
             const auto header = req.header("x-amz-copy-source").value_or("");
             auto src = parse_copy_source(header);
             if (!src) {
@@ -431,6 +442,9 @@ private:
             facts.existing_tags = source_obj.tags;
             if (auto e = authorize(facts, auth, b, &source, target_obj, source_obj)) {
                 return *e;
+            }
+            if (op == "UploadPartCopy") {
+                return upload_part_copy(_ctx, req, auth, b, source, *src);
             }
             return copy_object(_ctx, req, auth, b, source, *src);
         }

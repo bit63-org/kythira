@@ -186,6 +186,8 @@ BOOST_AUTO_TEST_CASE(records_and_commands_round_trip) {
     c.document = "doc";
     c.config = {{"acl", "<AccessControlPolicy/>"}, {"ownership-controls", "x"}};
     c.override_metadata = {"x-amz-tagging", "x-kythira-acl"};
+    c.min_part_bytes = 1234;
+    c.max_parts = 17;
     BOOST_TEST((codec::decode_command(codec::encode(c)) == c));
 
     index_result r;
@@ -567,6 +569,7 @@ BOOST_AUTO_TEST_CASE(multipart_upload_complete_and_abort) {
     create.owner = "acct";
     create.content = content_of({});
     create.content.user_metadata = {{"m", "v"}};
+    create.content.system_metadata = {{"x-amz-checksum-algorithm", "CRC32"}};
     const auto upload_id = r.apply(create).upload_id;
     BOOST_TEST(upload_id.size() == 16U);
 
@@ -590,14 +593,29 @@ BOOST_AUTO_TEST_CASE(multipart_upload_complete_and_abort) {
     BOOST_TEST(part(3, {6}, "unused").ok());
     BOOST_TEST(part(0, {6}, "x").error == "InvalidArgument");
     BOOST_TEST(r.count(6) == 1U);
+    {
+        // The bucket's own limit wins over the index's.
+        index_command c;
+        c.op = kind::upload_part;
+        c.target = b;
+        c.key = "big";
+        c.upload_id = upload_id;
+        c.part.number = 3;
+        c.part.etag = "unused";
+        c.max_parts = 2;
+        BOOST_TEST(r.apply(c).error == "InvalidArgument");
+    }
 
-    auto complete = [&](std::vector<completed_part> parts) {
+    auto complete = [&](std::vector<completed_part> parts, std::uint64_t min_part = 0,
+                        std::map<std::string, std::string> metadata = {}) {
         index_command c;
         c.op = kind::complete_upload;
         c.target = b;
         c.key = "big";
         c.upload_id = upload_id;
         c.parts = std::move(parts);
+        c.min_part_bytes = min_part;
+        c.content.system_metadata = std::move(metadata);
         return r.apply(c);
     };
     BOOST_TEST(complete({}).error == "MalformedXML");
@@ -606,9 +624,15 @@ BOOST_AUTO_TEST_CASE(multipart_upload_complete_and_abort) {
     BOOST_TEST(complete({{1, md5a}, {4, "x"}}).error == "InvalidPart");
     // Part 2 (100 bytes) is under the minimum and not last.
     BOOST_TEST(complete({{2, md5b}, {3, "unused"}}).error == "EntityTooSmall");
+    // Part 1 (200 bytes) is under the bucket's minimum of 300.
+    BOOST_TEST(complete({{1, md5a}, {2, md5b}}, 300).error == "EntityTooSmall");
     BOOST_TEST(r.sm.upload(b.id, "big", upload_id).has_value());
 
-    const auto done = complete({{1, "\"" + md5a + "\""}, {2, md5b}});
+    // The front end's checksum lands on the object; an empty value
+    // erases the upload's open-state key.
+    const auto done =
+        complete({{1, "\"" + md5a + "\""}, {2, md5b}}, 0,
+                 {{"x-amz-checksum-crc32", "AAAAAA=="}, {"x-amz-checksum-algorithm", ""}});
     BOOST_REQUIRE(done.ok());
     BOOST_TEST(done.etag.ends_with("-2"));
     BOOST_TEST(done.etag.size() == 34U);
@@ -617,6 +641,8 @@ BOOST_AUTO_TEST_CASE(multipart_upload_complete_and_abort) {
     BOOST_TEST(v.content.size() == 300U);
     BOOST_TEST((v.content.part_sizes == std::vector<std::uint64_t>{200, 100}));
     BOOST_TEST(v.content.user_metadata.at("m") == "v");
+    BOOST_TEST((v.content.system_metadata ==
+                std::map<std::string, std::string>{{"x-amz-checksum-crc32", "AAAAAA=="}}));
     BOOST_TEST(r.count(3) == 1U);
     BOOST_TEST(r.count(5) == 1U);
     BOOST_TEST(r.count(6) == 0U);  // the part left out
