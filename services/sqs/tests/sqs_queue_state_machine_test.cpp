@@ -248,12 +248,15 @@ BOOST_AUTO_TEST_CASE(a_receipt_is_valid_only_for_its_receive) {
     BOOST_REQUIRE_EQUAL(second.size(), 1U);
     BOOST_TEST(second[0].receive_count == 2U);
     BOOST_TEST(second[0].first_receive_ms == k_t0);
-    // The first handle no longer deletes or changes it.
+    // The first handle no longer deletes or changes it; both are accepted,
+    // as SQS accepts them.
     BOOST_TEST(
         (r.receipts(kind::delete_, t, k_t0 + 10'001, {ref(first[0])})[0].outcome == status::stale));
     BOOST_TEST(
-        (r.receipts(kind::change_visibility, t, k_t0 + 10'001, {ref(first[0], 5)})[0].outcome ==
-         status::invalid_receipt));
+        (r.receipts(kind::change_visibility, t, k_t0 + 10'001, {ref(first[0], 0)})[0].outcome ==
+         status::stale));
+    BOOST_TEST(
+        (r.sm.message(t, first[0].sequence)->status == sqs::stored_message::state::in_flight));
     BOOST_TEST(r.sm.message(t, first[0].sequence).has_value());
     // The latest one does.
     BOOST_TEST(
@@ -643,8 +646,11 @@ struct model {
         -> status {
         housekeeping(now);
         const auto it = msgs.find(seq);
-        if (it == msgs.end() || it->second.receive_seq != rseq || rseq == 0) {
+        if (it == msgs.end() || rseq == 0) {
             return status::invalid_receipt;
+        }
+        if (it->second.receive_seq != rseq) {
+            return status::stale;
         }
         auto& m = it->second;
         if (m.st != msg::in_flight) {

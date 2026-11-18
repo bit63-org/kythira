@@ -430,9 +430,23 @@ def resolve(req):
 # ---- comparing -----------------------------------------------------------
 
 
+# Batch answers whose entries SQS lists in no particular order (the
+# recordings show Successful shuffled against the request): compared as
+# sets, sorted by Id.
+UNORDERED = {"Successful", "Failed"}
+
+
+def by_id(xs):
+    if isinstance(xs, list) and all(isinstance(x, dict) and "Id" in x for x in xs):
+        return sorted(xs, key=lambda x: x["Id"])
+    return xs
+
+
 def diff(a, b, path=""):
     """Paths where `a` (the recording) and `b` differ."""
     if isinstance(a, dict) and isinstance(b, dict):
+        a = {k: by_id(v) if k in UNORDERED else v for k, v in a.items()}
+        b = {k: by_id(v) if k in UNORDERED else v for k, v in b.items()}
         out = []
         for k in sorted(set(a) | set(b)):
             p = path + "." + k if path else k

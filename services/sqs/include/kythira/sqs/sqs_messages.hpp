@@ -314,10 +314,16 @@ inline void put_field(std::string& out, std::string_view bytes) {
                 return std::isalnum(static_cast<unsigned char>(c)) != 0 || c == '_' || c == '-' ||
                        c == '.';
             });
+            if (lname.starts_with("aws.") || lname.starts_with("amazon.")) {
+                // SQS's text (task 13's recordings, seed 1 step 107).
+                return bad_attribute(
+                    "You can't use message attribute names beginning with "
+                    "'AWS.' or 'Amazon'. These strings are reserved for "
+                    "internal use.");
+            }
             if (name.empty() || name.size() > k_max_attribute_name || !chars_ok ||
                 name.front() == '.' || name.back() == '.' ||
-                name.find("..") != std::string_view::npos || lname.starts_with("aws.") ||
-                lname.starts_with("amazon.")) {
+                name.find("..") != std::string_view::npos) {
                 return bad_attribute(quoted + " has an invalid name.");
             }
         }
@@ -349,9 +355,8 @@ inline void put_field(std::string& out, std::string_view bytes) {
         const bool has_string = s != nullptr && s->is_string() && !s->get_string().empty();
         const bool has_binary = b != nullptr && b->is_string() && !b->get_string().empty();
         if (binary ? (!has_binary || s != nullptr) : (!has_string || b != nullptr)) {
-            return bad_attribute(quoted +
-                                 " must contain a non-empty value of message attribute "
-                                 "type '" +
+            // SQS's text (task 13's recording, seed 3 step 57).
+            return bad_attribute(quoted + " must contain a non-empty value of type '" +
                                  std::string(type) + "'.");
         }
         if (has_string && !valid_body(s->get_string())) {

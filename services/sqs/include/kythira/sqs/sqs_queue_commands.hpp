@@ -213,12 +213,14 @@ struct entry_result {
         /// the original's, as SQS answers.
         duplicate = 1,
         /// Delete: the handle is not from the message's latest receive, or
-        /// the message is gone. SQS accepts such a delete and does nothing.
+        /// the message is gone. Change visibility: the handle is not from
+        /// the latest receive of a message that still exists. SQS accepts
+        /// either and nothing changes.
         stale = 2,
         /// Change visibility: the message exists and the handle is its
         /// latest, but it is not in flight (`MessageNotInflight`).
         not_inflight = 3,
-        /// Change visibility: the handle is stale or the message is gone
+        /// Change visibility: the message is gone
         /// (`ReceiptHandleIsInvalid`).
         invalid_receipt = 4,
         /// Change visibility: the new deadline would pass 12 hours after

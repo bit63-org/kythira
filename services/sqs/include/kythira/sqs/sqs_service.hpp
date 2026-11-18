@@ -179,10 +179,10 @@ using front_end_detail::string_member;
                       "The request must contain the parameter " + std::string(param) + ".");
 }
 
-[[nodiscard]] inline auto bad_receipt(std::string_view token) -> aws_json::error {
-    return modeled_error(
-        "ReceiptHandleIsInvalid",
-        "The input receipt handle \"" + std::string(token) + "\" is not a valid receipt handle.");
+/// SQS's text does not echo the handle (task 13's recordings, seed 1 step
+/// 75 and seed 3 step 134).
+[[nodiscard]] inline auto bad_receipt(std::string_view /*token*/) -> aws_json::error {
+    return modeled_error("ReceiptHandleIsInvalid", "The input receipt handle is invalid.");
 }
 
 [[nodiscard]] inline auto to_bytes(const std::string& s) -> std::vector<std::byte> {
@@ -646,9 +646,10 @@ private:
             case status::exists:
                 return boost::json::object{{"QueueUrl", ctx._queue->_url}};
             case status::name_exists:
+                // SQS's text (task 13's recordings, seed 1 step 3).
                 return modeled_error("QueueNameExists",
                                      "A queue already exists with the same name and a different "
-                                     "value for attribute(s) " +
+                                     "value for attribute " +
                                          differing_attributes(r->_record->_settings, s));
             case status::deleted_recently:
                 return modeled_error("QueueDeletedRecently",
@@ -1497,11 +1498,17 @@ private:
                                    {"Message", e.message.value_or("")}};
     }
 
+    /// An empty list is left out, as SQS leaves it out (task 13's
+    /// recordings); every SDK reads an absent list as empty.
     [[nodiscard]] static auto batch_reply(boost::json::array ok, boost::json::array failed)
         -> boost::json::object {
         boost::json::object out;
-        out["Successful"] = std::move(ok);
-        out["Failed"] = std::move(failed);
+        if (!ok.empty()) {
+            out["Successful"] = std::move(ok);
+        }
+        if (!failed.empty()) {
+            out["Failed"] = std::move(failed);
+        }
         return out;
     }
 

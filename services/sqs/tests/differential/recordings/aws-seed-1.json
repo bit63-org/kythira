@@ -1,0 +1,4578 @@
+{
+ "botocore": "1.43.100",
+ "recorded_at": 1795032113,
+ "region": "us-east-1",
+ "seed": 1,
+ "steps": [
+  {
+   "op": "create_queue",
+   "request": {
+    "QueueName": "<prefix>-std"
+   },
+   "response": {
+    "QueueUrl": "<endpoint>/<account>/<prefix>-std"
+   }
+  },
+  {
+   "op": "create_queue",
+   "request": {
+    "Attributes": {
+     "FifoQueue": "true"
+    },
+    "QueueName": "<prefix>-f.fifo"
+   },
+   "response": {
+    "QueueUrl": "<endpoint>/<account>/<prefix>-f.fifo"
+   }
+  },
+  {
+   "op": "create_queue",
+   "request": {
+    "QueueName": "<prefix>-dlq"
+   },
+   "response": {
+    "QueueUrl": "<endpoint>/<account>/<prefix>-dlq"
+   }
+  },
+  {
+   "op": "create_queue",
+   "request": {
+    "Attributes": {
+     "DelaySeconds": "5"
+    },
+    "QueueName": "<prefix>-std"
+   },
+   "response": {
+    "error": "QueueAlreadyExists",
+    "message": "A queue already exists with the same name and a different value for attribute DelaySeconds",
+    "status": 400
+   }
+  },
+  {
+   "op": "get_queue_url",
+   "request": {
+    "QueueName": "<prefix>-std"
+   },
+   "response": {
+    "QueueUrl": "<endpoint>/<account>/<prefix>-std"
+   }
+  },
+  {
+   "op": "send_message_batch",
+   "request": {
+    "Entries": [
+     {
+      "Id": "e0",
+      "MessageAttributes": {
+       "a0": {
+        "DataType": "String.custom",
+        "StringValue": "blue"
+       },
+       "a3": {
+        "DataType": "String.custom",
+        "StringValue": "x"
+       },
+       "a7": {
+        "DataType": "String.custom",
+        "StringValue": "ünï"
+       }
+      },
+      "MessageBody": "b-1-a"
+     },
+     {
+      "Id": "e1",
+      "MessageBody": "b-2-ü"
+     },
+     {
+      "Id": "e2",
+      "MessageBody": "b-3-a"
+     },
+     {
+      "Id": "e3",
+      "MessageBody": "b-4-ccc"
+     },
+     {
+      "Id": "e4",
+      "MessageBody": "b-5-bb"
+     },
+     {
+      "Id": "e5",
+      "MessageBody": "b-6-a"
+     },
+     {
+      "Id": "e6",
+      "MessageAttributes": {
+       "k": {
+        "DataType": "String",
+        "StringValue": "v"
+       }
+      },
+      "MessageBody": "b-7-a"
+     },
+     {
+      "Id": "e7",
+      "MessageBody": "b-8-ü"
+     },
+     {
+      "Id": "e8",
+      "MessageBody": "b-9-ü"
+     },
+     {
+      "Id": "e9",
+      "MessageAttributes": {
+       "a3": {
+        "BinaryValue": "b64:cOuU",
+        "DataType": "Binary"
+       },
+       "a6": {
+        "DataType": "String",
+        "StringValue": "ünï"
+       },
+       "a8": {
+        "DataType": "String.custom",
+        "StringValue": "x"
+       }
+      },
+      "MessageBody": "b-10-line\nbreak"
+     }
+    ],
+    "QueueUrl": "<endpoint>/<account>/<prefix>-std"
+   },
+   "response": {
+    "Successful": [
+     {
+      "Id": "e0",
+      "MD5OfMessageAttributes": "248d4870966696325d73b318e319dd59",
+      "MD5OfMessageBody": "2076a5444110600ba6db7e9d9880979a",
+      "MessageId": "<message-id>"
+     },
+     {
+      "Id": "e1",
+      "MD5OfMessageBody": "f8711a2b6dfe6a73927ee2a4842f290f",
+      "MessageId": "<message-id>"
+     },
+     {
+      "Id": "e2",
+      "MD5OfMessageBody": "6aac6467f3c6f3beeb4a9799c683606e",
+      "MessageId": "<message-id>"
+     },
+     {
+      "Id": "e3",
+      "MD5OfMessageBody": "95336c97d4858ea45980ff1257a0d9a8",
+      "MessageId": "<message-id>"
+     },
+     {
+      "Id": "e4",
+      "MD5OfMessageBody": "9d5eab51e55a9b0664dde4f5bd5a855d",
+      "MessageId": "<message-id>"
+     },
+     {
+      "Id": "e5",
+      "MD5OfMessageBody": "fd9ddab5ee8a9ab22c87c9b8f6533785",
+      "MessageId": "<message-id>"
+     },
+     {
+      "Id": "e6",
+      "MD5OfMessageAttributes": "0a77b0642718c3d9dd47090567d11e0d",
+      "MD5OfMessageBody": "581443b3bae66d933bed76cd7b187ac9",
+      "MessageId": "<message-id>"
+     },
+     {
+      "Id": "e7",
+      "MD5OfMessageBody": "b2d1dc81244562df47d3cf656d43e8fa",
+      "MessageId": "<message-id>"
+     },
+     {
+      "Id": "e8",
+      "MD5OfMessageBody": "eb61a01ca8995bd04709fa4fd8fb1ca1",
+      "MessageId": "<message-id>"
+     },
+     {
+      "Id": "e9",
+      "MD5OfMessageAttributes": "e5ca11061a22fc38d1f567fae0461d2d",
+      "MD5OfMessageBody": "937972c3376b3663fc1a38709b4b7cb2",
+      "MessageId": "<message-id>"
+     }
+    ]
+   }
+  },
+  {
+   "op": "drain_batch",
+   "request": {
+    "QueueUrl": "<endpoint>/<account>/<prefix>-std",
+    "want": 10
+   },
+   "response": {
+    "messages": [
+     {
+      "Attributes": {
+       "ApproximateFirstReceiveTimestamp": "<time>",
+       "ApproximateReceiveCount": "1",
+       "SenderId": "<sender>",
+       "SentTimestamp": "<time>"
+      },
+      "Body": "b-1-a",
+      "MD5OfBody": "2076a5444110600ba6db7e9d9880979a",
+      "MD5OfMessageAttributes": "248d4870966696325d73b318e319dd59",
+      "MessageAttributes": {
+       "a0": {
+        "DataType": "String.custom",
+        "StringValue": "blue"
+       },
+       "a3": {
+        "DataType": "String.custom",
+        "StringValue": "x"
+       },
+       "a7": {
+        "DataType": "String.custom",
+        "StringValue": "ünï"
+       }
+      },
+      "MessageId": "<message-id>",
+      "ReceiptHandle": "<receipt>"
+     },
+     {
+      "Attributes": {
+       "ApproximateFirstReceiveTimestamp": "<time>",
+       "ApproximateReceiveCount": "1",
+       "SenderId": "<sender>",
+       "SentTimestamp": "<time>"
+      },
+      "Body": "b-10-line\nbreak",
+      "MD5OfBody": "937972c3376b3663fc1a38709b4b7cb2",
+      "MD5OfMessageAttributes": "e5ca11061a22fc38d1f567fae0461d2d",
+      "MessageAttributes": {
+       "a3": {
+        "BinaryValue": "b64:cOuU",
+        "DataType": "Binary"
+       },
+       "a6": {
+        "DataType": "String",
+        "StringValue": "ünï"
+       },
+       "a8": {
+        "DataType": "String.custom",
+        "StringValue": "x"
+       }
+      },
+      "MessageId": "<message-id>",
+      "ReceiptHandle": "<receipt>"
+     },
+     {
+      "Attributes": {
+       "ApproximateFirstReceiveTimestamp": "<time>",
+       "ApproximateReceiveCount": "1",
+       "SenderId": "<sender>",
+       "SentTimestamp": "<time>"
+      },
+      "Body": "b-2-ü",
+      "MD5OfBody": "f8711a2b6dfe6a73927ee2a4842f290f",
+      "MessageId": "<message-id>",
+      "ReceiptHandle": "<receipt>"
+     },
+     {
+      "Attributes": {
+       "ApproximateFirstReceiveTimestamp": "<time>",
+       "ApproximateReceiveCount": "1",
+       "SenderId": "<sender>",
+       "SentTimestamp": "<time>"
+      },
+      "Body": "b-3-a",
+      "MD5OfBody": "6aac6467f3c6f3beeb4a9799c683606e",
+      "MessageId": "<message-id>",
+      "ReceiptHandle": "<receipt>"
+     },
+     {
+      "Attributes": {
+       "ApproximateFirstReceiveTimestamp": "<time>",
+       "ApproximateReceiveCount": "1",
+       "SenderId": "<sender>",
+       "SentTimestamp": "<time>"
+      },
+      "Body": "b-4-ccc",
+      "MD5OfBody": "95336c97d4858ea45980ff1257a0d9a8",
+      "MessageId": "<message-id>",
+      "ReceiptHandle": "<receipt>"
+     },
+     {
+      "Attributes": {
+       "ApproximateFirstReceiveTimestamp": "<time>",
+       "ApproximateReceiveCount": "1",
+       "SenderId": "<sender>",
+       "SentTimestamp": "<time>"
+      },
+      "Body": "b-5-bb",
+      "MD5OfBody": "9d5eab51e55a9b0664dde4f5bd5a855d",
+      "MessageId": "<message-id>",
+      "ReceiptHandle": "<receipt>"
+     },
+     {
+      "Attributes": {
+       "ApproximateFirstReceiveTimestamp": "<time>",
+       "ApproximateReceiveCount": "1",
+       "SenderId": "<sender>",
+       "SentTimestamp": "<time>"
+      },
+      "Body": "b-6-a",
+      "MD5OfBody": "fd9ddab5ee8a9ab22c87c9b8f6533785",
+      "MessageId": "<message-id>",
+      "ReceiptHandle": "<receipt>"
+     },
+     {
+      "Attributes": {
+       "ApproximateFirstReceiveTimestamp": "<time>",
+       "ApproximateReceiveCount": "1",
+       "SenderId": "<sender>",
+       "SentTimestamp": "<time>"
+      },
+      "Body": "b-7-a",
+      "MD5OfBody": "581443b3bae66d933bed76cd7b187ac9",
+      "MD5OfMessageAttributes": "0a77b0642718c3d9dd47090567d11e0d",
+      "MessageAttributes": {
+       "k": {
+        "DataType": "String",
+        "StringValue": "v"
+       }
+      },
+      "MessageId": "<message-id>",
+      "ReceiptHandle": "<receipt>"
+     },
+     {
+      "Attributes": {
+       "ApproximateFirstReceiveTimestamp": "<time>",
+       "ApproximateReceiveCount": "1",
+       "SenderId": "<sender>",
+       "SentTimestamp": "<time>"
+      },
+      "Body": "b-8-ü",
+      "MD5OfBody": "b2d1dc81244562df47d3cf656d43e8fa",
+      "MessageId": "<message-id>",
+      "ReceiptHandle": "<receipt>"
+     },
+     {
+      "Attributes": {
+       "ApproximateFirstReceiveTimestamp": "<time>",
+       "ApproximateReceiveCount": "1",
+       "SenderId": "<sender>",
+       "SentTimestamp": "<time>"
+      },
+      "Body": "b-9-ü",
+      "MD5OfBody": "eb61a01ca8995bd04709fa4fd8fb1ca1",
+      "MessageId": "<message-id>",
+      "ReceiptHandle": "<receipt>"
+     }
+    ]
+   }
+  },
+  {
+   "op": "delete_message_batch",
+   "request": {
+    "Entries": [
+     {
+      "Id": "d0",
+      "ReceiptHandle": "<receipt>"
+     },
+     {
+      "Id": "d1",
+      "ReceiptHandle": "<receipt>"
+     },
+     {
+      "Id": "d2",
+      "ReceiptHandle": "<receipt>"
+     },
+     {
+      "Id": "d3",
+      "ReceiptHandle": "<receipt>"
+     },
+     {
+      "Id": "d4",
+      "ReceiptHandle": "<receipt>"
+     },
+     {
+      "Id": "d5",
+      "ReceiptHandle": "<receipt>"
+     },
+     {
+      "Id": "d6",
+      "ReceiptHandle": "<receipt>"
+     },
+     {
+      "Id": "d7",
+      "ReceiptHandle": "<receipt>"
+     },
+     {
+      "Id": "d8",
+      "ReceiptHandle": "<receipt>"
+     },
+     {
+      "Id": "d9",
+      "ReceiptHandle": "<receipt>"
+     }
+    ],
+    "QueueUrl": "<endpoint>/<account>/<prefix>-std"
+   },
+   "response": {
+    "Successful": [
+     {
+      "Id": "d7"
+     },
+     {
+      "Id": "d8"
+     },
+     {
+      "Id": "d5"
+     },
+     {
+      "Id": "d6"
+     },
+     {
+      "Id": "d0"
+     },
+     {
+      "Id": "d2"
+     },
+     {
+      "Id": "d3"
+     },
+     {
+      "Id": "d4"
+     },
+     {
+      "Id": "d1"
+     },
+     {
+      "Id": "d9"
+     }
+    ]
+   }
+  },
+  {
+   "op": "send_message",
+   "request": {
+    "MessageAttributes": {
+     "a5": {
+      "DataType": "String",
+      "StringValue": "ünï"
+     },
+     "a8": {
+      "DataType": "String.custom",
+      "StringValue": "ünï"
+     }
+    },
+    "MessageBody": "s-11-bb",
+    "QueueUrl": "<endpoint>/<account>/<prefix>-std"
+   },
+   "response": {
+    "MD5OfMessageAttributes": "8a831c8afa9b9907fd3f317753f09374",
+    "MD5OfMessageBody": "e4f2d04ba3400a1627fedd1bc4b278df",
+    "MessageId": "<message-id>"
+   }
+  },
+  {
+   "op": "receive_one",
+   "request": {
+    "QueueUrl": "<endpoint>/<account>/<prefix>-std",
+    "want": 1
+   },
+   "response": {
+    "messages": [
+     {
+      "Attributes": {
+       "ApproximateFirstReceiveTimestamp": "<time>",
+       "ApproximateReceiveCount": "1",
+       "SenderId": "<sender>",
+       "SentTimestamp": "<time>"
+      },
+      "Body": "s-11-bb",
+      "MD5OfBody": "e4f2d04ba3400a1627fedd1bc4b278df",
+      "MD5OfMessageAttributes": "8a831c8afa9b9907fd3f317753f09374",
+      "MessageAttributes": {
+       "a5": {
+        "DataType": "String",
+        "StringValue": "ünï"
+       },
+       "a8": {
+        "DataType": "String.custom",
+        "StringValue": "ünï"
+       }
+      },
+      "MessageId": "<message-id>",
+      "ReceiptHandle": "<receipt>"
+     }
+    ]
+   }
+  },
+  {
+   "op": "change_message_visibility",
+   "request": {
+    "QueueUrl": "<endpoint>/<account>/<prefix>-std",
+    "ReceiptHandle": "<receipt>",
+    "VisibilityTimeout": 0
+   },
+   "response": {}
+  },
+  {
+   "op": "receive_again",
+   "request": {
+    "QueueUrl": "<endpoint>/<account>/<prefix>-std",
+    "want": 1
+   },
+   "response": {
+    "messages": [
+     {
+      "Attributes": {
+       "ApproximateFirstReceiveTimestamp": "<time>",
+       "ApproximateReceiveCount": "2",
+       "SenderId": "<sender>",
+       "SentTimestamp": "<time>"
+      },
+      "Body": "s-11-bb",
+      "MD5OfBody": "e4f2d04ba3400a1627fedd1bc4b278df",
+      "MD5OfMessageAttributes": "8a831c8afa9b9907fd3f317753f09374",
+      "MessageAttributes": {
+       "a5": {
+        "DataType": "String",
+        "StringValue": "ünï"
+       },
+       "a8": {
+        "DataType": "String.custom",
+        "StringValue": "ünï"
+       }
+      },
+      "MessageId": "<message-id>",
+      "ReceiptHandle": "<receipt>"
+     }
+    ]
+   }
+  },
+  {
+   "op": "change_message_visibility",
+   "request": {
+    "QueueUrl": "<endpoint>/<account>/<prefix>-std",
+    "ReceiptHandle": "<receipt>",
+    "VisibilityTimeout": 10
+   },
+   "response": {}
+  },
+  {
+   "op": "delete_message",
+   "request": {
+    "QueueUrl": "<endpoint>/<account>/<prefix>-std",
+    "ReceiptHandle": "<receipt>"
+   },
+   "response": {}
+  },
+  {
+   "op": "send_message",
+   "request": {
+    "MessageBody": "f-13-ü",
+    "MessageDeduplicationId": "d12",
+    "MessageGroupId": "g2",
+    "QueueUrl": "<endpoint>/<account>/<prefix>-f.fifo"
+   },
+   "response": {
+    "MD5OfMessageBody": "d838db0d5162d3ee77c1972a550dbd14",
+    "MessageId": "<message-id>",
+    "SequenceNumber": "<sequence>"
+   }
+  },
+  {
+   "op": "send_message",
+   "request": {
+    "MessageBody": "f-15-ü",
+    "MessageDeduplicationId": "d14",
+    "MessageGroupId": "g0",
+    "QueueUrl": "<endpoint>/<account>/<prefix>-f.fifo"
+   },
+   "response": {
+    "MD5OfMessageBody": "632cba35db9324e7b99d728800c2ac89",
+    "MessageId": "<message-id>",
+    "SequenceNumber": "<sequence>"
+   }
+  },
+  {
+   "op": "send_message",
+   "request": {
+    "MessageBody": "f-15-ü",
+    "MessageDeduplicationId": "d14",
+    "MessageGroupId": "g0",
+    "QueueUrl": "<endpoint>/<account>/<prefix>-f.fifo"
+   },
+   "response": {
+    "MD5OfMessageBody": "632cba35db9324e7b99d728800c2ac89",
+    "MessageId": "<message-id>",
+    "SequenceNumber": "<sequence>"
+   }
+  },
+  {
+   "op": "send_message",
+   "request": {
+    "MessageBody": "f-17-ü",
+    "MessageDeduplicationId": "d16",
+    "MessageGroupId": "g1",
+    "QueueUrl": "<endpoint>/<account>/<prefix>-f.fifo"
+   },
+   "response": {
+    "MD5OfMessageBody": "c679b58b2d5b26f2c661867c2efdea16",
+    "MessageId": "<message-id>",
+    "SequenceNumber": "<sequence>"
+   }
+  },
+  {
+   "op": "send_message",
+   "request": {
+    "MessageBody": "f-19-line\nbreak",
+    "MessageDeduplicationId": "d18",
+    "MessageGroupId": "g1",
+    "QueueUrl": "<endpoint>/<account>/<prefix>-f.fifo"
+   },
+   "response": {
+    "MD5OfMessageBody": "7105d41d4c8825fe17fa13d6652f330f",
+    "MessageId": "<message-id>",
+    "SequenceNumber": "<sequence>"
+   }
+  },
+  {
+   "op": "drain_fifo",
+   "request": {
+    "QueueUrl": "<endpoint>/<account>/<prefix>-f.fifo",
+    "want": 4
+   },
+   "response": {
+    "groups": {
+     "g0": [
+      {
+       "Attributes": {
+        "ApproximateFirstReceiveTimestamp": "<time>",
+        "ApproximateReceiveCount": "1",
+        "MessageDeduplicationId": "d14",
+        "MessageGroupId": "g0",
+        "SenderId": "<sender>",
+        "SentTimestamp": "<time>",
+        "SequenceNumber": "<sequence>"
+       },
+       "Body": "f-15-ü",
+       "MD5OfBody": "632cba35db9324e7b99d728800c2ac89",
+       "MessageId": "<message-id>",
+       "ReceiptHandle": "<receipt>"
+      }
+     ],
+     "g1": [
+      {
+       "Attributes": {
+        "ApproximateFirstReceiveTimestamp": "<time>",
+        "ApproximateReceiveCount": "1",
+        "MessageDeduplicationId": "d16",
+        "MessageGroupId": "g1",
+        "SenderId": "<sender>",
+        "SentTimestamp": "<time>",
+        "SequenceNumber": "<sequence>"
+       },
+       "Body": "f-17-ü",
+       "MD5OfBody": "c679b58b2d5b26f2c661867c2efdea16",
+       "MessageId": "<message-id>",
+       "ReceiptHandle": "<receipt>"
+      },
+      {
+       "Attributes": {
+        "ApproximateFirstReceiveTimestamp": "<time>",
+        "ApproximateReceiveCount": "1",
+        "MessageDeduplicationId": "d18",
+        "MessageGroupId": "g1",
+        "SenderId": "<sender>",
+        "SentTimestamp": "<time>",
+        "SequenceNumber": "<sequence>"
+       },
+       "Body": "f-19-line\nbreak",
+       "MD5OfBody": "7105d41d4c8825fe17fa13d6652f330f",
+       "MessageId": "<message-id>",
+       "ReceiptHandle": "<receipt>"
+      }
+     ],
+     "g2": [
+      {
+       "Attributes": {
+        "ApproximateFirstReceiveTimestamp": "<time>",
+        "ApproximateReceiveCount": "1",
+        "MessageDeduplicationId": "d12",
+        "MessageGroupId": "g2",
+        "SenderId": "<sender>",
+        "SentTimestamp": "<time>",
+        "SequenceNumber": "<sequence>"
+       },
+       "Body": "f-13-ü",
+       "MD5OfBody": "d838db0d5162d3ee77c1972a550dbd14",
+       "MessageId": "<message-id>",
+       "ReceiptHandle": "<receipt>"
+      }
+     ]
+    }
+   }
+  },
+  {
+   "op": "delete_message_batch",
+   "request": {
+    "Entries": [
+     {
+      "Id": "d0",
+      "ReceiptHandle": "<receipt>"
+     },
+     {
+      "Id": "d1",
+      "ReceiptHandle": "<receipt>"
+     },
+     {
+      "Id": "d2",
+      "ReceiptHandle": "<receipt>"
+     },
+     {
+      "Id": "d3",
+      "ReceiptHandle": "<receipt>"
+     }
+    ],
+    "QueueUrl": "<endpoint>/<account>/<prefix>-f.fifo"
+   },
+   "response": {
+    "Successful": [
+     {
+      "Id": "d0"
+     },
+     {
+      "Id": "d1"
+     },
+     {
+      "Id": "d2"
+     },
+     {
+      "Id": "d3"
+     }
+    ]
+   }
+  },
+  {
+   "op": "set_queue_attributes",
+   "request": {
+    "Attributes": {
+     "NoSuchAttribute": "1"
+    },
+    "QueueUrl": "<endpoint>/<account>/<prefix>-std"
+   },
+   "response": {
+    "error": "InvalidAttributeName",
+    "message": "Unknown Attribute NoSuchAttribute.",
+    "status": 400
+   }
+  },
+  {
+   "op": "get_queue_attributes",
+   "request": {
+    "AttributeNames": [
+     "All"
+    ],
+    "QueueUrl": "<endpoint>/<account>/<prefix>-std"
+   },
+   "response": {
+    "Attributes": {
+     "ApproximateNumberOfMessages": "<count>",
+     "ApproximateNumberOfMessagesDelayed": "<count>",
+     "ApproximateNumberOfMessagesNotVisible": "<count>",
+     "CreatedTimestamp": "<time>",
+     "DelaySeconds": "0",
+     "LastModifiedTimestamp": "<time>",
+     "MaximumMessageSize": "1048576",
+     "MessageRetentionPeriod": "345600",
+     "QueueArn": "arn:aws:sqs:us-east-1:<account>:<prefix>-std",
+     "ReceiveMessageWaitTimeSeconds": "0",
+     "SqsManagedSseEnabled": "true",
+     "VisibilityTimeout": "30"
+    }
+   }
+  },
+  {
+   "op": "send_message_batch",
+   "request": {
+    "Entries": [
+     {
+      "Id": "e0",
+      "MessageBody": "b-20-ü"
+     },
+     {
+      "Id": "e1",
+      "MessageBody": "b-21-a"
+     },
+     {
+      "Id": "e2",
+      "MessageBody": "b-22-ccc"
+     },
+     {
+      "Id": "e3",
+      "MessageBody": "b-23-line\nbreak"
+     },
+     {
+      "Id": "e4",
+      "MessageBody": "b-24-ü"
+     },
+     {
+      "Id": "e5",
+      "MessageBody": "b-25-bb"
+     },
+     {
+      "Id": "e6",
+      "MessageBody": "b-26-a"
+     },
+     {
+      "Id": "e7",
+      "MessageBody": "b-27-line\nbreak"
+     },
+     {
+      "Id": "e8",
+      "MessageAttributes": {
+       "a7": {
+        "BinaryValue": "b64:iQLE",
+        "DataType": "Binary"
+       },
+       "a8": {
+        "DataType": "Number",
+        "StringValue": "791"
+       }
+      },
+      "MessageBody": "b-28-line\nbreak"
+     }
+    ],
+    "QueueUrl": "<endpoint>/<account>/<prefix>-std"
+   },
+   "response": {
+    "Successful": [
+     {
+      "Id": "e0",
+      "MD5OfMessageBody": "8e9c61533eeb5281bd10a6dc525cfd1e",
+      "MessageId": "<message-id>"
+     },
+     {
+      "Id": "e1",
+      "MD5OfMessageBody": "55958d95e258c8b797ada22bf7adcb94",
+      "MessageId": "<message-id>"
+     },
+     {
+      "Id": "e2",
+      "MD5OfMessageBody": "b6f9f9fc0e6de1fdbb0b6552eac310d4",
+      "MessageId": "<message-id>"
+     },
+     {
+      "Id": "e3",
+      "MD5OfMessageBody": "b071a549b41b95ab349d7919026ee497",
+      "MessageId": "<message-id>"
+     },
+     {
+      "Id": "e4",
+      "MD5OfMessageBody": "66476d9a10d80d80787eea76f6a9affd",
+      "MessageId": "<message-id>"
+     },
+     {
+      "Id": "e5",
+      "MD5OfMessageBody": "27804f507b54b4d06cc4c619d6dacaf3",
+      "MessageId": "<message-id>"
+     },
+     {
+      "Id": "e6",
+      "MD5OfMessageBody": "6a2fec8f6b2314ab861039d0397e5da9",
+      "MessageId": "<message-id>"
+     },
+     {
+      "Id": "e7",
+      "MD5OfMessageBody": "dab0b240e2efe70f32c4a5b3c4b503dc",
+      "MessageId": "<message-id>"
+     },
+     {
+      "Id": "e8",
+      "MD5OfMessageAttributes": "c7312b0bbcdc4bdcb56ccb7a45b6f363",
+      "MD5OfMessageBody": "be1e889911850c9f6641d2e6d9e1ea2d",
+      "MessageId": "<message-id>"
+     }
+    ]
+   }
+  },
+  {
+   "op": "drain_batch",
+   "request": {
+    "QueueUrl": "<endpoint>/<account>/<prefix>-std",
+    "want": 9
+   },
+   "response": {
+    "messages": [
+     {
+      "Attributes": {
+       "ApproximateFirstReceiveTimestamp": "<time>",
+       "ApproximateReceiveCount": "1",
+       "SenderId": "<sender>",
+       "SentTimestamp": "<time>"
+      },
+      "Body": "b-20-ü",
+      "MD5OfBody": "8e9c61533eeb5281bd10a6dc525cfd1e",
+      "MessageId": "<message-id>",
+      "ReceiptHandle": "<receipt>"
+     },
+     {
+      "Attributes": {
+       "ApproximateFirstReceiveTimestamp": "<time>",
+       "ApproximateReceiveCount": "1",
+       "SenderId": "<sender>",
+       "SentTimestamp": "<time>"
+      },
+      "Body": "b-21-a",
+      "MD5OfBody": "55958d95e258c8b797ada22bf7adcb94",
+      "MessageId": "<message-id>",
+      "ReceiptHandle": "<receipt>"
+     },
+     {
+      "Attributes": {
+       "ApproximateFirstReceiveTimestamp": "<time>",
+       "ApproximateReceiveCount": "1",
+       "SenderId": "<sender>",
+       "SentTimestamp": "<time>"
+      },
+      "Body": "b-22-ccc",
+      "MD5OfBody": "b6f9f9fc0e6de1fdbb0b6552eac310d4",
+      "MessageId": "<message-id>",
+      "ReceiptHandle": "<receipt>"
+     },
+     {
+      "Attributes": {
+       "ApproximateFirstReceiveTimestamp": "<time>",
+       "ApproximateReceiveCount": "1",
+       "SenderId": "<sender>",
+       "SentTimestamp": "<time>"
+      },
+      "Body": "b-23-line\nbreak",
+      "MD5OfBody": "b071a549b41b95ab349d7919026ee497",
+      "MessageId": "<message-id>",
+      "ReceiptHandle": "<receipt>"
+     },
+     {
+      "Attributes": {
+       "ApproximateFirstReceiveTimestamp": "<time>",
+       "ApproximateReceiveCount": "1",
+       "SenderId": "<sender>",
+       "SentTimestamp": "<time>"
+      },
+      "Body": "b-24-ü",
+      "MD5OfBody": "66476d9a10d80d80787eea76f6a9affd",
+      "MessageId": "<message-id>",
+      "ReceiptHandle": "<receipt>"
+     },
+     {
+      "Attributes": {
+       "ApproximateFirstReceiveTimestamp": "<time>",
+       "ApproximateReceiveCount": "1",
+       "SenderId": "<sender>",
+       "SentTimestamp": "<time>"
+      },
+      "Body": "b-25-bb",
+      "MD5OfBody": "27804f507b54b4d06cc4c619d6dacaf3",
+      "MessageId": "<message-id>",
+      "ReceiptHandle": "<receipt>"
+     },
+     {
+      "Attributes": {
+       "ApproximateFirstReceiveTimestamp": "<time>",
+       "ApproximateReceiveCount": "1",
+       "SenderId": "<sender>",
+       "SentTimestamp": "<time>"
+      },
+      "Body": "b-26-a",
+      "MD5OfBody": "6a2fec8f6b2314ab861039d0397e5da9",
+      "MessageId": "<message-id>",
+      "ReceiptHandle": "<receipt>"
+     },
+     {
+      "Attributes": {
+       "ApproximateFirstReceiveTimestamp": "<time>",
+       "ApproximateReceiveCount": "1",
+       "SenderId": "<sender>",
+       "SentTimestamp": "<time>"
+      },
+      "Body": "b-27-line\nbreak",
+      "MD5OfBody": "dab0b240e2efe70f32c4a5b3c4b503dc",
+      "MessageId": "<message-id>",
+      "ReceiptHandle": "<receipt>"
+     },
+     {
+      "Attributes": {
+       "ApproximateFirstReceiveTimestamp": "<time>",
+       "ApproximateReceiveCount": "1",
+       "SenderId": "<sender>",
+       "SentTimestamp": "<time>"
+      },
+      "Body": "b-28-line\nbreak",
+      "MD5OfBody": "be1e889911850c9f6641d2e6d9e1ea2d",
+      "MD5OfMessageAttributes": "c7312b0bbcdc4bdcb56ccb7a45b6f363",
+      "MessageAttributes": {
+       "a7": {
+        "BinaryValue": "b64:iQLE",
+        "DataType": "Binary"
+       },
+       "a8": {
+        "DataType": "Number",
+        "StringValue": "791"
+       }
+      },
+      "MessageId": "<message-id>",
+      "ReceiptHandle": "<receipt>"
+     }
+    ]
+   }
+  },
+  {
+   "op": "delete_message_batch",
+   "request": {
+    "Entries": [
+     {
+      "Id": "d0",
+      "ReceiptHandle": "<receipt>"
+     },
+     {
+      "Id": "d1",
+      "ReceiptHandle": "<receipt>"
+     },
+     {
+      "Id": "d2",
+      "ReceiptHandle": "<receipt>"
+     },
+     {
+      "Id": "d3",
+      "ReceiptHandle": "<receipt>"
+     },
+     {
+      "Id": "d4",
+      "ReceiptHandle": "<receipt>"
+     },
+     {
+      "Id": "d5",
+      "ReceiptHandle": "<receipt>"
+     },
+     {
+      "Id": "d6",
+      "ReceiptHandle": "<receipt>"
+     },
+     {
+      "Id": "d7",
+      "ReceiptHandle": "<receipt>"
+     },
+     {
+      "Id": "d8",
+      "ReceiptHandle": "<receipt>"
+     }
+    ],
+    "QueueUrl": "<endpoint>/<account>/<prefix>-std"
+   },
+   "response": {
+    "Successful": [
+     {
+      "Id": "d4"
+     },
+     {
+      "Id": "d5"
+     },
+     {
+      "Id": "d8"
+     },
+     {
+      "Id": "d2"
+     },
+     {
+      "Id": "d3"
+     },
+     {
+      "Id": "d6"
+     },
+     {
+      "Id": "d7"
+     },
+     {
+      "Id": "d0"
+     },
+     {
+      "Id": "d1"
+     }
+    ]
+   }
+  },
+  {
+   "op": "untag_queue",
+   "request": {
+    "QueueUrl": "<endpoint>/<account>/<prefix>-std",
+    "TagKeys": [
+     "t3"
+    ]
+   },
+   "response": {}
+  },
+  {
+   "op": "list_queue_tags",
+   "request": {
+    "QueueUrl": "<endpoint>/<account>/<prefix>-std"
+   },
+   "response": {}
+  },
+  {
+   "op": "send_message",
+   "request": {
+    "DelaySeconds": 901,
+    "MessageBody": "late",
+    "QueueUrl": "<endpoint>/<account>/<prefix>-std"
+   },
+   "response": {
+    "error": "InvalidParameterValue",
+    "message": "Value 901 for parameter DelaySeconds is invalid. Reason: DelaySeconds must be >= 0 and <= 900.",
+    "status": 400
+   }
+  },
+  {
+   "op": "send_message_batch",
+   "request": {
+    "Entries": [
+     {
+      "Id": "e0",
+      "MessageBody": "b-29-ü"
+     },
+     {
+      "Id": "e1",
+      "MessageBody": "b-30-ccc"
+     },
+     {
+      "Id": "e2",
+      "MessageBody": "b-31-a"
+     },
+     {
+      "Id": "e3",
+      "MessageBody": "b-32-line\nbreak"
+     },
+     {
+      "Id": "e4",
+      "MessageBody": "b-33-ccc"
+     },
+     {
+      "Id": "e5",
+      "MessageBody": "b-34-a"
+     },
+     {
+      "Id": "e6",
+      "MessageBody": "b-35-bb"
+     },
+     {
+      "Id": "e7",
+      "MessageBody": "b-36-bb"
+     },
+     {
+      "Id": "e8",
+      "MessageBody": "b-37-line\nbreak"
+     }
+    ],
+    "QueueUrl": "<endpoint>/<account>/<prefix>-std"
+   },
+   "response": {
+    "Successful": [
+     {
+      "Id": "e0",
+      "MD5OfMessageBody": "97799502166670ba6fb8e1093ae94ae9",
+      "MessageId": "<message-id>"
+     },
+     {
+      "Id": "e1",
+      "MD5OfMessageBody": "338df4bf72914a9809457bf56f89e9c2",
+      "MessageId": "<message-id>"
+     },
+     {
+      "Id": "e2",
+      "MD5OfMessageBody": "2ccfe343c998f213d193ad2353662645",
+      "MessageId": "<message-id>"
+     },
+     {
+      "Id": "e3",
+      "MD5OfMessageBody": "e72bdf6c2d1b4cca2e5183856f409ad8",
+      "MessageId": "<message-id>"
+     },
+     {
+      "Id": "e4",
+      "MD5OfMessageBody": "2dcbb77c49c057e66a719aedded001a1",
+      "MessageId": "<message-id>"
+     },
+     {
+      "Id": "e5",
+      "MD5OfMessageBody": "39cf3df52b540be60ef485b46226e2d2",
+      "MessageId": "<message-id>"
+     },
+     {
+      "Id": "e6",
+      "MD5OfMessageBody": "b8083d1df0da26f5001ee9bb8d409281",
+      "MessageId": "<message-id>"
+     },
+     {
+      "Id": "e7",
+      "MD5OfMessageBody": "341588824a63fa6def43cf14ac247bb6",
+      "MessageId": "<message-id>"
+     },
+     {
+      "Id": "e8",
+      "MD5OfMessageBody": "36b03432f703236c8f60ff3ee6f88066",
+      "MessageId": "<message-id>"
+     }
+    ]
+   }
+  },
+  {
+   "op": "drain_batch",
+   "request": {
+    "QueueUrl": "<endpoint>/<account>/<prefix>-std",
+    "want": 9
+   },
+   "response": {
+    "messages": [
+     {
+      "Attributes": {
+       "ApproximateFirstReceiveTimestamp": "<time>",
+       "ApproximateReceiveCount": "1",
+       "SenderId": "<sender>",
+       "SentTimestamp": "<time>"
+      },
+      "Body": "b-29-ü",
+      "MD5OfBody": "97799502166670ba6fb8e1093ae94ae9",
+      "MessageId": "<message-id>",
+      "ReceiptHandle": "<receipt>"
+     },
+     {
+      "Attributes": {
+       "ApproximateFirstReceiveTimestamp": "<time>",
+       "ApproximateReceiveCount": "1",
+       "SenderId": "<sender>",
+       "SentTimestamp": "<time>"
+      },
+      "Body": "b-30-ccc",
+      "MD5OfBody": "338df4bf72914a9809457bf56f89e9c2",
+      "MessageId": "<message-id>",
+      "ReceiptHandle": "<receipt>"
+     },
+     {
+      "Attributes": {
+       "ApproximateFirstReceiveTimestamp": "<time>",
+       "ApproximateReceiveCount": "1",
+       "SenderId": "<sender>",
+       "SentTimestamp": "<time>"
+      },
+      "Body": "b-31-a",
+      "MD5OfBody": "2ccfe343c998f213d193ad2353662645",
+      "MessageId": "<message-id>",
+      "ReceiptHandle": "<receipt>"
+     },
+     {
+      "Attributes": {
+       "ApproximateFirstReceiveTimestamp": "<time>",
+       "ApproximateReceiveCount": "1",
+       "SenderId": "<sender>",
+       "SentTimestamp": "<time>"
+      },
+      "Body": "b-32-line\nbreak",
+      "MD5OfBody": "e72bdf6c2d1b4cca2e5183856f409ad8",
+      "MessageId": "<message-id>",
+      "ReceiptHandle": "<receipt>"
+     },
+     {
+      "Attributes": {
+       "ApproximateFirstReceiveTimestamp": "<time>",
+       "ApproximateReceiveCount": "1",
+       "SenderId": "<sender>",
+       "SentTimestamp": "<time>"
+      },
+      "Body": "b-33-ccc",
+      "MD5OfBody": "2dcbb77c49c057e66a719aedded001a1",
+      "MessageId": "<message-id>",
+      "ReceiptHandle": "<receipt>"
+     },
+     {
+      "Attributes": {
+       "ApproximateFirstReceiveTimestamp": "<time>",
+       "ApproximateReceiveCount": "1",
+       "SenderId": "<sender>",
+       "SentTimestamp": "<time>"
+      },
+      "Body": "b-34-a",
+      "MD5OfBody": "39cf3df52b540be60ef485b46226e2d2",
+      "MessageId": "<message-id>",
+      "ReceiptHandle": "<receipt>"
+     },
+     {
+      "Attributes": {
+       "ApproximateFirstReceiveTimestamp": "<time>",
+       "ApproximateReceiveCount": "1",
+       "SenderId": "<sender>",
+       "SentTimestamp": "<time>"
+      },
+      "Body": "b-35-bb",
+      "MD5OfBody": "b8083d1df0da26f5001ee9bb8d409281",
+      "MessageId": "<message-id>",
+      "ReceiptHandle": "<receipt>"
+     },
+     {
+      "Attributes": {
+       "ApproximateFirstReceiveTimestamp": "<time>",
+       "ApproximateReceiveCount": "1",
+       "SenderId": "<sender>",
+       "SentTimestamp": "<time>"
+      },
+      "Body": "b-36-bb",
+      "MD5OfBody": "341588824a63fa6def43cf14ac247bb6",
+      "MessageId": "<message-id>",
+      "ReceiptHandle": "<receipt>"
+     },
+     {
+      "Attributes": {
+       "ApproximateFirstReceiveTimestamp": "<time>",
+       "ApproximateReceiveCount": "1",
+       "SenderId": "<sender>",
+       "SentTimestamp": "<time>"
+      },
+      "Body": "b-37-line\nbreak",
+      "MD5OfBody": "36b03432f703236c8f60ff3ee6f88066",
+      "MessageId": "<message-id>",
+      "ReceiptHandle": "<receipt>"
+     }
+    ]
+   }
+  },
+  {
+   "op": "delete_message_batch",
+   "request": {
+    "Entries": [
+     {
+      "Id": "d0",
+      "ReceiptHandle": "<receipt>"
+     },
+     {
+      "Id": "d1",
+      "ReceiptHandle": "<receipt>"
+     },
+     {
+      "Id": "d2",
+      "ReceiptHandle": "<receipt>"
+     },
+     {
+      "Id": "d3",
+      "ReceiptHandle": "<receipt>"
+     },
+     {
+      "Id": "d4",
+      "ReceiptHandle": "<receipt>"
+     },
+     {
+      "Id": "d5",
+      "ReceiptHandle": "<receipt>"
+     },
+     {
+      "Id": "d6",
+      "ReceiptHandle": "<receipt>"
+     },
+     {
+      "Id": "d7",
+      "ReceiptHandle": "<receipt>"
+     },
+     {
+      "Id": "d8",
+      "ReceiptHandle": "<receipt>"
+     }
+    ],
+    "QueueUrl": "<endpoint>/<account>/<prefix>-std"
+   },
+   "response": {
+    "Successful": [
+     {
+      "Id": "d0"
+     },
+     {
+      "Id": "d1"
+     },
+     {
+      "Id": "d2"
+     },
+     {
+      "Id": "d3"
+     },
+     {
+      "Id": "d4"
+     },
+     {
+      "Id": "d5"
+     },
+     {
+      "Id": "d8"
+     },
+     {
+      "Id": "d6"
+     },
+     {
+      "Id": "d7"
+     }
+    ]
+   }
+  },
+  {
+   "op": "send_message",
+   "request": {
+    "MessageBody": "f-39-a",
+    "MessageDeduplicationId": "d38",
+    "MessageGroupId": "g0",
+    "QueueUrl": "<endpoint>/<account>/<prefix>-f.fifo"
+   },
+   "response": {
+    "MD5OfMessageBody": "69b5b276525620266bba2762d8b2e309",
+    "MessageId": "<message-id>",
+    "SequenceNumber": "<sequence>"
+   }
+  },
+  {
+   "op": "send_message",
+   "request": {
+    "MessageBody": "f-41-a",
+    "MessageDeduplicationId": "d40",
+    "MessageGroupId": "g0",
+    "QueueUrl": "<endpoint>/<account>/<prefix>-f.fifo"
+   },
+   "response": {
+    "MD5OfMessageBody": "d898554297df5415ca19832603628c4a",
+    "MessageId": "<message-id>",
+    "SequenceNumber": "<sequence>"
+   }
+  },
+  {
+   "op": "send_message",
+   "request": {
+    "MessageBody": "f-43-bb",
+    "MessageDeduplicationId": "d42",
+    "MessageGroupId": "g0",
+    "QueueUrl": "<endpoint>/<account>/<prefix>-f.fifo"
+   },
+   "response": {
+    "MD5OfMessageBody": "eabb57e9c082b1135034d6fe7050ba1b",
+    "MessageId": "<message-id>",
+    "SequenceNumber": "<sequence>"
+   }
+  },
+  {
+   "op": "send_message",
+   "request": {
+    "MessageBody": "f-45-ccc",
+    "MessageDeduplicationId": "d44",
+    "MessageGroupId": "g0",
+    "QueueUrl": "<endpoint>/<account>/<prefix>-f.fifo"
+   },
+   "response": {
+    "MD5OfMessageBody": "4b7a5ebd36953247277d39b35bcacb5a",
+    "MessageId": "<message-id>",
+    "SequenceNumber": "<sequence>"
+   }
+  },
+  {
+   "op": "send_message",
+   "request": {
+    "MessageBody": "f-47-bb",
+    "MessageDeduplicationId": "d46",
+    "MessageGroupId": "g0",
+    "QueueUrl": "<endpoint>/<account>/<prefix>-f.fifo"
+   },
+   "response": {
+    "MD5OfMessageBody": "c6b45020daf29f217877c78bdc85db2a",
+    "MessageId": "<message-id>",
+    "SequenceNumber": "<sequence>"
+   }
+  },
+  {
+   "op": "send_message",
+   "request": {
+    "MessageBody": "f-49-ccc",
+    "MessageDeduplicationId": "d48",
+    "MessageGroupId": "g0",
+    "QueueUrl": "<endpoint>/<account>/<prefix>-f.fifo"
+   },
+   "response": {
+    "MD5OfMessageBody": "36237444955c20bed8f611c0a40914f0",
+    "MessageId": "<message-id>",
+    "SequenceNumber": "<sequence>"
+   }
+  },
+  {
+   "op": "drain_fifo",
+   "request": {
+    "QueueUrl": "<endpoint>/<account>/<prefix>-f.fifo",
+    "want": 6
+   },
+   "response": {
+    "groups": {
+     "g0": [
+      {
+       "Attributes": {
+        "ApproximateFirstReceiveTimestamp": "<time>",
+        "ApproximateReceiveCount": "1",
+        "MessageDeduplicationId": "d38",
+        "MessageGroupId": "g0",
+        "SenderId": "<sender>",
+        "SentTimestamp": "<time>",
+        "SequenceNumber": "<sequence>"
+       },
+       "Body": "f-39-a",
+       "MD5OfBody": "69b5b276525620266bba2762d8b2e309",
+       "MessageId": "<message-id>",
+       "ReceiptHandle": "<receipt>"
+      },
+      {
+       "Attributes": {
+        "ApproximateFirstReceiveTimestamp": "<time>",
+        "ApproximateReceiveCount": "1",
+        "MessageDeduplicationId": "d40",
+        "MessageGroupId": "g0",
+        "SenderId": "<sender>",
+        "SentTimestamp": "<time>",
+        "SequenceNumber": "<sequence>"
+       },
+       "Body": "f-41-a",
+       "MD5OfBody": "d898554297df5415ca19832603628c4a",
+       "MessageId": "<message-id>",
+       "ReceiptHandle": "<receipt>"
+      },
+      {
+       "Attributes": {
+        "ApproximateFirstReceiveTimestamp": "<time>",
+        "ApproximateReceiveCount": "1",
+        "MessageDeduplicationId": "d42",
+        "MessageGroupId": "g0",
+        "SenderId": "<sender>",
+        "SentTimestamp": "<time>",
+        "SequenceNumber": "<sequence>"
+       },
+       "Body": "f-43-bb",
+       "MD5OfBody": "eabb57e9c082b1135034d6fe7050ba1b",
+       "MessageId": "<message-id>",
+       "ReceiptHandle": "<receipt>"
+      },
+      {
+       "Attributes": {
+        "ApproximateFirstReceiveTimestamp": "<time>",
+        "ApproximateReceiveCount": "1",
+        "MessageDeduplicationId": "d44",
+        "MessageGroupId": "g0",
+        "SenderId": "<sender>",
+        "SentTimestamp": "<time>",
+        "SequenceNumber": "<sequence>"
+       },
+       "Body": "f-45-ccc",
+       "MD5OfBody": "4b7a5ebd36953247277d39b35bcacb5a",
+       "MessageId": "<message-id>",
+       "ReceiptHandle": "<receipt>"
+      },
+      {
+       "Attributes": {
+        "ApproximateFirstReceiveTimestamp": "<time>",
+        "ApproximateReceiveCount": "1",
+        "MessageDeduplicationId": "d46",
+        "MessageGroupId": "g0",
+        "SenderId": "<sender>",
+        "SentTimestamp": "<time>",
+        "SequenceNumber": "<sequence>"
+       },
+       "Body": "f-47-bb",
+       "MD5OfBody": "c6b45020daf29f217877c78bdc85db2a",
+       "MessageId": "<message-id>",
+       "ReceiptHandle": "<receipt>"
+      },
+      {
+       "Attributes": {
+        "ApproximateFirstReceiveTimestamp": "<time>",
+        "ApproximateReceiveCount": "1",
+        "MessageDeduplicationId": "d48",
+        "MessageGroupId": "g0",
+        "SenderId": "<sender>",
+        "SentTimestamp": "<time>",
+        "SequenceNumber": "<sequence>"
+       },
+       "Body": "f-49-ccc",
+       "MD5OfBody": "36237444955c20bed8f611c0a40914f0",
+       "MessageId": "<message-id>",
+       "ReceiptHandle": "<receipt>"
+      }
+     ]
+    }
+   }
+  },
+  {
+   "op": "delete_message_batch",
+   "request": {
+    "Entries": [
+     {
+      "Id": "d0",
+      "ReceiptHandle": "<receipt>"
+     },
+     {
+      "Id": "d1",
+      "ReceiptHandle": "<receipt>"
+     },
+     {
+      "Id": "d2",
+      "ReceiptHandle": "<receipt>"
+     },
+     {
+      "Id": "d3",
+      "ReceiptHandle": "<receipt>"
+     },
+     {
+      "Id": "d4",
+      "ReceiptHandle": "<receipt>"
+     },
+     {
+      "Id": "d5",
+      "ReceiptHandle": "<receipt>"
+     }
+    ],
+    "QueueUrl": "<endpoint>/<account>/<prefix>-f.fifo"
+   },
+   "response": {
+    "Successful": [
+     {
+      "Id": "d0"
+     },
+     {
+      "Id": "d1"
+     },
+     {
+      "Id": "d2"
+     },
+     {
+      "Id": "d3"
+     },
+     {
+      "Id": "d4"
+     },
+     {
+      "Id": "d5"
+     }
+    ]
+   }
+  },
+  {
+   "op": "send_message",
+   "request": {
+    "MessageBody": "f-51-ü",
+    "MessageDeduplicationId": "d50",
+    "MessageGroupId": "g1",
+    "QueueUrl": "<endpoint>/<account>/<prefix>-f.fifo"
+   },
+   "response": {
+    "MD5OfMessageBody": "cc7f12d4166f8d6d37f1fae3f4e8904d",
+    "MessageId": "<message-id>",
+    "SequenceNumber": "<sequence>"
+   }
+  },
+  {
+   "op": "send_message",
+   "request": {
+    "MessageBody": "f-53-ccc",
+    "MessageDeduplicationId": "d52",
+    "MessageGroupId": "g0",
+    "QueueUrl": "<endpoint>/<account>/<prefix>-f.fifo"
+   },
+   "response": {
+    "MD5OfMessageBody": "b63cf10ddfc45f1ce015dcf389883e1e",
+    "MessageId": "<message-id>",
+    "SequenceNumber": "<sequence>"
+   }
+  },
+  {
+   "op": "send_message",
+   "request": {
+    "MessageBody": "f-55-bb",
+    "MessageDeduplicationId": "d54",
+    "MessageGroupId": "g1",
+    "QueueUrl": "<endpoint>/<account>/<prefix>-f.fifo"
+   },
+   "response": {
+    "MD5OfMessageBody": "9bfd2d2a5b982a505e993e33f61ba20f",
+    "MessageId": "<message-id>",
+    "SequenceNumber": "<sequence>"
+   }
+  },
+  {
+   "op": "send_message",
+   "request": {
+    "MessageBody": "f-57-line\nbreak",
+    "MessageDeduplicationId": "d56",
+    "MessageGroupId": "g1",
+    "QueueUrl": "<endpoint>/<account>/<prefix>-f.fifo"
+   },
+   "response": {
+    "MD5OfMessageBody": "3d7157f67d393363676e65d73cc1e02e",
+    "MessageId": "<message-id>",
+    "SequenceNumber": "<sequence>"
+   }
+  },
+  {
+   "op": "send_message",
+   "request": {
+    "MessageBody": "f-59-a",
+    "MessageDeduplicationId": "d58",
+    "MessageGroupId": "g1",
+    "QueueUrl": "<endpoint>/<account>/<prefix>-f.fifo"
+   },
+   "response": {
+    "MD5OfMessageBody": "1fc3a3f33ffa80b16c537c400f794d1a",
+    "MessageId": "<message-id>",
+    "SequenceNumber": "<sequence>"
+   }
+  },
+  {
+   "op": "send_message",
+   "request": {
+    "MessageBody": "f-59-a",
+    "MessageDeduplicationId": "d58",
+    "MessageGroupId": "g1",
+    "QueueUrl": "<endpoint>/<account>/<prefix>-f.fifo"
+   },
+   "response": {
+    "MD5OfMessageBody": "1fc3a3f33ffa80b16c537c400f794d1a",
+    "MessageId": "<message-id>",
+    "SequenceNumber": "<sequence>"
+   }
+  },
+  {
+   "op": "send_message",
+   "request": {
+    "MessageBody": "f-61-bb",
+    "MessageDeduplicationId": "d60",
+    "MessageGroupId": "g1",
+    "QueueUrl": "<endpoint>/<account>/<prefix>-f.fifo"
+   },
+   "response": {
+    "MD5OfMessageBody": "43d2dab6ea044d837604a19f47dd351d",
+    "MessageId": "<message-id>",
+    "SequenceNumber": "<sequence>"
+   }
+  },
+  {
+   "op": "send_message",
+   "request": {
+    "MessageBody": "f-61-bb",
+    "MessageDeduplicationId": "d60",
+    "MessageGroupId": "g1",
+    "QueueUrl": "<endpoint>/<account>/<prefix>-f.fifo"
+   },
+   "response": {
+    "MD5OfMessageBody": "43d2dab6ea044d837604a19f47dd351d",
+    "MessageId": "<message-id>",
+    "SequenceNumber": "<sequence>"
+   }
+  },
+  {
+   "op": "drain_fifo",
+   "request": {
+    "QueueUrl": "<endpoint>/<account>/<prefix>-f.fifo",
+    "want": 6
+   },
+   "response": {
+    "groups": {
+     "g0": [
+      {
+       "Attributes": {
+        "ApproximateFirstReceiveTimestamp": "<time>",
+        "ApproximateReceiveCount": "1",
+        "MessageDeduplicationId": "d52",
+        "MessageGroupId": "g0",
+        "SenderId": "<sender>",
+        "SentTimestamp": "<time>",
+        "SequenceNumber": "<sequence>"
+       },
+       "Body": "f-53-ccc",
+       "MD5OfBody": "b63cf10ddfc45f1ce015dcf389883e1e",
+       "MessageId": "<message-id>",
+       "ReceiptHandle": "<receipt>"
+      }
+     ],
+     "g1": [
+      {
+       "Attributes": {
+        "ApproximateFirstReceiveTimestamp": "<time>",
+        "ApproximateReceiveCount": "1",
+        "MessageDeduplicationId": "d50",
+        "MessageGroupId": "g1",
+        "SenderId": "<sender>",
+        "SentTimestamp": "<time>",
+        "SequenceNumber": "<sequence>"
+       },
+       "Body": "f-51-ü",
+       "MD5OfBody": "cc7f12d4166f8d6d37f1fae3f4e8904d",
+       "MessageId": "<message-id>",
+       "ReceiptHandle": "<receipt>"
+      },
+      {
+       "Attributes": {
+        "ApproximateFirstReceiveTimestamp": "<time>",
+        "ApproximateReceiveCount": "1",
+        "MessageDeduplicationId": "d54",
+        "MessageGroupId": "g1",
+        "SenderId": "<sender>",
+        "SentTimestamp": "<time>",
+        "SequenceNumber": "<sequence>"
+       },
+       "Body": "f-55-bb",
+       "MD5OfBody": "9bfd2d2a5b982a505e993e33f61ba20f",
+       "MessageId": "<message-id>",
+       "ReceiptHandle": "<receipt>"
+      },
+      {
+       "Attributes": {
+        "ApproximateFirstReceiveTimestamp": "<time>",
+        "ApproximateReceiveCount": "1",
+        "MessageDeduplicationId": "d56",
+        "MessageGroupId": "g1",
+        "SenderId": "<sender>",
+        "SentTimestamp": "<time>",
+        "SequenceNumber": "<sequence>"
+       },
+       "Body": "f-57-line\nbreak",
+       "MD5OfBody": "3d7157f67d393363676e65d73cc1e02e",
+       "MessageId": "<message-id>",
+       "ReceiptHandle": "<receipt>"
+      },
+      {
+       "Attributes": {
+        "ApproximateFirstReceiveTimestamp": "<time>",
+        "ApproximateReceiveCount": "1",
+        "MessageDeduplicationId": "d58",
+        "MessageGroupId": "g1",
+        "SenderId": "<sender>",
+        "SentTimestamp": "<time>",
+        "SequenceNumber": "<sequence>"
+       },
+       "Body": "f-59-a",
+       "MD5OfBody": "1fc3a3f33ffa80b16c537c400f794d1a",
+       "MessageId": "<message-id>",
+       "ReceiptHandle": "<receipt>"
+      },
+      {
+       "Attributes": {
+        "ApproximateFirstReceiveTimestamp": "<time>",
+        "ApproximateReceiveCount": "1",
+        "MessageDeduplicationId": "d60",
+        "MessageGroupId": "g1",
+        "SenderId": "<sender>",
+        "SentTimestamp": "<time>",
+        "SequenceNumber": "<sequence>"
+       },
+       "Body": "f-61-bb",
+       "MD5OfBody": "43d2dab6ea044d837604a19f47dd351d",
+       "MessageId": "<message-id>",
+       "ReceiptHandle": "<receipt>"
+      }
+     ]
+    }
+   }
+  },
+  {
+   "op": "delete_message_batch",
+   "request": {
+    "Entries": [
+     {
+      "Id": "d0",
+      "ReceiptHandle": "<receipt>"
+     },
+     {
+      "Id": "d1",
+      "ReceiptHandle": "<receipt>"
+     },
+     {
+      "Id": "d2",
+      "ReceiptHandle": "<receipt>"
+     },
+     {
+      "Id": "d3",
+      "ReceiptHandle": "<receipt>"
+     },
+     {
+      "Id": "d4",
+      "ReceiptHandle": "<receipt>"
+     },
+     {
+      "Id": "d5",
+      "ReceiptHandle": "<receipt>"
+     }
+    ],
+    "QueueUrl": "<endpoint>/<account>/<prefix>-f.fifo"
+   },
+   "response": {
+    "Successful": [
+     {
+      "Id": "d0"
+     },
+     {
+      "Id": "d1"
+     },
+     {
+      "Id": "d2"
+     },
+     {
+      "Id": "d3"
+     },
+     {
+      "Id": "d4"
+     },
+     {
+      "Id": "d5"
+     }
+    ]
+   }
+  },
+  {
+   "op": "send_message_batch",
+   "request": {
+    "Entries": [
+     {
+      "Id": "e0",
+      "MessageBody": "b-62-line\nbreak"
+     },
+     {
+      "Id": "e1",
+      "MessageBody": "b-63-line\nbreak"
+     },
+     {
+      "Id": "e2",
+      "MessageBody": "b-64-line\nbreak"
+     },
+     {
+      "Id": "e3",
+      "MessageBody": "b-65-line\nbreak"
+     },
+     {
+      "Id": "e4",
+      "MessageBody": "b-66-ü"
+     },
+     {
+      "Id": "e5",
+      "MessageBody": "b-67-ccc"
+     },
+     {
+      "Id": "e6",
+      "MessageAttributes": {
+       "a3": {
+        "DataType": "Number",
+        "StringValue": "891"
+       },
+       "a4": {
+        "DataType": "String",
+        "StringValue": "x"
+       }
+      },
+      "MessageBody": "b-68-ü"
+     },
+     {
+      "Id": "e7",
+      "MessageBody": "b-69-a"
+     }
+    ],
+    "QueueUrl": "<endpoint>/<account>/<prefix>-std"
+   },
+   "response": {
+    "Successful": [
+     {
+      "Id": "e0",
+      "MD5OfMessageBody": "d5674b8ee7abd99ede04f4a0e13b5e47",
+      "MessageId": "<message-id>"
+     },
+     {
+      "Id": "e1",
+      "MD5OfMessageBody": "bc29583f624e4f139b96e221aa36400f",
+      "MessageId": "<message-id>"
+     },
+     {
+      "Id": "e2",
+      "MD5OfMessageBody": "f5c92e6b6ae965d81cbfc69ee51731e9",
+      "MessageId": "<message-id>"
+     },
+     {
+      "Id": "e3",
+      "MD5OfMessageBody": "e3359d3b090f409d1423e1f905ca2c5a",
+      "MessageId": "<message-id>"
+     },
+     {
+      "Id": "e4",
+      "MD5OfMessageBody": "d1574888aa2ab2ba462a8d21e79ed0be",
+      "MessageId": "<message-id>"
+     },
+     {
+      "Id": "e5",
+      "MD5OfMessageBody": "6df51e98f14358ea0425e11358aab6f4",
+      "MessageId": "<message-id>"
+     },
+     {
+      "Id": "e6",
+      "MD5OfMessageAttributes": "bcd0701ed520f16815e7cfacb721ff27",
+      "MD5OfMessageBody": "84eef7d481dc84c733288822367f3e9e",
+      "MessageId": "<message-id>"
+     },
+     {
+      "Id": "e7",
+      "MD5OfMessageBody": "98e504989453165eca4d3c2388595b6b",
+      "MessageId": "<message-id>"
+     }
+    ]
+   }
+  },
+  {
+   "op": "drain_batch",
+   "request": {
+    "QueueUrl": "<endpoint>/<account>/<prefix>-std",
+    "want": 8
+   },
+   "response": {
+    "messages": [
+     {
+      "Attributes": {
+       "ApproximateFirstReceiveTimestamp": "<time>",
+       "ApproximateReceiveCount": "1",
+       "SenderId": "<sender>",
+       "SentTimestamp": "<time>"
+      },
+      "Body": "b-62-line\nbreak",
+      "MD5OfBody": "d5674b8ee7abd99ede04f4a0e13b5e47",
+      "MessageId": "<message-id>",
+      "ReceiptHandle": "<receipt>"
+     },
+     {
+      "Attributes": {
+       "ApproximateFirstReceiveTimestamp": "<time>",
+       "ApproximateReceiveCount": "1",
+       "SenderId": "<sender>",
+       "SentTimestamp": "<time>"
+      },
+      "Body": "b-63-line\nbreak",
+      "MD5OfBody": "bc29583f624e4f139b96e221aa36400f",
+      "MessageId": "<message-id>",
+      "ReceiptHandle": "<receipt>"
+     },
+     {
+      "Attributes": {
+       "ApproximateFirstReceiveTimestamp": "<time>",
+       "ApproximateReceiveCount": "1",
+       "SenderId": "<sender>",
+       "SentTimestamp": "<time>"
+      },
+      "Body": "b-64-line\nbreak",
+      "MD5OfBody": "f5c92e6b6ae965d81cbfc69ee51731e9",
+      "MessageId": "<message-id>",
+      "ReceiptHandle": "<receipt>"
+     },
+     {
+      "Attributes": {
+       "ApproximateFirstReceiveTimestamp": "<time>",
+       "ApproximateReceiveCount": "1",
+       "SenderId": "<sender>",
+       "SentTimestamp": "<time>"
+      },
+      "Body": "b-65-line\nbreak",
+      "MD5OfBody": "e3359d3b090f409d1423e1f905ca2c5a",
+      "MessageId": "<message-id>",
+      "ReceiptHandle": "<receipt>"
+     },
+     {
+      "Attributes": {
+       "ApproximateFirstReceiveTimestamp": "<time>",
+       "ApproximateReceiveCount": "1",
+       "SenderId": "<sender>",
+       "SentTimestamp": "<time>"
+      },
+      "Body": "b-66-ü",
+      "MD5OfBody": "d1574888aa2ab2ba462a8d21e79ed0be",
+      "MessageId": "<message-id>",
+      "ReceiptHandle": "<receipt>"
+     },
+     {
+      "Attributes": {
+       "ApproximateFirstReceiveTimestamp": "<time>",
+       "ApproximateReceiveCount": "1",
+       "SenderId": "<sender>",
+       "SentTimestamp": "<time>"
+      },
+      "Body": "b-67-ccc",
+      "MD5OfBody": "6df51e98f14358ea0425e11358aab6f4",
+      "MessageId": "<message-id>",
+      "ReceiptHandle": "<receipt>"
+     },
+     {
+      "Attributes": {
+       "ApproximateFirstReceiveTimestamp": "<time>",
+       "ApproximateReceiveCount": "1",
+       "SenderId": "<sender>",
+       "SentTimestamp": "<time>"
+      },
+      "Body": "b-68-ü",
+      "MD5OfBody": "84eef7d481dc84c733288822367f3e9e",
+      "MD5OfMessageAttributes": "bcd0701ed520f16815e7cfacb721ff27",
+      "MessageAttributes": {
+       "a3": {
+        "DataType": "Number",
+        "StringValue": "891"
+       },
+       "a4": {
+        "DataType": "String",
+        "StringValue": "x"
+       }
+      },
+      "MessageId": "<message-id>",
+      "ReceiptHandle": "<receipt>"
+     },
+     {
+      "Attributes": {
+       "ApproximateFirstReceiveTimestamp": "<time>",
+       "ApproximateReceiveCount": "1",
+       "SenderId": "<sender>",
+       "SentTimestamp": "<time>"
+      },
+      "Body": "b-69-a",
+      "MD5OfBody": "98e504989453165eca4d3c2388595b6b",
+      "MessageId": "<message-id>",
+      "ReceiptHandle": "<receipt>"
+     }
+    ]
+   }
+  },
+  {
+   "op": "delete_message_batch",
+   "request": {
+    "Entries": [
+     {
+      "Id": "d0",
+      "ReceiptHandle": "<receipt>"
+     },
+     {
+      "Id": "d1",
+      "ReceiptHandle": "<receipt>"
+     },
+     {
+      "Id": "d2",
+      "ReceiptHandle": "<receipt>"
+     },
+     {
+      "Id": "d3",
+      "ReceiptHandle": "<receipt>"
+     },
+     {
+      "Id": "d4",
+      "ReceiptHandle": "<receipt>"
+     },
+     {
+      "Id": "d5",
+      "ReceiptHandle": "<receipt>"
+     },
+     {
+      "Id": "d6",
+      "ReceiptHandle": "<receipt>"
+     },
+     {
+      "Id": "d7",
+      "ReceiptHandle": "<receipt>"
+     }
+    ],
+    "QueueUrl": "<endpoint>/<account>/<prefix>-std"
+   },
+   "response": {
+    "Successful": [
+     {
+      "Id": "d0"
+     },
+     {
+      "Id": "d1"
+     },
+     {
+      "Id": "d6"
+     },
+     {
+      "Id": "d7"
+     },
+     {
+      "Id": "d2"
+     },
+     {
+      "Id": "d3"
+     },
+     {
+      "Id": "d4"
+     },
+     {
+      "Id": "d5"
+     }
+    ]
+   }
+  },
+  {
+   "op": "send_message_batch",
+   "request": {
+    "Entries": [
+     {
+      "Id": "e0",
+      "MessageAttributes": {
+       "k": {
+        "DataType": "String",
+        "StringValue": "v"
+       }
+      },
+      "MessageBody": "b-70-line\nbreak"
+     },
+     {
+      "Id": "e1",
+      "MessageBody": "b-71-line\nbreak"
+     },
+     {
+      "Id": "e2",
+      "MessageBody": "b-72-a"
+     },
+     {
+      "Id": "e3",
+      "MessageBody": "b-73-bb"
+     },
+     {
+      "Id": "e4",
+      "MessageBody": "b-74-line\nbreak"
+     },
+     {
+      "Id": "e5",
+      "MessageBody": "b-75-line\nbreak"
+     },
+     {
+      "Id": "e6",
+      "MessageAttributes": {
+       "empty": {
+        "DataType": "String",
+        "StringValue": ""
+       }
+      },
+      "MessageBody": "b-76-ü"
+     }
+    ],
+    "QueueUrl": "<endpoint>/<account>/<prefix>-std"
+   },
+   "response": {
+    "Failed": [
+     {
+      "Code": "InvalidParameterValue",
+      "Id": "e6",
+      "Message": "Message (user) attribute 'empty' must contain a non-empty value of type 'String'.",
+      "SenderFault": true
+     }
+    ],
+    "Successful": [
+     {
+      "Id": "e0",
+      "MD5OfMessageAttributes": "0a77b0642718c3d9dd47090567d11e0d",
+      "MD5OfMessageBody": "c0aa86f8434191599ebb746c55601ab1",
+      "MessageId": "<message-id>"
+     },
+     {
+      "Id": "e1",
+      "MD5OfMessageBody": "4310c406d28c1902386e0d897b408c7d",
+      "MessageId": "<message-id>"
+     },
+     {
+      "Id": "e2",
+      "MD5OfMessageBody": "90235f1831c5c3a830356c85634c8465",
+      "MessageId": "<message-id>"
+     },
+     {
+      "Id": "e3",
+      "MD5OfMessageBody": "ba860c53f29e507bc94640fadbf49051",
+      "MessageId": "<message-id>"
+     },
+     {
+      "Id": "e4",
+      "MD5OfMessageBody": "4570d4c6563fb9602be1d7e2ba7fa38d",
+      "MessageId": "<message-id>"
+     },
+     {
+      "Id": "e5",
+      "MD5OfMessageBody": "fed7b06c1d29ce8975f355534b901737",
+      "MessageId": "<message-id>"
+     }
+    ]
+   }
+  },
+  {
+   "op": "drain_batch",
+   "request": {
+    "QueueUrl": "<endpoint>/<account>/<prefix>-std",
+    "want": 6
+   },
+   "response": {
+    "messages": [
+     {
+      "Attributes": {
+       "ApproximateFirstReceiveTimestamp": "<time>",
+       "ApproximateReceiveCount": "1",
+       "SenderId": "<sender>",
+       "SentTimestamp": "<time>"
+      },
+      "Body": "b-70-line\nbreak",
+      "MD5OfBody": "c0aa86f8434191599ebb746c55601ab1",
+      "MD5OfMessageAttributes": "0a77b0642718c3d9dd47090567d11e0d",
+      "MessageAttributes": {
+       "k": {
+        "DataType": "String",
+        "StringValue": "v"
+       }
+      },
+      "MessageId": "<message-id>",
+      "ReceiptHandle": "<receipt>"
+     },
+     {
+      "Attributes": {
+       "ApproximateFirstReceiveTimestamp": "<time>",
+       "ApproximateReceiveCount": "1",
+       "SenderId": "<sender>",
+       "SentTimestamp": "<time>"
+      },
+      "Body": "b-71-line\nbreak",
+      "MD5OfBody": "4310c406d28c1902386e0d897b408c7d",
+      "MessageId": "<message-id>",
+      "ReceiptHandle": "<receipt>"
+     },
+     {
+      "Attributes": {
+       "ApproximateFirstReceiveTimestamp": "<time>",
+       "ApproximateReceiveCount": "1",
+       "SenderId": "<sender>",
+       "SentTimestamp": "<time>"
+      },
+      "Body": "b-72-a",
+      "MD5OfBody": "90235f1831c5c3a830356c85634c8465",
+      "MessageId": "<message-id>",
+      "ReceiptHandle": "<receipt>"
+     },
+     {
+      "Attributes": {
+       "ApproximateFirstReceiveTimestamp": "<time>",
+       "ApproximateReceiveCount": "1",
+       "SenderId": "<sender>",
+       "SentTimestamp": "<time>"
+      },
+      "Body": "b-73-bb",
+      "MD5OfBody": "ba860c53f29e507bc94640fadbf49051",
+      "MessageId": "<message-id>",
+      "ReceiptHandle": "<receipt>"
+     },
+     {
+      "Attributes": {
+       "ApproximateFirstReceiveTimestamp": "<time>",
+       "ApproximateReceiveCount": "1",
+       "SenderId": "<sender>",
+       "SentTimestamp": "<time>"
+      },
+      "Body": "b-74-line\nbreak",
+      "MD5OfBody": "4570d4c6563fb9602be1d7e2ba7fa38d",
+      "MessageId": "<message-id>",
+      "ReceiptHandle": "<receipt>"
+     },
+     {
+      "Attributes": {
+       "ApproximateFirstReceiveTimestamp": "<time>",
+       "ApproximateReceiveCount": "1",
+       "SenderId": "<sender>",
+       "SentTimestamp": "<time>"
+      },
+      "Body": "b-75-line\nbreak",
+      "MD5OfBody": "fed7b06c1d29ce8975f355534b901737",
+      "MessageId": "<message-id>",
+      "ReceiptHandle": "<receipt>"
+     }
+    ]
+   }
+  },
+  {
+   "op": "delete_message_batch",
+   "request": {
+    "Entries": [
+     {
+      "Id": "d0",
+      "ReceiptHandle": "<receipt>"
+     },
+     {
+      "Id": "d1",
+      "ReceiptHandle": "<receipt>"
+     },
+     {
+      "Id": "d2",
+      "ReceiptHandle": "<receipt>"
+     },
+     {
+      "Id": "d3",
+      "ReceiptHandle": "<receipt>"
+     },
+     {
+      "Id": "d4",
+      "ReceiptHandle": "<receipt>"
+     },
+     {
+      "Id": "d5",
+      "ReceiptHandle": "<receipt>"
+     }
+    ],
+    "QueueUrl": "<endpoint>/<account>/<prefix>-std"
+   },
+   "response": {
+    "Successful": [
+     {
+      "Id": "d0"
+     },
+     {
+      "Id": "d1"
+     },
+     {
+      "Id": "d4"
+     },
+     {
+      "Id": "d5"
+     },
+     {
+      "Id": "d2"
+     },
+     {
+      "Id": "d3"
+     }
+    ]
+   }
+  },
+  {
+   "op": "tag_queue",
+   "request": {
+    "QueueUrl": "<endpoint>/<account>/<prefix>-std",
+    "Tags": {
+     "t3": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+    }
+   },
+   "response": {}
+  },
+  {
+   "op": "list_queue_tags",
+   "request": {
+    "QueueUrl": "<endpoint>/<account>/<prefix>-std"
+   },
+   "response": {
+    "Tags": {
+     "t3": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+    }
+   }
+  },
+  {
+   "op": "set_queue_attributes",
+   "request": {
+    "Attributes": {
+     "RedrivePolicy": "{\"deadLetterTargetArn\": \"arn:aws:sqs:<region>:<account>:<prefix>-dlq\", \"maxReceiveCount\": 1}"
+    },
+    "QueueUrl": "<endpoint>/<account>/<prefix>-std"
+   },
+   "response": {}
+  },
+  {
+   "op": "list_dead_letter_source_queues",
+   "request": {
+    "QueueUrl": "<endpoint>/<account>/<prefix>-dlq"
+   },
+   "response": {
+    "queueUrls": [
+     "<endpoint>/<account>/<prefix>-std"
+    ]
+   }
+  },
+  {
+   "op": "set_queue_attributes",
+   "request": {
+    "Attributes": {
+     "RedrivePolicy": ""
+    },
+    "QueueUrl": "<endpoint>/<account>/<prefix>-std"
+   },
+   "response": {}
+  },
+  {
+   "op": "send_message",
+   "request": {
+    "MessageBody": "f-78-ccc",
+    "MessageDeduplicationId": "d77",
+    "MessageGroupId": "g0",
+    "QueueUrl": "<endpoint>/<account>/<prefix>-f.fifo"
+   },
+   "response": {
+    "MD5OfMessageBody": "08afb1ab71640fc0a16306bb9e49adc1",
+    "MessageId": "<message-id>",
+    "SequenceNumber": "<sequence>"
+   }
+  },
+  {
+   "op": "send_message",
+   "request": {
+    "MessageBody": "f-80-ccc",
+    "MessageDeduplicationId": "d79",
+    "MessageGroupId": "g1",
+    "QueueUrl": "<endpoint>/<account>/<prefix>-f.fifo"
+   },
+   "response": {
+    "MD5OfMessageBody": "946bbb905583d6536b9f1b57e2ec738d",
+    "MessageId": "<message-id>",
+    "SequenceNumber": "<sequence>"
+   }
+  },
+  {
+   "op": "send_message",
+   "request": {
+    "MessageBody": "f-80-ccc",
+    "MessageDeduplicationId": "d79",
+    "MessageGroupId": "g1",
+    "QueueUrl": "<endpoint>/<account>/<prefix>-f.fifo"
+   },
+   "response": {
+    "MD5OfMessageBody": "946bbb905583d6536b9f1b57e2ec738d",
+    "MessageId": "<message-id>",
+    "SequenceNumber": "<sequence>"
+   }
+  },
+  {
+   "op": "send_message",
+   "request": {
+    "MessageBody": "f-82-ccc",
+    "MessageDeduplicationId": "d81",
+    "MessageGroupId": "g0",
+    "QueueUrl": "<endpoint>/<account>/<prefix>-f.fifo"
+   },
+   "response": {
+    "MD5OfMessageBody": "2ec1e37b108523ebded3b36d5adae369",
+    "MessageId": "<message-id>",
+    "SequenceNumber": "<sequence>"
+   }
+  },
+  {
+   "op": "send_message",
+   "request": {
+    "MessageBody": "f-84-bb",
+    "MessageDeduplicationId": "d83",
+    "MessageGroupId": "g2",
+    "QueueUrl": "<endpoint>/<account>/<prefix>-f.fifo"
+   },
+   "response": {
+    "MD5OfMessageBody": "34cd347bd4c5f7e60e6dd505413f4043",
+    "MessageId": "<message-id>",
+    "SequenceNumber": "<sequence>"
+   }
+  },
+  {
+   "op": "drain_fifo",
+   "request": {
+    "QueueUrl": "<endpoint>/<account>/<prefix>-f.fifo",
+    "want": 4
+   },
+   "response": {
+    "groups": {
+     "g0": [
+      {
+       "Attributes": {
+        "ApproximateFirstReceiveTimestamp": "<time>",
+        "ApproximateReceiveCount": "1",
+        "MessageDeduplicationId": "d77",
+        "MessageGroupId": "g0",
+        "SenderId": "<sender>",
+        "SentTimestamp": "<time>",
+        "SequenceNumber": "<sequence>"
+       },
+       "Body": "f-78-ccc",
+       "MD5OfBody": "08afb1ab71640fc0a16306bb9e49adc1",
+       "MessageId": "<message-id>",
+       "ReceiptHandle": "<receipt>"
+      },
+      {
+       "Attributes": {
+        "ApproximateFirstReceiveTimestamp": "<time>",
+        "ApproximateReceiveCount": "1",
+        "MessageDeduplicationId": "d81",
+        "MessageGroupId": "g0",
+        "SenderId": "<sender>",
+        "SentTimestamp": "<time>",
+        "SequenceNumber": "<sequence>"
+       },
+       "Body": "f-82-ccc",
+       "MD5OfBody": "2ec1e37b108523ebded3b36d5adae369",
+       "MessageId": "<message-id>",
+       "ReceiptHandle": "<receipt>"
+      }
+     ],
+     "g1": [
+      {
+       "Attributes": {
+        "ApproximateFirstReceiveTimestamp": "<time>",
+        "ApproximateReceiveCount": "1",
+        "MessageDeduplicationId": "d79",
+        "MessageGroupId": "g1",
+        "SenderId": "<sender>",
+        "SentTimestamp": "<time>",
+        "SequenceNumber": "<sequence>"
+       },
+       "Body": "f-80-ccc",
+       "MD5OfBody": "946bbb905583d6536b9f1b57e2ec738d",
+       "MessageId": "<message-id>",
+       "ReceiptHandle": "<receipt>"
+      }
+     ],
+     "g2": [
+      {
+       "Attributes": {
+        "ApproximateFirstReceiveTimestamp": "<time>",
+        "ApproximateReceiveCount": "1",
+        "MessageDeduplicationId": "d83",
+        "MessageGroupId": "g2",
+        "SenderId": "<sender>",
+        "SentTimestamp": "<time>",
+        "SequenceNumber": "<sequence>"
+       },
+       "Body": "f-84-bb",
+       "MD5OfBody": "34cd347bd4c5f7e60e6dd505413f4043",
+       "MessageId": "<message-id>",
+       "ReceiptHandle": "<receipt>"
+      }
+     ]
+    }
+   }
+  },
+  {
+   "op": "delete_message_batch",
+   "request": {
+    "Entries": [
+     {
+      "Id": "d0",
+      "ReceiptHandle": "<receipt>"
+     },
+     {
+      "Id": "d1",
+      "ReceiptHandle": "<receipt>"
+     },
+     {
+      "Id": "d2",
+      "ReceiptHandle": "<receipt>"
+     },
+     {
+      "Id": "d3",
+      "ReceiptHandle": "<receipt>"
+     }
+    ],
+    "QueueUrl": "<endpoint>/<account>/<prefix>-f.fifo"
+   },
+   "response": {
+    "Successful": [
+     {
+      "Id": "d0"
+     },
+     {
+      "Id": "d1"
+     },
+     {
+      "Id": "d2"
+     },
+     {
+      "Id": "d3"
+     }
+    ]
+   }
+  },
+  {
+   "op": "send_message_batch",
+   "request": {
+    "Entries": [
+     {
+      "Id": "e0",
+      "MessageBody": "b-85-a"
+     },
+     {
+      "Id": "e1",
+      "MessageBody": "b-86-line\nbreak"
+     },
+     {
+      "Id": "e2",
+      "MessageBody": "b-87-line\nbreak"
+     },
+     {
+      "Id": "e3",
+      "MessageAttributes": {
+       "k": {
+        "DataType": "String",
+        "StringValue": "v"
+       }
+      },
+      "MessageBody": "b-88-line\nbreak"
+     },
+     {
+      "Id": "e4",
+      "MessageAttributes": {
+       "a4": {
+        "DataType": "Number",
+        "StringValue": "772"
+       }
+      },
+      "MessageBody": "b-89-a"
+     }
+    ],
+    "QueueUrl": "<endpoint>/<account>/<prefix>-std"
+   },
+   "response": {
+    "Successful": [
+     {
+      "Id": "e0",
+      "MD5OfMessageBody": "bbd669b9e242f91148fb2e2e6c89ffb0",
+      "MessageId": "<message-id>"
+     },
+     {
+      "Id": "e1",
+      "MD5OfMessageBody": "67f25ed2409bc328cd790e17048d3916",
+      "MessageId": "<message-id>"
+     },
+     {
+      "Id": "e2",
+      "MD5OfMessageBody": "e4dfbcb9c655eef7ade4eec6703e7d5c",
+      "MessageId": "<message-id>"
+     },
+     {
+      "Id": "e3",
+      "MD5OfMessageAttributes": "0a77b0642718c3d9dd47090567d11e0d",
+      "MD5OfMessageBody": "2cf0858d73e00c7eecd9294c5316e29f",
+      "MessageId": "<message-id>"
+     },
+     {
+      "Id": "e4",
+      "MD5OfMessageAttributes": "0c4df5e076641eab47e1554652503ba4",
+      "MD5OfMessageBody": "85e9d1ec4add96e96df3ce901897f9bf",
+      "MessageId": "<message-id>"
+     }
+    ]
+   }
+  },
+  {
+   "op": "drain_batch",
+   "request": {
+    "QueueUrl": "<endpoint>/<account>/<prefix>-std",
+    "want": 5
+   },
+   "response": {
+    "messages": [
+     {
+      "Attributes": {
+       "ApproximateFirstReceiveTimestamp": "<time>",
+       "ApproximateReceiveCount": "1",
+       "SenderId": "<sender>",
+       "SentTimestamp": "<time>"
+      },
+      "Body": "b-85-a",
+      "MD5OfBody": "bbd669b9e242f91148fb2e2e6c89ffb0",
+      "MessageId": "<message-id>",
+      "ReceiptHandle": "<receipt>"
+     },
+     {
+      "Attributes": {
+       "ApproximateFirstReceiveTimestamp": "<time>",
+       "ApproximateReceiveCount": "1",
+       "SenderId": "<sender>",
+       "SentTimestamp": "<time>"
+      },
+      "Body": "b-86-line\nbreak",
+      "MD5OfBody": "67f25ed2409bc328cd790e17048d3916",
+      "MessageId": "<message-id>",
+      "ReceiptHandle": "<receipt>"
+     },
+     {
+      "Attributes": {
+       "ApproximateFirstReceiveTimestamp": "<time>",
+       "ApproximateReceiveCount": "1",
+       "SenderId": "<sender>",
+       "SentTimestamp": "<time>"
+      },
+      "Body": "b-87-line\nbreak",
+      "MD5OfBody": "e4dfbcb9c655eef7ade4eec6703e7d5c",
+      "MessageId": "<message-id>",
+      "ReceiptHandle": "<receipt>"
+     },
+     {
+      "Attributes": {
+       "ApproximateFirstReceiveTimestamp": "<time>",
+       "ApproximateReceiveCount": "1",
+       "SenderId": "<sender>",
+       "SentTimestamp": "<time>"
+      },
+      "Body": "b-88-line\nbreak",
+      "MD5OfBody": "2cf0858d73e00c7eecd9294c5316e29f",
+      "MD5OfMessageAttributes": "0a77b0642718c3d9dd47090567d11e0d",
+      "MessageAttributes": {
+       "k": {
+        "DataType": "String",
+        "StringValue": "v"
+       }
+      },
+      "MessageId": "<message-id>",
+      "ReceiptHandle": "<receipt>"
+     },
+     {
+      "Attributes": {
+       "ApproximateFirstReceiveTimestamp": "<time>",
+       "ApproximateReceiveCount": "1",
+       "SenderId": "<sender>",
+       "SentTimestamp": "<time>"
+      },
+      "Body": "b-89-a",
+      "MD5OfBody": "85e9d1ec4add96e96df3ce901897f9bf",
+      "MD5OfMessageAttributes": "0c4df5e076641eab47e1554652503ba4",
+      "MessageAttributes": {
+       "a4": {
+        "DataType": "Number",
+        "StringValue": "772"
+       }
+      },
+      "MessageId": "<message-id>",
+      "ReceiptHandle": "<receipt>"
+     }
+    ]
+   }
+  },
+  {
+   "op": "delete_message_batch",
+   "request": {
+    "Entries": [
+     {
+      "Id": "d0",
+      "ReceiptHandle": "<receipt>"
+     },
+     {
+      "Id": "d1",
+      "ReceiptHandle": "<receipt>"
+     },
+     {
+      "Id": "d2",
+      "ReceiptHandle": "<receipt>"
+     },
+     {
+      "Id": "d3",
+      "ReceiptHandle": "<receipt>"
+     },
+     {
+      "Id": "d4",
+      "ReceiptHandle": "<receipt>"
+     }
+    ],
+    "QueueUrl": "<endpoint>/<account>/<prefix>-std"
+   },
+   "response": {
+    "Successful": [
+     {
+      "Id": "d4"
+     },
+     {
+      "Id": "d2"
+     },
+     {
+      "Id": "d3"
+     },
+     {
+      "Id": "d0"
+     },
+     {
+      "Id": "d1"
+     }
+    ]
+   }
+  },
+  {
+   "op": "send_message_batch",
+   "request": {
+    "Entries": [],
+    "QueueUrl": "<endpoint>/<account>/<prefix>-std"
+   },
+   "response": {
+    "error": "AWS.SimpleQueueService.EmptyBatchRequest",
+    "message": "There should be at least one SendMessageBatchRequestEntry in the request.",
+    "status": 400
+   }
+  },
+  {
+   "op": "set_queue_attributes",
+   "request": {
+    "Attributes": {
+     "NoSuchAttribute": "1"
+    },
+    "QueueUrl": "<endpoint>/<account>/<prefix>-std"
+   },
+   "response": {
+    "error": "InvalidAttributeName",
+    "message": "Unknown Attribute NoSuchAttribute.",
+    "status": 400
+   }
+  },
+  {
+   "op": "get_queue_attributes",
+   "request": {
+    "AttributeNames": [
+     "All"
+    ],
+    "QueueUrl": "<endpoint>/<account>/<prefix>-std"
+   },
+   "response": {
+    "Attributes": {
+     "ApproximateNumberOfMessages": "<count>",
+     "ApproximateNumberOfMessagesDelayed": "<count>",
+     "ApproximateNumberOfMessagesNotVisible": "<count>",
+     "CreatedTimestamp": "<time>",
+     "DelaySeconds": "0",
+     "LastModifiedTimestamp": "<time>",
+     "MaximumMessageSize": "1048576",
+     "MessageRetentionPeriod": "345600",
+     "QueueArn": "arn:aws:sqs:<region>:<account>:<prefix>-std",
+     "ReceiveMessageWaitTimeSeconds": "0",
+     "SqsManagedSseEnabled": "true",
+     "VisibilityTimeout": "30"
+    }
+   }
+  },
+  {
+   "op": "list_queues",
+   "request": {
+    "QueueNamePrefix": "<prefix>"
+   },
+   "response": {
+    "QueueUrls": [
+     "<endpoint>/<account>/<prefix>-dlq",
+     "<endpoint>/<account>/<prefix>-f.fifo",
+     "<endpoint>/<account>/<prefix>-std"
+    ]
+   }
+  },
+  {
+   "op": "change_message_visibility",
+   "request": {
+    "QueueUrl": "<endpoint>/<account>/<prefix>-std",
+    "ReceiptHandle": "not-a-handle",
+    "VisibilityTimeout": 10
+   },
+   "response": {
+    "error": "ReceiptHandleIsInvalid",
+    "message": "The input receipt handle is invalid.",
+    "status": 404
+   }
+  },
+  {
+   "op": "send_message",
+   "request": {
+    "DelaySeconds": 901,
+    "MessageBody": "late",
+    "QueueUrl": "<endpoint>/<account>/<prefix>-std"
+   },
+   "response": {
+    "error": "InvalidParameterValue",
+    "message": "Value 901 for parameter DelaySeconds is invalid. Reason: DelaySeconds must be >= 0 and <= 900.",
+    "status": 400
+   }
+  },
+  {
+   "op": "send_message",
+   "request": {
+    "MessageBody": "s-90-ccc",
+    "QueueUrl": "<endpoint>/<account>/<prefix>-std"
+   },
+   "response": {
+    "MD5OfMessageBody": "2fe46f22ecb91b0b1296a60861b6c627",
+    "MessageId": "<message-id>"
+   }
+  },
+  {
+   "op": "receive_one",
+   "request": {
+    "QueueUrl": "<endpoint>/<account>/<prefix>-std",
+    "want": 1
+   },
+   "response": {
+    "messages": [
+     {
+      "Attributes": {
+       "ApproximateFirstReceiveTimestamp": "<time>",
+       "ApproximateReceiveCount": "1",
+       "SenderId": "<sender>",
+       "SentTimestamp": "<time>"
+      },
+      "Body": "s-90-ccc",
+      "MD5OfBody": "2fe46f22ecb91b0b1296a60861b6c627",
+      "MessageId": "<message-id>",
+      "ReceiptHandle": "<receipt>"
+     }
+    ]
+   }
+  },
+  {
+   "op": "delete_message",
+   "request": {
+    "QueueUrl": "<endpoint>/<account>/<prefix>-std",
+    "ReceiptHandle": "<receipt>"
+   },
+   "response": {}
+  },
+  {
+   "op": "set_queue_attributes",
+   "request": {
+    "Attributes": {
+     "RedrivePolicy": "{\"deadLetterTargetArn\": \"arn:aws:sqs:<region>:<account>:<prefix>-dlq\", \"maxReceiveCount\": 1}"
+    },
+    "QueueUrl": "<endpoint>/<account>/<prefix>-std"
+   },
+   "response": {}
+  },
+  {
+   "op": "list_dead_letter_source_queues",
+   "request": {
+    "QueueUrl": "<endpoint>/<account>/<prefix>-dlq"
+   },
+   "response": {
+    "queueUrls": [
+     "<endpoint>/<account>/<prefix>-std"
+    ]
+   }
+  },
+  {
+   "op": "set_queue_attributes",
+   "request": {
+    "Attributes": {
+     "RedrivePolicy": ""
+    },
+    "QueueUrl": "<endpoint>/<account>/<prefix>-std"
+   },
+   "response": {}
+  },
+  {
+   "op": "send_message_batch",
+   "request": {
+    "Entries": [
+     {
+      "Id": "e0",
+      "MessageAttributes": {
+       "a5": {
+        "BinaryValue": "b64:lzrq",
+        "DataType": "Binary"
+       },
+       "a9": {
+        "DataType": "Number",
+        "StringValue": "78"
+       }
+      },
+      "MessageBody": "b-91-ccc"
+     },
+     {
+      "Id": "e1",
+      "MessageAttributes": {
+       "k": {
+        "DataType": "String",
+        "StringValue": "v"
+       }
+      },
+      "MessageBody": "b-92-ccc"
+     },
+     {
+      "Id": "e2",
+      "MessageAttributes": {
+       "empty": {
+        "DataType": "String",
+        "StringValue": ""
+       }
+      },
+      "MessageBody": "b-93-ccc"
+     }
+    ],
+    "QueueUrl": "<endpoint>/<account>/<prefix>-std"
+   },
+   "response": {
+    "Failed": [
+     {
+      "Code": "InvalidParameterValue",
+      "Id": "e2",
+      "Message": "Message (user) attribute 'empty' must contain a non-empty value of type 'String'.",
+      "SenderFault": true
+     }
+    ],
+    "Successful": [
+     {
+      "Id": "e0",
+      "MD5OfMessageAttributes": "aa904c08b7536962069d8e9824daabc1",
+      "MD5OfMessageBody": "c137aeeb35a9aa9d6fbea24f59d0a462",
+      "MessageId": "<message-id>"
+     },
+     {
+      "Id": "e1",
+      "MD5OfMessageAttributes": "0a77b0642718c3d9dd47090567d11e0d",
+      "MD5OfMessageBody": "363a97713795989de2b480fcca0aa985",
+      "MessageId": "<message-id>"
+     }
+    ]
+   }
+  },
+  {
+   "op": "drain_batch",
+   "request": {
+    "QueueUrl": "<endpoint>/<account>/<prefix>-std",
+    "want": 2
+   },
+   "response": {
+    "messages": [
+     {
+      "Attributes": {
+       "ApproximateFirstReceiveTimestamp": "<time>",
+       "ApproximateReceiveCount": "1",
+       "SenderId": "<sender>",
+       "SentTimestamp": "<time>"
+      },
+      "Body": "b-91-ccc",
+      "MD5OfBody": "c137aeeb35a9aa9d6fbea24f59d0a462",
+      "MD5OfMessageAttributes": "aa904c08b7536962069d8e9824daabc1",
+      "MessageAttributes": {
+       "a5": {
+        "BinaryValue": "b64:lzrq",
+        "DataType": "Binary"
+       },
+       "a9": {
+        "DataType": "Number",
+        "StringValue": "78"
+       }
+      },
+      "MessageId": "<message-id>",
+      "ReceiptHandle": "<receipt>"
+     },
+     {
+      "Attributes": {
+       "ApproximateFirstReceiveTimestamp": "<time>",
+       "ApproximateReceiveCount": "1",
+       "SenderId": "<sender>",
+       "SentTimestamp": "<time>"
+      },
+      "Body": "b-92-ccc",
+      "MD5OfBody": "363a97713795989de2b480fcca0aa985",
+      "MD5OfMessageAttributes": "0a77b0642718c3d9dd47090567d11e0d",
+      "MessageAttributes": {
+       "k": {
+        "DataType": "String",
+        "StringValue": "v"
+       }
+      },
+      "MessageId": "<message-id>",
+      "ReceiptHandle": "<receipt>"
+     }
+    ]
+   }
+  },
+  {
+   "op": "delete_message_batch",
+   "request": {
+    "Entries": [
+     {
+      "Id": "d0",
+      "ReceiptHandle": "<receipt>"
+     },
+     {
+      "Id": "d1",
+      "ReceiptHandle": "<receipt>"
+     }
+    ],
+    "QueueUrl": "<endpoint>/<account>/<prefix>-std"
+   },
+   "response": {
+    "Successful": [
+     {
+      "Id": "d0"
+     },
+     {
+      "Id": "d1"
+     }
+    ]
+   }
+  },
+  {
+   "op": "send_message",
+   "request": {
+    "MessageAttributes": {
+     "a9": {
+      "DataType": "Number",
+      "StringValue": "426"
+     }
+    },
+    "MessageBody": "s-94-a",
+    "QueueUrl": "<endpoint>/<account>/<prefix>-std"
+   },
+   "response": {
+    "MD5OfMessageAttributes": "350850c1eacc937d0d5a745cbbc30e30",
+    "MD5OfMessageBody": "5aa33e4f386d43a0a149559755126d81",
+    "MessageId": "<message-id>"
+   }
+  },
+  {
+   "op": "receive_one",
+   "request": {
+    "QueueUrl": "<endpoint>/<account>/<prefix>-std",
+    "want": 1
+   },
+   "response": {
+    "messages": [
+     {
+      "Attributes": {
+       "ApproximateFirstReceiveTimestamp": "<time>",
+       "ApproximateReceiveCount": "1",
+       "SenderId": "<sender>",
+       "SentTimestamp": "<time>"
+      },
+      "Body": "s-94-a",
+      "MD5OfBody": "5aa33e4f386d43a0a149559755126d81",
+      "MD5OfMessageAttributes": "350850c1eacc937d0d5a745cbbc30e30",
+      "MessageAttributes": {
+       "a9": {
+        "DataType": "Number",
+        "StringValue": "426"
+       }
+      },
+      "MessageId": "<message-id>",
+      "ReceiptHandle": "<receipt>"
+     }
+    ]
+   }
+  },
+  {
+   "op": "change_message_visibility",
+   "request": {
+    "QueueUrl": "<endpoint>/<account>/<prefix>-std",
+    "ReceiptHandle": "<receipt>",
+    "VisibilityTimeout": 0
+   },
+   "response": {}
+  },
+  {
+   "op": "receive_again",
+   "request": {
+    "QueueUrl": "<endpoint>/<account>/<prefix>-std",
+    "want": 1
+   },
+   "response": {
+    "messages": [
+     {
+      "Attributes": {
+       "ApproximateFirstReceiveTimestamp": "<time>",
+       "ApproximateReceiveCount": "2",
+       "SenderId": "<sender>",
+       "SentTimestamp": "<time>"
+      },
+      "Body": "s-94-a",
+      "MD5OfBody": "5aa33e4f386d43a0a149559755126d81",
+      "MD5OfMessageAttributes": "350850c1eacc937d0d5a745cbbc30e30",
+      "MessageAttributes": {
+       "a9": {
+        "DataType": "Number",
+        "StringValue": "426"
+       }
+      },
+      "MessageId": "<message-id>",
+      "ReceiptHandle": "<receipt>"
+     }
+    ]
+   }
+  },
+  {
+   "op": "change_message_visibility",
+   "request": {
+    "QueueUrl": "<endpoint>/<account>/<prefix>-std",
+    "ReceiptHandle": "<receipt>",
+    "VisibilityTimeout": 10
+   },
+   "response": {}
+  },
+  {
+   "op": "delete_message",
+   "request": {
+    "QueueUrl": "<endpoint>/<account>/<prefix>-std",
+    "ReceiptHandle": "<receipt>"
+   },
+   "response": {}
+  },
+  {
+   "op": "tag_queue",
+   "request": {
+    "QueueUrl": "<endpoint>/<account>/<prefix>-std",
+    "Tags": {
+     "t1": "v"
+    }
+   },
+   "response": {}
+  },
+  {
+   "op": "list_queue_tags",
+   "request": {
+    "QueueUrl": "<endpoint>/<account>/<prefix>-std"
+   },
+   "response": {
+    "Tags": {
+     "t1": "v",
+     "t3": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+    }
+   }
+  },
+  {
+   "op": "tag_queue",
+   "request": {
+    "QueueUrl": "<endpoint>/<account>/<prefix>-f.fifo",
+    "Tags": {
+     "t2": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+    }
+   },
+   "response": {}
+  },
+  {
+   "op": "list_queue_tags",
+   "request": {
+    "QueueUrl": "<endpoint>/<account>/<prefix>-f.fifo"
+   },
+   "response": {
+    "Tags": {
+     "t2": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+    }
+   }
+  },
+  {
+   "op": "send_message_batch",
+   "request": {
+    "Entries": [
+     {
+      "Id": "same",
+      "MessageBody": "1"
+     },
+     {
+      "Id": "same",
+      "MessageBody": "2"
+     }
+    ],
+    "QueueUrl": "<endpoint>/<account>/<prefix>-std"
+   },
+   "response": {
+    "error": "AWS.SimpleQueueService.BatchEntryIdsNotDistinct",
+    "message": "Id same repeated.",
+    "status": 400
+   }
+  },
+  {
+   "op": "send_message",
+   "request": {
+    "MessageAttributes": {
+     "a0": {
+      "DataType": "String",
+      "StringValue": "x"
+     },
+     "a9": {
+      "BinaryValue": "b64:o+bI",
+      "DataType": "Binary"
+     }
+    },
+    "MessageBody": "s-95-bb",
+    "QueueUrl": "<endpoint>/<account>/<prefix>-std"
+   },
+   "response": {
+    "MD5OfMessageAttributes": "4aed183a9dbfc8e4d1ced41b78005a85",
+    "MD5OfMessageBody": "a845ca3de8108ce80db23a8f19b20fd3",
+    "MessageId": "<message-id>"
+   }
+  },
+  {
+   "op": "receive_one",
+   "request": {
+    "QueueUrl": "<endpoint>/<account>/<prefix>-std",
+    "want": 1
+   },
+   "response": {
+    "messages": [
+     {
+      "Attributes": {
+       "ApproximateFirstReceiveTimestamp": "<time>",
+       "ApproximateReceiveCount": "1",
+       "SenderId": "<sender>",
+       "SentTimestamp": "<time>"
+      },
+      "Body": "s-95-bb",
+      "MD5OfBody": "a845ca3de8108ce80db23a8f19b20fd3",
+      "MD5OfMessageAttributes": "4aed183a9dbfc8e4d1ced41b78005a85",
+      "MessageAttributes": {
+       "a0": {
+        "DataType": "String",
+        "StringValue": "x"
+       },
+       "a9": {
+        "BinaryValue": "b64:o+bI",
+        "DataType": "Binary"
+       }
+      },
+      "MessageId": "<message-id>",
+      "ReceiptHandle": "<receipt>"
+     }
+    ]
+   }
+  },
+  {
+   "op": "change_message_visibility",
+   "request": {
+    "QueueUrl": "<endpoint>/<account>/<prefix>-std",
+    "ReceiptHandle": "<receipt>",
+    "VisibilityTimeout": 0
+   },
+   "response": {}
+  },
+  {
+   "op": "receive_again",
+   "request": {
+    "QueueUrl": "<endpoint>/<account>/<prefix>-std",
+    "want": 1
+   },
+   "response": {
+    "messages": [
+     {
+      "Attributes": {
+       "ApproximateFirstReceiveTimestamp": "<time>",
+       "ApproximateReceiveCount": "2",
+       "SenderId": "<sender>",
+       "SentTimestamp": "<time>"
+      },
+      "Body": "s-95-bb",
+      "MD5OfBody": "a845ca3de8108ce80db23a8f19b20fd3",
+      "MD5OfMessageAttributes": "4aed183a9dbfc8e4d1ced41b78005a85",
+      "MessageAttributes": {
+       "a0": {
+        "DataType": "String",
+        "StringValue": "x"
+       },
+       "a9": {
+        "BinaryValue": "b64:o+bI",
+        "DataType": "Binary"
+       }
+      },
+      "MessageId": "<message-id>",
+      "ReceiptHandle": "<receipt>"
+     }
+    ]
+   }
+  },
+  {
+   "op": "change_message_visibility",
+   "request": {
+    "QueueUrl": "<endpoint>/<account>/<prefix>-std",
+    "ReceiptHandle": "<receipt>",
+    "VisibilityTimeout": 10
+   },
+   "response": {}
+  },
+  {
+   "op": "delete_message",
+   "request": {
+    "QueueUrl": "<endpoint>/<account>/<prefix>-std",
+    "ReceiptHandle": "<receipt>"
+   },
+   "response": {}
+  },
+  {
+   "op": "send_message",
+   "request": {
+    "MessageAttributes": {
+     "a1": {
+      "DataType": "String.custom",
+      "StringValue": "blue"
+     },
+     "a9": {
+      "DataType": "Number",
+      "StringValue": "791"
+     }
+    },
+    "MessageBody": "s-96-a",
+    "QueueUrl": "<endpoint>/<account>/<prefix>-std"
+   },
+   "response": {
+    "MD5OfMessageAttributes": "46e2d6576f8561b0143e9fade5a6e04a",
+    "MD5OfMessageBody": "7e9842e391e5714cc3ed3d0441183e56",
+    "MessageId": "<message-id>"
+   }
+  },
+  {
+   "op": "receive_one",
+   "request": {
+    "QueueUrl": "<endpoint>/<account>/<prefix>-std",
+    "want": 1
+   },
+   "response": {
+    "messages": [
+     {
+      "Attributes": {
+       "ApproximateFirstReceiveTimestamp": "<time>",
+       "ApproximateReceiveCount": "1",
+       "SenderId": "<sender>",
+       "SentTimestamp": "<time>"
+      },
+      "Body": "s-96-a",
+      "MD5OfBody": "7e9842e391e5714cc3ed3d0441183e56",
+      "MD5OfMessageAttributes": "46e2d6576f8561b0143e9fade5a6e04a",
+      "MessageAttributes": {
+       "a1": {
+        "DataType": "String.custom",
+        "StringValue": "blue"
+       },
+       "a9": {
+        "DataType": "Number",
+        "StringValue": "791"
+       }
+      },
+      "MessageId": "<message-id>",
+      "ReceiptHandle": "<receipt>"
+     }
+    ]
+   }
+  },
+  {
+   "op": "delete_message",
+   "request": {
+    "QueueUrl": "<endpoint>/<account>/<prefix>-std",
+    "ReceiptHandle": "<receipt>"
+   },
+   "response": {}
+  },
+  {
+   "op": "delete_message_batch",
+   "request": {
+    "Entries": [
+     {
+      "Id": "x",
+      "ReceiptHandle": "not-a-handle"
+     }
+    ],
+    "QueueUrl": "<endpoint>/<account>/<prefix>-std"
+   },
+   "response": {
+    "Failed": [
+     {
+      "Code": "ReceiptHandleIsInvalid",
+      "Id": "x",
+      "Message": "The input receipt handle is invalid.",
+      "SenderFault": true
+     }
+    ]
+   }
+  },
+  {
+   "op": "send_message",
+   "request": {
+    "MessageAttributes": {
+     "aws.reserved": {
+      "DataType": "String",
+      "StringValue": "v"
+     }
+    },
+    "MessageBody": "x",
+    "QueueUrl": "<endpoint>/<account>/<prefix>-std"
+   },
+   "response": {
+    "error": "InvalidParameterValue",
+    "message": "You can't use message attribute names beginning with 'AWS.' or 'Amazon'. These strings are reserved for internal use.",
+    "status": 400
+   }
+  },
+  {
+   "op": "set_queue_attributes",
+   "request": {
+    "Attributes": {
+     "MessageRetentionPeriod": "60"
+    },
+    "QueueUrl": "<endpoint>/<account>/<prefix>-std"
+   },
+   "response": {}
+  },
+  {
+   "op": "set_queue_attributes",
+   "request": {
+    "Attributes": {
+     "MessageRetentionPeriod": "345600"
+    },
+    "QueueUrl": "<endpoint>/<account>/<prefix>-std"
+   },
+   "response": {}
+  },
+  {
+   "op": "get_queue_attributes",
+   "request": {
+    "AttributeNames": [
+     "All"
+    ],
+    "QueueUrl": "<endpoint>/<account>/<prefix>-std"
+   },
+   "response": {
+    "Attributes": {
+     "ApproximateNumberOfMessages": "<count>",
+     "ApproximateNumberOfMessagesDelayed": "<count>",
+     "ApproximateNumberOfMessagesNotVisible": "<count>",
+     "CreatedTimestamp": "<time>",
+     "DelaySeconds": "0",
+     "LastModifiedTimestamp": "<time>",
+     "MaximumMessageSize": "1048576",
+     "MessageRetentionPeriod": "345600",
+     "QueueArn": "arn:aws:sqs:<region>:<account>:<prefix>-std",
+     "ReceiveMessageWaitTimeSeconds": "0",
+     "SqsManagedSseEnabled": "true",
+     "VisibilityTimeout": "30"
+    }
+   }
+  },
+  {
+   "op": "send_message",
+   "request": {
+    "MessageBody": "f-98-a",
+    "MessageDeduplicationId": "d97",
+    "MessageGroupId": "g1",
+    "QueueUrl": "<endpoint>/<account>/<prefix>-f.fifo"
+   },
+   "response": {
+    "MD5OfMessageBody": "48b6823bae2bfb32e3eb72872fc0180f",
+    "MessageId": "<message-id>",
+    "SequenceNumber": "<sequence>"
+   }
+  },
+  {
+   "op": "drain_fifo",
+   "request": {
+    "QueueUrl": "<endpoint>/<account>/<prefix>-f.fifo",
+    "want": 1
+   },
+   "response": {
+    "groups": {
+     "g1": [
+      {
+       "Attributes": {
+        "ApproximateFirstReceiveTimestamp": "<time>",
+        "ApproximateReceiveCount": "1",
+        "MessageDeduplicationId": "d97",
+        "MessageGroupId": "g1",
+        "SenderId": "<sender>",
+        "SentTimestamp": "<time>",
+        "SequenceNumber": "<sequence>"
+       },
+       "Body": "f-98-a",
+       "MD5OfBody": "48b6823bae2bfb32e3eb72872fc0180f",
+       "MessageId": "<message-id>",
+       "ReceiptHandle": "<receipt>"
+      }
+     ]
+    }
+   }
+  },
+  {
+   "op": "delete_message_batch",
+   "request": {
+    "Entries": [
+     {
+      "Id": "d0",
+      "ReceiptHandle": "<receipt>"
+     }
+    ],
+    "QueueUrl": "<endpoint>/<account>/<prefix>-f.fifo"
+   },
+   "response": {
+    "Successful": [
+     {
+      "Id": "d0"
+     }
+    ]
+   }
+  },
+  {
+   "op": "untag_queue",
+   "request": {
+    "QueueUrl": "<endpoint>/<account>/<prefix>-std",
+    "TagKeys": [
+     "t2"
+    ]
+   },
+   "response": {}
+  },
+  {
+   "op": "list_queue_tags",
+   "request": {
+    "QueueUrl": "<endpoint>/<account>/<prefix>-std"
+   },
+   "response": {
+    "Tags": {
+     "t1": "v",
+     "t3": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+    }
+   }
+  },
+  {
+   "op": "set_queue_attributes",
+   "request": {
+    "Attributes": {
+     "RedrivePolicy": "{\"deadLetterTargetArn\": \"arn:aws:sqs:<region>:<account>:<prefix>-dlq\", \"maxReceiveCount\": 1}"
+    },
+    "QueueUrl": "<endpoint>/<account>/<prefix>-std"
+   },
+   "response": {}
+  },
+  {
+   "op": "list_dead_letter_source_queues",
+   "request": {
+    "QueueUrl": "<endpoint>/<account>/<prefix>-dlq"
+   },
+   "response": {
+    "queueUrls": [
+     "<endpoint>/<account>/<prefix>-std"
+    ]
+   }
+  },
+  {
+   "op": "set_queue_attributes",
+   "request": {
+    "Attributes": {
+     "RedrivePolicy": ""
+    },
+    "QueueUrl": "<endpoint>/<account>/<prefix>-std"
+   },
+   "response": {}
+  },
+  {
+   "op": "send_message",
+   "request": {
+    "MessageBody": "f-100-ccc",
+    "MessageDeduplicationId": "d99",
+    "MessageGroupId": "g0",
+    "QueueUrl": "<endpoint>/<account>/<prefix>-f.fifo"
+   },
+   "response": {
+    "MD5OfMessageBody": "97be21e93aebf2f026a393c2978bfe37",
+    "MessageId": "<message-id>",
+    "SequenceNumber": "<sequence>"
+   }
+  },
+  {
+   "op": "send_message",
+   "request": {
+    "MessageBody": "f-102-bb",
+    "MessageDeduplicationId": "d101",
+    "MessageGroupId": "g0",
+    "QueueUrl": "<endpoint>/<account>/<prefix>-f.fifo"
+   },
+   "response": {
+    "MD5OfMessageBody": "fa4492f9c636866513d0383a560b3429",
+    "MessageId": "<message-id>",
+    "SequenceNumber": "<sequence>"
+   }
+  },
+  {
+   "op": "send_message",
+   "request": {
+    "MessageBody": "f-104-bb",
+    "MessageDeduplicationId": "d103",
+    "MessageGroupId": "g0",
+    "QueueUrl": "<endpoint>/<account>/<prefix>-f.fifo"
+   },
+   "response": {
+    "MD5OfMessageBody": "1b235a42582ba95dc5a164190c1f6dde",
+    "MessageId": "<message-id>",
+    "SequenceNumber": "<sequence>"
+   }
+  },
+  {
+   "op": "send_message",
+   "request": {
+    "MessageBody": "f-104-bb",
+    "MessageDeduplicationId": "d103",
+    "MessageGroupId": "g0",
+    "QueueUrl": "<endpoint>/<account>/<prefix>-f.fifo"
+   },
+   "response": {
+    "MD5OfMessageBody": "1b235a42582ba95dc5a164190c1f6dde",
+    "MessageId": "<message-id>",
+    "SequenceNumber": "<sequence>"
+   }
+  },
+  {
+   "op": "drain_fifo",
+   "request": {
+    "QueueUrl": "<endpoint>/<account>/<prefix>-f.fifo",
+    "want": 3
+   },
+   "response": {
+    "groups": {
+     "g0": [
+      {
+       "Attributes": {
+        "ApproximateFirstReceiveTimestamp": "<time>",
+        "ApproximateReceiveCount": "1",
+        "MessageDeduplicationId": "d99",
+        "MessageGroupId": "g0",
+        "SenderId": "<sender>",
+        "SentTimestamp": "<time>",
+        "SequenceNumber": "<sequence>"
+       },
+       "Body": "f-100-ccc",
+       "MD5OfBody": "97be21e93aebf2f026a393c2978bfe37",
+       "MessageId": "<message-id>",
+       "ReceiptHandle": "<receipt>"
+      },
+      {
+       "Attributes": {
+        "ApproximateFirstReceiveTimestamp": "<time>",
+        "ApproximateReceiveCount": "1",
+        "MessageDeduplicationId": "d101",
+        "MessageGroupId": "g0",
+        "SenderId": "<sender>",
+        "SentTimestamp": "<time>",
+        "SequenceNumber": "<sequence>"
+       },
+       "Body": "f-102-bb",
+       "MD5OfBody": "fa4492f9c636866513d0383a560b3429",
+       "MessageId": "<message-id>",
+       "ReceiptHandle": "<receipt>"
+      },
+      {
+       "Attributes": {
+        "ApproximateFirstReceiveTimestamp": "<time>",
+        "ApproximateReceiveCount": "1",
+        "MessageDeduplicationId": "d103",
+        "MessageGroupId": "g0",
+        "SenderId": "<sender>",
+        "SentTimestamp": "<time>",
+        "SequenceNumber": "<sequence>"
+       },
+       "Body": "f-104-bb",
+       "MD5OfBody": "1b235a42582ba95dc5a164190c1f6dde",
+       "MessageId": "<message-id>",
+       "ReceiptHandle": "<receipt>"
+      }
+     ]
+    }
+   }
+  },
+  {
+   "op": "delete_message_batch",
+   "request": {
+    "Entries": [
+     {
+      "Id": "d0",
+      "ReceiptHandle": "<receipt>"
+     },
+     {
+      "Id": "d1",
+      "ReceiptHandle": "<receipt>"
+     },
+     {
+      "Id": "d2",
+      "ReceiptHandle": "<receipt>"
+     }
+    ],
+    "QueueUrl": "<endpoint>/<account>/<prefix>-f.fifo"
+   },
+   "response": {
+    "Successful": [
+     {
+      "Id": "d0"
+     },
+     {
+      "Id": "d1"
+     },
+     {
+      "Id": "d2"
+     }
+    ]
+   }
+  },
+  {
+   "op": "send_message",
+   "request": {
+    "MessageBody": "f-106-line\nbreak",
+    "MessageDeduplicationId": "d105",
+    "MessageGroupId": "g1",
+    "QueueUrl": "<endpoint>/<account>/<prefix>-f.fifo"
+   },
+   "response": {
+    "MD5OfMessageBody": "543927931d5746277a45fadc5c7cd319",
+    "MessageId": "<message-id>",
+    "SequenceNumber": "<sequence>"
+   }
+  },
+  {
+   "op": "drain_fifo",
+   "request": {
+    "QueueUrl": "<endpoint>/<account>/<prefix>-f.fifo",
+    "want": 1
+   },
+   "response": {
+    "groups": {
+     "g1": [
+      {
+       "Attributes": {
+        "ApproximateFirstReceiveTimestamp": "<time>",
+        "ApproximateReceiveCount": "1",
+        "MessageDeduplicationId": "d105",
+        "MessageGroupId": "g1",
+        "SenderId": "<sender>",
+        "SentTimestamp": "<time>",
+        "SequenceNumber": "<sequence>"
+       },
+       "Body": "f-106-line\nbreak",
+       "MD5OfBody": "543927931d5746277a45fadc5c7cd319",
+       "MessageId": "<message-id>",
+       "ReceiptHandle": "<receipt>"
+      }
+     ]
+    }
+   }
+  },
+  {
+   "op": "delete_message_batch",
+   "request": {
+    "Entries": [
+     {
+      "Id": "d0",
+      "ReceiptHandle": "<receipt>"
+     }
+    ],
+    "QueueUrl": "<endpoint>/<account>/<prefix>-f.fifo"
+   },
+   "response": {
+    "Successful": [
+     {
+      "Id": "d0"
+     }
+    ]
+   }
+  },
+  {
+   "op": "send_message",
+   "request": {
+    "MessageBody": "s-107-a",
+    "QueueUrl": "<endpoint>/<account>/<prefix>-std"
+   },
+   "response": {
+    "MD5OfMessageBody": "55df4c3166535994f38a5bc9595f4404",
+    "MessageId": "<message-id>"
+   }
+  },
+  {
+   "op": "receive_one",
+   "request": {
+    "QueueUrl": "<endpoint>/<account>/<prefix>-std",
+    "want": 1
+   },
+   "response": {
+    "messages": [
+     {
+      "Attributes": {
+       "ApproximateFirstReceiveTimestamp": "<time>",
+       "ApproximateReceiveCount": "1",
+       "SenderId": "<sender>",
+       "SentTimestamp": "<time>"
+      },
+      "Body": "s-107-a",
+      "MD5OfBody": "55df4c3166535994f38a5bc9595f4404",
+      "MessageId": "<message-id>",
+      "ReceiptHandle": "<receipt>"
+     }
+    ]
+   }
+  },
+  {
+   "op": "change_message_visibility",
+   "request": {
+    "QueueUrl": "<endpoint>/<account>/<prefix>-std",
+    "ReceiptHandle": "<receipt>",
+    "VisibilityTimeout": 0
+   },
+   "response": {}
+  },
+  {
+   "op": "receive_again",
+   "request": {
+    "QueueUrl": "<endpoint>/<account>/<prefix>-std",
+    "want": 1
+   },
+   "response": {
+    "messages": [
+     {
+      "Attributes": {
+       "ApproximateFirstReceiveTimestamp": "<time>",
+       "ApproximateReceiveCount": "2",
+       "SenderId": "<sender>",
+       "SentTimestamp": "<time>"
+      },
+      "Body": "s-107-a",
+      "MD5OfBody": "55df4c3166535994f38a5bc9595f4404",
+      "MessageId": "<message-id>",
+      "ReceiptHandle": "<receipt>"
+     }
+    ]
+   }
+  },
+  {
+   "op": "change_message_visibility",
+   "request": {
+    "QueueUrl": "<endpoint>/<account>/<prefix>-std",
+    "ReceiptHandle": "<receipt>",
+    "VisibilityTimeout": 10
+   },
+   "response": {}
+  },
+  {
+   "op": "delete_message",
+   "request": {
+    "QueueUrl": "<endpoint>/<account>/<prefix>-std",
+    "ReceiptHandle": "<receipt>"
+   },
+   "response": {}
+  },
+  {
+   "op": "set_queue_attributes",
+   "request": {
+    "Attributes": {
+     "NoSuchAttribute": "1"
+    },
+    "QueueUrl": "<endpoint>/<account>/<prefix>-std"
+   },
+   "response": {
+    "error": "InvalidAttributeName",
+    "message": "Unknown Attribute NoSuchAttribute.",
+    "status": 400
+   }
+  },
+  {
+   "op": "get_queue_attributes",
+   "request": {
+    "AttributeNames": [
+     "All"
+    ],
+    "QueueUrl": "<endpoint>/<account>/<prefix>-std"
+   },
+   "response": {
+    "Attributes": {
+     "ApproximateNumberOfMessages": "<count>",
+     "ApproximateNumberOfMessagesDelayed": "<count>",
+     "ApproximateNumberOfMessagesNotVisible": "<count>",
+     "CreatedTimestamp": "<time>",
+     "DelaySeconds": "0",
+     "LastModifiedTimestamp": "<time>",
+     "MaximumMessageSize": "1048576",
+     "MessageRetentionPeriod": "345600",
+     "QueueArn": "arn:aws:sqs:<region>:<account>:<prefix>-std",
+     "ReceiveMessageWaitTimeSeconds": "0",
+     "SqsManagedSseEnabled": "true",
+     "VisibilityTimeout": "30"
+    }
+   }
+  },
+  {
+   "op": "set_queue_attributes",
+   "request": {
+    "Attributes": {
+     "NoSuchAttribute": "1"
+    },
+    "QueueUrl": "<endpoint>/<account>/<prefix>-std"
+   },
+   "response": {
+    "error": "InvalidAttributeName",
+    "message": "Unknown Attribute NoSuchAttribute.",
+    "status": 400
+   }
+  },
+  {
+   "op": "get_queue_attributes",
+   "request": {
+    "AttributeNames": [
+     "All"
+    ],
+    "QueueUrl": "<endpoint>/<account>/<prefix>-std"
+   },
+   "response": {
+    "Attributes": {
+     "ApproximateNumberOfMessages": "<count>",
+     "ApproximateNumberOfMessagesDelayed": "<count>",
+     "ApproximateNumberOfMessagesNotVisible": "<count>",
+     "CreatedTimestamp": "<time>",
+     "DelaySeconds": "0",
+     "LastModifiedTimestamp": "<time>",
+     "MaximumMessageSize": "1048576",
+     "MessageRetentionPeriod": "345600",
+     "QueueArn": "arn:aws:sqs:<region>:<account>:<prefix>-std",
+     "ReceiveMessageWaitTimeSeconds": "0",
+     "SqsManagedSseEnabled": "true",
+     "VisibilityTimeout": "30"
+    }
+   }
+  },
+  {
+   "op": "set_queue_attributes",
+   "request": {
+    "Attributes": {
+     "DelaySeconds": "901"
+    },
+    "QueueUrl": "<endpoint>/<account>/<prefix>-std"
+   },
+   "response": {
+    "error": "InvalidAttributeValue",
+    "message": "Invalid value for the parameter DelaySeconds.",
+    "status": 400
+   }
+  },
+  {
+   "op": "set_queue_attributes",
+   "request": {
+    "Attributes": {
+     "DelaySeconds": "0"
+    },
+    "QueueUrl": "<endpoint>/<account>/<prefix>-std"
+   },
+   "response": {}
+  },
+  {
+   "op": "get_queue_attributes",
+   "request": {
+    "AttributeNames": [
+     "All"
+    ],
+    "QueueUrl": "<endpoint>/<account>/<prefix>-std"
+   },
+   "response": {
+    "Attributes": {
+     "ApproximateNumberOfMessages": "<count>",
+     "ApproximateNumberOfMessagesDelayed": "<count>",
+     "ApproximateNumberOfMessagesNotVisible": "<count>",
+     "CreatedTimestamp": "<time>",
+     "DelaySeconds": "0",
+     "LastModifiedTimestamp": "<time>",
+     "MaximumMessageSize": "1048576",
+     "MessageRetentionPeriod": "345600",
+     "QueueArn": "arn:aws:sqs:<region>:<account>:<prefix>-std",
+     "ReceiveMessageWaitTimeSeconds": "0",
+     "SqsManagedSseEnabled": "true",
+     "VisibilityTimeout": "30"
+    }
+   }
+  },
+  {
+   "op": "send_message_batch",
+   "request": {
+    "Entries": [
+     {
+      "Id": "e0",
+      "MessageBody": "b-108-bb"
+     },
+     {
+      "Id": "e1",
+      "MessageBody": "b-109-a"
+     },
+     {
+      "Id": "e2",
+      "MessageBody": "b-110-line\nbreak"
+     },
+     {
+      "Id": "e3",
+      "MessageBody": "b-111-line\nbreak"
+     }
+    ],
+    "QueueUrl": "<endpoint>/<account>/<prefix>-std"
+   },
+   "response": {
+    "Successful": [
+     {
+      "Id": "e0",
+      "MD5OfMessageBody": "5f0aef08d6378045f7868f90daa43a91",
+      "MessageId": "<message-id>"
+     },
+     {
+      "Id": "e1",
+      "MD5OfMessageBody": "2fd9475431721fb3db2f44008ecd4dbb",
+      "MessageId": "<message-id>"
+     },
+     {
+      "Id": "e2",
+      "MD5OfMessageBody": "f023a5cad48ec01fcd3c6c13355dace6",
+      "MessageId": "<message-id>"
+     },
+     {
+      "Id": "e3",
+      "MD5OfMessageBody": "a64eee631270c44a7f761ef6d270eeb5",
+      "MessageId": "<message-id>"
+     }
+    ]
+   }
+  },
+  {
+   "op": "drain_batch",
+   "request": {
+    "QueueUrl": "<endpoint>/<account>/<prefix>-std",
+    "want": 4
+   },
+   "response": {
+    "messages": [
+     {
+      "Attributes": {
+       "ApproximateFirstReceiveTimestamp": "<time>",
+       "ApproximateReceiveCount": "1",
+       "SenderId": "<sender>",
+       "SentTimestamp": "<time>"
+      },
+      "Body": "b-108-bb",
+      "MD5OfBody": "5f0aef08d6378045f7868f90daa43a91",
+      "MessageId": "<message-id>",
+      "ReceiptHandle": "<receipt>"
+     },
+     {
+      "Attributes": {
+       "ApproximateFirstReceiveTimestamp": "<time>",
+       "ApproximateReceiveCount": "1",
+       "SenderId": "<sender>",
+       "SentTimestamp": "<time>"
+      },
+      "Body": "b-109-a",
+      "MD5OfBody": "2fd9475431721fb3db2f44008ecd4dbb",
+      "MessageId": "<message-id>",
+      "ReceiptHandle": "<receipt>"
+     },
+     {
+      "Attributes": {
+       "ApproximateFirstReceiveTimestamp": "<time>",
+       "ApproximateReceiveCount": "1",
+       "SenderId": "<sender>",
+       "SentTimestamp": "<time>"
+      },
+      "Body": "b-110-line\nbreak",
+      "MD5OfBody": "f023a5cad48ec01fcd3c6c13355dace6",
+      "MessageId": "<message-id>",
+      "ReceiptHandle": "<receipt>"
+     },
+     {
+      "Attributes": {
+       "ApproximateFirstReceiveTimestamp": "<time>",
+       "ApproximateReceiveCount": "1",
+       "SenderId": "<sender>",
+       "SentTimestamp": "<time>"
+      },
+      "Body": "b-111-line\nbreak",
+      "MD5OfBody": "a64eee631270c44a7f761ef6d270eeb5",
+      "MessageId": "<message-id>",
+      "ReceiptHandle": "<receipt>"
+     }
+    ]
+   }
+  },
+  {
+   "op": "delete_message_batch",
+   "request": {
+    "Entries": [
+     {
+      "Id": "d0",
+      "ReceiptHandle": "<receipt>"
+     },
+     {
+      "Id": "d1",
+      "ReceiptHandle": "<receipt>"
+     },
+     {
+      "Id": "d2",
+      "ReceiptHandle": "<receipt>"
+     },
+     {
+      "Id": "d3",
+      "ReceiptHandle": "<receipt>"
+     }
+    ],
+    "QueueUrl": "<endpoint>/<account>/<prefix>-std"
+   },
+   "response": {
+    "Successful": [
+     {
+      "Id": "d2"
+     },
+     {
+      "Id": "d3"
+     },
+     {
+      "Id": "d0"
+     },
+     {
+      "Id": "d1"
+     }
+    ]
+   }
+  },
+  {
+   "op": "send_message_batch",
+   "request": {
+    "Entries": [
+     {
+      "Id": "e0",
+      "MessageBody": "b-112-ccc"
+     },
+     {
+      "Id": "e1",
+      "MessageAttributes": {
+       "a1": {
+        "BinaryValue": "b64:5NyA",
+        "DataType": "Binary"
+       }
+      },
+      "MessageBody": "b-113-bb"
+     },
+     {
+      "Id": "e2",
+      "MessageBody": "b-114-line\nbreak"
+     }
+    ],
+    "QueueUrl": "<endpoint>/<account>/<prefix>-std"
+   },
+   "response": {
+    "Successful": [
+     {
+      "Id": "e0",
+      "MD5OfMessageBody": "c5db459ec314998075817a55c95d3265",
+      "MessageId": "<message-id>"
+     },
+     {
+      "Id": "e1",
+      "MD5OfMessageAttributes": "09322d7486d9d821d45d3f0afa032562",
+      "MD5OfMessageBody": "56ad1fc889cf89534e773878010db442",
+      "MessageId": "<message-id>"
+     },
+     {
+      "Id": "e2",
+      "MD5OfMessageBody": "76efa159bfb6c5d8032bc60bae4738df",
+      "MessageId": "<message-id>"
+     }
+    ]
+   }
+  },
+  {
+   "op": "drain_batch",
+   "request": {
+    "QueueUrl": "<endpoint>/<account>/<prefix>-std",
+    "want": 3
+   },
+   "response": {
+    "messages": [
+     {
+      "Attributes": {
+       "ApproximateFirstReceiveTimestamp": "<time>",
+       "ApproximateReceiveCount": "1",
+       "SenderId": "<sender>",
+       "SentTimestamp": "<time>"
+      },
+      "Body": "b-112-ccc",
+      "MD5OfBody": "c5db459ec314998075817a55c95d3265",
+      "MessageId": "<message-id>",
+      "ReceiptHandle": "<receipt>"
+     },
+     {
+      "Attributes": {
+       "ApproximateFirstReceiveTimestamp": "<time>",
+       "ApproximateReceiveCount": "1",
+       "SenderId": "<sender>",
+       "SentTimestamp": "<time>"
+      },
+      "Body": "b-113-bb",
+      "MD5OfBody": "56ad1fc889cf89534e773878010db442",
+      "MD5OfMessageAttributes": "09322d7486d9d821d45d3f0afa032562",
+      "MessageAttributes": {
+       "a1": {
+        "BinaryValue": "b64:5NyA",
+        "DataType": "Binary"
+       }
+      },
+      "MessageId": "<message-id>",
+      "ReceiptHandle": "<receipt>"
+     },
+     {
+      "Attributes": {
+       "ApproximateFirstReceiveTimestamp": "<time>",
+       "ApproximateReceiveCount": "1",
+       "SenderId": "<sender>",
+       "SentTimestamp": "<time>"
+      },
+      "Body": "b-114-line\nbreak",
+      "MD5OfBody": "76efa159bfb6c5d8032bc60bae4738df",
+      "MessageId": "<message-id>",
+      "ReceiptHandle": "<receipt>"
+     }
+    ]
+   }
+  },
+  {
+   "op": "delete_message_batch",
+   "request": {
+    "Entries": [
+     {
+      "Id": "d0",
+      "ReceiptHandle": "<receipt>"
+     },
+     {
+      "Id": "d1",
+      "ReceiptHandle": "<receipt>"
+     },
+     {
+      "Id": "d2",
+      "ReceiptHandle": "<receipt>"
+     }
+    ],
+    "QueueUrl": "<endpoint>/<account>/<prefix>-std"
+   },
+   "response": {
+    "Successful": [
+     {
+      "Id": "d2"
+     },
+     {
+      "Id": "d0"
+     },
+     {
+      "Id": "d1"
+     }
+    ]
+   }
+  },
+  {
+   "op": "send_message",
+   "request": {
+    "MessageAttributes": {
+     "a4": {
+      "DataType": "Number",
+      "StringValue": "492"
+     },
+     "a6": {
+      "DataType": "String",
+      "StringValue": "ünï"
+     }
+    },
+    "MessageBody": "s-115-ü",
+    "QueueUrl": "<endpoint>/<account>/<prefix>-std"
+   },
+   "response": {
+    "MD5OfMessageAttributes": "a70bd013e5f7dac992cfac946b29cc30",
+    "MD5OfMessageBody": "c4db880a00a662b4d8445afe9ffcf2c1",
+    "MessageId": "<message-id>"
+   }
+  },
+  {
+   "op": "receive_one",
+   "request": {
+    "QueueUrl": "<endpoint>/<account>/<prefix>-std",
+    "want": 1
+   },
+   "response": {
+    "messages": [
+     {
+      "Attributes": {
+       "ApproximateFirstReceiveTimestamp": "<time>",
+       "ApproximateReceiveCount": "1",
+       "SenderId": "<sender>",
+       "SentTimestamp": "<time>"
+      },
+      "Body": "s-115-ü",
+      "MD5OfBody": "c4db880a00a662b4d8445afe9ffcf2c1",
+      "MD5OfMessageAttributes": "a70bd013e5f7dac992cfac946b29cc30",
+      "MessageAttributes": {
+       "a4": {
+        "DataType": "Number",
+        "StringValue": "492"
+       },
+       "a6": {
+        "DataType": "String",
+        "StringValue": "ünï"
+       }
+      },
+      "MessageId": "<message-id>",
+      "ReceiptHandle": "<receipt>"
+     }
+    ]
+   }
+  },
+  {
+   "op": "change_message_visibility",
+   "request": {
+    "QueueUrl": "<endpoint>/<account>/<prefix>-std",
+    "ReceiptHandle": "<receipt>",
+    "VisibilityTimeout": 0
+   },
+   "response": {}
+  },
+  {
+   "op": "receive_again",
+   "request": {
+    "QueueUrl": "<endpoint>/<account>/<prefix>-std",
+    "want": 1
+   },
+   "response": {
+    "messages": [
+     {
+      "Attributes": {
+       "ApproximateFirstReceiveTimestamp": "<time>",
+       "ApproximateReceiveCount": "2",
+       "SenderId": "<sender>",
+       "SentTimestamp": "<time>"
+      },
+      "Body": "s-115-ü",
+      "MD5OfBody": "c4db880a00a662b4d8445afe9ffcf2c1",
+      "MD5OfMessageAttributes": "a70bd013e5f7dac992cfac946b29cc30",
+      "MessageAttributes": {
+       "a4": {
+        "DataType": "Number",
+        "StringValue": "492"
+       },
+       "a6": {
+        "DataType": "String",
+        "StringValue": "ünï"
+       }
+      },
+      "MessageId": "<message-id>",
+      "ReceiptHandle": "<receipt>"
+     }
+    ]
+   }
+  },
+  {
+   "op": "change_message_visibility",
+   "request": {
+    "QueueUrl": "<endpoint>/<account>/<prefix>-std",
+    "ReceiptHandle": "<receipt>",
+    "VisibilityTimeout": 10
+   },
+   "response": {}
+  },
+  {
+   "op": "delete_message",
+   "request": {
+    "QueueUrl": "<endpoint>/<account>/<prefix>-std",
+    "ReceiptHandle": "<receipt>"
+   },
+   "response": {}
+  },
+  {
+   "op": "purge_queue",
+   "request": {
+    "QueueUrl": "<endpoint>/<account>/<prefix>-std"
+   },
+   "response": {}
+  },
+  {
+   "op": "purge_queue",
+   "request": {
+    "QueueUrl": "<endpoint>/<account>/<prefix>-std"
+   },
+   "response": {
+    "error": "AWS.SimpleQueueService.PurgeQueueInProgress",
+    "message": "Only one PurgeQueue operation on <prefix>-std is allowed every 60 seconds.",
+    "status": 403
+   }
+  }
+ ],
+ "steps_requested": 150,
+ "target": "aws",
+ "version": 1
+}
