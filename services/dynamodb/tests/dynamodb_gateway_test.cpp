@@ -1072,7 +1072,8 @@ struct forwarding {
     op_backend backend{engine};
     std::optional<ddb::gateway<op_backend>> gw;
 
-    explicit forwarding(std::string_view secret) {
+    explicit forwarding(std::string_view secret,
+                        kythira::layers::role_set roles = kythira::layers::role_set::all()) {
         auto vars = minimal_env();
         vars["KYTHIRA_DYNAMODB_BIND"] = "127.0.0.1";
         vars["KYTHIRA_DYNAMODB_PORT"] = "0";
@@ -1080,17 +1081,19 @@ struct forwarding {
         BOOST_REQUIRE(std::holds_alternative<ddb::gateway_config>(c));
         auto cfg = std::get<ddb::gateway_config>(c);
         cfg.cluster.forward_secret = std::string(secret);
+        cfg.roles = roles;
         gw.emplace(cfg, backend);
         gw->start();
     }
 
-    auto post(const std::string& body, std::optional<std::uint64_t> time, const std::string& mac)
-        -> http::response<http::string_body> {
+    auto post(const std::string& body, std::optional<std::uint64_t> time, const std::string& mac,
+              std::string_view target = ddb::k_forward_path) -> http::response<http::string_body> {
         boost::asio::io_context ioc;
         boost::beast::tcp_stream s(ioc);
         s.expires_after(std::chrono::seconds(10));
         s.connect({boost::asio::ip::make_address("127.0.0.1"), gw->port()});
-        http::request<http::string_body> req{http::verb::post, ddb::k_forward_path, 11};
+        http::request<http::string_body> req{
+            target == "/" && body.empty() ? http::verb::get : http::verb::post, target, 11};
         req.set(http::field::host, "127.0.0.1");
         if (time) {
             req.set(ddb::k_forward_time_header, std::to_string(*time));
@@ -1150,4 +1153,103 @@ BOOST_AUTO_TEST_CASE(without_a_secret_the_forward_path_is_not_served) {
     const auto r = f.post("abc", t, ddb::forward_mac("", t, "abc"));
     BOOST_TEST(r.result_int() == 400U);
     BOOST_TEST(r.body().find("served:") == std::string::npos);
+}
+
+// KYTHIRA_DYNAMODB_ROLES (.kiro/specs/dynamodb-independent-layers/ task 1).
+
+BOOST_AUTO_TEST_CASE(a_node_runs_all_four_roles_unless_told_otherwise) {
+    const auto all = kythira::layers::role_set::all();
+    BOOST_TEST(
+        (std::get<ddb::gateway_config>(ddb::gateway_config_from_env(env_of(minimal_env()))).roles ==
+         all));
+    BOOST_TEST(
+        (std::get<ddb::gateway_config>(ddb::gateway_config_from_env(env_of(cluster_env()))).roles ==
+         all));
+    // Naming all four is the same as naming none, with or without a
+    // cluster.
+    auto vars = minimal_env();
+    vars["KYTHIRA_DYNAMODB_ROLES"] = "segments, data,front_end ,gateway";
+    BOOST_REQUIRE_EQUAL(config_error(vars), "ok");
+    BOOST_TEST(
+        (std::get<ddb::gateway_config>(ddb::gateway_config_from_env(env_of(vars))).roles == all));
+}
+
+BOOST_AUTO_TEST_CASE(a_cluster_voter_can_run_the_data_role_alone) {
+    auto vars = cluster_env();
+    vars["KYTHIRA_DYNAMODB_ROLES"] = "data,segments";
+    BOOST_REQUIRE_EQUAL(config_error(vars), "ok");
+    const auto c = std::get<ddb::gateway_config>(ddb::gateway_config_from_env(env_of(vars)));
+    using kythira::layers::role;
+    BOOST_TEST(c.roles.has(role::data));
+    BOOST_TEST(c.roles.has(role::segments));
+    BOOST_TEST(!c.roles.has(role::gateway));
+    BOOST_TEST(!c.roles.has(role::front_end));
+    BOOST_TEST(c.roles.to_string() == "data,segments");
+    // A data node is a voter: it must still be among the peers.
+    vars["KYTHIRA_DYNAMODB_NODE_ID"] = "9";
+    BOOST_TEST(config_error(vars).find("must include this node's own id") != std::string::npos);
+}
+
+BOOST_AUTO_TEST_CASE(a_role_set_the_node_cannot_serve_stops_it_naming_what_is_missing) {
+    const auto error_for = [](std::map<std::string, std::string> vars, const std::string& roles) {
+        vars["KYTHIRA_DYNAMODB_ROLES"] = roles;
+        return config_error(std::move(vars));
+    };
+    const auto has = [](const std::string& text, std::string_view part) {
+        BOOST_TEST_INFO("error: " << text);
+        return text.find(part) != std::string::npos;
+    };
+    // Bad names are refused with the variable named.
+    BOOST_TEST(has(error_for(cluster_env(), "data,segment"), "KYTHIRA_DYNAMODB_ROLES:"));
+    BOOST_TEST(has(error_for(cluster_env(), "data,data,segments"), "KYTHIRA_DYNAMODB_ROLES:"));
+    BOOST_TEST(has(error_for(cluster_env(), ""), "KYTHIRA_DYNAMODB_ROLES"));
+    // No data role: no remote backend yet.
+    for (const auto* roles :
+         {"gateway,front_end", "gateway,front_end,segments", "segments", "front_end", "gateway"}) {
+        BOOST_TEST(has(error_for(cluster_env(), roles), "without the data role"));
+    }
+    // Data without segments: no remote volumes yet.
+    BOOST_TEST(has(error_for(cluster_env(), "gateway,front_end,data"), "add segments"));
+    BOOST_TEST(has(error_for(cluster_env(), "data"), "add segments"));
+    // A gateway apart from its front end: no handoff yet.
+    BOOST_TEST(has(error_for(cluster_env(), "gateway,data,segments"), "run both or neither"));
+    BOOST_TEST(has(error_for(cluster_env(), "front_end,data,segments"), "run both or neither"));
+    // A data node with no cluster has nobody to serve.
+    BOOST_TEST(has(error_for(minimal_env(), "data,segments"), "set KYTHIRA_DYNAMODB_PEERS"));
+    // Every message starts with the set as the node read it.
+    BOOST_TEST(error_for(cluster_env(), "segments,data,gateway")
+                   .starts_with("KYTHIRA_DYNAMODB_ROLES=gateway,data,segments: "));
+}
+
+BOOST_AUTO_TEST_CASE(health_reports_the_role_set) {
+    forwarding f(k_forward_secret);
+    const auto res = f.post("", std::nullopt, "", "/");
+    BOOST_TEST(res.result_int() == 200U);
+    BOOST_TEST(res.body() == "healthy: dynamodb.us-east-1.amazonaws.com ");
+    BOOST_TEST(std::string(res[ddb::k_roles_header]) == "gateway,front_end,data,segments");
+}
+
+BOOST_AUTO_TEST_CASE(a_data_node_serves_forwarded_ops_and_refuses_clients) {
+    using kythira::layers::role;
+    forwarding f(k_forward_secret, kythira::layers::role_set::parse("data,segments"));
+    // Health still answers, with the set.
+    const auto health = f.post("", std::nullopt, "", "/");
+    BOOST_TEST(health.result_int() == 200U);
+    BOOST_TEST(std::string(health[ddb::k_roles_header]) == "data,segments");
+    // Other voters' gateways still reach its ops.
+    const auto t = now_ms();
+    const auto op = f.post("abc", t, ddb::forward_mac(k_forward_secret, t, "abc"));
+    BOOST_TEST(op.result_int() == 200U);
+    BOOST_TEST(op.body() == "served:abc");
+    const ddb::forward_client client(
+        ddb::forward_client_config{.secret = std::string(k_forward_secret), .tls = false},
+        {{"7", ddb::forward_peer{"127.0.0.1", f.gw->port()}}});
+    BOOST_TEST(client.send("7", "xyz").value_or("none") == "served:xyz");
+    // A client call, or a forwarded op without a valid MAC, gets a plain
+    // 404 naming the node's roles, never the front end.
+    const auto client_call = f.post("{}", std::nullopt, "", "/");
+    BOOST_TEST(client_call.result_int() == 404U);
+    BOOST_TEST(client_call.body().find("no DynamoDB gateway") != std::string::npos);
+    BOOST_TEST(std::string(client_call[ddb::k_roles_header]) == "data,segments");
+    BOOST_TEST(f.post("abc", t, ddb::forward_mac(k_forward_secret, t, "abd")).result_int() == 403U);
 }

@@ -55,6 +55,8 @@ public:
         bool fail_start = false;
         bool fail_stop = false;
         bool healthy = true;
+        /// The layer roles the module reports, if any.
+        std::string roles;
     };
 
     fake_module(journal& j, options o) : _j(j), _o(std::move(o)) {}
@@ -92,8 +94,8 @@ public:
         }
     }
     [[nodiscard]] auto health() const -> node::module_health override {
-        return _o.healthy ? node::module_health{true, {}}
-                          : node::module_health{false, "no leader \"yet\""};
+        return _o.healthy ? node::module_health{true, {}, _o.roles}
+                          : node::module_health{false, "no leader \"yet\"", _o.roles};
     }
     [[nodiscard]] auto metrics() const -> std::vector<node::module_metric> override {
         return {{"requests_total", 3, {{"op", "get"}}}, {"tables", 2, {}}};
@@ -327,6 +329,23 @@ BOOST_AUTO_TEST_CASE(health_and_metrics_cover_every_module) {
     BOOST_TEST(text.find("kythira_node_service_up{service=\"kinesis\"} 0\n") != std::string::npos);
     BOOST_TEST(text.find("kythira_iam_requests_total{op=\"get\"} 3\n") != std::string::npos);
     BOOST_TEST(text.find("kythira_kinesis_tables 2\n") != std::string::npos);
+    r->stop();
+}
+
+BOOST_AUTO_TEST_CASE(health_names_each_modules_layer_roles) {
+    // A module with layers (.kiro/specs/dynamodb-independent-layers/
+    // task 1) reports its role set; one without reports none.
+    fixture f;
+    f.add({.name = "iam", .number = 5});
+    f.add({.name = "dynamodb", .number = 2, .roles = "data,segments"});
+    auto r = f.runner({"iam", "dynamodb"});
+    fake_host host;
+    r->start(host, env_of({}));
+    const auto [status, body] = r->health_report();
+    BOOST_TEST(status == 200U);
+    BOOST_TEST(body == R"({"node_id":"1","services":{)"
+                       R"("dynamodb":{"healthy":true,"roles":"data,segments"},)"
+                       R"("iam":{"healthy":true}},"healthy":true})");
     r->stop();
 }
 

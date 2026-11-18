@@ -177,6 +177,11 @@ struct module_health {
     bool healthy = false;
     /// Why not, or what is degraded; empty when healthy.
     std::string detail;
+    /// The module's layer roles on this node, `,`-separated in the order
+    /// `layers::role_set::to_string` writes them
+    /// (.kiro/specs/kinesis-independent-layers/ Requirement 2.6); empty for
+    /// a module without layers.
+    std::string roles;
 };
 
 /// One metric a module reports. The node writes it as

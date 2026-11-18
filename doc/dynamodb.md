@@ -90,6 +90,7 @@ from the environment; `dynamodb_gateway_node --help` lists them all.
 | `KYTHIRA_DYNAMODB_DISK_FLOOR_BYTES` | writes are refused below this much free space (1 GiB) |
 | `KYTHIRA_DYNAMODB_SPLIT_BYTES`, `_SPLIT_KEYS`, `_SPLIT_INTERVAL_MS` | the split policy; both thresholds 0 turns splits off |
 | `KYTHIRA_DYNAMODB_COMPAT` | the cluster's compatibility profile (below) |
+| `KYTHIRA_DYNAMODB_ROLES` | the layers this node runs: unset is all four (`gateway,front_end,data,segments`), as before; `data,segments` makes a voter that serves only forwarded ops and answers clients 404. Other sets are refused at start until the independent-layers spec builds them (`.kiro/specs/dynamodb-independent-layers/`) |
 
 Without `PEERS` the daemon runs one node with no Raft on the memory
 engine, like DynamoDB Local's `-inMemory`: good for tests, nothing kept.

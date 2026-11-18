@@ -78,6 +78,17 @@
 /// | `KYTHIRA_DYNAMODB_STRONG_SECRET` | | the secret strong voters forward with (16+ chars) |
 /// | `KYTHIRA_DYNAMODB_STRONG_HEARTBEAT_MS` | `250` | strong groups' heartbeat |
 /// | `KYTHIRA_DYNAMODB_STRONG_ELECTION_MIN_MS`, `_MAX_MS` | `2500`, `5000` | election timeouts |
+/// | `KYTHIRA_DYNAMODB_ROLES` | all four | the layers this node runs (below) |
+///
+/// `KYTHIRA_DYNAMODB_ROLES` (.kiro/specs/dynamodb-independent-layers/
+/// task 1) is a `,`-separated subset of `gateway`, `front_end`, `data` and
+/// `segments`. Unset, a node runs all four, exactly as before. This build
+/// serves two sets: all four, and `data,segments`, a data node that is a
+/// Raft voter and runs the leader-side workers, takes ops forwarded from
+/// the other voters' gateways, and answers clients 404. Every other set
+/// stops the node at start, naming the part it lacks. The set shows on
+/// `GET /` as the `x-kythira-roles` header, and in kythira_node's
+/// `/healthz` and `/metrics`.
 ///
 /// Without a backup store a single node keeps backups in memory, and a
 /// cluster refuses `CreateBackup` (`backup.hpp`) and
@@ -134,6 +145,7 @@
 #include <kythira/dynamodb/txn_api.hpp>
 
 #include <raft/beast_https_server.hpp>
+#include <raft/layer_roles.hpp>
 #include <raft/logger.hpp>
 #include <raft/static_key_authorizer.hpp>
 #include <raft/static_or_iam_authorizer.hpp>
@@ -319,6 +331,9 @@ struct gateway_config {
     /// How long a table's key may fail to open on the catalog leader
     /// before the table goes INACCESSIBLE_ENCRYPTION_CREDENTIALS.
     std::uint64_t kms_inaccessible_after_ms = 600'000;
+    /// `KYTHIRA_DYNAMODB_ROLES`: the layers this node runs; all four unless
+    /// set.
+    kythira::layers::role_set roles = kythira::layers::role_set::all();
 };
 
 /// Reads one environment variable; empty optional when unset.
@@ -523,7 +538,14 @@ inline constexpr std::string_view k_gateway_env_help =
     "                                        same in all three regions (16+ chars)\n"
     "  KYTHIRA_DYNAMODB_STRONG_HEARTBEAT_MS  strong groups' heartbeat (250)\n"
     "  KYTHIRA_DYNAMODB_STRONG_ELECTION_MIN_MS, _MAX_MS  their election timeout\n"
-    "                                        range (2500, 5000)\n";
+    "                                        range (2500, 5000)\n"
+    "  KYTHIRA_DYNAMODB_ROLES                layers this node runs: all four\n"
+    "                                        (gateway,front_end,data,segments, the\n"
+    "                                        default) or data,segments\n";
+
+/// The header `GET /` and a data node's refusals carry the node's role set
+/// in.
+inline constexpr std::string_view k_roles_header = "x-kythira-roles";
 
 namespace gateway_detail {
 
@@ -644,6 +666,59 @@ namespace gateway_detail {
     }
     if (c.engine == "rocksdb" && c.data_dir.empty()) {
         return std::string("KYTHIRA_DYNAMODB_ENGINE=rocksdb needs KYTHIRA_DYNAMODB_DATA_DIR");
+    }
+    return std::nullopt;
+}
+
+/// `KYTHIRA_DYNAMODB_ROLES` into `c.roles`; the error text for a set this
+/// build cannot serve, naming what it lacks. Read after the cluster
+/// settings, since a node without the client roles must be a voter.
+[[nodiscard]] inline auto roles_from_env(const env_lookup& env, gateway_config& c)
+    -> std::optional<std::string> {
+    using kythira::layers::role;
+    const auto text = env("KYTHIRA_DYNAMODB_ROLES");
+    if (!text) {
+        return std::nullopt;
+    }
+    std::string names;
+    for (const char ch : *text) {
+        if (ch != ' ' && ch != '\t') {
+            names += ch;
+        }
+    }
+    if (names.empty()) {
+        return std::string(
+            "KYTHIRA_DYNAMODB_ROLES is set but names no role (gateway, front_end, data, "
+            "segments; unset runs all four)");
+    }
+    try {
+        c.roles = kythira::layers::role_set::parse(names);
+    } catch (const std::invalid_argument& e) {
+        return std::string("KYTHIRA_DYNAMODB_ROLES: ") + e.what();
+    }
+    if (c.roles == kythira::layers::role_set::all()) {
+        return std::nullopt;
+    }
+    const auto named = "KYTHIRA_DYNAMODB_ROLES=" + c.roles.to_string() + ": ";
+    if (!c.roles.has(role::data)) {
+        return named +
+               "a node without the data role needs a remote backend to reach the data nodes, "
+               "which this build does not have yet; add data";
+    }
+    if (!c.roles.has(role::segments)) {
+        return named +
+               "the data role without segments needs a segment node's volume for the change "
+               "log, which this build does not have yet; add segments";
+    }
+    if (c.roles.has(role::gateway) != c.roles.has(role::front_end)) {
+        return named +
+               "a gateway apart from its front end needs the authenticated-call handoff, which "
+               "this build does not have yet; run both or neither";
+    }
+    if (!c.cluster.enabled()) {
+        return named +
+               "a node without the gateway and front_end roles serves no client, so it must be "
+               "a data node of a cluster: set KYTHIRA_DYNAMODB_PEERS";
     }
     return std::nullopt;
 }
@@ -1090,6 +1165,9 @@ namespace gateway_detail {
     if (auto e = gateway_detail::cluster_from_env(env, c)) {
         return *e;
     }
+    if (auto e = gateway_detail::roles_from_env(env, c)) {
+        return *e;
+    }
     c.backup_dir = env("KYTHIRA_DYNAMODB_BACKUP_DIR").value_or("");
     c.backup_s3_bucket = env("KYTHIRA_DYNAMODB_BACKUP_S3_BUCKET").value_or("");
     c.backup_s3_prefix = env("KYTHIRA_DYNAMODB_BACKUP_S3_PREFIX").value_or("");
@@ -1390,6 +1468,7 @@ public:
             https::response res{http::status::ok, req.version()};
             res.set(http::field::content_type, "text/plain");
             res.body() = "healthy: dynamodb." + _config.front.region + ".amazonaws.com ";
+            res.set(k_roles_header, _config.roles.to_string());
             res.prepare_payload();
             return res;
         }
@@ -1407,6 +1486,18 @@ public:
         if (req.target() == k_strong_forward_path && _strong_ops &&
             !_config.strong.forward_secret.empty()) {
             return forwarded(req, _config.strong.forward_secret, _strong_ops);
+        }
+        if (!_config.roles.has(kythira::layers::role::gateway)) {
+            // A data node (KYTHIRA_DYNAMODB_ROLES=data,segments) listens only
+            // for the ops other voters forward; a client sent here is
+            // misconfigured, so say so instead of letting the SDK retry.
+            https::response res{http::status::not_found, req.version()};
+            res.set(http::field::content_type, "text/plain");
+            res.set(k_roles_header, _config.roles.to_string());
+            res.body() = "this node runs no DynamoDB gateway (roles " + _config.roles.to_string() +
+                         "); send requests to a gateway\n";
+            res.prepare_payload();
+            return res;
         }
         return to_https_response(_front->handle(to_front_end_request(req, ctx)), req.version());
     }
