@@ -194,6 +194,11 @@ enum class grant : std::uint8_t {
             }
         }
     }
+    // AWS treats {"AWS": "*"} as "*" in a resource policy: it covers
+    // anonymous callers too.
+    if (who.kind == principal_kind::anonymous && contains(p.values("AWS"), "*")) {
+        raise(grant::direct);
+    }
     if ((who.kind == principal_kind::service && contains(p.values("Service"), who.name)) ||
         (who.kind == principal_kind::web_identity && contains(p.values("Federated"), who.name))) {
         raise(grant::direct);

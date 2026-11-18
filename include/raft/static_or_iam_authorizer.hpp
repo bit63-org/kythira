@@ -55,6 +55,9 @@ struct iam_hooks {
     /// S3 POST policies. A daemon whose services need neither may leave it
     /// empty; such claims are then refused.
     std::function<resolve_result(const sigv4::claim&, sigv4::error_protocol)> resolve;
+    /// IAM's `authorize_anonymous` (`aws_anonymous_authorizer`), for S3's
+    /// public access. Empty: anonymous callers get nothing from policies.
+    std::function<authz_decision(const authz_request&)> authorize_anonymous;
 };
 
 class static_or_iam_authorizer {
@@ -150,6 +153,17 @@ public:
         return _static.resolve(c, protocol);
     }
 
+    /// `aws_anonymous_authorizer`: IAM's answer when IAM is in use and
+    /// can give one; static keys have no resource policies to consult.
+    [[nodiscard]] auto authorize_anonymous(const authz_request& r) -> authz_decision {
+        if (_mode != auth_mode::static_keys && _iam && _iam->authorize_anonymous) {
+            return _iam->authorize_anonymous(r);
+        }
+        authz_decision d;
+        d.reason = "no resource policy evaluator for anonymous requests";
+        return d;
+    }
+
     [[nodiscard]] auto authorize(const principal_context& who, const authz_request& r)
         -> authz_decision {
         if (_mode == auth_mode::static_keys ||
@@ -172,5 +186,6 @@ private:
 
 static_assert(aws_request_authorizer<static_or_iam_authorizer>);
 static_assert(aws_claim_resolver<static_or_iam_authorizer>);
+static_assert(aws_anonymous_authorizer<static_or_iam_authorizer>);
 
 }  // namespace kythira::aws_auth

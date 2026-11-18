@@ -215,4 +215,14 @@ concept aws_claim_resolver = requires(A& a, const sigv4::claim& c, sigv4::error_
     { a.resolve(c, p) } -> std::same_as<resolve_result>;
 };
 
+/// An authorizer that can decide for an unsigned request: no identity
+/// policies, so only a resource policy granting `"*"` (or `{"AWS": "*"}`,
+/// which AWS treats the same) can allow it. S3's anonymous access goes
+/// through this (s3-compatible-storage Requirement 5.5). An authorizer
+/// without it allows anonymous callers nothing through policies.
+template<typename A>
+concept aws_anonymous_authorizer = requires(A& a, const authz_request& r) {
+    { a.authorize_anonymous(r) } -> std::same_as<authz_decision>;
+};
+
 }  // namespace kythira::aws_auth
