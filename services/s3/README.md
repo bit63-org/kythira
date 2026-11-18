@@ -31,6 +31,7 @@ module's consumers (Requirement 17.3).
 | `implemented-operations.txt` | operations the gateway implements | 1 onward |
 | `doc/unsupported.md` | every other operation, with its planned task, reason and the exact error it returns (`NotImplemented`, 501) | 1 onward |
 | `tools/check_coverage.py`, `tools/test_check_coverage.py` | the coverage check (Requirement 2.2) and its fixture tests | 1 |
+| `tests/evidence/` | the recording stub, the client scenarios (AWS CLI v2, boto3, Java, Go and JS SDKs, rclone, Mountpoint) and the checked-in wire evidence with what it means for the gateway; `s3_wire_evidence` checks the files | 1 |
 | `cmd/s3_gateway_node/` | the daemon; a placeholder with `--help` and `--self-test` until tasks 5-7 | 1 |
 
 ## Core targets and variables used

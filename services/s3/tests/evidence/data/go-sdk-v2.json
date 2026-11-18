@@ -1,0 +1,1146 @@
+{
+ "client": "aws-sdk-go-v2-s3-v1.115.0",
+ "requests": [
+  {
+   "operation": "CreateBucket",
+   "method": "PUT",
+   "target": "/",
+   "addressing": "virtual-hosted",
+   "http_version": "HTTP/1.1",
+   "expect_continue": false,
+   "content_sha256": "hex",
+   "headers": [
+    [
+     "Host",
+     "evidence.s3.kythira.test:<port>"
+    ],
+    [
+     "User-Agent",
+     "aws-sdk-go-v2/1.48.0 ua/2.1 os/linux lang/go#1.24.7 md/GOOS#linux md/GOARCH#amd64 api/s3#1.115.0 m/E,g"
+    ],
+    [
+     "Content-Length",
+     "0"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "Amz-Sdk-Invocation-Id",
+     "<uuid>"
+    ],
+    [
+     "Amz-Sdk-Request",
+     "attempt=1; max=3"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/s3/aws4_request, SignedHeaders=accept-encoding;amz-sdk-invocation-id;amz-sdk-request;host;x-amz-content-sha256;x-amz-date, Signature=<hex>"
+    ],
+    [
+     "X-Amz-Content-Sha256",
+     "<sha256-hex>"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ]
+   ],
+   "body": null,
+   "response_status": 200
+  },
+  {
+   "operation": "HeadBucket",
+   "method": "HEAD",
+   "target": "/",
+   "addressing": "virtual-hosted",
+   "http_version": "HTTP/1.1",
+   "expect_continue": false,
+   "content_sha256": "hex",
+   "headers": [
+    [
+     "Host",
+     "evidence.s3.kythira.test:<port>"
+    ],
+    [
+     "User-Agent",
+     "aws-sdk-go-v2/1.48.0 ua/2.1 os/linux lang/go#1.24.7 md/GOOS#linux md/GOARCH#amd64 api/s3#1.115.0 m/E,g"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "Amz-Sdk-Invocation-Id",
+     "<uuid>"
+    ],
+    [
+     "Amz-Sdk-Request",
+     "attempt=1; max=3"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/s3/aws4_request, SignedHeaders=accept-encoding;amz-sdk-invocation-id;amz-sdk-request;host;x-amz-content-sha256;x-amz-date, Signature=<hex>"
+    ],
+    [
+     "X-Amz-Content-Sha256",
+     "<sha256-hex>"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ]
+   ],
+   "body": null,
+   "response_status": 200
+  },
+  {
+   "operation": "PutObject",
+   "method": "PUT",
+   "target": "/hello.txt?x-id=PutObject",
+   "addressing": "virtual-hosted",
+   "http_version": "HTTP/1.1",
+   "expect_continue": false,
+   "content_sha256": "STREAMING-UNSIGNED-PAYLOAD-TRAILER",
+   "headers": [
+    [
+     "Host",
+     "evidence.s3.kythira.test:<port>"
+    ],
+    [
+     "User-Agent",
+     "aws-sdk-go-v2/1.48.0 ua/2.1 os/linux lang/go#1.24.7 md/GOOS#linux md/GOARCH#amd64 api/s3#1.115.0 m/E,Z,g"
+    ],
+    [
+     "Content-Length",
+     "83"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "Amz-Sdk-Invocation-Id",
+     "<uuid>"
+    ],
+    [
+     "Amz-Sdk-Request",
+     "attempt=1; max=3"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/s3/aws4_request, SignedHeaders=accept-encoding;amz-sdk-invocation-id;amz-sdk-request;content-encoding;content-length;content-type;host;x-amz-content-sha256;x-amz-date;x-amz-decoded-content-length;x-amz-trailer, Signature=<hex>"
+    ],
+    [
+     "Content-Encoding",
+     "aws-chunked"
+    ],
+    [
+     "Content-Type",
+     "text/plain"
+    ],
+    [
+     "X-Amz-Content-Sha256",
+     "STREAMING-UNSIGNED-PAYLOAD-TRAILER"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "X-Amz-Decoded-Content-Length",
+     "41"
+    ],
+    [
+     "X-Amz-Trailer",
+     "x-amz-checksum-crc32"
+    ]
+   ],
+   "body": {
+    "transfer": "content-length",
+    "kind": "object",
+    "length": 41,
+    "sha256": "5731799fa50a404cb2a77e5722751784a724ca25c500908d148f5f1a274b4e05",
+    "aws_chunked": {
+     "chunk_sizes": [
+      {
+       "size": 41,
+       "count": 1
+      },
+      {
+       "size": 0,
+       "count": 1
+      }
+     ],
+     "chunks_signed": false,
+     "trailers": [
+      "x-amz-checksum-crc32"
+     ],
+     "trailer_signed": false
+    },
+    "encoded_length": 83
+   },
+   "response_status": 200
+  },
+  {
+   "operation": "HeadObject",
+   "method": "HEAD",
+   "target": "/hello.txt",
+   "addressing": "virtual-hosted",
+   "http_version": "HTTP/1.1",
+   "expect_continue": false,
+   "content_sha256": "hex",
+   "headers": [
+    [
+     "Host",
+     "evidence.s3.kythira.test:<port>"
+    ],
+    [
+     "User-Agent",
+     "aws-sdk-go-v2/1.48.0 ua/2.1 os/linux lang/go#1.24.7 md/GOOS#linux md/GOARCH#amd64 api/s3#1.115.0 m/E,g"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "Amz-Sdk-Invocation-Id",
+     "<uuid>"
+    ],
+    [
+     "Amz-Sdk-Request",
+     "attempt=1; max=3"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/s3/aws4_request, SignedHeaders=accept-encoding;amz-sdk-invocation-id;amz-sdk-request;host;x-amz-content-sha256;x-amz-date, Signature=<hex>"
+    ],
+    [
+     "X-Amz-Content-Sha256",
+     "<sha256-hex>"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ]
+   ],
+   "body": null,
+   "response_status": 200
+  },
+  {
+   "operation": "GetObject",
+   "method": "GET",
+   "target": "/hello.txt?x-id=GetObject",
+   "addressing": "virtual-hosted",
+   "http_version": "HTTP/1.1",
+   "expect_continue": false,
+   "content_sha256": "hex",
+   "headers": [
+    [
+     "Host",
+     "evidence.s3.kythira.test:<port>"
+    ],
+    [
+     "User-Agent",
+     "aws-sdk-go-v2/1.48.0 ua/2.1 os/linux lang/go#1.24.7 md/GOOS#linux md/GOARCH#amd64 api/s3#1.115.0 m/E,b,g"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "Amz-Sdk-Invocation-Id",
+     "<uuid>"
+    ],
+    [
+     "Amz-Sdk-Request",
+     "attempt=1; max=3"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/s3/aws4_request, SignedHeaders=accept-encoding;amz-sdk-invocation-id;amz-sdk-request;host;range;x-amz-checksum-mode;x-amz-content-sha256;x-amz-date, Signature=<hex>"
+    ],
+    [
+     "Range",
+     "bytes=0-4"
+    ],
+    [
+     "X-Amz-Checksum-Mode",
+     "ENABLED"
+    ],
+    [
+     "X-Amz-Content-Sha256",
+     "<sha256-hex>"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ]
+   ],
+   "body": null,
+   "response_status": 206
+  },
+  {
+   "operation": "CreateMultipartUpload",
+   "method": "POST",
+   "target": "/large.bin?uploads=",
+   "addressing": "virtual-hosted",
+   "http_version": "HTTP/1.1",
+   "expect_continue": false,
+   "content_sha256": "hex",
+   "headers": [
+    [
+     "Host",
+     "evidence.s3.kythira.test:<port>"
+    ],
+    [
+     "User-Agent",
+     "aws-sdk-go-v2/1.48.0 ua/2.1 os/linux lang/go#1.24.7 md/GOOS#linux md/GOARCH#amd64 api/s3#1.115.0 ft/s3-transfer m/E,G,g"
+    ],
+    [
+     "Content-Length",
+     "0"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "Amz-Sdk-Invocation-Id",
+     "<uuid>"
+    ],
+    [
+     "Amz-Sdk-Request",
+     "attempt=1; max=3"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/s3/aws4_request, SignedHeaders=accept-encoding;amz-sdk-invocation-id;amz-sdk-request;host;x-amz-checksum-algorithm;x-amz-content-sha256;x-amz-date, Signature=<hex>"
+    ],
+    [
+     "X-Amz-Checksum-Algorithm",
+     "CRC32"
+    ],
+    [
+     "X-Amz-Content-Sha256",
+     "<sha256-hex>"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ]
+   ],
+   "body": null,
+   "response_status": 200
+  },
+  {
+   "operation": "UploadPart",
+   "method": "PUT",
+   "target": "/large.bin?partNumber=1&uploadId=evidence-upload-0001&x-id=UploadPart",
+   "addressing": "virtual-hosted",
+   "http_version": "HTTP/1.1",
+   "expect_continue": true,
+   "content_sha256": "STREAMING-UNSIGNED-PAYLOAD-TRAILER",
+   "headers": [
+    [
+     "Host",
+     "evidence.s3.kythira.test:<port>"
+    ],
+    [
+     "User-Agent",
+     "aws-sdk-go-v2/1.48.0 ua/2.1 os/linux lang/go#1.24.7 md/GOOS#linux md/GOARCH#amd64 api/s3#1.115.0 ft/s3-transfer m/E,G,Z,g"
+    ],
+    [
+     "Content-Length",
+     "5242926"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "Amz-Sdk-Invocation-Id",
+     "<uuid>"
+    ],
+    [
+     "Amz-Sdk-Request",
+     "attempt=1; max=3"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/s3/aws4_request, SignedHeaders=accept-encoding;amz-sdk-invocation-id;amz-sdk-request;content-encoding;content-length;content-type;host;x-amz-content-sha256;x-amz-date;x-amz-decoded-content-length;x-amz-sdk-checksum-algorithm;x-amz-trailer, Signature=<hex>"
+    ],
+    [
+     "Content-Encoding",
+     "aws-chunked"
+    ],
+    [
+     "Content-Type",
+     "application/octet-stream"
+    ],
+    [
+     "Expect",
+     "100-continue"
+    ],
+    [
+     "X-Amz-Content-Sha256",
+     "STREAMING-UNSIGNED-PAYLOAD-TRAILER"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "X-Amz-Decoded-Content-Length",
+     "5242880"
+    ],
+    [
+     "X-Amz-Sdk-Checksum-Algorithm",
+     "CRC32"
+    ],
+    [
+     "X-Amz-Trailer",
+     "x-amz-checksum-crc32"
+    ]
+   ],
+   "body": {
+    "transfer": "content-length",
+    "kind": "object",
+    "length": 5242880,
+    "sha256": "2e7cab6314e9614b6f2da12630661c3038e5592025f6534ba5823c3b340a1cb6",
+    "aws_chunked": {
+     "chunk_sizes": [
+      {
+       "size": 5242880,
+       "count": 1
+      },
+      {
+       "size": 0,
+       "count": 1
+      }
+     ],
+     "chunks_signed": false,
+     "trailers": [
+      "x-amz-checksum-crc32"
+     ],
+     "trailer_signed": false
+    },
+    "encoded_length": 5242926
+   },
+   "response_status": 200
+  },
+  {
+   "operation": "UploadPart",
+   "method": "PUT",
+   "target": "/large.bin?partNumber=2&uploadId=evidence-upload-0001&x-id=UploadPart",
+   "addressing": "virtual-hosted",
+   "http_version": "HTTP/1.1",
+   "expect_continue": true,
+   "content_sha256": "STREAMING-UNSIGNED-PAYLOAD-TRAILER",
+   "headers": [
+    [
+     "Host",
+     "evidence.s3.kythira.test:<port>"
+    ],
+    [
+     "User-Agent",
+     "aws-sdk-go-v2/1.48.0 ua/2.1 os/linux lang/go#1.24.7 md/GOOS#linux md/GOARCH#amd64 api/s3#1.115.0 ft/s3-transfer m/E,G,Z,g"
+    ],
+    [
+     "Content-Length",
+     "5242926"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "Amz-Sdk-Invocation-Id",
+     "<uuid>"
+    ],
+    [
+     "Amz-Sdk-Request",
+     "attempt=1; max=3"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/s3/aws4_request, SignedHeaders=accept-encoding;amz-sdk-invocation-id;amz-sdk-request;content-encoding;content-length;content-type;host;x-amz-content-sha256;x-amz-date;x-amz-decoded-content-length;x-amz-sdk-checksum-algorithm;x-amz-trailer, Signature=<hex>"
+    ],
+    [
+     "Content-Encoding",
+     "aws-chunked"
+    ],
+    [
+     "Content-Type",
+     "application/octet-stream"
+    ],
+    [
+     "Expect",
+     "100-continue"
+    ],
+    [
+     "X-Amz-Content-Sha256",
+     "STREAMING-UNSIGNED-PAYLOAD-TRAILER"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "X-Amz-Decoded-Content-Length",
+     "5242880"
+    ],
+    [
+     "X-Amz-Sdk-Checksum-Algorithm",
+     "CRC32"
+    ],
+    [
+     "X-Amz-Trailer",
+     "x-amz-checksum-crc32"
+    ]
+   ],
+   "body": {
+    "transfer": "content-length",
+    "kind": "object",
+    "length": 5242880,
+    "sha256": "2e7cab6314e9614b6f2da12630661c3038e5592025f6534ba5823c3b340a1cb6",
+    "aws_chunked": {
+     "chunk_sizes": [
+      {
+       "size": 5242880,
+       "count": 1
+      },
+      {
+       "size": 0,
+       "count": 1
+      }
+     ],
+     "chunks_signed": false,
+     "trailers": [
+      "x-amz-checksum-crc32"
+     ],
+     "trailer_signed": false
+    },
+    "encoded_length": 5242926
+   },
+   "response_status": 200
+  },
+  {
+   "operation": "UploadPart",
+   "method": "PUT",
+   "target": "/large.bin?partNumber=3&uploadId=evidence-upload-0001&x-id=UploadPart",
+   "addressing": "virtual-hosted",
+   "http_version": "HTTP/1.1",
+   "expect_continue": true,
+   "content_sha256": "STREAMING-UNSIGNED-PAYLOAD-TRAILER",
+   "headers": [
+    [
+     "Host",
+     "evidence.s3.kythira.test:<port>"
+    ],
+    [
+     "User-Agent",
+     "aws-sdk-go-v2/1.48.0 ua/2.1 os/linux lang/go#1.24.7 md/GOOS#linux md/GOARCH#amd64 api/s3#1.115.0 ft/s3-transfer m/E,G,Z,g"
+    ],
+    [
+     "Content-Length",
+     "2097198"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "Amz-Sdk-Invocation-Id",
+     "<uuid>"
+    ],
+    [
+     "Amz-Sdk-Request",
+     "attempt=1; max=3"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/s3/aws4_request, SignedHeaders=accept-encoding;amz-sdk-invocation-id;amz-sdk-request;content-encoding;content-length;content-type;host;x-amz-content-sha256;x-amz-date;x-amz-decoded-content-length;x-amz-sdk-checksum-algorithm;x-amz-trailer, Signature=<hex>"
+    ],
+    [
+     "Content-Encoding",
+     "aws-chunked"
+    ],
+    [
+     "Content-Type",
+     "application/octet-stream"
+    ],
+    [
+     "Expect",
+     "100-continue"
+    ],
+    [
+     "X-Amz-Content-Sha256",
+     "STREAMING-UNSIGNED-PAYLOAD-TRAILER"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "X-Amz-Decoded-Content-Length",
+     "2097152"
+    ],
+    [
+     "X-Amz-Sdk-Checksum-Algorithm",
+     "CRC32"
+    ],
+    [
+     "X-Amz-Trailer",
+     "x-amz-checksum-crc32"
+    ]
+   ],
+   "body": {
+    "transfer": "content-length",
+    "kind": "object",
+    "length": 2097152,
+    "sha256": "91d3beb88a9b2f778a6c44a1c53b63d3c79931845a9aef84b3fb414610bd1938",
+    "aws_chunked": {
+     "chunk_sizes": [
+      {
+       "size": 2097152,
+       "count": 1
+      },
+      {
+       "size": 0,
+       "count": 1
+      }
+     ],
+     "chunks_signed": false,
+     "trailers": [
+      "x-amz-checksum-crc32"
+     ],
+     "trailer_signed": false
+    },
+    "encoded_length": 2097198
+   },
+   "response_status": 200
+  },
+  {
+   "operation": "CompleteMultipartUpload",
+   "method": "POST",
+   "target": "/large.bin?uploadId=evidence-upload-0001",
+   "addressing": "virtual-hosted",
+   "http_version": "HTTP/1.1",
+   "expect_continue": false,
+   "content_sha256": "hex",
+   "headers": [
+    [
+     "Host",
+     "evidence.s3.kythira.test:<port>"
+    ],
+    [
+     "User-Agent",
+     "aws-sdk-go-v2/1.48.0 ua/2.1 os/linux lang/go#1.24.7 md/GOOS#linux md/GOARCH#amd64 api/s3#1.115.0 ft/s3-transfer m/E,G,g"
+    ],
+    [
+     "Content-Length",
+     "381"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "Amz-Sdk-Invocation-Id",
+     "<uuid>"
+    ],
+    [
+     "Amz-Sdk-Request",
+     "attempt=1; max=3"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/s3/aws4_request, SignedHeaders=accept-encoding;amz-sdk-invocation-id;amz-sdk-request;content-length;content-type;host;x-amz-content-sha256;x-amz-date, Signature=<hex>"
+    ],
+    [
+     "Content-Type",
+     "application/xml"
+    ],
+    [
+     "X-Amz-Content-Sha256",
+     "<sha256-hex>"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ]
+   ],
+   "body": {
+    "transfer": "content-length",
+    "kind": "xml",
+    "text": "<CompleteMultipartUpload xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"><Part><ETag>&#34;006a88ed7d5826af90d38dba4666fd89&#34;</ETag><PartNumber>1</PartNumber></Part><Part><ETag>&#34;006a88ed7d5826af90d38dba4666fd89&#34;</ETag><PartNumber>2</PartNumber></Part><Part><ETag>&#34;db1f7d786f6e0317456fac1628349973&#34;</ETag><PartNumber>3</PartNumber></Part></CompleteMultipartUpload>"
+   },
+   "response_status": 200
+  },
+  {
+   "operation": "ListObjectsV2",
+   "method": "GET",
+   "target": "/?delimiter=%2F&list-type=2",
+   "addressing": "virtual-hosted",
+   "http_version": "HTTP/1.1",
+   "expect_continue": false,
+   "content_sha256": "hex",
+   "headers": [
+    [
+     "Host",
+     "evidence.s3.kythira.test:<port>"
+    ],
+    [
+     "User-Agent",
+     "aws-sdk-go-v2/1.48.0 ua/2.1 os/linux lang/go#1.24.7 md/GOOS#linux md/GOARCH#amd64 api/s3#1.115.0 m/E,g"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "Amz-Sdk-Invocation-Id",
+     "<uuid>"
+    ],
+    [
+     "Amz-Sdk-Request",
+     "attempt=1; max=3"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/s3/aws4_request, SignedHeaders=accept-encoding;amz-sdk-invocation-id;amz-sdk-request;host;x-amz-content-sha256;x-amz-date, Signature=<hex>"
+    ],
+    [
+     "X-Amz-Content-Sha256",
+     "<sha256-hex>"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ]
+   ],
+   "body": null,
+   "response_status": 200
+  },
+  {
+   "operation": "CopyObject",
+   "method": "PUT",
+   "target": "/copy.txt?x-id=CopyObject",
+   "addressing": "virtual-hosted",
+   "http_version": "HTTP/1.1",
+   "expect_continue": false,
+   "content_sha256": "hex",
+   "headers": [
+    [
+     "Host",
+     "evidence.s3.kythira.test:<port>"
+    ],
+    [
+     "User-Agent",
+     "aws-sdk-go-v2/1.48.0 ua/2.1 os/linux lang/go#1.24.7 md/GOOS#linux md/GOARCH#amd64 api/s3#1.115.0 m/E,g"
+    ],
+    [
+     "Content-Length",
+     "0"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "Amz-Sdk-Invocation-Id",
+     "<uuid>"
+    ],
+    [
+     "Amz-Sdk-Request",
+     "attempt=1; max=3"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/s3/aws4_request, SignedHeaders=accept-encoding;amz-sdk-invocation-id;amz-sdk-request;host;x-amz-content-sha256;x-amz-copy-source;x-amz-date, Signature=<hex>"
+    ],
+    [
+     "X-Amz-Content-Sha256",
+     "<sha256-hex>"
+    ],
+    [
+     "X-Amz-Copy-Source",
+     "evidence/hello.txt"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ]
+   ],
+   "body": null,
+   "response_status": 200
+  },
+  {
+   "operation": "GetObject",
+   "method": "GET",
+   "target": "/copy.txt?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Checksum-Mode=ENABLED&X-Amz-Credential=AKIDEXAMPLE%2F<yyyymmdd>%2Fus-east-1%2Fs3%2Faws4_request&X-Amz-Date=<amz-date>&X-Amz-Expires=3600&X-Amz-SignedHeaders=host&x-id=GetObject&X-Amz-Signature=<hex>",
+   "addressing": "virtual-hosted",
+   "http_version": "HTTP/1.1",
+   "expect_continue": false,
+   "content_sha256": "absent",
+   "headers": [
+    [
+     "Host",
+     "evidence.s3.kythira.test:<port>"
+    ],
+    [
+     "User-Agent",
+     "Go-http-client/1.1"
+    ],
+    [
+     "Accept-Encoding",
+     "gzip"
+    ]
+   ],
+   "body": null,
+   "response_status": 200
+  },
+  {
+   "operation": "CreateMultipartUpload",
+   "method": "POST",
+   "target": "/aborted.bin?uploads=",
+   "addressing": "virtual-hosted",
+   "http_version": "HTTP/1.1",
+   "expect_continue": false,
+   "content_sha256": "hex",
+   "headers": [
+    [
+     "Host",
+     "evidence.s3.kythira.test:<port>"
+    ],
+    [
+     "User-Agent",
+     "aws-sdk-go-v2/1.48.0 ua/2.1 os/linux lang/go#1.24.7 md/GOOS#linux md/GOARCH#amd64 api/s3#1.115.0 m/E,g"
+    ],
+    [
+     "Content-Length",
+     "0"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "Amz-Sdk-Invocation-Id",
+     "<uuid>"
+    ],
+    [
+     "Amz-Sdk-Request",
+     "attempt=1; max=3"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/s3/aws4_request, SignedHeaders=accept-encoding;amz-sdk-invocation-id;amz-sdk-request;host;x-amz-content-sha256;x-amz-date, Signature=<hex>"
+    ],
+    [
+     "X-Amz-Content-Sha256",
+     "<sha256-hex>"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ]
+   ],
+   "body": null,
+   "response_status": 200
+  },
+  {
+   "operation": "AbortMultipartUpload",
+   "method": "DELETE",
+   "target": "/aborted.bin?uploadId=evidence-upload-0002&x-id=AbortMultipartUpload",
+   "addressing": "virtual-hosted",
+   "http_version": "HTTP/1.1",
+   "expect_continue": false,
+   "content_sha256": "hex",
+   "headers": [
+    [
+     "Host",
+     "evidence.s3.kythira.test:<port>"
+    ],
+    [
+     "User-Agent",
+     "aws-sdk-go-v2/1.48.0 ua/2.1 os/linux lang/go#1.24.7 md/GOOS#linux md/GOARCH#amd64 api/s3#1.115.0 m/E,g"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "Amz-Sdk-Invocation-Id",
+     "<uuid>"
+    ],
+    [
+     "Amz-Sdk-Request",
+     "attempt=1; max=3"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/s3/aws4_request, SignedHeaders=accept-encoding;amz-sdk-invocation-id;amz-sdk-request;host;x-amz-content-sha256;x-amz-date, Signature=<hex>"
+    ],
+    [
+     "X-Amz-Content-Sha256",
+     "<sha256-hex>"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ]
+   ],
+   "body": null,
+   "response_status": 204
+  },
+  {
+   "operation": "DeleteObjects",
+   "method": "POST",
+   "target": "/?delete=",
+   "addressing": "virtual-hosted",
+   "http_version": "HTTP/1.1",
+   "expect_continue": false,
+   "content_sha256": "hex",
+   "headers": [
+    [
+     "Host",
+     "evidence.s3.kythira.test:<port>"
+    ],
+    [
+     "User-Agent",
+     "aws-sdk-go-v2/1.48.0 ua/2.1 os/linux lang/go#1.24.7 md/GOOS#linux md/GOARCH#amd64 api/s3#1.115.0 m/E,Z,g"
+    ],
+    [
+     "Content-Length",
+     "138"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "Amz-Sdk-Invocation-Id",
+     "<uuid>"
+    ],
+    [
+     "Amz-Sdk-Request",
+     "attempt=1; max=3"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/s3/aws4_request, SignedHeaders=accept-encoding;amz-sdk-invocation-id;amz-sdk-request;content-length;content-type;host;x-amz-checksum-crc32;x-amz-content-sha256;x-amz-date, Signature=<hex>"
+    ],
+    [
+     "Content-Type",
+     "application/xml"
+    ],
+    [
+     "X-Amz-Checksum-Crc32",
+     "sirJpQ=="
+    ],
+    [
+     "X-Amz-Content-Sha256",
+     "<sha256-hex>"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ]
+   ],
+   "body": {
+    "transfer": "content-length",
+    "kind": "xml",
+    "text": "<Delete xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"><Object><Key>copy.txt</Key></Object><Object><Key>large.bin</Key></Object></Delete>"
+   },
+   "response_status": 200
+  },
+  {
+   "operation": "DeleteObject",
+   "method": "DELETE",
+   "target": "/hello.txt?x-id=DeleteObject",
+   "addressing": "virtual-hosted",
+   "http_version": "HTTP/1.1",
+   "expect_continue": false,
+   "content_sha256": "hex",
+   "headers": [
+    [
+     "Host",
+     "evidence.s3.kythira.test:<port>"
+    ],
+    [
+     "User-Agent",
+     "aws-sdk-go-v2/1.48.0 ua/2.1 os/linux lang/go#1.24.7 md/GOOS#linux md/GOARCH#amd64 api/s3#1.115.0 m/E,g"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "Amz-Sdk-Invocation-Id",
+     "<uuid>"
+    ],
+    [
+     "Amz-Sdk-Request",
+     "attempt=1; max=3"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/s3/aws4_request, SignedHeaders=accept-encoding;amz-sdk-invocation-id;amz-sdk-request;host;x-amz-content-sha256;x-amz-date, Signature=<hex>"
+    ],
+    [
+     "X-Amz-Content-Sha256",
+     "<sha256-hex>"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ]
+   ],
+   "body": null,
+   "response_status": 204
+  },
+  {
+   "operation": "DeleteBucket",
+   "method": "DELETE",
+   "target": "/",
+   "addressing": "virtual-hosted",
+   "http_version": "HTTP/1.1",
+   "expect_continue": false,
+   "content_sha256": "hex",
+   "headers": [
+    [
+     "Host",
+     "evidence.s3.kythira.test:<port>"
+    ],
+    [
+     "User-Agent",
+     "aws-sdk-go-v2/1.48.0 ua/2.1 os/linux lang/go#1.24.7 md/GOOS#linux md/GOARCH#amd64 api/s3#1.115.0 m/E,g"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "Amz-Sdk-Invocation-Id",
+     "<uuid>"
+    ],
+    [
+     "Amz-Sdk-Request",
+     "attempt=1; max=3"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/s3/aws4_request, SignedHeaders=accept-encoding;amz-sdk-invocation-id;amz-sdk-request;host;x-amz-content-sha256;x-amz-date, Signature=<hex>"
+    ],
+    [
+     "X-Amz-Content-Sha256",
+     "<sha256-hex>"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ]
+   ],
+   "body": null,
+   "response_status": 204
+  },
+  {
+   "operation": "ListBuckets",
+   "method": "GET",
+   "target": "/?x-id=ListBuckets",
+   "addressing": "service",
+   "http_version": "HTTP/1.1",
+   "expect_continue": false,
+   "content_sha256": "hex",
+   "headers": [
+    [
+     "Host",
+     "s3.kythira.test:<port>"
+    ],
+    [
+     "User-Agent",
+     "aws-sdk-go-v2/1.48.0 ua/2.1 os/linux lang/go#1.24.7 md/GOOS#linux md/GOARCH#amd64 api/s3#1.115.0 m/E,g"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "Amz-Sdk-Invocation-Id",
+     "<uuid>"
+    ],
+    [
+     "Amz-Sdk-Request",
+     "attempt=1; max=3"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/s3/aws4_request, SignedHeaders=accept-encoding;amz-sdk-invocation-id;amz-sdk-request;host;x-amz-content-sha256;x-amz-date, Signature=<hex>"
+    ],
+    [
+     "X-Amz-Content-Sha256",
+     "<sha256-hex>"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ]
+   ],
+   "body": null,
+   "response_status": 200
+  }
+ ],
+ "summary": {
+  "operations": [
+   "CreateBucket",
+   "HeadBucket",
+   "PutObject",
+   "HeadObject",
+   "GetObject",
+   "CreateMultipartUpload",
+   "UploadPart",
+   "UploadPart",
+   "UploadPart",
+   "CompleteMultipartUpload",
+   "ListObjectsV2",
+   "CopyObject",
+   "GetObject",
+   "CreateMultipartUpload",
+   "AbortMultipartUpload",
+   "DeleteObjects",
+   "DeleteObject",
+   "DeleteBucket",
+   "ListBuckets"
+  ],
+  "addressing": [
+   "virtual-hosted"
+  ],
+  "content_sha256": [
+   "STREAMING-UNSIGNED-PAYLOAD-TRAILER",
+   "absent",
+   "hex"
+  ],
+  "http_versions": [
+   "HTTP/1.1"
+  ],
+  "expect_continue": [
+   "False",
+   "True"
+  ],
+  "object_uploads": [
+   {
+    "aws_chunked": true,
+    "chunks_signed": false,
+    "trailers": [
+     "x-amz-checksum-crc32"
+    ],
+    "transfer": "content-length",
+    "x-amz-content-sha256": "STREAMING-UNSIGNED-PAYLOAD-TRAILER",
+    "requests": 4
+   }
+  ]
+ }
+}
