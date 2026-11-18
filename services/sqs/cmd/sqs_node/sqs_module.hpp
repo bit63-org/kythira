@@ -48,6 +48,8 @@
 #include <kythira/sqs/sqs_service.hpp>
 #include <kythira/sqs/sqs_workers.hpp>
 
+#include "sns_bridge_setup.hpp"
+
 #include <raft/beast_https_server.hpp>
 #include <raft/binary_file_persistence.hpp>
 #include <raft/console_logger.hpp>
@@ -262,6 +264,7 @@ public:
     using worker_type = sqs::tick_worker<cluster_type>;
     using mover_type = sqs::move_worker<cluster_type>;
     using grower_type = sqs::grow_worker<cluster_type>;
+    using bridge_type = sqs::sns_bridge<service_type>;
 
     /// The local id of the bootstrap group.
     static constexpr std::uint64_t k_first_group = 1;
@@ -443,6 +446,15 @@ public:
                 ++_peer_requests;
                 return _cluster->propose_local(key, std::move(entry));
             });
+        if (_opt._sns_bridge) {
+            _bridge = std::make_unique<bridge_type>(*_service,
+                                                    sqs::sns_bridge_settings(_opt, fc._endpoint));
+            _handler_owner->set_sns_bridge(
+                [this](std::string_view method, std::string_view path, std::string_view body) {
+                    const auto r = _bridge->handle(method, path, body);
+                    return std::pair{r._status, r._body};
+                });
+        }
         _handler.store(_handler_owner.get(), std::memory_order_release);
         _started = true;
         std::cout << "sqs " << kythira::host_node_id_text(_self)
@@ -483,6 +495,7 @@ public:
         _server.reset();
         _handler_owner.reset();
         _front_end.reset();
+        _bridge.reset();
         _service.reset();
         _worker_ptr.store(nullptr, std::memory_order_release);
         _worker.reset();
@@ -518,6 +531,7 @@ public:
             {"ticks_proposed", static_cast<double>(_worker ? _worker->ticks() : 0), {}},
             {"messages_moved", static_cast<double>(_mover ? _mover->moved() : 0), {}},
             {"partitions_grown", static_cast<double>(_grower ? _grower->grown() : 0), {}},
+            {"sns_bridge_delivered", static_cast<double>(_bridge ? _bridge->delivered() : 0), {}},
             {"raft_term_sum", service_node::raft_term_sum(*_raft), {}},
         };
     }
@@ -543,6 +557,8 @@ private:
     std::unique_ptr<mover_type> _mover;
     /// Grows standard queues' partition counts with their send rates.
     std::unique_ptr<grower_type> _grower;
+    /// Real SNS's HTTPS deliveries, when `SQS_SNS_BRIDGE=on`.
+    std::unique_ptr<bridge_type> _bridge;
     std::unique_ptr<front_end_type> _front_end;
     std::unique_ptr<handler_type> _handler_owner;
     std::atomic<handler_type*> _handler{nullptr};

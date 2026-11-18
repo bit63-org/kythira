@@ -22,6 +22,9 @@
 /// | `SQS_SSE_KEY_FILE` | | the SSE-SQS master secret, at least 16 bytes (`sqs_sse.hpp`) |
 /// | `SQS_KMS` | `none` | the SSE-KMS key provider: `none` (KMS-encrypted queues refuse sends with KmsNotFound) or `local` |
 /// | `SQS_KMS_PASSPHRASE_FILE` | | `local`'s passphrase; every node needs the same one |
+/// | `SQS_SNS_BRIDGE` | `off` | `on` serves `/sns-bridge/<account>/<queue>` for real SNS's HTTPS deliveries (`sqs_sns_bridge.hpp`) |
+/// | `SQS_SNS_CERT_HOSTS` | `sns.<region>.amazonaws.com` | hosts SNS signing certificates and subscribe URLs may come from, comma-separated |
+/// | `SQS_SNS_CA` | `/etc/ssl/certs/ca-certificates.crt` | the roots those hosts' certificates chain to |
 /// | `SQS_COMPAT` | | compatibility switches, `name=value` comma-separated (`sqs_compat_profile.hpp`) |
 /// | `SQS_MAX_BODY_BYTES` | 4194304 | the largest request body the listener reads |
 // clang-format on
@@ -57,6 +60,9 @@ struct sqs_node_options {
     /// `none` or `local`.
     std::string _kms = "none";
     std::string _kms_passphrase_file;
+    bool _sns_bridge = false;
+    std::vector<std::string> _sns_cert_hosts;
+    std::string _sns_ca = "/etc/ssl/certs/ca-certificates.crt";
     std::vector<std::pair<std::string, std::string>> _compat;
     std::uint64_t _max_body_bytes = std::uint64_t{4} * 1024 * 1024;
 };
@@ -154,6 +160,23 @@ namespace node_options_detail {
     if (o._kms == "local" && o._kms_passphrase_file.empty()) {
         return std::string("SQS_KMS=local needs SQS_KMS_PASSPHRASE_FILE");
     }
+    if (const auto v = get("SQS_SNS_BRIDGE")) {
+        if (*v != "on" && *v != "off") {
+            return std::string("SQS_SNS_BRIDGE must be on or off");
+        }
+        o._sns_bridge = *v == "on";
+    }
+    if (const auto v = get("SQS_SNS_CERT_HOSTS"); v && !v->empty()) {
+        std::string_view rest = *v;
+        while (!rest.empty()) {
+            const auto comma = rest.find(',');
+            if (const auto host = rest.substr(0, comma); !host.empty()) {
+                o._sns_cert_hosts.emplace_back(host);
+            }
+            rest = comma == std::string_view::npos ? std::string_view() : rest.substr(comma + 1);
+        }
+    }
+    o._sns_ca = get("SQS_SNS_CA").value_or(o._sns_ca);
     if (const auto v = get("SQS_COMPAT"); v && !v->empty()) {
         std::string_view rest = *v;
         while (!rest.empty()) {
