@@ -203,6 +203,30 @@ auto limits_of(const std::string& text) -> std::optional<kythira::kms::account_l
     return l;
 }
 
+/// KYTHIRA_KMS_ROLES (Requirement 2.1 and 2.4): all three when unset.
+auto roles_of(const std::string& text) -> kythira::layers::role_set {
+    if (text.empty()) {
+        return kms_roles;
+    }
+    kythira::layers::role_set roles;
+    try {
+        roles = kythira::layers::role_set::parse(text);
+    } catch (const std::invalid_argument& e) {
+        throw fail(std::string("KYTHIRA_KMS_ROLES: ") + e.what());
+    }
+    if (!kms_roles.contains(roles)) {
+        throw fail("KYTHIRA_KMS_ROLES=" + text +
+                   ": the KMS's layers are gateway, front_end and data (segments is Kinesis's)");
+    }
+    if (roles.has(kythira::layers::role::gateway) && !roles.has(kythira::layers::role::front_end)) {
+        // The gateway hands requests to its own front end; reaching
+        // another node's needs the authenticated call (task 4).
+        throw fail("KYTHIRA_KMS_ROLES=" + text +
+                   ": a gateway needs the front_end role on the same node in this release");
+    }
+    return roles;
+}
+
 }  // namespace
 
 auto composite_env(env_fn env) -> env_fn {
@@ -241,10 +265,20 @@ auto from_env(const env_fn& env) -> kms_options {
         throw fail("KYTHIRA_NODE_ID: " + id.error());
     }
     o.data_dir = get_required(env, "KYTHIRA_KMS_DATA_DIR");
+    o.roles = roles_of(get_opt(env, "KYTHIRA_KMS_ROLES"));
+    const bool data = o.roles.has(kythira::layers::role::data);
+    const bool front_end = o.roles.has(kythira::layers::role::front_end);
     o.api_urls = id_map("KYTHIRA_KMS_API_URLS", get_required(env, "KYTHIRA_KMS_API_URLS"));
-    if (!o.api_urls.contains(o.node_id)) {
+    if (data && !o.api_urls.contains(o.node_id)) {
         throw fail("KYTHIRA_KMS_API_URLS must include this node's own id " +
                    kythira::host_node_id_text(o.node_id));
+    }
+    if (!data && o.api_urls.contains(o.node_id)) {
+        // Requirement 2.2: only data nodes are catalog members.
+        throw fail("KYTHIRA_KMS_API_URLS lists this node's id " +
+                   kythira::host_node_id_text(o.node_id) +
+                   ", but a node without the data role is not a catalog member; list the data "
+                   "nodes only");
     }
 
     o.insecure_plaintext = bool_opt(env, "KYTHIRA_KMS_INSECURE_PLAINTEXT", false);
@@ -263,11 +297,11 @@ auto from_env(const env_fn& env) -> kms_options {
         o.tls_cert = get_required(env, "KYTHIRA_KMS_TLS_CERT");
         o.tls_key = get_required(env, "KYTHIRA_KMS_TLS_KEY");
         o.client_ca = get_required(env, "KYTHIRA_KMS_TLS_CA");
-        if (o.api_urls.size() > 1) {
-            o.peer_identities = list_of(get_required(env, "KYTHIRA_KMS_PEER_IDENTITIES"));
-            if (o.peer_identities.empty()) {
-                throw fail("KYTHIRA_KMS_PEER_IDENTITIES lists no identity");
-            }
+        o.peer_identities = list_of(get_opt(env, "KYTHIRA_KMS_PEER_IDENTITIES"));
+        if (data && o.api_urls.size() > 1 && o.peer_identities.empty()) {
+            throw fail(
+                "missing required env var KYTHIRA_KMS_PEER_IDENTITIES (more than one "
+                "member)");
         }
     }
     o.max_body_bytes = u64_opt(env, "KYTHIRA_KMS_MAX_BODY_BYTES", o.max_body_bytes);
@@ -339,8 +373,15 @@ auto from_env(const env_fn& env) -> kms_options {
     if (o.token_label.size() > 32) {
         throw fail("KYTHIRA_KMS_TOKEN_LABEL is longer than a PKCS#11 label (32 bytes)");
     }
-    o.pin_file = get_required(env, "KYTHIRA_KMS_PIN_FILE");
-    (void)read_pin(o.pin_file);  // fail at start, not at the first job
+    if (front_end) {
+        o.pin_file = get_required(env, "KYTHIRA_KMS_PIN_FILE");
+        (void)read_pin(o.pin_file);  // fail at start, not at the first job
+    } else if (!get_opt(env, "KYTHIRA_KMS_PIN_FILE").empty()) {
+        // Requirement 2.3: HSM credentials live in the front-end layer only.
+        throw fail(
+            "KYTHIRA_KMS_PIN_FILE is set, but a node without the front_end role holds no "
+            "HSM PIN; unset it");
+    }
 
     o.job_interval = ms_opt(env, "KYTHIRA_KMS_JOB_INTERVAL_MS", o.job_interval);
     if (o.job_interval.count() == 0) {
@@ -352,6 +393,12 @@ auto from_env(const env_fn& env) -> kms_options {
         throw fail("KYTHIRA_KMS_JOB_LEASE_MS must be longer than KYTHIRA_KMS_JOB_INTERVAL_MS");
     }
     o.grace = ms_opt(env, "KYTHIRA_KMS_GRACE_MS", o.grace);
+    o.bounded_staleness = ms_opt(env, "KYTHIRA_KMS_BOUNDED_STALENESS_MS", o.bounded_staleness);
+    if (o.bounded_staleness.count() != 0 && !front_end) {
+        throw fail(
+            "KYTHIRA_KMS_BOUNDED_STALENESS_MS is set, but only a front end reads key "
+            "metadata for requests; unset it on a node without the front_end role");
+    }
 
     o.tick_interval = ms_opt(env, "KYTHIRA_TICK_INTERVAL_MS", o.tick_interval);
     o.election_timeout_min = ms_opt(env, "KYTHIRA_ELECTION_TIMEOUT_MIN_MS", o.election_timeout_min);
@@ -399,9 +446,17 @@ auto usage_text() -> std::string_view {
     return R"(The KMS module (KYTHIRA_SERVICES=kms):
 
   KYTHIRA_NODE_ID                    this node's id (required)
-  KYTHIRA_KMS_API_URLS               id=https://host:port for every member, this
-                                     node included (required): the catalog's
-                                     voters
+  KYTHIRA_KMS_ROLES                  the layers this node runs, comma-separated
+                                     from gateway, front_end, data (all three):
+                                     only data nodes are catalog members, only
+                                     front ends hold the HSM PIN and run the
+                                     key jobs, and a gateway needs front_end
+                                     on the same node
+  KYTHIRA_KMS_API_URLS               id=https://host:port for every catalog
+                                     member (data node), this node included
+                                     exactly when it runs data (required): the
+                                     catalog's voters, and where a front end
+                                     without data reads and proposes
   KYTHIRA_KMS_DATA_DIR               state (the node's kms/ in kythira_node)
   KYTHIRA_KMS_API_LISTEN             host:port of the KMS API (0.0.0.0:8443): AWS
                                      clients, and members forwarding to the
@@ -412,8 +467,11 @@ auto usage_text() -> std::string_view {
   KYTHIRA_KMS_TLS_CA                 the CA the members' certificates chain to
                                      (default: KYTHIRA_NODE_TLS_CA)
   KYTHIRA_KMS_PEER_IDENTITIES        the members' certificate URI or DNS SANs,
-                                     comma-separated: who may forward
-                                     (required with more than one member)
+                                     comma-separated: who may forward, and on
+                                     a data node also the front ends without
+                                     data that may use the catalog API
+                                     (required on a data node with more than
+                                     one member)
   KYTHIRA_KMS_INSECURE_PLAINTEXT     plaintext listener and forwarding, for tests
                                      only (default: KYTHIRA_NODE_INSECURE_PLAINTEXT)
   KYTHIRA_KMS_MAX_BODY_BYTES         largest request body (1048576)
@@ -452,11 +510,19 @@ auto usage_text() -> std::string_view {
                                      bind to the token (kms)
   KYTHIRA_KMS_TOKEN_LABEL            the token holding backing keys (kms)
   KYTHIRA_KMS_PIN_FILE               a file holding the token's user PIN
-                                     (required)
-  KYTHIRA_KMS_JOB_INTERVAL_MS        the leader's key jobs: settling, rotation,
+                                     (required on a front end, refused
+                                     elsewhere)
+  KYTHIRA_KMS_JOB_INTERVAL_MS        the key jobs, on the front end holding
+                                     the job lease: settling, rotation,
                                      deletion, orphan sweep (10000)
+  KYTHIRA_KMS_JOB_LEASE_MS           how long the job lease lasts unrenewed
+                                     (the larger of 30000 and three intervals)
   KYTHIRA_KMS_GRACE_MS               a Creating key or an unaccounted backing
                                      key is left this long first (300000)
+  KYTHIRA_KMS_BOUNDED_STALENESS_MS   0 (default): every request reads key
+                                     metadata at a read-index point of the
+                                     catalog; else a point at most this old
+                                     may serve (AWS's eventual consistency)
   KYTHIRA_KMS_PROPOSE_TIMEOUT_MS     one proposal or read barrier (5000)
   KYTHIRA_KMS_ELECTION_TIMEOUT_MIN_MS and the other KYTHIRA_KMS_ Raft tuning
                                      names override the node's KYTHIRA_ ones
