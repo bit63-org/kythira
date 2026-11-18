@@ -1,6 +1,6 @@
 # Implementation Plan
 
-## Status: 0/16 tasks complete (phase A: 0/11, phase B: 0/5)
+## Status: 1/16 tasks complete (phase A: 1/11, phase B: 0/5)
 
 Each task is one PR unless noted. Needs `redis-general-data-types`
 phase 1 and its task 43 (RDB value codec, `DUMP`/`RESTORE`, `MIGRATE`).
@@ -9,12 +9,18 @@ keyspace). Phase A comes first; nothing in it waits for phase B.
 
 ## Phase A — RDB files, replication, bulk copy
 
-- [ ] 1. Whole-file RDB codec
+- [x] 1. Whole-file RDB codec
   - Header, opcodes, CRC64, LZF, version table; streaming reader and
     writer over file, object-store and socket sources/sinks; golden files
     from every reference version and from ElastiCache/MemoryDB backups;
     fuzz target
   - _Requirements: 2.1-2.4, 14.1_
+  - Done: `redis_rdb_file.hpp` (with `redis_rdb_crc64.hpp`,
+    `redis_rdb_lzf.hpp`); golden files from Redis 7.2-8.4 and Valkey
+    7.2-9.0 with their `DUMP` listings, writer output load-checked in
+    each; backups exported by ElastiCache (Redis OSS 7.1, Valkey 9.1) and
+    MemoryDB (Redis OSS 7.1, Valkey 7.3) on 2026-11-18 (Clark's go, about
+    $0.10, everything deleted); fuzz test.
 
 - [ ] 2. Key writer and job state
   - Batched per-group / transactional writes, conflicts, refusals report,

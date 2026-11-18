@@ -1,0 +1,14 @@
+# Copyright (c) 2026 Clark Rawlins
+# SPDX-License-Identifier: Apache-2.0
+
+service: Amazon ElastiCache (node-based, cluster mode disabled, 1 node)
+engine: Redis OSS
+engine version: 7.1.0
+node type: cache.t4g.micro
+region: us-east-1
+date: 2026-11-18
+seed: services/redis/tests/golden/rdb/redis-7.2.rdb (loaded as is)
+rdb header (first 9 bytes): REDIS0010
+size: 39003 bytes
+sha256: ee19729c70caf4f68619ec67ee6e9e3848da09848fd40fe7ecd98b2e0fe14ead
+export: create-snapshot, then copy-snapshot --target-bucket

@@ -1,0 +1,19 @@
+# Copyright (c) 2026 Clark Rawlins
+# SPDX-License-Identifier: Apache-2.0
+
+service: Amazon MemoryDB (1 shard, 0 replicas, ACL open-access)
+engine: Redis OSS
+engine version: 7.1 (patch 7.1.1)
+node type: db.t4g.small
+region: us-east-1
+date: 2026-11-18
+seed: services/redis/tests/golden/rdb/redis-7.2.rdb, database 0 only, re-saved by redis:7.2
+rdb header (first 9 bytes): REDIS0010
+size: 39213 bytes
+sha256: af37a3eeb6fa2ebef6b3aa1ebf1bd1d28987e9602ab60a689aa989e62b48dd42
+export: create-snapshot, then copy-snapshot --target-bucket
+note: MemoryDB has only database 0 and refused the multi-database seed
+  ("number of databases required to load the RDB file is higher than the
+  configured amount"), so the seed was loaded into a local container of
+  the same engine, databases 1-15 were flushed (dropping 4 of 29 keys:
+  3 in db1, 1 in db9), and the SAVE output was used.

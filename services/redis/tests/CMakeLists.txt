@@ -56,6 +56,17 @@ target_link_libraries(redis_golden_bytes_test PRIVATE OpenSSL::Crypto)
 target_compile_definitions(redis_golden_bytes_test PRIVATE
     KYTHIRA_REDIS_GOLDEN_DIR="${KYTHIRA_REDIS_GOLDEN_DIR}")
 set_tests_properties(redis_golden_bytes_test PROPERTIES LABELS "unit;redis;cache" TIMEOUT 120)
+# redis-migration-tooling task 1: the whole-file RDB codec. The golden test
+# reads dump.rdb files written by Redis 7.2-8.4 and Valkey 7.2-9.0, with the
+# servers' own DUMP listings (golden/rdb/generate_rdb_goldens.py); the fuzz
+# test mutates them (the sanitizer legs run it too).
+set(KYTHIRA_REDIS_RDB_GOLDEN_DIR "${CMAKE_CURRENT_SOURCE_DIR}/golden/rdb")
+foreach(_rdb_test IN ITEMS redis_rdb_file_unit_test redis_rdb_golden_test redis_rdb_file_fuzz_test)
+    kythira_redis_test(${_rdb_test} ${_rdb_test}.cpp)
+    target_compile_definitions(${_rdb_test} PRIVATE
+        KYTHIRA_REDIS_RDB_GOLDEN_DIR="${KYTHIRA_REDIS_RDB_GOLDEN_DIR}")
+    set_tests_properties(${_rdb_test} PROPERTIES LABELS "unit;redis" TIMEOUT 300)
+endforeach()
 target_link_libraries(redis_acl_unit_test PRIVATE OpenSSL::Crypto)
 kythira_redis_test(redis_auth_limiter_unit_test redis_auth_limiter_unit_test.cpp)
 # redis_gateway_node's own environment parsing (the plaintext-Raft opt-in).
