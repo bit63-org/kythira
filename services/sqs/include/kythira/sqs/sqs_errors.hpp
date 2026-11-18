@@ -36,6 +36,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <utility>
 
 namespace kythira::sqs {
 
@@ -63,13 +64,26 @@ inline constexpr protocol_error k_internal_error{"com.amazon.coral.service#Inter
                                                  "InternalFailure", 500, false};
 inline constexpr protocol_error k_too_large_error{
     "com.amazon.coral.service#RequestEntityTooLargeException", "RequestEntityTooLarge", 413, true};
+inline constexpr protocol_error k_access_denied_error{
+    "com.amazon.coral.service#AccessDeniedException", "AccessDenied", 403, true};
 
 /// Every protocol error, for the JSON-type-to-query-code lookup.
 inline constexpr std::array k_protocol_errors{
     k_validation_error,        k_missing_parameter_error, k_serialization_error,
     k_unknown_operation_error, k_missing_action_error,    k_internal_error,
-    k_too_large_error,
+    k_too_large_error,         k_access_denied_error,
 };
+
+/// The query codes of the authentication errors core's SigV4 verifier
+/// words for JSON services (`sigv4::error_protocol::json`), for the
+/// `x-amzn-query-error` header of a query-compatible JSON client. A query
+/// request is authenticated with the query wording to begin with.
+inline constexpr std::array<std::pair<std::string_view, std::string_view>, 4> k_auth_query_codes{{
+    {"ExpiredTokenException", "ExpiredToken"},
+    {"IncompleteSignatureException", "IncompleteSignature"},
+    {"InvalidSignatureException", "SignatureDoesNotMatch"},
+    {"UnrecognizedClientException", "InvalidClientTokenId"},
+}};
 
 /// The core codec's style for SQS: modeled errors under
 /// `com.amazonaws.sqs#`, protocol errors as `k_protocol_errors` names them.
@@ -128,9 +142,9 @@ struct query_view {
 };
 
 /// The query code and fault side of `e`: a modeled error's from the
-/// query-era model, a protocol error's from `k_protocol_errors`, anything
-/// else (an authentication error the gateway raises) by the part of its
-/// type after `#`, a Sender fault below HTTP 500.
+/// query-era model, a protocol error's from `k_protocol_errors`, a JSON
+/// authentication error's from `k_auth_query_codes`, anything else by the
+/// part of its type after `#` (a Sender fault below HTTP 500).
 [[nodiscard]] inline auto to_query(const aws_json::error& e) -> query_view {
     const std::string_view type = e.type;
     if (type.starts_with(k_error_namespace)) {
@@ -141,6 +155,11 @@ struct query_view {
     for (const auto& p : k_protocol_errors) {
         if (p.json_type == type) {
             return {std::string(p.query_code), p.sender};
+        }
+    }
+    for (const auto& [json, query] : k_auth_query_codes) {
+        if (json == type) {
+            return {std::string(query), true};
         }
     }
     const auto hash = type.rfind('#');

@@ -19,7 +19,7 @@ Every operation in the model is planned; none is left out of the spec.
 
 | Operation | Planned | Reason | Error |
 |---|---|---|---|
-| `AddPermission` | task 3 | Not built yet (queue policies and authorization). | `UnknownOperationException` (JSON) or `InvalidAction` (query), HTTP 400 |
+| `AddPermission` | task 4 | Not built yet: the policy edit is ready (`sqs_queue_policy.hpp`), the queue catalog it writes to comes with task 4. | `UnknownOperationException` (JSON) or `InvalidAction` (query), HTTP 400 |
 | `CancelMessageMoveTask` | task 6 | Not built yet (dead-letter queues and move tasks). | `UnknownOperationException` (JSON) or `InvalidAction` (query), HTTP 400 |
 | `ChangeMessageVisibility` | task 4 | Not built yet (queue and message API). | `UnknownOperationException` (JSON) or `InvalidAction` (query), HTTP 400 |
 | `ChangeMessageVisibilityBatch` | task 4 | Not built yet (queue and message API). | `UnknownOperationException` (JSON) or `InvalidAction` (query), HTTP 400 |
@@ -35,7 +35,7 @@ Every operation in the model is planned; none is left out of the spec.
 | `ListQueues` | task 4 | Not built yet (queue and message API). | `UnknownOperationException` (JSON) or `InvalidAction` (query), HTTP 400 |
 | `PurgeQueue` | task 4 | Not built yet (queue and message API). | `UnknownOperationException` (JSON) or `InvalidAction` (query), HTTP 400 |
 | `ReceiveMessage` | task 4 | Not built yet (queue and message API). | `UnknownOperationException` (JSON) or `InvalidAction` (query), HTTP 400 |
-| `RemovePermission` | task 3 | Not built yet (queue policies and authorization). | `UnknownOperationException` (JSON) or `InvalidAction` (query), HTTP 400 |
+| `RemovePermission` | task 4 | Not built yet: the policy edit is ready (`sqs_queue_policy.hpp`), the queue catalog it writes to comes with task 4. | `UnknownOperationException` (JSON) or `InvalidAction` (query), HTTP 400 |
 | `SendMessage` | task 4 | Not built yet (queue and message API). | `UnknownOperationException` (JSON) or `InvalidAction` (query), HTTP 400 |
 | `SendMessageBatch` | task 4 | Not built yet (queue and message API). | `UnknownOperationException` (JSON) or `InvalidAction` (query), HTTP 400 |
 | `SetQueueAttributes` | task 4 | Not built yet (queue and message API). | `UnknownOperationException` (JSON) or `InvalidAction` (query), HTTP 400 |
