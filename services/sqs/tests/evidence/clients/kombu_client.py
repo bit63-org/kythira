@@ -23,7 +23,7 @@ base.Channel._next_delivery_tag = lambda self: f"delivery-tag-{next(_tags)}"
 
 endpoint = urllib.parse.urlsplit(sys.argv[1])
 url = f"sqs://AKIDEXAMPLE:{urllib.parse.quote('wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY', safe='')}@{endpoint.hostname}:{endpoint.port}"
-options = {"region": "us-east-1", "is_secure": False, "wait_time_seconds": 1,
+options = {"region": "us-east-1", "is_secure": endpoint.scheme == "https", "wait_time_seconds": 1,
            "polling_interval": 0.1, "queue_name_prefix": "evidence-"}
 exchange = Exchange("evidence", type="direct")
 queue = Queue("celery", exchange, routing_key="celery")

@@ -122,6 +122,12 @@ target_link_libraries(sqs_listener_test PRIVATE OpenSSL::SSL Threads::Threads)
 # availability stream that wakes long polls parked on such a front end.
 kythira_sqs_test(sqs_layers_test sqs_layers_test.cpp)
 target_link_libraries(sqs_layers_test PRIVATE OpenSSL::SSL Threads::Threads)
+# The layer identities on the internal routes over mutual TLS
+# (sqs_layers.hpp), with certificates from the test CA where it is built.
+if(TARGET certificate_authority)
+    target_link_libraries(sqs_layers_test PRIVATE certificate_authority)
+    target_compile_definitions(sqs_layers_test PRIVATE KYTHIRA_SQS_TEST_IDENTITIES=1)
+endif()
 
 # Task 5: long polling. The availability hub, and receives parked on it
 # over a local_queue_cluster whose state machine notifies the hub and whose
