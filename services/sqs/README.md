@@ -24,6 +24,7 @@ Built when `CONFIG_SQS=y` (`services/sqs/Kconfig`, off by default).
 | `implemented-operations.txt` | operations the gateway implements | 1 onward |
 | `doc/unsupported.md` | every other operation, with its planned task, reason and the exact error it returns | 1 onward |
 | `tools/check_coverage.py`, `tools/test_check_coverage.py` | the coverage check (Requirement 2.1) and its fixture tests | 1 |
+| `tests/evidence/` | the recording stub, the clients and the checked-in wire evidence (AWS CLI v2, boto3 on JSON and query, Java SDK v2, JMS, Kombu); `sqs_wire_evidence` checks it | 1 |
 | `cmd/sqs_node/` | the daemon; a placeholder whose `--self-test` checks the operation table until tasks 3 and 4 | 1 |
 
 ## Core pieces used

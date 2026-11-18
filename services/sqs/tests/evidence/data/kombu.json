@@ -1,0 +1,559 @@
+{
+ "client": "kombu-5.5.4",
+ "requests": [
+  {
+   "method": "POST",
+   "path": "/",
+   "http_version": "HTTP/1.1",
+   "content_type": "application/x-amz-json-1.0",
+   "headers": [
+    [
+     "Host",
+     "127.0.0.1:<port>"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "X-Amz-Target",
+     "AmazonSQS.ListQueues"
+    ],
+    [
+     "Content-Type",
+     "application/x-amz-json-1.0"
+    ],
+    [
+     "x-amzn-query-mode",
+     "true"
+    ],
+    [
+     "User-Agent",
+     "Boto3/1.43.100 md/Botocore#1.43.100 ua/2.1 os/linux#<kernel> md/arch#<arch> lang/python#3.13.18 md/pyimpl#CPython m/D,N,Z,b,e cfg/retry-mode#legacy Botocore/1.43.100"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/sqs/aws4_request, SignedHeaders=content-type;host;x-amz-date;x-amz-target;x-amzn-query-mode, Signature=<hex>"
+    ],
+    [
+     "amz-sdk-invocation-id",
+     "<uuid>"
+    ],
+    [
+     "amz-sdk-request",
+     "attempt=1"
+    ],
+    [
+     "Content-Length",
+     "32"
+    ]
+   ],
+   "operation": "ListQueues",
+   "body": {
+    "QueueNamePrefix": "evidence-"
+   },
+   "response_status": 200,
+   "response_type": null
+  },
+  {
+   "method": "POST",
+   "path": "/",
+   "http_version": "HTTP/1.1",
+   "content_type": "application/x-amz-json-1.0",
+   "headers": [
+    [
+     "Host",
+     "127.0.0.1:<port>"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "X-Amz-Target",
+     "AmazonSQS.ListQueues"
+    ],
+    [
+     "Content-Type",
+     "application/x-amz-json-1.0"
+    ],
+    [
+     "x-amzn-query-mode",
+     "true"
+    ],
+    [
+     "User-Agent",
+     "Boto3/1.43.100 md/Botocore#1.43.100 ua/2.1 os/linux#<kernel> md/arch#<arch> lang/python#3.13.18 md/pyimpl#CPython m/D,N,Z,b,e cfg/retry-mode#legacy Botocore/1.43.100"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/sqs/aws4_request, SignedHeaders=content-type;host;x-amz-date;x-amz-target;x-amzn-query-mode, Signature=<hex>"
+    ],
+    [
+     "amz-sdk-invocation-id",
+     "<uuid>"
+    ],
+    [
+     "amz-sdk-request",
+     "attempt=1"
+    ],
+    [
+     "Content-Length",
+     "38"
+    ]
+   ],
+   "operation": "ListQueues",
+   "body": {
+    "QueueNamePrefix": "evidence-celery"
+   },
+   "response_status": 200,
+   "response_type": null
+  },
+  {
+   "method": "POST",
+   "path": "/",
+   "http_version": "HTTP/1.1",
+   "content_type": "application/x-amz-json-1.0",
+   "headers": [
+    [
+     "Host",
+     "127.0.0.1:<port>"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "X-Amz-Target",
+     "AmazonSQS.CreateQueue"
+    ],
+    [
+     "Content-Type",
+     "application/x-amz-json-1.0"
+    ],
+    [
+     "x-amzn-query-mode",
+     "true"
+    ],
+    [
+     "User-Agent",
+     "Boto3/1.43.100 md/Botocore#1.43.100 ua/2.1 os/linux#<kernel> md/arch#<arch> lang/python#3.13.18 md/pyimpl#CPython m/D,N,Z,b,e cfg/retry-mode#legacy Botocore/1.43.100"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/sqs/aws4_request, SignedHeaders=content-type;host;x-amz-date;x-amz-target;x-amzn-query-mode, Signature=<hex>"
+    ],
+    [
+     "amz-sdk-invocation-id",
+     "<uuid>"
+    ],
+    [
+     "amz-sdk-request",
+     "attempt=1"
+    ],
+    [
+     "Content-Length",
+     "77"
+    ]
+   ],
+   "operation": "CreateQueue",
+   "body": {
+    "Attributes": {
+     "VisibilityTimeout": "1800"
+    },
+    "QueueName": "evidence-celery"
+   },
+   "response_status": 200,
+   "response_type": null
+  },
+  {
+   "method": "POST",
+   "path": "/",
+   "http_version": "HTTP/1.1",
+   "content_type": "application/x-amz-json-1.0",
+   "headers": [
+    [
+     "Host",
+     "127.0.0.1:<port>"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "X-Amz-Target",
+     "AmazonSQS.GetQueueAttributes"
+    ],
+    [
+     "Content-Type",
+     "application/x-amz-json-1.0"
+    ],
+    [
+     "x-amzn-query-mode",
+     "true"
+    ],
+    [
+     "User-Agent",
+     "Boto3/1.43.100 md/Botocore#1.43.100 ua/2.1 os/linux#<kernel> md/arch#<arch> lang/python#3.13.18 md/pyimpl#CPython m/D,N,Z,b,e cfg/retry-mode#legacy Botocore/1.43.100"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/sqs/aws4_request, SignedHeaders=content-type;host;x-amz-date;x-amz-target;x-amzn-query-mode, Signature=<hex>"
+    ],
+    [
+     "amz-sdk-invocation-id",
+     "<uuid>"
+    ],
+    [
+     "amz-sdk-request",
+     "attempt=1"
+    ],
+    [
+     "Content-Length",
+     "118"
+    ]
+   ],
+   "operation": "GetQueueAttributes",
+   "body": {
+    "AttributeNames": [
+     "ApproximateNumberOfMessages"
+    ],
+    "QueueUrl": "http://127.0.0.1:<port>/123456789012/evidence-celery"
+   },
+   "response_status": 200,
+   "response_type": null
+  },
+  {
+   "method": "POST",
+   "path": "/",
+   "http_version": "HTTP/1.1",
+   "content_type": "application/x-amz-json-1.0",
+   "headers": [
+    [
+     "Host",
+     "127.0.0.1:<port>"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "X-Amz-Target",
+     "AmazonSQS.SendMessage"
+    ],
+    [
+     "Content-Type",
+     "application/x-amz-json-1.0"
+    ],
+    [
+     "x-amzn-query-mode",
+     "true"
+    ],
+    [
+     "User-Agent",
+     "Boto3/1.43.100 md/Botocore#1.43.100 ua/2.1 os/linux#<kernel> md/arch#<arch> lang/python#3.13.18 md/pyimpl#CPython m/D,N,Z,b,e cfg/retry-mode#legacy Botocore/1.43.100"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/sqs/aws4_request, SignedHeaders=content-type;host;x-amz-date;x-amz-target;x-amzn-query-mode, Signature=<hex>"
+    ],
+    [
+     "amz-sdk-invocation-id",
+     "<uuid>"
+    ],
+    [
+     "amz-sdk-request",
+     "attempt=1"
+    ],
+    [
+     "Content-Length",
+     "534"
+    ]
+   ],
+   "operation": "SendMessage",
+   "body": {
+    "MessageBody": "eyJib2R5IjogImV5SjBZWE5ySWpvZ0ltRmtaQ0lzSUNKaGNtZHpJam9nV3pJc0lETmRmUT09IiwgImNvbnRlbnQtZW5jb2RpbmciOiAidXRmLTgiLCAiY29udGVudC10eXBlIjogImFwcGxpY2F0aW9uL2pzb24iLCAiaGVhZGVycyI6IHsib3JpZ2luIjogImV2aWRlbmNlIn0sICJwcm9wZXJ0aWVzIjogeyJkZWxpdmVyeV9tb2RlIjogMiwgImRlbGl2ZXJ5X2luZm8iOiB7ImV4Y2hhbmdlIjogImV2aWRlbmNlIiwgInJvdXRpbmdfa2V5IjogImNlbGVyeSJ9LCAicHJpb3JpdHkiOiAwLCAiYm9keV9lbmNvZGluZyI6ICJiYXNlNjQiLCAiZGVsaXZlcnlfdGFnIjogImRlbGl2ZXJ5LXRhZy0xIn19",
+    "QueueUrl": "http://127.0.0.1:<port>/123456789012/evidence-celery"
+   },
+   "response_status": 200,
+   "response_type": null
+  },
+  {
+   "method": "POST",
+   "path": "/",
+   "http_version": "HTTP/1.1",
+   "content_type": "application/x-amz-json-1.0",
+   "headers": [
+    [
+     "Host",
+     "127.0.0.1:<port>"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "X-Amz-Target",
+     "AmazonSQS.GetQueueAttributes"
+    ],
+    [
+     "Content-Type",
+     "application/x-amz-json-1.0"
+    ],
+    [
+     "x-amzn-query-mode",
+     "true"
+    ],
+    [
+     "User-Agent",
+     "Boto3/1.43.100 md/Botocore#1.43.100 ua/2.1 os/linux#<kernel> md/arch#<arch> lang/python#3.13.18 md/pyimpl#CPython m/D,N,Z,b,e cfg/retry-mode#legacy Botocore/1.43.100"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/sqs/aws4_request, SignedHeaders=content-type;host;x-amz-date;x-amz-target;x-amzn-query-mode, Signature=<hex>"
+    ],
+    [
+     "amz-sdk-invocation-id",
+     "<uuid>"
+    ],
+    [
+     "amz-sdk-request",
+     "attempt=1"
+    ],
+    [
+     "Content-Length",
+     "118"
+    ]
+   ],
+   "operation": "GetQueueAttributes",
+   "body": {
+    "AttributeNames": [
+     "ApproximateNumberOfMessages"
+    ],
+    "QueueUrl": "http://127.0.0.1:<port>/123456789012/evidence-celery"
+   },
+   "response_status": 200,
+   "response_type": null
+  },
+  {
+   "method": "POST",
+   "path": "/",
+   "http_version": "HTTP/1.1",
+   "content_type": "application/x-amz-json-1.0",
+   "headers": [
+    [
+     "Host",
+     "127.0.0.1:<port>"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "X-Amz-Target",
+     "AmazonSQS.ReceiveMessage"
+    ],
+    [
+     "Content-Type",
+     "application/x-amz-json-1.0"
+    ],
+    [
+     "x-amzn-query-mode",
+     "true"
+    ],
+    [
+     "User-Agent",
+     "Boto3/1.43.100 md/Botocore#1.43.100 ua/2.1 os/linux#<kernel> md/arch#<arch> lang/python#3.13.18 md/pyimpl#CPython m/D,N,Z,b,e cfg/retry-mode#legacy Botocore/1.43.100"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/sqs/aws4_request, SignedHeaders=content-type;host;x-amz-date;x-amz-target;x-amzn-query-mode, Signature=<hex>"
+    ],
+    [
+     "amz-sdk-invocation-id",
+     "<uuid>"
+    ],
+    [
+     "amz-sdk-request",
+     "attempt=1"
+    ],
+    [
+     "Content-Length",
+     "116"
+    ]
+   ],
+   "operation": "ReceiveMessage",
+   "body": {
+    "MaxNumberOfMessages": 10,
+    "QueueUrl": "http://127.0.0.1:<port>/123456789012/evidence-celery",
+    "WaitTimeSeconds": 1
+   },
+   "response_status": 200,
+   "response_type": null
+  },
+  {
+   "method": "POST",
+   "path": "/",
+   "http_version": "HTTP/1.1",
+   "content_type": "application/x-amz-json-1.0",
+   "headers": [
+    [
+     "Host",
+     "127.0.0.1:<port>"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "X-Amz-Target",
+     "AmazonSQS.DeleteMessage"
+    ],
+    [
+     "Content-Type",
+     "application/x-amz-json-1.0"
+    ],
+    [
+     "x-amzn-query-mode",
+     "true"
+    ],
+    [
+     "User-Agent",
+     "Boto3/1.43.100 md/Botocore#1.43.100 ua/2.1 os/linux#<kernel> md/arch#<arch> lang/python#3.13.18 md/pyimpl#CPython m/D,N,Z,b,e cfg/retry-mode#legacy Botocore/1.43.100"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/sqs/aws4_request, SignedHeaders=content-type;host;x-amz-date;x-amz-target;x-amzn-query-mode, Signature=<hex>"
+    ],
+    [
+     "amz-sdk-invocation-id",
+     "<uuid>"
+    ],
+    [
+     "amz-sdk-request",
+     "attempt=1"
+    ],
+    [
+     "Content-Length",
+     "152"
+    ]
+   ],
+   "operation": "DeleteMessage",
+   "body": {
+    "QueueUrl": "http://127.0.0.1:<port>/123456789012/evidence-celery",
+    "ReceiptHandle": "cmVjZWlwdC0xLTAwMDAwMDAwLTAwMDAtNDAwMC04MDAwLTAwMDAwMDAwMDAwMQ=="
+   },
+   "response_status": 200,
+   "response_type": null
+  },
+  {
+   "method": "POST",
+   "path": "/",
+   "http_version": "HTTP/1.1",
+   "content_type": "application/x-amz-json-1.0",
+   "headers": [
+    [
+     "Host",
+     "127.0.0.1:<port>"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "X-Amz-Target",
+     "AmazonSQS.DeleteQueue"
+    ],
+    [
+     "Content-Type",
+     "application/x-amz-json-1.0"
+    ],
+    [
+     "x-amzn-query-mode",
+     "true"
+    ],
+    [
+     "User-Agent",
+     "Boto3/1.43.100 md/Botocore#1.43.100 ua/2.1 os/linux#<kernel> md/arch#<arch> lang/python#3.13.18 md/pyimpl#CPython m/D,N,Z,b,e cfg/retry-mode#legacy Botocore/1.43.100"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/sqs/aws4_request, SignedHeaders=content-type;host;x-amz-date;x-amz-target;x-amzn-query-mode, Signature=<hex>"
+    ],
+    [
+     "amz-sdk-invocation-id",
+     "<uuid>"
+    ],
+    [
+     "amz-sdk-request",
+     "attempt=1"
+    ],
+    [
+     "Content-Length",
+     "67"
+    ]
+   ],
+   "operation": "DeleteQueue",
+   "body": {
+    "QueueUrl": "http://127.0.0.1:<port>/123456789012/evidence-celery"
+   },
+   "response_status": 200,
+   "response_type": null
+  }
+ ],
+ "summary": {
+  "operations": [
+   "ListQueues",
+   "ListQueues",
+   "CreateQueue",
+   "GetQueueAttributes",
+   "SendMessage",
+   "GetQueueAttributes",
+   "ReceiveMessage",
+   "DeleteMessage",
+   "DeleteQueue"
+  ],
+  "content_types": [
+   "application/x-amz-json-1.0"
+  ],
+  "http_versions": [
+   "HTTP/1.1"
+  ]
+ }
+}

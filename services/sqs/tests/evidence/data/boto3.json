@@ -1,0 +1,1530 @@
+{
+ "client": "boto3-1.43.100",
+ "requests": [
+  {
+   "method": "POST",
+   "path": "/",
+   "http_version": "HTTP/1.1",
+   "content_type": "application/x-amz-json-1.0",
+   "headers": [
+    [
+     "Host",
+     "127.0.0.1:<port>"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "X-Amz-Target",
+     "AmazonSQS.CreateQueue"
+    ],
+    [
+     "Content-Type",
+     "application/x-amz-json-1.0"
+    ],
+    [
+     "x-amzn-query-mode",
+     "true"
+    ],
+    [
+     "User-Agent",
+     "Boto3/1.43.100 md/Botocore#1.43.100 ua/2.1 os/linux#<kernel> md/arch#<arch> lang/python#3.13.18 md/pyimpl#CPython m/D,N,Z,b,g cfg/retry-mode#legacy Botocore/1.43.100"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/sqs/aws4_request, SignedHeaders=content-type;host;x-amz-date;x-amz-target;x-amzn-query-mode, Signature=<hex>"
+    ],
+    [
+     "amz-sdk-invocation-id",
+     "<uuid>"
+    ],
+    [
+     "amz-sdk-request",
+     "attempt=1"
+    ],
+    [
+     "Content-Length",
+     "118"
+    ]
+   ],
+   "operation": "CreateQueue",
+   "body": {
+    "Attributes": {
+     "DelaySeconds": "0",
+     "VisibilityTimeout": "45"
+    },
+    "QueueName": "evidence",
+    "tags": {
+     "team": "kythira"
+    }
+   },
+   "response_status": 200,
+   "response_type": null
+  },
+  {
+   "method": "POST",
+   "path": "/",
+   "http_version": "HTTP/1.1",
+   "content_type": "application/x-amz-json-1.0",
+   "headers": [
+    [
+     "Host",
+     "127.0.0.1:<port>"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "X-Amz-Target",
+     "AmazonSQS.GetQueueUrl"
+    ],
+    [
+     "Content-Type",
+     "application/x-amz-json-1.0"
+    ],
+    [
+     "x-amzn-query-mode",
+     "true"
+    ],
+    [
+     "User-Agent",
+     "Boto3/1.43.100 md/Botocore#1.43.100 ua/2.1 os/linux#<kernel> md/arch#<arch> lang/python#3.13.18 md/pyimpl#CPython m/D,N,Z,b,g cfg/retry-mode#legacy Botocore/1.43.100"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/sqs/aws4_request, SignedHeaders=content-type;host;x-amz-date;x-amz-target;x-amzn-query-mode, Signature=<hex>"
+    ],
+    [
+     "amz-sdk-invocation-id",
+     "<uuid>"
+    ],
+    [
+     "amz-sdk-request",
+     "attempt=1"
+    ],
+    [
+     "Content-Length",
+     "25"
+    ]
+   ],
+   "operation": "GetQueueUrl",
+   "body": {
+    "QueueName": "evidence"
+   },
+   "response_status": 200,
+   "response_type": null
+  },
+  {
+   "method": "POST",
+   "path": "/",
+   "http_version": "HTTP/1.1",
+   "content_type": "application/x-amz-json-1.0",
+   "headers": [
+    [
+     "Host",
+     "127.0.0.1:<port>"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "X-Amz-Target",
+     "AmazonSQS.SetQueueAttributes"
+    ],
+    [
+     "Content-Type",
+     "application/x-amz-json-1.0"
+    ],
+    [
+     "x-amzn-query-mode",
+     "true"
+    ],
+    [
+     "User-Agent",
+     "Boto3/1.43.100 md/Botocore#1.43.100 ua/2.1 os/linux#<kernel> md/arch#<arch> lang/python#3.13.18 md/pyimpl#CPython m/D,N,Z,b,g cfg/retry-mode#legacy Botocore/1.43.100"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/sqs/aws4_request, SignedHeaders=content-type;host;x-amz-date;x-amz-target;x-amzn-query-mode, Signature=<hex>"
+    ],
+    [
+     "amz-sdk-invocation-id",
+     "<uuid>"
+    ],
+    [
+     "amz-sdk-request",
+     "attempt=1"
+    ],
+    [
+     "Content-Length",
+     "114"
+    ]
+   ],
+   "operation": "SetQueueAttributes",
+   "body": {
+    "Attributes": {
+     "ReceiveMessageWaitTimeSeconds": "1"
+    },
+    "QueueUrl": "http://127.0.0.1:<port>/123456789012/evidence"
+   },
+   "response_status": 200,
+   "response_type": null
+  },
+  {
+   "method": "POST",
+   "path": "/",
+   "http_version": "HTTP/1.1",
+   "content_type": "application/x-amz-json-1.0",
+   "headers": [
+    [
+     "Host",
+     "127.0.0.1:<port>"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "X-Amz-Target",
+     "AmazonSQS.GetQueueAttributes"
+    ],
+    [
+     "Content-Type",
+     "application/x-amz-json-1.0"
+    ],
+    [
+     "x-amzn-query-mode",
+     "true"
+    ],
+    [
+     "User-Agent",
+     "Boto3/1.43.100 md/Botocore#1.43.100 ua/2.1 os/linux#<kernel> md/arch#<arch> lang/python#3.13.18 md/pyimpl#CPython m/D,N,Z,b,g cfg/retry-mode#legacy Botocore/1.43.100"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/sqs/aws4_request, SignedHeaders=content-type;host;x-amz-date;x-amz-target;x-amzn-query-mode, Signature=<hex>"
+    ],
+    [
+     "amz-sdk-invocation-id",
+     "<uuid>"
+    ],
+    [
+     "amz-sdk-request",
+     "attempt=1"
+    ],
+    [
+     "Content-Length",
+     "87"
+    ]
+   ],
+   "operation": "GetQueueAttributes",
+   "body": {
+    "AttributeNames": [
+     "All"
+    ],
+    "QueueUrl": "http://127.0.0.1:<port>/123456789012/evidence"
+   },
+   "response_status": 200,
+   "response_type": null
+  },
+  {
+   "method": "POST",
+   "path": "/",
+   "http_version": "HTTP/1.1",
+   "content_type": "application/x-amz-json-1.0",
+   "headers": [
+    [
+     "Host",
+     "127.0.0.1:<port>"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "X-Amz-Target",
+     "AmazonSQS.ListQueues"
+    ],
+    [
+     "Content-Type",
+     "application/x-amz-json-1.0"
+    ],
+    [
+     "x-amzn-query-mode",
+     "true"
+    ],
+    [
+     "User-Agent",
+     "Boto3/1.43.100 md/Botocore#1.43.100 ua/2.1 os/linux#<kernel> md/arch#<arch> lang/python#3.13.18 md/pyimpl#CPython m/D,N,Z,b,g cfg/retry-mode#legacy Botocore/1.43.100"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/sqs/aws4_request, SignedHeaders=content-type;host;x-amz-date;x-amz-target;x-amzn-query-mode, Signature=<hex>"
+    ],
+    [
+     "amz-sdk-invocation-id",
+     "<uuid>"
+    ],
+    [
+     "amz-sdk-request",
+     "attempt=1"
+    ],
+    [
+     "Content-Length",
+     "26"
+    ]
+   ],
+   "operation": "ListQueues",
+   "body": {
+    "QueueNamePrefix": "evi"
+   },
+   "response_status": 200,
+   "response_type": null
+  },
+  {
+   "method": "POST",
+   "path": "/",
+   "http_version": "HTTP/1.1",
+   "content_type": "application/x-amz-json-1.0",
+   "headers": [
+    [
+     "Host",
+     "127.0.0.1:<port>"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "X-Amz-Target",
+     "AmazonSQS.TagQueue"
+    ],
+    [
+     "Content-Type",
+     "application/x-amz-json-1.0"
+    ],
+    [
+     "x-amzn-query-mode",
+     "true"
+    ],
+    [
+     "User-Agent",
+     "Boto3/1.43.100 md/Botocore#1.43.100 ua/2.1 os/linux#<kernel> md/arch#<arch> lang/python#3.13.18 md/pyimpl#CPython m/D,N,Z,b,g cfg/retry-mode#legacy Botocore/1.43.100"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/sqs/aws4_request, SignedHeaders=content-type;host;x-amz-date;x-amz-target;x-amzn-query-mode, Signature=<hex>"
+    ],
+    [
+     "amz-sdk-invocation-id",
+     "<uuid>"
+    ],
+    [
+     "amz-sdk-request",
+     "attempt=1"
+    ],
+    [
+     "Content-Length",
+     "89"
+    ]
+   ],
+   "operation": "TagQueue",
+   "body": {
+    "QueueUrl": "http://127.0.0.1:<port>/123456789012/evidence",
+    "Tags": {
+     "env": "evidence"
+    }
+   },
+   "response_status": 200,
+   "response_type": null
+  },
+  {
+   "method": "POST",
+   "path": "/",
+   "http_version": "HTTP/1.1",
+   "content_type": "application/x-amz-json-1.0",
+   "headers": [
+    [
+     "Host",
+     "127.0.0.1:<port>"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "X-Amz-Target",
+     "AmazonSQS.ListQueueTags"
+    ],
+    [
+     "Content-Type",
+     "application/x-amz-json-1.0"
+    ],
+    [
+     "x-amzn-query-mode",
+     "true"
+    ],
+    [
+     "User-Agent",
+     "Boto3/1.43.100 md/Botocore#1.43.100 ua/2.1 os/linux#<kernel> md/arch#<arch> lang/python#3.13.18 md/pyimpl#CPython m/D,N,Z,b,g cfg/retry-mode#legacy Botocore/1.43.100"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/sqs/aws4_request, SignedHeaders=content-type;host;x-amz-date;x-amz-target;x-amzn-query-mode, Signature=<hex>"
+    ],
+    [
+     "amz-sdk-invocation-id",
+     "<uuid>"
+    ],
+    [
+     "amz-sdk-request",
+     "attempt=1"
+    ],
+    [
+     "Content-Length",
+     "60"
+    ]
+   ],
+   "operation": "ListQueueTags",
+   "body": {
+    "QueueUrl": "http://127.0.0.1:<port>/123456789012/evidence"
+   },
+   "response_status": 200,
+   "response_type": null
+  },
+  {
+   "method": "POST",
+   "path": "/",
+   "http_version": "HTTP/1.1",
+   "content_type": "application/x-amz-json-1.0",
+   "headers": [
+    [
+     "Host",
+     "127.0.0.1:<port>"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "X-Amz-Target",
+     "AmazonSQS.UntagQueue"
+    ],
+    [
+     "Content-Type",
+     "application/x-amz-json-1.0"
+    ],
+    [
+     "x-amzn-query-mode",
+     "true"
+    ],
+    [
+     "User-Agent",
+     "Boto3/1.43.100 md/Botocore#1.43.100 ua/2.1 os/linux#<kernel> md/arch#<arch> lang/python#3.13.18 md/pyimpl#CPython m/D,N,Z,b,g cfg/retry-mode#legacy Botocore/1.43.100"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/sqs/aws4_request, SignedHeaders=content-type;host;x-amz-date;x-amz-target;x-amzn-query-mode, Signature=<hex>"
+    ],
+    [
+     "amz-sdk-invocation-id",
+     "<uuid>"
+    ],
+    [
+     "amz-sdk-request",
+     "attempt=1"
+    ],
+    [
+     "Content-Length",
+     "80"
+    ]
+   ],
+   "operation": "UntagQueue",
+   "body": {
+    "QueueUrl": "http://127.0.0.1:<port>/123456789012/evidence",
+    "TagKeys": [
+     "env"
+    ]
+   },
+   "response_status": 200,
+   "response_type": null
+  },
+  {
+   "method": "POST",
+   "path": "/",
+   "http_version": "HTTP/1.1",
+   "content_type": "application/x-amz-json-1.0",
+   "headers": [
+    [
+     "Host",
+     "127.0.0.1:<port>"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "X-Amz-Target",
+     "AmazonSQS.SendMessage"
+    ],
+    [
+     "Content-Type",
+     "application/x-amz-json-1.0"
+    ],
+    [
+     "x-amzn-query-mode",
+     "true"
+    ],
+    [
+     "User-Agent",
+     "Boto3/1.43.100 md/Botocore#1.43.100 ua/2.1 os/linux#<kernel> md/arch#<arch> lang/python#3.13.18 md/pyimpl#CPython m/D,N,Z,b,g cfg/retry-mode#legacy Botocore/1.43.100"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/sqs/aws4_request, SignedHeaders=content-type;host;x-amz-date;x-amz-target;x-amzn-query-mode, Signature=<hex>"
+    ],
+    [
+     "amz-sdk-invocation-id",
+     "<uuid>"
+    ],
+    [
+     "amz-sdk-request",
+     "attempt=1"
+    ],
+    [
+     "Content-Length",
+     "405"
+    ]
+   ],
+   "operation": "SendMessage",
+   "body": {
+    "MessageAttributes": {
+     "b": {
+      "BinaryValue": "AAEC",
+      "DataType": "Binary"
+     },
+     "n": {
+      "DataType": "Number.int",
+      "StringValue": "42"
+     },
+     "s": {
+      "DataType": "String",
+      "StringValue": "text"
+     }
+    },
+    "MessageBody": "hello",
+    "MessageSystemAttributes": {
+     "AWSTraceHeader": {
+      "DataType": "String",
+      "StringValue": "Root=1-5759e988-bd862e3fe1be46a994272793;Sampled=1"
+     }
+    },
+    "QueueUrl": "http://127.0.0.1:<port>/123456789012/evidence"
+   },
+   "response_status": 200,
+   "response_type": null
+  },
+  {
+   "method": "POST",
+   "path": "/",
+   "http_version": "HTTP/1.1",
+   "content_type": "application/x-amz-json-1.0",
+   "headers": [
+    [
+     "Host",
+     "127.0.0.1:<port>"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "X-Amz-Target",
+     "AmazonSQS.SendMessageBatch"
+    ],
+    [
+     "Content-Type",
+     "application/x-amz-json-1.0"
+    ],
+    [
+     "x-amzn-query-mode",
+     "true"
+    ],
+    [
+     "User-Agent",
+     "Boto3/1.43.100 md/Botocore#1.43.100 ua/2.1 os/linux#<kernel> md/arch#<arch> lang/python#3.13.18 md/pyimpl#CPython m/D,N,Z,b,g cfg/retry-mode#legacy Botocore/1.43.100"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/sqs/aws4_request, SignedHeaders=content-type;host;x-amz-date;x-amz-target;x-amzn-query-mode, Signature=<hex>"
+    ],
+    [
+     "amz-sdk-invocation-id",
+     "<uuid>"
+    ],
+    [
+     "amz-sdk-request",
+     "attempt=1"
+    ],
+    [
+     "Content-Length",
+     "238"
+    ]
+   ],
+   "operation": "SendMessageBatch",
+   "body": {
+    "Entries": [
+     {
+      "Id": "one",
+      "MessageBody": "one"
+     },
+     {
+      "DelaySeconds": 0,
+      "Id": "two",
+      "MessageAttributes": {
+       "k": {
+        "DataType": "String",
+        "StringValue": "v"
+       }
+      },
+      "MessageBody": "two"
+     }
+    ],
+    "QueueUrl": "http://127.0.0.1:<port>/123456789012/evidence"
+   },
+   "response_status": 200,
+   "response_type": null
+  },
+  {
+   "method": "POST",
+   "path": "/",
+   "http_version": "HTTP/1.1",
+   "content_type": "application/x-amz-json-1.0",
+   "headers": [
+    [
+     "Host",
+     "127.0.0.1:<port>"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "X-Amz-Target",
+     "AmazonSQS.ReceiveMessage"
+    ],
+    [
+     "Content-Type",
+     "application/x-amz-json-1.0"
+    ],
+    [
+     "x-amzn-query-mode",
+     "true"
+    ],
+    [
+     "User-Agent",
+     "Boto3/1.43.100 md/Botocore#1.43.100 ua/2.1 os/linux#<kernel> md/arch#<arch> lang/python#3.13.18 md/pyimpl#CPython m/D,N,Z,b,g cfg/retry-mode#legacy Botocore/1.43.100"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/sqs/aws4_request, SignedHeaders=content-type;host;x-amz-date;x-amz-target;x-amzn-query-mode, Signature=<hex>"
+    ],
+    [
+     "amz-sdk-invocation-id",
+     "<uuid>"
+    ],
+    [
+     "amz-sdk-request",
+     "attempt=1"
+    ],
+    [
+     "Content-Length",
+     "195"
+    ]
+   ],
+   "operation": "ReceiveMessage",
+   "body": {
+    "AttributeNames": [
+     "All"
+    ],
+    "MaxNumberOfMessages": 10,
+    "MessageAttributeNames": [
+     "All"
+    ],
+    "QueueUrl": "http://127.0.0.1:<port>/123456789012/evidence",
+    "VisibilityTimeout": 30,
+    "WaitTimeSeconds": 1
+   },
+   "response_status": 200,
+   "response_type": null
+  },
+  {
+   "method": "POST",
+   "path": "/",
+   "http_version": "HTTP/1.1",
+   "content_type": "application/x-amz-json-1.0",
+   "headers": [
+    [
+     "Host",
+     "127.0.0.1:<port>"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "X-Amz-Target",
+     "AmazonSQS.ChangeMessageVisibility"
+    ],
+    [
+     "Content-Type",
+     "application/x-amz-json-1.0"
+    ],
+    [
+     "x-amzn-query-mode",
+     "true"
+    ],
+    [
+     "User-Agent",
+     "Boto3/1.43.100 md/Botocore#1.43.100 ua/2.1 os/linux#<kernel> md/arch#<arch> lang/python#3.13.18 md/pyimpl#CPython m/D,N,Z,b,g cfg/retry-mode#legacy Botocore/1.43.100"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/sqs/aws4_request, SignedHeaders=content-type;host;x-amz-date;x-amz-target;x-amzn-query-mode, Signature=<hex>"
+    ],
+    [
+     "amz-sdk-invocation-id",
+     "<uuid>"
+    ],
+    [
+     "amz-sdk-request",
+     "attempt=1"
+    ],
+    [
+     "Content-Length",
+     "170"
+    ]
+   ],
+   "operation": "ChangeMessageVisibility",
+   "body": {
+    "QueueUrl": "http://127.0.0.1:<port>/123456789012/evidence",
+    "ReceiptHandle": "cmVjZWlwdC0xLTAwMDAwMDAwLTAwMDAtNDAwMC04MDAwLTAwMDAwMDAwMDAwMQ==",
+    "VisibilityTimeout": 60
+   },
+   "response_status": 200,
+   "response_type": null
+  },
+  {
+   "method": "POST",
+   "path": "/",
+   "http_version": "HTTP/1.1",
+   "content_type": "application/x-amz-json-1.0",
+   "headers": [
+    [
+     "Host",
+     "127.0.0.1:<port>"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "X-Amz-Target",
+     "AmazonSQS.ChangeMessageVisibilityBatch"
+    ],
+    [
+     "Content-Type",
+     "application/x-amz-json-1.0"
+    ],
+    [
+     "x-amzn-query-mode",
+     "true"
+    ],
+    [
+     "User-Agent",
+     "Boto3/1.43.100 md/Botocore#1.43.100 ua/2.1 os/linux#<kernel> md/arch#<arch> lang/python#3.13.18 md/pyimpl#CPython m/D,N,Z,b,g cfg/retry-mode#legacy Botocore/1.43.100"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/sqs/aws4_request, SignedHeaders=content-type;host;x-amz-date;x-amz-target;x-amzn-query-mode, Signature=<hex>"
+    ],
+    [
+     "amz-sdk-invocation-id",
+     "<uuid>"
+    ],
+    [
+     "amz-sdk-request",
+     "attempt=1"
+    ],
+    [
+     "Content-Length",
+     "198"
+    ]
+   ],
+   "operation": "ChangeMessageVisibilityBatch",
+   "body": {
+    "Entries": [
+     {
+      "Id": "one",
+      "ReceiptHandle": "cmVjZWlwdC0yLTAwMDAwMDAwLTAwMDAtNDAwMC04MDAwLTAwMDAwMDAwMDAwMg==",
+      "VisibilityTimeout": 60
+     }
+    ],
+    "QueueUrl": "http://127.0.0.1:<port>/123456789012/evidence"
+   },
+   "response_status": 200,
+   "response_type": null
+  },
+  {
+   "method": "POST",
+   "path": "/",
+   "http_version": "HTTP/1.1",
+   "content_type": "application/x-amz-json-1.0",
+   "headers": [
+    [
+     "Host",
+     "127.0.0.1:<port>"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "X-Amz-Target",
+     "AmazonSQS.DeleteMessage"
+    ],
+    [
+     "Content-Type",
+     "application/x-amz-json-1.0"
+    ],
+    [
+     "x-amzn-query-mode",
+     "true"
+    ],
+    [
+     "User-Agent",
+     "Boto3/1.43.100 md/Botocore#1.43.100 ua/2.1 os/linux#<kernel> md/arch#<arch> lang/python#3.13.18 md/pyimpl#CPython m/D,N,Z,b,g cfg/retry-mode#legacy Botocore/1.43.100"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/sqs/aws4_request, SignedHeaders=content-type;host;x-amz-date;x-amz-target;x-amzn-query-mode, Signature=<hex>"
+    ],
+    [
+     "amz-sdk-invocation-id",
+     "<uuid>"
+    ],
+    [
+     "amz-sdk-request",
+     "attempt=1"
+    ],
+    [
+     "Content-Length",
+     "145"
+    ]
+   ],
+   "operation": "DeleteMessage",
+   "body": {
+    "QueueUrl": "http://127.0.0.1:<port>/123456789012/evidence",
+    "ReceiptHandle": "cmVjZWlwdC0xLTAwMDAwMDAwLTAwMDAtNDAwMC04MDAwLTAwMDAwMDAwMDAwMQ=="
+   },
+   "response_status": 200,
+   "response_type": null
+  },
+  {
+   "method": "POST",
+   "path": "/",
+   "http_version": "HTTP/1.1",
+   "content_type": "application/x-amz-json-1.0",
+   "headers": [
+    [
+     "Host",
+     "127.0.0.1:<port>"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "X-Amz-Target",
+     "AmazonSQS.DeleteMessageBatch"
+    ],
+    [
+     "Content-Type",
+     "application/x-amz-json-1.0"
+    ],
+    [
+     "x-amzn-query-mode",
+     "true"
+    ],
+    [
+     "User-Agent",
+     "Boto3/1.43.100 md/Botocore#1.43.100 ua/2.1 os/linux#<kernel> md/arch#<arch> lang/python#3.13.18 md/pyimpl#CPython m/D,N,Z,b,g cfg/retry-mode#legacy Botocore/1.43.100"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/sqs/aws4_request, SignedHeaders=content-type;host;x-amz-date;x-amz-target;x-amzn-query-mode, Signature=<hex>"
+    ],
+    [
+     "amz-sdk-invocation-id",
+     "<uuid>"
+    ],
+    [
+     "amz-sdk-request",
+     "attempt=1"
+    ],
+    [
+     "Content-Length",
+     "273"
+    ]
+   ],
+   "operation": "DeleteMessageBatch",
+   "body": {
+    "Entries": [
+     {
+      "Id": "one",
+      "ReceiptHandle": "cmVjZWlwdC0yLTAwMDAwMDAwLTAwMDAtNDAwMC04MDAwLTAwMDAwMDAwMDAwMg=="
+     },
+     {
+      "Id": "two",
+      "ReceiptHandle": "cmVjZWlwdC0zLTAwMDAwMDAwLTAwMDAtNDAwMC04MDAwLTAwMDAwMDAwMDAwMw=="
+     }
+    ],
+    "QueueUrl": "http://127.0.0.1:<port>/123456789012/evidence"
+   },
+   "response_status": 200,
+   "response_type": null
+  },
+  {
+   "method": "POST",
+   "path": "/",
+   "http_version": "HTTP/1.1",
+   "content_type": "application/x-amz-json-1.0",
+   "headers": [
+    [
+     "Host",
+     "127.0.0.1:<port>"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "X-Amz-Target",
+     "AmazonSQS.ReceiveMessage"
+    ],
+    [
+     "Content-Type",
+     "application/x-amz-json-1.0"
+    ],
+    [
+     "x-amzn-query-mode",
+     "true"
+    ],
+    [
+     "User-Agent",
+     "Boto3/1.43.100 md/Botocore#1.43.100 ua/2.1 os/linux#<kernel> md/arch#<arch> lang/python#3.13.18 md/pyimpl#CPython m/D,N,Z,b,g cfg/retry-mode#legacy Botocore/1.43.100"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/sqs/aws4_request, SignedHeaders=content-type;host;x-amz-date;x-amz-target;x-amzn-query-mode, Signature=<hex>"
+    ],
+    [
+     "amz-sdk-invocation-id",
+     "<uuid>"
+    ],
+    [
+     "amz-sdk-request",
+     "attempt=1"
+    ],
+    [
+     "Content-Length",
+     "82"
+    ]
+   ],
+   "operation": "ReceiveMessage",
+   "body": {
+    "QueueUrl": "http://127.0.0.1:<port>/123456789012/evidence",
+    "WaitTimeSeconds": 0
+   },
+   "response_status": 200,
+   "response_type": null
+  },
+  {
+   "method": "POST",
+   "path": "/",
+   "http_version": "HTTP/1.1",
+   "content_type": "application/x-amz-json-1.0",
+   "headers": [
+    [
+     "Host",
+     "127.0.0.1:<port>"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "X-Amz-Target",
+     "AmazonSQS.PurgeQueue"
+    ],
+    [
+     "Content-Type",
+     "application/x-amz-json-1.0"
+    ],
+    [
+     "x-amzn-query-mode",
+     "true"
+    ],
+    [
+     "User-Agent",
+     "Boto3/1.43.100 md/Botocore#1.43.100 ua/2.1 os/linux#<kernel> md/arch#<arch> lang/python#3.13.18 md/pyimpl#CPython m/D,N,Z,b,g cfg/retry-mode#legacy Botocore/1.43.100"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/sqs/aws4_request, SignedHeaders=content-type;host;x-amz-date;x-amz-target;x-amzn-query-mode, Signature=<hex>"
+    ],
+    [
+     "amz-sdk-invocation-id",
+     "<uuid>"
+    ],
+    [
+     "amz-sdk-request",
+     "attempt=1"
+    ],
+    [
+     "Content-Length",
+     "60"
+    ]
+   ],
+   "operation": "PurgeQueue",
+   "body": {
+    "QueueUrl": "http://127.0.0.1:<port>/123456789012/evidence"
+   },
+   "response_status": 200,
+   "response_type": null
+  },
+  {
+   "method": "POST",
+   "path": "/",
+   "http_version": "HTTP/1.1",
+   "content_type": "application/x-amz-json-1.0",
+   "headers": [
+    [
+     "Host",
+     "127.0.0.1:<port>"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "X-Amz-Target",
+     "AmazonSQS.CreateQueue"
+    ],
+    [
+     "Content-Type",
+     "application/x-amz-json-1.0"
+    ],
+    [
+     "x-amzn-query-mode",
+     "true"
+    ],
+    [
+     "User-Agent",
+     "Boto3/1.43.100 md/Botocore#1.43.100 ua/2.1 os/linux#<kernel> md/arch#<arch> lang/python#3.13.18 md/pyimpl#CPython m/D,N,Z,b,g cfg/retry-mode#legacy Botocore/1.43.100"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/sqs/aws4_request, SignedHeaders=content-type;host;x-amz-date;x-amz-target;x-amzn-query-mode, Signature=<hex>"
+    ],
+    [
+     "amz-sdk-invocation-id",
+     "<uuid>"
+    ],
+    [
+     "amz-sdk-request",
+     "attempt=1"
+    ],
+    [
+     "Content-Length",
+     "105"
+    ]
+   ],
+   "operation": "CreateQueue",
+   "body": {
+    "Attributes": {
+     "ContentBasedDeduplication": "false",
+     "FifoQueue": "true"
+    },
+    "QueueName": "evidence.fifo"
+   },
+   "response_status": 200,
+   "response_type": null
+  },
+  {
+   "method": "POST",
+   "path": "/",
+   "http_version": "HTTP/1.1",
+   "content_type": "application/x-amz-json-1.0",
+   "headers": [
+    [
+     "Host",
+     "127.0.0.1:<port>"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "X-Amz-Target",
+     "AmazonSQS.SendMessage"
+    ],
+    [
+     "Content-Type",
+     "application/x-amz-json-1.0"
+    ],
+    [
+     "x-amzn-query-mode",
+     "true"
+    ],
+    [
+     "User-Agent",
+     "Boto3/1.43.100 md/Botocore#1.43.100 ua/2.1 os/linux#<kernel> md/arch#<arch> lang/python#3.13.18 md/pyimpl#CPython m/D,N,Z,b,g cfg/retry-mode#legacy Botocore/1.43.100"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/sqs/aws4_request, SignedHeaders=content-type;host;x-amz-date;x-amz-target;x-amzn-query-mode, Signature=<hex>"
+    ],
+    [
+     "amz-sdk-invocation-id",
+     "<uuid>"
+    ],
+    [
+     "amz-sdk-request",
+     "attempt=1"
+    ],
+    [
+     "Content-Length",
+     "145"
+    ]
+   ],
+   "operation": "SendMessage",
+   "body": {
+    "MessageBody": "first",
+    "MessageDeduplicationId": "d1",
+    "MessageGroupId": "g1",
+    "QueueUrl": "http://127.0.0.1:<port>/123456789012/evidence.fifo"
+   },
+   "response_status": 200,
+   "response_type": null
+  },
+  {
+   "method": "POST",
+   "path": "/",
+   "http_version": "HTTP/1.1",
+   "content_type": "application/x-amz-json-1.0",
+   "headers": [
+    [
+     "Host",
+     "127.0.0.1:<port>"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "X-Amz-Target",
+     "AmazonSQS.ReceiveMessage"
+    ],
+    [
+     "Content-Type",
+     "application/x-amz-json-1.0"
+    ],
+    [
+     "x-amzn-query-mode",
+     "true"
+    ],
+    [
+     "User-Agent",
+     "Boto3/1.43.100 md/Botocore#1.43.100 ua/2.1 os/linux#<kernel> md/arch#<arch> lang/python#3.13.18 md/pyimpl#CPython m/D,N,Z,b,g cfg/retry-mode#legacy Botocore/1.43.100"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/sqs/aws4_request, SignedHeaders=content-type;host;x-amz-date;x-amz-target;x-amzn-query-mode, Signature=<hex>"
+    ],
+    [
+     "amz-sdk-invocation-id",
+     "<uuid>"
+    ],
+    [
+     "amz-sdk-request",
+     "attempt=1"
+    ],
+    [
+     "Content-Length",
+     "143"
+    ]
+   ],
+   "operation": "ReceiveMessage",
+   "body": {
+    "AttributeNames": [
+     "MessageGroupId"
+    ],
+    "QueueUrl": "http://127.0.0.1:<port>/123456789012/evidence.fifo",
+    "ReceiveRequestAttemptId": "attempt-1"
+   },
+   "response_status": 200,
+   "response_type": null
+  },
+  {
+   "method": "POST",
+   "path": "/",
+   "http_version": "HTTP/1.1",
+   "content_type": "application/x-amz-json-1.0",
+   "headers": [
+    [
+     "Host",
+     "127.0.0.1:<port>"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "X-Amz-Target",
+     "AmazonSQS.DeleteMessage"
+    ],
+    [
+     "Content-Type",
+     "application/x-amz-json-1.0"
+    ],
+    [
+     "x-amzn-query-mode",
+     "true"
+    ],
+    [
+     "User-Agent",
+     "Boto3/1.43.100 md/Botocore#1.43.100 ua/2.1 os/linux#<kernel> md/arch#<arch> lang/python#3.13.18 md/pyimpl#CPython m/D,N,Z,b,g cfg/retry-mode#legacy Botocore/1.43.100"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/sqs/aws4_request, SignedHeaders=content-type;host;x-amz-date;x-amz-target;x-amzn-query-mode, Signature=<hex>"
+    ],
+    [
+     "amz-sdk-invocation-id",
+     "<uuid>"
+    ],
+    [
+     "amz-sdk-request",
+     "attempt=1"
+    ],
+    [
+     "Content-Length",
+     "150"
+    ]
+   ],
+   "operation": "DeleteMessage",
+   "body": {
+    "QueueUrl": "http://127.0.0.1:<port>/123456789012/evidence.fifo",
+    "ReceiptHandle": "cmVjZWlwdC00LTAwMDAwMDAwLTAwMDAtNDAwMC04MDAwLTAwMDAwMDAwMDAwNA=="
+   },
+   "response_status": 200,
+   "response_type": null
+  },
+  {
+   "method": "POST",
+   "path": "/",
+   "http_version": "HTTP/1.1",
+   "content_type": "application/x-amz-json-1.0",
+   "headers": [
+    [
+     "Host",
+     "127.0.0.1:<port>"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "X-Amz-Target",
+     "AmazonSQS.DeleteQueue"
+    ],
+    [
+     "Content-Type",
+     "application/x-amz-json-1.0"
+    ],
+    [
+     "x-amzn-query-mode",
+     "true"
+    ],
+    [
+     "User-Agent",
+     "Boto3/1.43.100 md/Botocore#1.43.100 ua/2.1 os/linux#<kernel> md/arch#<arch> lang/python#3.13.18 md/pyimpl#CPython m/D,N,Z,b,g cfg/retry-mode#legacy Botocore/1.43.100"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/sqs/aws4_request, SignedHeaders=content-type;host;x-amz-date;x-amz-target;x-amzn-query-mode, Signature=<hex>"
+    ],
+    [
+     "amz-sdk-invocation-id",
+     "<uuid>"
+    ],
+    [
+     "amz-sdk-request",
+     "attempt=1"
+    ],
+    [
+     "Content-Length",
+     "65"
+    ]
+   ],
+   "operation": "DeleteQueue",
+   "body": {
+    "QueueUrl": "http://127.0.0.1:<port>/123456789012/evidence.fifo"
+   },
+   "response_status": 200,
+   "response_type": null
+  },
+  {
+   "method": "POST",
+   "path": "/",
+   "http_version": "HTTP/1.1",
+   "content_type": "application/x-amz-json-1.0",
+   "headers": [
+    [
+     "Host",
+     "127.0.0.1:<port>"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "X-Amz-Target",
+     "AmazonSQS.DeleteQueue"
+    ],
+    [
+     "Content-Type",
+     "application/x-amz-json-1.0"
+    ],
+    [
+     "x-amzn-query-mode",
+     "true"
+    ],
+    [
+     "User-Agent",
+     "Boto3/1.43.100 md/Botocore#1.43.100 ua/2.1 os/linux#<kernel> md/arch#<arch> lang/python#3.13.18 md/pyimpl#CPython m/D,N,Z,b,g cfg/retry-mode#legacy Botocore/1.43.100"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/sqs/aws4_request, SignedHeaders=content-type;host;x-amz-date;x-amz-target;x-amzn-query-mode, Signature=<hex>"
+    ],
+    [
+     "amz-sdk-invocation-id",
+     "<uuid>"
+    ],
+    [
+     "amz-sdk-request",
+     "attempt=1"
+    ],
+    [
+     "Content-Length",
+     "60"
+    ]
+   ],
+   "operation": "DeleteQueue",
+   "body": {
+    "QueueUrl": "http://127.0.0.1:<port>/123456789012/evidence"
+   },
+   "response_status": 200,
+   "response_type": null
+  },
+  {
+   "method": "POST",
+   "path": "/",
+   "http_version": "HTTP/1.1",
+   "content_type": "application/x-amz-json-1.0",
+   "headers": [
+    [
+     "Host",
+     "127.0.0.1:<port>"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "X-Amz-Target",
+     "AmazonSQS.GetQueueUrl"
+    ],
+    [
+     "Content-Type",
+     "application/x-amz-json-1.0"
+    ],
+    [
+     "x-amzn-query-mode",
+     "true"
+    ],
+    [
+     "User-Agent",
+     "Boto3/1.43.100 md/Botocore#1.43.100 ua/2.1 os/linux#<kernel> md/arch#<arch> lang/python#3.13.18 md/pyimpl#CPython m/D,N,Z,b,g cfg/retry-mode#legacy Botocore/1.43.100"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/sqs/aws4_request, SignedHeaders=content-type;host;x-amz-date;x-amz-target;x-amzn-query-mode, Signature=<hex>"
+    ],
+    [
+     "amz-sdk-invocation-id",
+     "<uuid>"
+    ],
+    [
+     "amz-sdk-request",
+     "attempt=1"
+    ],
+    [
+     "Content-Length",
+     "25"
+    ]
+   ],
+   "operation": "GetQueueUrl",
+   "body": {
+    "QueueName": "evidence"
+   },
+   "response_status": 400,
+   "response_type": "com.amazonaws.sqs#QueueDoesNotExist"
+  }
+ ],
+ "summary": {
+  "operations": [
+   "CreateQueue",
+   "GetQueueUrl",
+   "SetQueueAttributes",
+   "GetQueueAttributes",
+   "ListQueues",
+   "TagQueue",
+   "ListQueueTags",
+   "UntagQueue",
+   "SendMessage",
+   "SendMessageBatch",
+   "ReceiveMessage",
+   "ChangeMessageVisibility",
+   "ChangeMessageVisibilityBatch",
+   "DeleteMessage",
+   "DeleteMessageBatch",
+   "ReceiveMessage",
+   "PurgeQueue",
+   "CreateQueue",
+   "SendMessage",
+   "ReceiveMessage",
+   "DeleteMessage",
+   "DeleteQueue",
+   "DeleteQueue",
+   "GetQueueUrl"
+  ],
+  "content_types": [
+   "application/x-amz-json-1.0"
+  ],
+  "http_versions": [
+   "HTTP/1.1"
+  ]
+ }
+}

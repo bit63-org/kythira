@@ -1,0 +1,655 @@
+{
+ "client": "sqs-java-messaging-lib-2.1.5",
+ "requests": [
+  {
+   "method": "POST",
+   "path": "/",
+   "http_version": "HTTP/1.1",
+   "content_type": "application/x-amz-json-1.0",
+   "headers": [
+    [
+     "amz-sdk-invocation-id",
+     "<uuid>"
+    ],
+    [
+     "amz-sdk-request",
+     "attempt=1; max=4"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/sqs/aws4_request, SignedHeaders=amz-sdk-invocation-id;amz-sdk-request;content-length;content-type;host;x-amz-content-sha256;x-amz-date;x-amz-target;x-amzn-query-mode, Signature=<hex>"
+    ],
+    [
+     "Content-Type",
+     "application/x-amz-json-1.0"
+    ],
+    [
+     "User-Agent",
+     "aws-sdk-java/2.57.11 md/io#sync md/http#UrlConnection ua/2.1 api/SQS#2.57.x os/Linux#<kernel> lang/java#21.0.13.0.3 md/OpenJDK_64-Bit_Server_VM#21.0.13.0.3+1-1-24.04.1-Ubuntu md/vendor#Ubuntu md/en_US m/AK,D,N,g"
+    ],
+    [
+     "x-amz-content-sha256",
+     "<sha256-hex>"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "X-Amz-Target",
+     "AmazonSQS.GetQueueUrl"
+    ],
+    [
+     "x-amzn-query-mode",
+     "true"
+    ],
+    [
+     "Accept",
+     "*/*"
+    ],
+    [
+     "Host",
+     "127.0.0.1:<port>"
+    ],
+    [
+     "Connection",
+     "keep-alive"
+    ],
+    [
+     "Content-Length",
+     "28"
+    ]
+   ],
+   "operation": "GetQueueUrl",
+   "body": {
+    "QueueName": "evidence-jms"
+   },
+   "response_status": 400,
+   "response_type": "com.amazonaws.sqs#QueueDoesNotExist"
+  },
+  {
+   "method": "POST",
+   "path": "/",
+   "http_version": "HTTP/1.1",
+   "content_type": "application/x-amz-json-1.0",
+   "headers": [
+    [
+     "amz-sdk-invocation-id",
+     "<uuid>"
+    ],
+    [
+     "amz-sdk-request",
+     "attempt=1; max=4"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/sqs/aws4_request, SignedHeaders=amz-sdk-invocation-id;amz-sdk-request;content-length;content-type;host;x-amz-content-sha256;x-amz-date;x-amz-target;x-amzn-query-mode, Signature=<hex>"
+    ],
+    [
+     "Content-Type",
+     "application/x-amz-json-1.0"
+    ],
+    [
+     "User-Agent",
+     "aws-sdk-java/2.57.11 md/io#sync md/http#UrlConnection ua/2.1 api/SQS#2.57.x os/Linux#<kernel> lang/java#21.0.13.0.3 md/OpenJDK_64-Bit_Server_VM#21.0.13.0.3+1-1-24.04.1-Ubuntu md/vendor#Ubuntu md/en_US m/AK,D,N,g"
+    ],
+    [
+     "x-amz-content-sha256",
+     "<sha256-hex>"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "X-Amz-Target",
+     "AmazonSQS.CreateQueue"
+    ],
+    [
+     "x-amzn-query-mode",
+     "true"
+    ],
+    [
+     "Accept",
+     "*/*"
+    ],
+    [
+     "Host",
+     "127.0.0.1:<port>"
+    ],
+    [
+     "Connection",
+     "keep-alive"
+    ],
+    [
+     "Content-Length",
+     "28"
+    ]
+   ],
+   "operation": "CreateQueue",
+   "body": {
+    "QueueName": "evidence-jms"
+   },
+   "response_status": 200,
+   "response_type": null
+  },
+  {
+   "method": "POST",
+   "path": "/",
+   "http_version": "HTTP/1.1",
+   "content_type": "application/x-amz-json-1.0",
+   "headers": [
+    [
+     "amz-sdk-invocation-id",
+     "<uuid>"
+    ],
+    [
+     "amz-sdk-request",
+     "attempt=1; max=4"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/sqs/aws4_request, SignedHeaders=amz-sdk-invocation-id;amz-sdk-request;content-length;content-type;host;x-amz-content-sha256;x-amz-date;x-amz-target;x-amzn-query-mode, Signature=<hex>"
+    ],
+    [
+     "Content-Type",
+     "application/x-amz-json-1.0"
+    ],
+    [
+     "User-Agent",
+     "aws-sdk-java/2.57.11 md/io#sync md/http#UrlConnection ua/2.1 api/SQS#2.57.x os/Linux#<kernel> lang/java#21.0.13.0.3 md/OpenJDK_64-Bit_Server_VM#21.0.13.0.3+1-1-24.04.1-Ubuntu md/vendor#Ubuntu md/en_US m/AK,D,N,g"
+    ],
+    [
+     "x-amz-content-sha256",
+     "<sha256-hex>"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "X-Amz-Target",
+     "AmazonSQS.GetQueueUrl"
+    ],
+    [
+     "x-amzn-query-mode",
+     "true"
+    ],
+    [
+     "Accept",
+     "*/*"
+    ],
+    [
+     "Host",
+     "127.0.0.1:<port>"
+    ],
+    [
+     "Connection",
+     "keep-alive"
+    ],
+    [
+     "Content-Length",
+     "28"
+    ]
+   ],
+   "operation": "GetQueueUrl",
+   "body": {
+    "QueueName": "evidence-jms"
+   },
+   "response_status": 200,
+   "response_type": null
+  },
+  {
+   "method": "POST",
+   "path": "/",
+   "http_version": "HTTP/1.1",
+   "content_type": "application/x-amz-json-1.0",
+   "headers": [
+    [
+     "amz-sdk-invocation-id",
+     "<uuid>"
+    ],
+    [
+     "amz-sdk-request",
+     "attempt=1; max=4"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/sqs/aws4_request, SignedHeaders=amz-sdk-invocation-id;amz-sdk-request;content-length;content-type;host;x-amz-content-sha256;x-amz-date;x-amz-target;x-amzn-query-mode, Signature=<hex>"
+    ],
+    [
+     "Content-Type",
+     "application/x-amz-json-1.0"
+    ],
+    [
+     "User-Agent",
+     "aws-sdk-java/2.57.11 md/io#sync md/http#UrlConnection ua/2.1 api/SQS#2.57.x os/Linux#<kernel> lang/java#21.0.13.0.3 md/OpenJDK_64-Bit_Server_VM#21.0.13.0.3+1-1-24.04.1-Ubuntu md/vendor#Ubuntu md/en_US m/AK,D,N,g"
+    ],
+    [
+     "x-amz-content-sha256",
+     "<sha256-hex>"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "X-Amz-Target",
+     "AmazonSQS.SendMessage"
+    ],
+    [
+     "x-amzn-query-mode",
+     "true"
+    ],
+    [
+     "Accept",
+     "*/*"
+    ],
+    [
+     "Host",
+     "127.0.0.1:<port>"
+    ],
+    [
+     "Connection",
+     "keep-alive"
+    ],
+    [
+     "Content-Length",
+     "278"
+    ]
+   ],
+   "operation": "SendMessage",
+   "body": {
+    "MessageAttributes": {
+     "JMS_SQSMessageType": {
+      "DataType": "String",
+      "StringValue": "text"
+     },
+     "color": {
+      "DataType": "String",
+      "StringValue": "blue"
+     },
+     "count": {
+      "DataType": "Number.int",
+      "StringValue": "7"
+     }
+    },
+    "MessageBody": "hello jms",
+    "QueueUrl": "http://127.0.0.1:<port>/123456789012/evidence-jms"
+   },
+   "response_status": 200,
+   "response_type": null
+  },
+  {
+   "method": "POST",
+   "path": "/",
+   "http_version": "HTTP/1.1",
+   "content_type": "application/x-amz-json-1.0",
+   "headers": [
+    [
+     "amz-sdk-invocation-id",
+     "<uuid>"
+    ],
+    [
+     "amz-sdk-request",
+     "attempt=1; max=4"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/sqs/aws4_request, SignedHeaders=amz-sdk-invocation-id;amz-sdk-request;content-length;content-type;host;x-amz-content-sha256;x-amz-date;x-amz-target;x-amzn-query-mode, Signature=<hex>"
+    ],
+    [
+     "Content-Type",
+     "application/x-amz-json-1.0"
+    ],
+    [
+     "User-Agent",
+     "aws-sdk-java/2.57.11 md/io#sync md/http#UrlConnection ua/2.1 api/SQS#2.57.x os/Linux#<kernel> lang/java#21.0.13.0.3 md/OpenJDK_64-Bit_Server_VM#21.0.13.0.3+1-1-24.04.1-Ubuntu md/vendor#Ubuntu md/en_US m/AK,D,N,g"
+    ],
+    [
+     "x-amz-content-sha256",
+     "<sha256-hex>"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "X-Amz-Target",
+     "AmazonSQS.ReceiveMessage"
+    ],
+    [
+     "x-amzn-query-mode",
+     "true"
+    ],
+    [
+     "Accept",
+     "*/*"
+    ],
+    [
+     "Host",
+     "127.0.0.1:<port>"
+    ],
+    [
+     "Connection",
+     "keep-alive"
+    ],
+    [
+     "Content-Length",
+     "165"
+    ]
+   ],
+   "operation": "ReceiveMessage",
+   "body": {
+    "AttributeNames": [
+     "All"
+    ],
+    "MaxNumberOfMessages": 1,
+    "MessageAttributeNames": [
+     "All"
+    ],
+    "QueueUrl": "http://127.0.0.1:<port>/123456789012/evidence-jms",
+    "WaitTimeSeconds": 20
+   },
+   "response_status": 200,
+   "response_type": null
+  },
+  {
+   "method": "POST",
+   "path": "/",
+   "http_version": "HTTP/1.1",
+   "content_type": "application/x-amz-json-1.0",
+   "headers": [
+    [
+     "amz-sdk-invocation-id",
+     "<uuid>"
+    ],
+    [
+     "amz-sdk-request",
+     "attempt=1; max=4"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/sqs/aws4_request, SignedHeaders=amz-sdk-invocation-id;amz-sdk-request;content-length;content-type;host;x-amz-content-sha256;x-amz-date;x-amz-target;x-amzn-query-mode, Signature=<hex>"
+    ],
+    [
+     "Content-Type",
+     "application/x-amz-json-1.0"
+    ],
+    [
+     "User-Agent",
+     "aws-sdk-java/2.57.11 md/io#sync md/http#UrlConnection ua/2.1 api/SQS#2.57.x os/Linux#<kernel> lang/java#21.0.13.0.3 md/OpenJDK_64-Bit_Server_VM#21.0.13.0.3+1-1-24.04.1-Ubuntu md/vendor#Ubuntu md/en_US m/AK,D,N,g"
+    ],
+    [
+     "x-amz-content-sha256",
+     "<sha256-hex>"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "X-Amz-Target",
+     "AmazonSQS.ReceiveMessage"
+    ],
+    [
+     "x-amzn-query-mode",
+     "true"
+    ],
+    [
+     "Accept",
+     "*/*"
+    ],
+    [
+     "Host",
+     "127.0.0.1:<port>"
+    ],
+    [
+     "Connection",
+     "keep-alive"
+    ],
+    [
+     "Content-Length",
+     "165"
+    ]
+   ],
+   "operation": "ReceiveMessage",
+   "body": {
+    "AttributeNames": [
+     "All"
+    ],
+    "MaxNumberOfMessages": 1,
+    "MessageAttributeNames": [
+     "All"
+    ],
+    "QueueUrl": "http://127.0.0.1:<port>/123456789012/evidence-jms",
+    "WaitTimeSeconds": 20
+   },
+   "response_status": 200,
+   "response_type": null
+  },
+  {
+   "method": "POST",
+   "path": "/",
+   "http_version": "HTTP/1.1",
+   "content_type": "application/x-amz-json-1.0",
+   "headers": [
+    [
+     "amz-sdk-invocation-id",
+     "<uuid>"
+    ],
+    [
+     "amz-sdk-request",
+     "attempt=1; max=4"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/sqs/aws4_request, SignedHeaders=amz-sdk-invocation-id;amz-sdk-request;content-length;content-type;host;x-amz-content-sha256;x-amz-date;x-amz-target;x-amzn-query-mode, Signature=<hex>"
+    ],
+    [
+     "Content-Type",
+     "application/x-amz-json-1.0"
+    ],
+    [
+     "User-Agent",
+     "aws-sdk-java/2.57.11 md/io#sync md/http#UrlConnection ua/2.1 api/SQS#2.57.x os/Linux#<kernel> lang/java#21.0.13.0.3 md/OpenJDK_64-Bit_Server_VM#21.0.13.0.3+1-1-24.04.1-Ubuntu md/vendor#Ubuntu md/en_US m/AK,D,N,g"
+    ],
+    [
+     "x-amz-content-sha256",
+     "<sha256-hex>"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "X-Amz-Target",
+     "AmazonSQS.DeleteMessageBatch"
+    ],
+    [
+     "x-amzn-query-mode",
+     "true"
+    ],
+    [
+     "Accept",
+     "*/*"
+    ],
+    [
+     "Host",
+     "127.0.0.1:<port>"
+    ],
+    [
+     "Connection",
+     "keep-alive"
+    ],
+    [
+     "Content-Length",
+     "169"
+    ]
+   ],
+   "operation": "DeleteMessageBatch",
+   "body": {
+    "Entries": [
+     {
+      "Id": "0",
+      "ReceiptHandle": "cmVjZWlwdC0xLTAwMDAwMDAwLTAwMDAtNDAwMC04MDAwLTAwMDAwMDAwMDAwMQ=="
+     }
+    ],
+    "QueueUrl": "http://127.0.0.1:<port>/123456789012/evidence-jms"
+   },
+   "response_status": 200,
+   "response_type": null
+  },
+  {
+   "method": "POST",
+   "path": "/",
+   "http_version": "HTTP/1.1",
+   "content_type": "application/x-amz-json-1.0",
+   "headers": [
+    [
+     "amz-sdk-invocation-id",
+     "<uuid>"
+    ],
+    [
+     "amz-sdk-request",
+     "attempt=1; max=4"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/sqs/aws4_request, SignedHeaders=amz-sdk-invocation-id;amz-sdk-request;content-length;content-type;host;x-amz-content-sha256;x-amz-date;x-amz-target;x-amzn-query-mode, Signature=<hex>"
+    ],
+    [
+     "Content-Type",
+     "application/x-amz-json-1.0"
+    ],
+    [
+     "User-Agent",
+     "aws-sdk-java/2.57.11 md/io#sync md/http#UrlConnection ua/2.1 api/SQS#2.57.x os/Linux#<kernel> lang/java#21.0.13.0.3 md/OpenJDK_64-Bit_Server_VM#21.0.13.0.3+1-1-24.04.1-Ubuntu md/vendor#Ubuntu md/en_US m/AK,D,N,g"
+    ],
+    [
+     "x-amz-content-sha256",
+     "<sha256-hex>"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "X-Amz-Target",
+     "AmazonSQS.GetQueueUrl"
+    ],
+    [
+     "x-amzn-query-mode",
+     "true"
+    ],
+    [
+     "Accept",
+     "*/*"
+    ],
+    [
+     "Host",
+     "127.0.0.1:<port>"
+    ],
+    [
+     "Connection",
+     "keep-alive"
+    ],
+    [
+     "Content-Length",
+     "28"
+    ]
+   ],
+   "operation": "GetQueueUrl",
+   "body": {
+    "QueueName": "evidence-jms"
+   },
+   "response_status": 200,
+   "response_type": null
+  },
+  {
+   "method": "POST",
+   "path": "/",
+   "http_version": "HTTP/1.1",
+   "content_type": "application/x-amz-json-1.0",
+   "headers": [
+    [
+     "amz-sdk-invocation-id",
+     "<uuid>"
+    ],
+    [
+     "amz-sdk-request",
+     "attempt=1; max=4"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/sqs/aws4_request, SignedHeaders=amz-sdk-invocation-id;amz-sdk-request;content-length;content-type;host;x-amz-content-sha256;x-amz-date;x-amz-target;x-amzn-query-mode, Signature=<hex>"
+    ],
+    [
+     "Content-Type",
+     "application/x-amz-json-1.0"
+    ],
+    [
+     "User-Agent",
+     "aws-sdk-java/2.57.11 md/io#sync md/http#UrlConnection ua/2.1 api/SQS#2.57.x os/Linux#<kernel> lang/java#21.0.13.0.3 md/OpenJDK_64-Bit_Server_VM#21.0.13.0.3+1-1-24.04.1-Ubuntu md/vendor#Ubuntu md/en_US m/AK,D,N,g"
+    ],
+    [
+     "x-amz-content-sha256",
+     "<sha256-hex>"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "X-Amz-Target",
+     "AmazonSQS.DeleteQueue"
+    ],
+    [
+     "x-amzn-query-mode",
+     "true"
+    ],
+    [
+     "Accept",
+     "*/*"
+    ],
+    [
+     "Host",
+     "127.0.0.1:<port>"
+    ],
+    [
+     "Connection",
+     "keep-alive"
+    ],
+    [
+     "Content-Length",
+     "63"
+    ]
+   ],
+   "operation": "DeleteQueue",
+   "body": {
+    "QueueUrl": "http://127.0.0.1:<port>/123456789012/evidence-jms"
+   },
+   "response_status": 200,
+   "response_type": null
+  }
+ ],
+ "summary": {
+  "operations": [
+   "GetQueueUrl",
+   "CreateQueue",
+   "GetQueueUrl",
+   "SendMessage",
+   "ReceiveMessage",
+   "ReceiveMessage",
+   "DeleteMessageBatch",
+   "GetQueueUrl",
+   "DeleteQueue"
+  ],
+  "content_types": [
+   "application/x-amz-json-1.0"
+  ],
+  "http_versions": [
+   "HTTP/1.1"
+  ]
+ }
+}
