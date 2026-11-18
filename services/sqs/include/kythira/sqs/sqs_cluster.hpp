@@ -14,6 +14,7 @@
 /// over one in-process state machine holding every key, for tests and a
 /// single-node development mode.
 
+#include <kythira/sqs/sqs_data_access.hpp>
 #include <kythira/sqs/sqs_queue_state_machine.hpp>
 
 #include <raft/memory_kv_engine.hpp>
@@ -38,14 +39,24 @@ namespace kythira::sqs {
 ///   leader, timeout). A nullopt is ambiguous: the entry may still commit.
 /// - `read(key, f)`: run `f` on the state machine of the group owning
 ///   `key`, as this node's replica has it; false when this node cannot.
+/// - `query(q)`: one of the front end's named reads (`sqs_data_access.hpp`),
+///   answered by a replica of the group owning `query_key(q)`: this node's,
+///   or a data node's when this node holds none; nullopt when no replica
+///   answered.
 /// - `now_ms()`: the clock leaders stamp entries with (Requirement 5.4).
+///
+/// The handlers use only `propose`, `query` and `now_ms`, so a front end
+/// without the data role runs over `remote_queue_cluster`. `read` is for
+/// the leader-side workers, which run only where the data is.
 template<typename C>
-concept queue_cluster = requires(C& c, const std::string& key, std::vector<std::byte> entry,
-                                 std::function<void(const typename C::state_machine_type&)> f) {
-    { c.propose(key, std::move(entry)) } -> std::same_as<std::optional<std::vector<std::byte>>>;
-    { c.read(key, f) } -> std::same_as<bool>;
-    { c.now_ms() } -> std::same_as<std::uint64_t>;
-};
+concept queue_cluster =
+    requires(C& c, const std::string& key, std::vector<std::byte> entry,
+             std::function<void(const typename C::state_machine_type&)> f, const data_query& q) {
+        { c.propose(key, std::move(entry)) } -> std::same_as<std::optional<std::vector<std::byte>>>;
+        { c.read(key, f) } -> std::same_as<bool>;
+        { c.query(q) } -> std::same_as<std::optional<data_answer>>;
+        { c.now_ms() } -> std::same_as<std::uint64_t>;
+    };
 
 /// Every key in one state machine on one `memory_kv_engine`, behind one
 /// mutex: entries commit in call order, reads see every committed entry.
@@ -70,6 +81,10 @@ public:
         const std::scoped_lock lock(_mutex);
         f(_sm);
         return true;
+    }
+
+    auto query(const data_query& q) -> std::optional<data_answer> {
+        return query_by_read(*this, q);
     }
 
     [[nodiscard]] auto now_ms() -> std::uint64_t { return _clock(); }

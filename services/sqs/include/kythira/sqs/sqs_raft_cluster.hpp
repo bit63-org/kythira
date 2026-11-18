@@ -24,6 +24,7 @@
 /// whose state machine is an `sqs_queue_state_machine`.
 
 #include <kythira/sqs/sqs_catalog.hpp>
+#include <kythira/sqs/sqs_data_access.hpp>
 #include <kythira/sqs/sqs_queue_state_machine.hpp>
 
 #include <raft/shard_exceptions.hpp>
@@ -79,6 +80,11 @@ public:
                 return true;
             });
         return done.value_or(false);
+    }
+
+    /// Answered from this node's replica (a replica read, like `read`).
+    auto query(const data_query& q) -> std::optional<data_answer> {
+        return query_by_read(*this, q);
     }
 
     [[nodiscard]] auto now_ms() -> std::uint64_t { return _clock(); }

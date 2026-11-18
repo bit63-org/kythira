@@ -34,8 +34,23 @@
 // (SQS_ELECTION_TIMEOUT_MIN_MS, ...; the bare KYTHIRA_* names in sqs_node).
 // The receipt keys must be the same on every node and survive restarts, so
 // a durable node needs SQS_RECEIPT_KEYS_FILE or SQS_FORWARD_SECRET.
+//
+// Layers (task 10, Requirements 11 and 12.1): KYTHIRA_SQS_ROLES picks what
+// the node runs, all of gateway, front_end and data by default.
+//   - With data, the node holds a replica, runs the leader-side workers,
+//     and serves the internal endpoints: propose, named reads, and the
+//     availability stream (sqs_availability.hpp).
+//   - With front_end (and, on this release, gateway with it), the node
+//     serves the SQS API; its handlers reach the data layer through a
+//     hybrid_queue_cluster, in-process for the groups held here and over
+//     SQS_DATA_ENDPOINTS for the rest. A front end without data follows
+//     every data node's availability stream into its long-poll hub.
+//   - Without front_end, the listener answers the internal endpoints only.
+// A drain ends parked long polls with empty answers before the listener
+// stops, so a front end restarts without its clients noticing.
 
 #include <kythira/sqs/sqs_actions.hpp>
+#include <kythira/sqs/sqs_availability.hpp>
 #include <kythira/sqs/sqs_compat_profile.hpp>
 #include <kythira/sqs/sqs_forward.hpp>
 #include <kythira/sqs/sqs_front_end.hpp>
@@ -45,6 +60,7 @@
 #include <kythira/sqs/sqs_queue_state_machine.hpp>
 #include <kythira/sqs/sqs_raft_cluster.hpp>
 #include <kythira/sqs/sqs_receipts.hpp>
+#include <kythira/sqs/sqs_remote_cluster.hpp>
 #include <kythira/sqs/sqs_service.hpp>
 #include <kythira/sqs/sqs_workers.hpp>
 
@@ -260,7 +276,8 @@ public:
     using authorizer_type = aws_auth::static_key_authorizer;
     using front_end_type = sqs::sqs_front_end<authorizer_type>;
     using handler_type = sqs::sqs_http_handler<front_end_type>;
-    using service_type = sqs::sqs_service<cluster_type>;
+    using routed_type = sqs::hybrid_queue_cluster<cluster_type>;
+    using service_type = sqs::sqs_service<routed_type>;
     using worker_type = sqs::tick_worker<cluster_type>;
     using mover_type = sqs::move_worker<cluster_type>;
     using grower_type = sqs::grow_worker<cluster_type>;
@@ -303,18 +320,20 @@ public:
             }
             const auto& nc = std::get<service_node::node_config>(node);
             read_cluster_options(env, nc);
-            if (_opt._receipt_keys_file.empty() && _opt._forward_secret.empty()) {
+            const bool serves_api = _opt.has(layers::role::front_end);
+            if (serves_api && _opt._receipt_keys_file.empty() && _opt._forward_secret.empty()) {
                 return std::string(
                     "SQS_RECEIPT_KEYS_FILE or SQS_FORWARD_SECRET is required: receipt handles "
                     "must verify on every node and after a restart");
             }
-            if (_opt._sse_key_file.empty() && _opt._forward_secret.empty()) {
+            if (serves_api && _opt._sse_key_file.empty() && _opt._forward_secret.empty()) {
                 return std::string(
                     "SQS_SSE_KEY_FILE or SQS_FORWARD_SECRET is required: queues are encrypted "
                     "with SSE-SQS by default and their messages must open on every node and "
                     "after a restart");
             }
-            if (_cluster_opt._voters.size() > 1 && _opt._forward_secret.empty()) {
+            if (_opt.has(layers::role::data) && _cluster_opt._voters.size() > 1 &&
+                _opt._forward_secret.empty()) {
                 return std::string(
                     "SQS_FORWARD_SECRET is required with more than one node: followers forward "
                     "writes to the leader signed with it");
@@ -325,18 +344,22 @@ public:
             }
             _service_config._profile = *profile;
             _service_config._receipt_keys =
-                _opt._receipt_keys_file.empty()
+                !serves_api ? sqs::receipt_key_ring{}
+                : _opt._receipt_keys_file.empty()
                     ? sqs::derived_receipt_key(_opt._forward_secret)
                     : sqs::parse_receipt_keys(module_detail::read_file(_opt._receipt_keys_file,
                                                                        "SQS_RECEIPT_KEYS_FILE"));
-            _service_config._sse = sqs::node_sse_keys(
-                _opt._sse_key_file.empty()
-                    ? std::string()
-                    : module_detail::read_file(_opt._sse_key_file, "SQS_SSE_KEY_FILE"),
-                _opt._forward_secret,
-                _opt._kms == "local" ? std::optional<std::string>(module_detail::read_file(
-                                           _opt._kms_passphrase_file, "SQS_KMS_PASSPHRASE_FILE"))
-                                     : std::nullopt);
+            if (serves_api) {
+                _service_config._sse = sqs::node_sse_keys(
+                    _opt._sse_key_file.empty()
+                        ? std::string()
+                        : module_detail::read_file(_opt._sse_key_file, "SQS_SSE_KEY_FILE"),
+                    _opt._forward_secret,
+                    _opt._kms == "local"
+                        ? std::optional<std::string>(module_detail::read_file(
+                              _opt._kms_passphrase_file, "SQS_KMS_PASSPHRASE_FILE"))
+                        : std::nullopt);
+            }
             _authorizer = std::make_unique<authorizer_type>(
                 aws_auth::parse_static_keys(
                     module_detail::read_file(_opt._static_keys_file, "SQS_STATIC_KEYS_FILE")),
@@ -349,60 +372,71 @@ public:
     }
 
     void register_groups(Host& host, const service_node::group_space& space) override {
-        for (const auto* sub : {"engine", "raft", "snapshots"}) {
-            std::filesystem::create_directories(_cluster_opt._data_dir / sub);
-        }
         _self = host.node_id();
-        _raft = std::make_unique<raft_host>(make_raft_config(host, space));
-        auto voters = _cluster_opt._voters;
-        if (voters.empty()) {
-            voters.push_back(_self);
+        if (_opt.has(layers::role::data)) {
+            register_data(host, space);
         }
-        _raft->create_group(space.to_host(k_first_group), voters);
-
-        kythira::mtls::client_config pc;
-        pc.ca_path = _cluster_opt._peer_ca;
-        pc.plaintext = _opt._allow_plaintext;
-        pc.client_certificate = false;  // the forwarding HMAC authenticates
-        pc.timeout = _cluster_opt._propose_timeout + std::chrono::seconds(2);
-        pc.max_body_bytes = _opt._max_body_bytes + 1024;
-        _peers = std::make_unique<kythira::mtls::client>(pc);
-        _cluster = std::make_unique<cluster_type>(
-            *_raft,
-            [this](const kythira::host_node_id& leader, const std::string& key,
-                   const std::vector<std::byte>& entry) { return forward(leader, key, entry); },
-            _cluster_opt._propose_timeout);
+        if (!_opt._data_endpoints.empty()) {
+            kythira::mtls::client_config dc;
+            dc.ca_path = _cluster_opt._peer_ca;
+            dc.plaintext = _opt._allow_plaintext;
+            dc.client_certificate = false;  // the forwarding HMAC authenticates
+            dc.timeout = _cluster_opt._propose_timeout + std::chrono::seconds(2);
+            dc.max_body_bytes = _opt._max_body_bytes + 1024;
+            _data_client = std::make_shared<kythira::mtls::client>(dc);
+            _remote = std::make_unique<sqs::remote_queue_cluster>(
+                _opt._data_endpoints, _opt._forward_secret, transport(_data_client));
+        }
+        if (!_opt.has(layers::role::front_end)) {
+            return;
+        }
+        // One group over the whole key space until task 12: a data node
+        // holds every key, so the remote side only serves front ends
+        // without the data role.
+        _routed = std::make_unique<routed_type>(
+            _cluster.get(), _cluster ? nullptr : _remote.get(),
+            [this](const std::string&) { return _cluster != nullptr; });
         _service_config._waits = &_hub;
-        _service = std::make_unique<service_type>(*_cluster, _service_config);
-        _worker = std::make_unique<worker_type>(
-            *_cluster, [this](const std::string& key) { return _cluster->leads(key); });
-        _worker_ptr.store(_worker.get(), std::memory_order_release);
-        _mover = std::make_unique<mover_type>(
-            *_cluster, [this](const std::string& key) { return _cluster->leads(key); },
-            sqs::sqs_arn_queue);
-        _grower = std::make_unique<grower_type>(
-            *_cluster, [this](const std::string& key) { return _cluster->leads(key); });
+        _service = std::make_unique<service_type>(*_routed, _service_config);
+        if (!_cluster) {
+            kythira::mtls::client_config fc;
+            fc.ca_path = _cluster_opt._peer_ca;
+            fc.plaintext = _opt._allow_plaintext;
+            fc.client_certificate = false;
+            // Longer than the data node holds an availability call.
+            fc.timeout = k_feed_wait + std::chrono::seconds(5);
+            _feed_client = std::make_shared<kythira::mtls::client>(fc);
+            _follower = std::make_unique<sqs::availability_follower>(
+                _hub, _opt._data_endpoints, _opt._forward_secret, transport(_feed_client));
+        }
     }
 
     void publish(service_node::module_registry& /*registry*/) override {}
 
     void start(service_node::module_registry& /*registry*/) override {
         _hub.reopen();
-        _raft->start();
-        _worker->start();
-        _mover->start();
-        _grower->start();
-        _driving = true;
-        _driver = std::thread([this] {
-            while (_driving.load(std::memory_order_acquire)) {
-                try {
-                    (void)_raft->tick();
-                } catch (const std::exception& e) {
-                    std::cerr << "sqs: tick failed: " << e.what() << std::endl;
+        if (_raft) {
+            _feed = std::make_unique<sqs::availability_feed>();
+            _feed_ptr.store(_feed.get(), std::memory_order_release);
+            _raft->start();
+            _worker->start();
+            _mover->start();
+            _grower->start();
+            _driving = true;
+            _driver = std::thread([this] {
+                while (_driving.load(std::memory_order_acquire)) {
+                    try {
+                        (void)_raft->tick();
+                    } catch (const std::exception& e) {
+                        std::cerr << "sqs: tick failed: " << e.what() << std::endl;
+                    }
+                    std::this_thread::sleep_for(_cluster_opt._tick_interval);
                 }
-                std::this_thread::sleep_for(_cluster_opt._tick_interval);
-            }
-        });
+            });
+        }
+        if (_follower) {
+            _follower->start();
+        }
 
         https::server_config hc;
         hc.bind_address = _opt._listen_host;
@@ -439,14 +473,27 @@ public:
                                  "://localhost:" + std::to_string(_server->port())
                            : _opt._endpoint;
         _front_end = std::make_unique<front_end_type>(fc, *_authorizer);
-        _service->register_with(*_front_end);
-        _handler_owner = std::make_unique<handler_type>(
-            *_front_end, _opt._forward_secret,
-            [this](const std::string& key, std::vector<std::byte> entry) {
+        if (_service) {
+            _service->register_with(*_front_end);
+        }
+        sqs::local_proposer propose;
+        if (_cluster) {
+            propose = [this](const std::string& key, std::vector<std::byte> entry) {
                 ++_peer_requests;
                 return _cluster->propose_local(key, std::move(entry));
+            };
+        }
+        _handler_owner =
+            std::make_unique<handler_type>(*_front_end, _opt._forward_secret, std::move(propose));
+        _handler_owner->set_client_api(_service != nullptr);
+        if (_cluster) {
+            _handler_owner->set_local_query([this](const sqs::data_query& q) {
+                ++_peer_requests;
+                return _cluster->query(q);
             });
-        if (_opt._sns_bridge) {
+            _handler_owner->set_availability_feed(_feed.get(), k_feed_wait);
+        }
+        if (_opt._sns_bridge && _service) {
             _bridge = std::make_unique<bridge_type>(*_service,
                                                     sqs::sns_bridge_settings(_opt, fc._endpoint));
             _handler_owner->set_sns_bridge(
@@ -458,7 +505,8 @@ public:
         _handler.store(_handler_owner.get(), std::memory_order_release);
         _started = true;
         std::cout << "sqs " << kythira::host_node_id_text(_self)
-                  << " ready: nodes=" << std::max<std::size_t>(1, _cluster_opt._voters.size())
+                  << " ready: roles=" << _opt._roles.to_string()
+                  << " nodes=" << std::max<std::size_t>(1, _cluster_opt._voters.size())
                   << " api=" << _server->port() << (_opt._allow_plaintext ? " (http)" : " (https)")
                   << " queue URLs on " << fc._endpoint << std::endl;
     }
@@ -467,6 +515,9 @@ public:
     /// polls answer empty first (Requirement 12.1).
     void drain() override {
         _hub.close();
+        if (auto* f = _feed_ptr.load(std::memory_order_acquire)) {
+            f->close();  // front ends' availability calls answer now
+        }
         if (_server) {
             _server->stop();
         }
@@ -474,6 +525,9 @@ public:
 
     void stop() override {
         drain();
+        if (_follower) {
+            _follower->stop();
+        }
         if (_worker) {
             _worker->stop();
         }
@@ -497,6 +551,11 @@ public:
         _front_end.reset();
         _bridge.reset();
         _service.reset();
+        _routed.reset();
+        _follower.reset();
+        _remote.reset();
+        _data_client.reset();
+        _feed_client.reset();
         _worker_ptr.store(nullptr, std::memory_order_release);
         _worker.reset();
         _mover.reset();
@@ -504,6 +563,8 @@ public:
         _cluster.reset();
         _peers.reset();
         _raft.reset();
+        _feed_ptr.store(nullptr, std::memory_order_release);
+        _feed.reset();
         _started = false;
     }
 
@@ -518,22 +579,33 @@ public:
     }
 
     [[nodiscard]] auto metrics() const -> std::vector<service_node::module_metric> override {
-        if (!_raft || !_cluster) {
+        if (!_started) {
             return {};
         }
-        return {
+        std::vector<service_node::module_metric> out{
             {"requests", static_cast<double>(_requests.load()), {}},
             {"peer_requests", static_cast<double>(_peer_requests.load()), {}},
-            {"proposals_forwarded", static_cast<double>(_cluster->forwarded_count()), {}},
-            {"forward_failures", static_cast<double>(_forward_failures.load()), {}},
             {"long_polls_parked", static_cast<double>(_hub.parked()), {}},
             {"long_polls_woken", static_cast<double>(_hub.notified()), {}},
-            {"ticks_proposed", static_cast<double>(_worker ? _worker->ticks() : 0), {}},
-            {"messages_moved", static_cast<double>(_mover ? _mover->moved() : 0), {}},
-            {"partitions_grown", static_cast<double>(_grower ? _grower->grown() : 0), {}},
             {"sns_bridge_delivered", static_cast<double>(_bridge ? _bridge->delivered() : 0), {}},
-            {"raft_term_sum", service_node::raft_term_sum(*_raft), {}},
         };
+        if (_follower) {
+            out.push_back({"availability_batches", static_cast<double>(_follower->batches()), {}});
+        }
+        if (!_raft || !_cluster) {
+            return out;
+        }
+        for (auto m : std::vector<service_node::module_metric>{
+                 {"proposals_forwarded", static_cast<double>(_cluster->forwarded_count()), {}},
+                 {"forward_failures", static_cast<double>(_forward_failures.load()), {}},
+                 {"ticks_proposed", static_cast<double>(_worker ? _worker->ticks() : 0), {}},
+                 {"messages_moved", static_cast<double>(_mover ? _mover->moved() : 0), {}},
+                 {"partitions_grown", static_cast<double>(_grower ? _grower->grown() : 0), {}},
+                 {"raft_term_sum", service_node::raft_term_sum(*_raft), {}},
+             }) {
+            out.push_back(std::move(m));
+        }
+        return out;
     }
 
 private:
@@ -547,8 +619,19 @@ private:
     std::unique_ptr<raft_host> _raft;
     std::unique_ptr<kythira::mtls::client> _peers;
     std::unique_ptr<cluster_type> _cluster;
+    /// The data layer over SQS_DATA_ENDPOINTS, when given.
+    std::shared_ptr<kythira::mtls::client> _data_client;
+    std::unique_ptr<sqs::remote_queue_cluster> _remote;
+    /// What the handlers use: `_cluster` here, `_remote` for the rest.
+    std::unique_ptr<routed_type> _routed;
     std::unique_ptr<service_type> _service;
     sqs::availability_hub _hub;
+    /// A data node's wake-up stream for front ends without the data role.
+    std::unique_ptr<sqs::availability_feed> _feed;
+    std::atomic<sqs::availability_feed*> _feed_ptr{nullptr};
+    /// A front end without the data role: follows the data nodes' feeds.
+    std::shared_ptr<kythira::mtls::client> _feed_client;
+    std::unique_ptr<sqs::availability_follower> _follower;
     std::unique_ptr<worker_type> _worker;
     /// For the state machines' listener, which may run before the worker
     /// exists or after it has gone.
@@ -570,6 +653,55 @@ private:
     std::atomic<std::uint64_t> _requests{0};
     std::atomic<std::uint64_t> _peer_requests{0};
     std::atomic<std::uint64_t> _forward_failures{0};
+
+    /// How long a data node holds a front end's availability call.
+    static constexpr std::chrono::milliseconds k_feed_wait{10000};
+
+    /// The replica, Raft host and leader-side workers of the data role.
+    void register_data(Host& host, const service_node::group_space& space) {
+        for (const auto* sub : {"engine", "raft", "snapshots"}) {
+            std::filesystem::create_directories(_cluster_opt._data_dir / sub);
+        }
+        _raft = std::make_unique<raft_host>(make_raft_config(host, space));
+        auto voters = _cluster_opt._voters;
+        if (voters.empty()) {
+            voters.push_back(_self);
+        }
+        _raft->create_group(space.to_host(k_first_group), voters);
+
+        kythira::mtls::client_config pc;
+        pc.ca_path = _cluster_opt._peer_ca;
+        pc.plaintext = _opt._allow_plaintext;
+        pc.client_certificate = false;  // the forwarding HMAC authenticates
+        pc.timeout = _cluster_opt._propose_timeout + std::chrono::seconds(2);
+        pc.max_body_bytes = _opt._max_body_bytes + 1024;
+        _peers = std::make_unique<kythira::mtls::client>(pc);
+        _cluster = std::make_unique<cluster_type>(
+            *_raft,
+            [this](const kythira::host_node_id& leader, const std::string& key,
+                   const std::vector<std::byte>& entry) { return forward(leader, key, entry); },
+            _cluster_opt._propose_timeout);
+        _worker = std::make_unique<worker_type>(
+            *_cluster, [this](const std::string& key) { return _cluster->leads(key); });
+        _worker_ptr.store(_worker.get(), std::memory_order_release);
+        _mover = std::make_unique<mover_type>(
+            *_cluster, [this](const std::string& key) { return _cluster->leads(key); },
+            sqs::sqs_arn_queue);
+        _grower = std::make_unique<grower_type>(
+            *_cluster, [this](const std::string& key) { return _cluster->leads(key); });
+    }
+
+    /// Internal calls to the data nodes over `client`.
+    [[nodiscard]] static auto transport(std::shared_ptr<kythira::mtls::client> client)
+        -> sqs::data_transport {
+        return
+            [client = std::move(client)](
+                const std::string& base, const std::string& path,
+                const std::vector<std::pair<std::string, std::string>>& headers, std::string body) {
+                return client->request("POST", base, path, std::move(body),
+                                       "application/octet-stream", "kythira-sqs", headers);
+            };
+    }
 
     void read_cluster_options(const service_node::env_lookup& env,
                               const service_node::node_config& nc) {
@@ -642,7 +774,11 @@ private:
             typename types::state_machine_type sm;
             sm.set_availability_listener([this](const sqs::queue_target& t, bool visible) {
                 if (visible) {
-                    _hub.notify(sqs::queue_keys::partition_prefix(t));
+                    const auto key = sqs::queue_keys::partition_prefix(t);
+                    _hub.notify(key);
+                    if (auto* f = _feed_ptr.load(std::memory_order_acquire)) {
+                        f->publish(key);
+                    }
                 }
                 if (auto* w = _worker_ptr.load(std::memory_order_acquire)) {
                     w->wake();

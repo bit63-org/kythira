@@ -385,13 +385,11 @@ public:
         if (!catalog_keys::valid_account(account) || name.empty()) {
             return std::nullopt;
         }
-        std::optional<queue_record> out;
-        const auto key = catalog_keys::queue(account, name);
-        if (!_cluster.read(
-                key, [&](const state_machine_type& sm) { out = sm.find_queue(account, name); })) {
-            throw std::runtime_error("sqs: catalog unreadable on this node");
+        const auto a = _cluster.query(data_query::find(std::string(account), std::string(name)));
+        if (!a) {
+            throw std::runtime_error("sqs: catalog unreadable from this node");
         }
-        return out;
+        return a->_queue;
     }
 
 private:
@@ -743,11 +741,13 @@ private:
         const auto& account = ctx._principal.account;
         const auto limit = static_cast<std::size_t>(max.value_or(1000));
         std::vector<queue_record> found;
-        if (catalog_keys::valid_account(account) &&
-            !_cluster.read(catalog_keys::queues_prefix(account), [&](const state_machine_type& sm) {
-                found = sm.list_queues(account, prefix, after, limit + 1);
-            })) {
-            return internal_failure();
+        if (catalog_keys::valid_account(account)) {
+            auto a =
+                _cluster.query(data_query::list(account, std::string(prefix), after, limit + 1));
+            if (!a) {
+                return internal_failure();
+            }
+            found = std::move(a->_queues);
         }
         boost::json::object out;
         boost::json::array urls;
@@ -792,21 +792,21 @@ private:
         const auto limit = static_cast<std::size_t>(max.value_or(1000));
         std::vector<std::string> sources;
         bool more = false;
-        if (!_cluster.read(catalog_keys::queues_prefix(account), [&](const state_machine_type& sm) {
-                for (const auto& r :
-                     sm.list_queues(account, "", after, std::numeric_limits<std::size_t>::max())) {
-                    const auto o = attribute_detail::parse_object(r._settings._redrive_policy);
-                    if (!o || string_member(*o, "deadLetterTargetArn").value_or("") != arn) {
-                        continue;
-                    }
-                    if (sources.size() == limit) {
-                        more = true;
-                        break;
-                    }
-                    sources.push_back(r._name);
-                }
-            })) {
+        const auto all = _cluster.query(
+            data_query::list(account, "", after, std::numeric_limits<std::uint64_t>::max()));
+        if (!all) {
             return internal_failure();
+        }
+        for (const auto& r : all->_queues) {
+            const auto o = attribute_detail::parse_object(r._settings._redrive_policy);
+            if (!o || string_member(*o, "deadLetterTargetArn").value_or("") != arn) {
+                continue;
+            }
+            if (sources.size() == limit) {
+                more = true;
+                break;
+            }
+            sources.push_back(r._name);
         }
         boost::json::object out;
         boost::json::array urls;
@@ -841,21 +841,16 @@ private:
     /// Whether some queue of `account` names `arn` as its dead-letter queue.
     [[nodiscard]] auto is_dead_letter_queue(std::string_view account, std::string_view arn)
         -> bool {
-        bool found = false;
-        (void)_cluster.read(
-            catalog_keys::queues_prefix(account), [&](const state_machine_type& sm) {
-                for (const auto& r :
-                     sm.list_queues(account, "", "", std::numeric_limits<std::size_t>::max())) {
-                    const auto o = attribute_detail::parse_object(r._settings._redrive_policy);
-                    if (o &&
-                        service_detail::string_member(*o, "deadLetterTargetArn").value_or("") ==
-                            arn) {
-                        found = true;
-                        return;
-                    }
-                }
-            });
-        return found;
+        const auto all = _cluster.query(data_query::list(
+            std::string(account), "", "", std::numeric_limits<std::uint64_t>::max()));
+        if (!all) {
+            return false;
+        }
+        return std::ranges::any_of(all->_queues, [&](const queue_record& r) {
+            const auto o = attribute_detail::parse_object(r._settings._redrive_policy);
+            return o &&
+                   service_detail::string_member(*o, "deadLetterTargetArn").value_or("") == arn;
+        });
     }
 
     /// Visible messages across `q`'s partitions, as this replica has them.
@@ -863,8 +858,7 @@ private:
         std::uint64_t n = 0;
         for (std::uint16_t p = 0; p < std::max<std::uint16_t>(q._partitions, 1); ++p) {
             const auto t = q.target(p);
-            (void)_cluster.read(queue_keys::partition_prefix(t),
-                                [&](const state_machine_type& sm) { n += sm.counts(t).visible; });
+            n += counts_of(t).visible;
         }
         return n;
     }
@@ -982,13 +976,11 @@ private:
             return invalid_value("MaxResults", std::to_string(*max),
                                  "Value must be between 1 and 10.");
         }
-        std::vector<move_task> tasks;
-        if (!_cluster.read(catalog_keys::moves_of(q->_account, q->_name),
-                           [&](const state_machine_type& sm) {
-                               tasks = sm.move_tasks(q->_account, q->_name);
-                           })) {
+        auto answer = _cluster.query(data_query::moves(q->_account, q->_name));
+        if (!answer) {
             return internal_failure();
         }
+        const auto tasks = std::move(answer->_tasks);
         boost::json::array results;
         for (const auto& m : tasks) {
             if (results.size() == static_cast<std::size_t>(max.value_or(1))) {
@@ -1067,14 +1059,10 @@ private:
         f._modified_s = static_cast<std::int64_t>(q->_modified_ms / 1000);
         for (std::uint16_t p = 0; p < q->_partitions; ++p) {
             const auto t = q->target(p);
-            // A partition this node holds no replica of counts as empty:
-            // the counts are approximate (Requirement 4.3).
-            (void)_cluster.read(queue_keys::partition_prefix(t), [&](const state_machine_type& sm) {
-                const auto c = sm.counts(t);
-                f._visible += c.visible;
-                f._not_visible += c.not_visible;
-                f._delayed += c.delayed;
-            });
+            const auto c = counts_of(t);
+            f._visible += c.visible;
+            f._not_visible += c.not_visible;
+            f._delayed += c.delayed;
         }
         auto values =
             attribute_values(q->_settings, f, service_detail::strings_member(in, "AttributeNames"));
@@ -1618,15 +1606,21 @@ private:
         return out;
     }
 
-    /// Whether this node's replica shows partition `t` with something to
-    /// receive now (visible, or due by `now`); true when it cannot tell.
+    /// Whether a replica shows partition `t` with something to receive now
+    /// (visible, or due by `now`); true when none answered.
     [[nodiscard]] auto worth_receiving(const queue_target& t, std::uint64_t now) -> bool {
-        bool worth = true;
-        (void)_cluster.read(queue_keys::partition_prefix(t), [&](const state_machine_type& sm) {
-            const auto due = sm.next_deadline(t);
-            worth = sm.counts(t).visible > 0 || (due && *due <= now);
-        });
-        return worth;
+        const auto a = _cluster.query(data_query::counts_of(t));
+        if (!a) {
+            return true;
+        }
+        return a->_counts.visible > 0 || (a->_deadline && *a->_deadline <= now);
+    }
+
+    /// Partition `t`'s approximate counts; a partition no replica answered
+    /// for counts as empty, the counts being approximate (Requirement 4.3).
+    [[nodiscard]] auto counts_of(const queue_target& t) -> partition_counts {
+        const auto a = _cluster.query(data_query::counts_of(t));
+        return a ? a->_counts : partition_counts{};
     }
 
     auto receive_message_op(sqs_call_context& ctx, boost::json::object& in) -> result {
@@ -1658,9 +1652,7 @@ private:
             std::uint64_t in_flight = 0;
             for (std::uint16_t p = 0; p < std::max<std::uint16_t>(q->_partitions, 1); ++p) {
                 const auto t = q->target(p);
-                (void)_cluster.read(
-                    queue_keys::partition_prefix(t),
-                    [&](const state_machine_type& sm) { in_flight += sm.counts(t).not_visible; });
+                in_flight += counts_of(t).not_visible;
             }
             if (in_flight >= limit) {
                 if (q->_settings._fifo) {

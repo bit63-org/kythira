@@ -19,8 +19,13 @@
 /// its own path, only when a forwarding secret is set: the HMAC is checked
 /// before the body is read as an entry, and the entry is proposed locally,
 /// never forwarded again. 503 means "not committed here", which the
-/// forwarding node reports to its client as retryable.
+/// forwarding node reports to its client as retryable. A data node also
+/// answers front ends' named reads (`sqs_data_access.hpp`) at
+/// `/_kythira/sqs/v1/query`, authenticated the same way; 503 there means
+/// "no replica of that group here".
 
+#include <kythira/sqs/sqs_availability.hpp>
+#include <kythira/sqs/sqs_data_access.hpp>
 #include <kythira/sqs/sqs_forward.hpp>
 #include <kythira/sqs/sqs_front_end.hpp>
 
@@ -36,6 +41,9 @@
 #include <vector>
 
 namespace kythira::sqs {
+
+/// Answers a front end's named read from this node's replica, or nullopt.
+using local_querier = std::function<std::optional<data_answer>(const data_query&)>;
 
 /// Proposes a forwarded entry here; what `apply()` returned, or nullopt.
 using local_proposer = std::function<std::optional<std::vector<std::byte>>(
@@ -109,6 +117,16 @@ public:
         if (target == forward::k_path) {
             return forwarded(req);
         }
+        if (target == data_wire::k_query_path) {
+            return queried(req);
+        }
+        if (target == k_availability_path) {
+            return availability(req);
+        }
+        if (!_client_api) {
+            return listener_detail::plain(404, "this node serves no SQS API (data role only)\n",
+                                          req.version());
+        }
         if (_bridge && target.starts_with("/sns-bridge/")) {
             const auto method = req.method_string();
             const auto [status, body] = _bridge(std::string_view(method.data(), method.size()),
@@ -119,15 +137,94 @@ public:
             _front_end.handle(listener_detail::to_sqs_request(req, ctx)), req.version());
     }
 
+    /// Serves front ends' named reads (`sqs_data_access.hpp`) at
+    /// `/_kythira/sqs/v1/query` (set before serving; a data node only).
+    void set_local_query(local_querier query) { _query = std::move(query); }
+
+    /// Serves the long-poll wake-up stream (`sqs_availability.hpp`) from
+    /// `feed`, holding each call up to `wait` (set before serving; a data
+    /// node only). `feed` outlives the handler.
+    void set_availability_feed(availability_feed* feed,
+                               std::chrono::milliseconds wait = std::chrono::seconds{10}) {
+        _feed = feed;
+        _feed_wait = wait;
+    }
+
     /// Serves `/sns-bridge/...` through `bridge` (set before serving).
     void set_sns_bridge(bridge_fn bridge) { _bridge = std::move(bridge); }
+
+    /// false: only the internal endpoints answer, every other path 404 (a
+    /// node without the front-end role; set before serving).
+    void set_client_api(bool on) { _client_api = on; }
 
 private:
     FrontEnd& _front_end;
     bridge_fn _bridge;
     std::string _secret;
     local_proposer _propose;
+    local_querier _query;
+    availability_feed* _feed = nullptr;
+    std::chrono::milliseconds _feed_wait{10000};
+    bool _client_api = true;
     clock_fn _clock;
+
+    auto availability(const https::request& req) -> https::response {
+        using listener_detail::plain;
+        if (_secret.empty() || _feed == nullptr) {
+            return plain(404, "not found\n", req.version());
+        }
+        if (req.method() != boost::beast::http::verb::post) {
+            return plain(405, "POST only\n", req.version());
+        }
+        if (!signed_by_peer(req)) {
+            return plain(403, "bad or stale forwarding signature\n", req.version());
+        }
+        boost::system::error_code ec;
+        const auto v = boost::json::parse(req.body(), ec);
+        if (ec || !v.is_object()) {
+            return plain(400, "malformed availability request\n", req.version());
+        }
+        const auto batch = _feed->wait(data_wire::str(v.as_object(), "epoch"),
+                                       data_wire::u64(v.as_object(), "since"), _feed_wait);
+        https::response r{boost::beast::http::status::ok, req.version()};
+        r.set(boost::beast::http::field::content_type, "application/json");
+        r.body() = encode_availability(batch);
+        r.prepare_payload();
+        return r;
+    }
+
+    /// Whether `req` carries a valid forwarding signature over its body.
+    [[nodiscard]] auto signed_by_peer(const https::request& req) const -> bool {
+        const auto header = req[forward::k_header];
+        return forward::verify(_secret, std::string_view(header.data(), header.size()), req.body(),
+                               _clock());
+    }
+
+    auto queried(const https::request& req) -> https::response {
+        using listener_detail::plain;
+        if (_secret.empty() || !_query) {
+            return plain(404, "not found\n", req.version());
+        }
+        if (req.method() != boost::beast::http::verb::post) {
+            return plain(405, "POST only\n", req.version());
+        }
+        if (!signed_by_peer(req)) {
+            return plain(403, "bad or stale forwarding signature\n", req.version());
+        }
+        const auto q = decode_query(req.body());
+        if (!q) {
+            return plain(400, "malformed query\n", req.version());
+        }
+        const auto a = _query(*q);
+        if (!a) {
+            return plain(503, "no replica here\n", req.version());
+        }
+        https::response r{boost::beast::http::status::ok, req.version()};
+        r.set(boost::beast::http::field::content_type, "application/json");
+        r.body() = encode_answer(*a);
+        r.prepare_payload();
+        return r;
+    }
 
     auto forwarded(const https::request& req) -> https::response {
         using listener_detail::plain;
@@ -137,9 +234,7 @@ private:
         if (req.method() != boost::beast::http::verb::post) {
             return plain(405, "POST only\n", req.version());
         }
-        const auto header = req[forward::k_header];
-        if (!forward::verify(_secret, std::string_view(header.data(), header.size()), req.body(),
-                             _clock())) {
+        if (!signed_by_peer(req)) {
             return plain(403, "bad or stale forwarding signature\n", req.version());
         }
         auto p = forward::decode_body(req.body());
