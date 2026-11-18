@@ -321,11 +321,6 @@ template<typename NodeId, typename GroupId> struct redis_gateway_cache_hooks {
 template<typename NodeId>
 using redis_endpoint_resolver = std::function<std::optional<std::string>(const NodeId&)>;
 
-/// `Host` is a `multi_raft<Types, std::string, std::uint64_t>` whose state
-/// machine is `redis_kv_state_machine` (values in RAM) or
-/// `cache_kv_state_machine` (values in the node's chunk store); the gateway
-/// reads it through `redis_gateway_value_access`. `Logger` and `Metrics`
-/// satisfy the project's `logger` and `metrics` concepts.
 namespace redis_gateway_detail {
 template<typename SM, bool = is_transactional_state_machine_v<SM>>
 struct is_mvcc : std::false_type {};
@@ -333,7 +328,24 @@ template<typename SM> struct is_mvcc<SM, true> : std::bool_constant<SM::k_mvcc =
 template<typename SM> inline constexpr bool is_mvcc_v = is_mvcc<SM>::value;
 }  // namespace redis_gateway_detail
 
-template<typename Host, typename Logger, typename Metrics> class redis_gateway {
+/// The front-end layer (.kiro/specs/redis-general-data-types/ design
+/// Component 9): authorization, planning (one group, a fan-out, or a
+/// transaction), the transaction coordinator, and every command handler
+/// past authentication, reaching data through `redis_data_access`. Its
+/// definitions are in redis_front_end_impl.hpp.
+///
+/// `redis_gateway` (below) is the gateway layer on top of it: listeners,
+/// TLS, connection state, `AUTH`/`HELLO`/`CLIENT`/`QUIT`/`RESET`. A
+/// co-located node runs both in one object, with no hop or copy between
+/// them; a gateway without the `front_end` role sends its commands to a
+/// remote front end instead (task 17).
+///
+/// `Host` is a `multi_raft<Types, std::string, std::uint64_t>` whose state
+/// machine is `redis_kv_state_machine` (values in RAM) or
+/// `cache_kv_state_machine` (values in the node's chunk store); the front
+/// end reads it through `redis_gateway_value_access`. `Logger` and `Metrics`
+/// satisfy the project's `logger` and `metrics` concepts.
+template<typename Host, typename Logger, typename Metrics> class redis_front_end {
 public:
     using node_id_type = typename Host::node_id_type;
     using group_id_type = typename Host::group_id_type;
@@ -354,23 +366,13 @@ public:
     /// `snapshot`, and every write takes an oracle timestamp.
     static constexpr bool k_snapshot = redis_gateway_detail::is_mvcc_v<state_machine_type>;
 
-    redis_gateway(Host& host, redis_acl& acl, Logger& logger, Metrics& metrics,
-                  redis_gateway_config config, endpoint_resolver resolver);
-    ~redis_gateway();
+    redis_front_end(Host& host, redis_acl& acl, Logger& logger, Metrics& metrics,
+                    redis_gateway_config config, endpoint_resolver resolver);
 
-    redis_gateway(const redis_gateway&) = delete;
-    auto operator=(const redis_gateway&) -> redis_gateway& = delete;
-
-    /// Bind the listeners and start the I/O and worker threads. Throws on a
-    /// bind failure or an ACL/anonymous misconfiguration.
-    auto start() -> void;
-    /// Close listeners, drain connections, join threads. Idempotent.
-    auto stop() -> void;
-    [[nodiscard]] auto is_running() const noexcept -> bool { return _running.load(); }
-
-    /// Bound port of the plaintext listener (0 if none / not started).
-    [[nodiscard]] auto port() const noexcept -> std::uint16_t { return _port; }
-    [[nodiscard]] auto tls_port() const noexcept -> std::uint16_t { return _tls_port; }
+    redis_front_end(const redis_front_end&) = delete;
+    auto operator=(const redis_front_end&) -> redis_front_end& = delete;
+    redis_front_end(redis_front_end&&) = delete;
+    auto operator=(redis_front_end&&) -> redis_front_end& = delete;
 
     /// Leader-side maintenance: propose a bounded `sweep` of expired keys and,
     /// when a shard is over budget, a bounded `evict`. Meant to be called from
@@ -400,21 +402,8 @@ public:
     [[nodiscard]] auto stats() const noexcept -> const redis_gateway_stats& { return _stats; }
     [[nodiscard]] auto config() const noexcept -> const redis_gateway_config& { return _config; }
 
-    /// Tests only: execute one command as if it arrived on an authenticated
-    /// connection, without a socket. Returns the encoded reply.
-    auto execute_for_test(const resp_command& cmd, const std::optional<redis_identity>& identity,
-                          bool internal) -> std::string;
-
-    class connection;
-    friend class connection;
-
-private:
-    struct queued_command {
-        resp_command _cmd;
-        std::size_t _bytes = 0;
-        /// A pre-built reply (the shed error) that replaces execution.
-        std::string _prebuilt;
-    };
+protected:
+    ~redis_front_end() = default;
 
     /// Per-connection protocol state that is independent of the socket.
     struct session {
@@ -465,7 +454,7 @@ private:
         using group_id_type = typename Host::group_id_type;
         using send_future = future_default<std::vector<std::byte>>;
 
-        explicit txn_client(redis_gateway& gateway) : _gateway(gateway) {}
+        explicit txn_client(redis_front_end& front_end) : _front_end(front_end) {}
 
         [[nodiscard]] auto resolve(const std::string& key) -> std::optional<group_id_type>;
         [[nodiscard]] auto send(const std::vector<std::string>& keys,
@@ -486,23 +475,17 @@ private:
         requires k_snapshot;
 
     private:
-        redis_gateway& _gateway;
+        redis_front_end& _front_end;
     };
     friend class txn_client;
     using coordinator_type = transaction_coordinator<txn_client, std::string>;
 
     // ---- command dispatch ----------------------------------------------------
-    auto execute(session& s, const resp_command& cmd) -> std::string;
-    auto handle_auth(session& s, const resp_command& cmd) -> std::string;
-    /// Admission for one AUTH attempt (redis_auth_limiter). Returns the
-    /// refusal to send, or nullopt when the attempt may proceed, in which
-    /// case `_auth_limiter.finish()` must follow.
-    auto admit_auth(session& s) -> std::optional<std::string>;
-    /// `handle_auth` for a user the credential verifier vouches for.
-    auto auth_with_verifier(session& s, const std::string& user, const std::string& credential)
+    /// Every command past the gateway's authentication checks: the
+    /// transaction surface, then the per-command handlers. `upper` is the
+    /// command name in upper case. Returns the encoded reply.
+    auto execute_command(session& s, std::string_view upper, const resp_command& cmd)
         -> std::string;
-    auto handle_hello(session& s, const resp_command& cmd) -> std::string;
-    auto handle_client(session& s, const resp_command& cmd) -> std::string;
     auto handle_get(session& s, const resp_command& cmd) -> std::string;
     auto handle_exists(session& s, const resp_command& cmd) -> std::string;
     auto handle_strlen(session& s, const resp_command& cmd) -> std::string;
@@ -613,12 +596,6 @@ private:
     /// The write refusal for the shard owning `key`, if any.
     auto space_refusal(const std::string& key) -> std::optional<std::string>;
 
-    // ---- networking ------------------------------------------------------------
-    auto accept_loop(std::shared_ptr<boost::asio::ip::tcp::acceptor> acceptor, bool tls) -> void;
-    auto build_ssl_context() -> boost::asio::ssl::context;
-    auto register_connection(const std::shared_ptr<connection>& c) -> void;
-    auto unregister_connection(connection* c) -> void;
-
     auto build_forward_ssl_context() -> boost::asio::ssl::context;
 
     struct forward_pool {
@@ -640,28 +617,10 @@ private:
     endpoint_resolver _resolver;
     redis_gateway_stats _stats;
     std::mutex _metrics_mutex;
-
-    boost::asio::io_context _io;
-    std::optional<boost::asio::executor_work_guard<boost::asio::io_context::executor_type>> _work;
-    // One acceptor per address the listen host resolves to (net_bind.hpp),
-    // all on the same port.
-    std::vector<std::shared_ptr<boost::asio::ip::tcp::acceptor>> _acceptors;
-    std::vector<std::shared_ptr<boost::asio::ip::tcp::acceptor>> _tls_acceptors;
-    std::shared_ptr<boost::asio::ssl::context> _ssl_ctx;
     /// Client side of forwarding over TLS; null when forwarding is plaintext.
     std::shared_ptr<boost::asio::ssl::context> _forward_ssl_ctx;
-    std::vector<std::thread> _io_threads;
-    std::optional<boost::asio::thread_pool> _workers;
-    std::uint16_t _port = 0;
-    std::uint16_t _tls_port = 0;
     std::atomic<bool> _running{false};
     std::chrono::steady_clock::time_point _started_at{};
-
-    std::mutex _connections_mutex;
-    std::unordered_map<connection*, std::weak_ptr<connection>> _connections;
-    std::atomic<std::size_t> _inflight_bytes{0};
-
-    redis_auth_limiter _auth_limiter;
 
     /// Leader-local advisory LRU per shard: never replicated, rebuilt lazily
     /// after a leadership change from whatever the shard holds.
@@ -678,6 +637,115 @@ private:
 
     std::mutex _forward_mutex;
     std::unordered_map<std::string, std::shared_ptr<forward_pool>> _forward_pools;
+};
+
+/// The gateway layer over an in-process front end (see `redis_front_end`).
+template<typename Host, typename Logger, typename Metrics>
+class redis_gateway : public redis_front_end<Host, Logger, Metrics> {
+    using front_end = redis_front_end<Host, Logger, Metrics>;
+
+public:
+    using front_end::k_snapshot;
+    using front_end::k_transactional;
+    using typename front_end::endpoint_resolver;
+    using typename front_end::group_id_type;
+    using typename front_end::node_id_type;
+
+    redis_gateway(Host& host, redis_acl& acl, Logger& logger, Metrics& metrics,
+                  redis_gateway_config config, endpoint_resolver resolver);
+    ~redis_gateway();
+
+    redis_gateway(const redis_gateway&) = delete;
+    auto operator=(const redis_gateway&) -> redis_gateway& = delete;
+    redis_gateway(redis_gateway&&) = delete;
+    auto operator=(redis_gateway&&) -> redis_gateway& = delete;
+
+    /// Bind the listeners and start the I/O and worker threads. Throws on a
+    /// bind failure or an ACL/anonymous misconfiguration.
+    auto start() -> void;
+    /// Close listeners, drain connections, join threads. Idempotent.
+    auto stop() -> void;
+    [[nodiscard]] auto is_running() const noexcept -> bool { return this->_running.load(); }
+
+    /// Bound port of the plaintext listener (0 if none / not started).
+    [[nodiscard]] auto port() const noexcept -> std::uint16_t { return _port; }
+    [[nodiscard]] auto tls_port() const noexcept -> std::uint16_t { return _tls_port; }
+
+    /// Tests only: execute one command as if it arrived on an authenticated
+    /// connection, without a socket. Returns the encoded reply.
+    auto execute_for_test(const resp_command& cmd, const std::optional<redis_identity>& identity,
+                          bool internal) -> std::string;
+
+    class connection;
+    friend class connection;
+
+private:
+    using front_end::_acl;
+    using front_end::_config;
+    using front_end::_data;
+    using front_end::_forward_mutex;
+    using front_end::_forward_pools;
+    using front_end::_forward_ssl_ctx;
+    using front_end::_logger;
+    using front_end::_running;
+    using front_end::_started_at;
+    using front_end::_stats;
+    using front_end::audit;
+    using front_end::authorize;
+    using front_end::build_forward_ssl_context;
+    using front_end::emit;
+    using front_end::emit_duration;
+    using front_end::server_mode;
+    using front_end::txn_allocate_timestamps;
+    using front_end::txn_send;
+    using typename front_end::coordinator_type;
+    using typename front_end::session;
+
+    struct queued_command {
+        resp_command _cmd;
+        std::size_t _bytes = 0;
+        /// A pre-built reply (the shed error) that replaces execution.
+        std::string _prebuilt;
+    };
+
+    // ---- connection commands -------------------------------------------------
+    /// The whole command: the pre-authentication surface (`AUTH`, `HELLO`,
+    /// `QUIT`, `RESET`), the credential checks, `CLIENT`, then the front end.
+    auto execute(session& s, const resp_command& cmd) -> std::string;
+    auto handle_auth(session& s, const resp_command& cmd) -> std::string;
+    /// Admission for one AUTH attempt (redis_auth_limiter). Returns the
+    /// refusal to send, or nullopt when the attempt may proceed, in which
+    /// case `_auth_limiter.finish()` must follow.
+    auto admit_auth(session& s) -> std::optional<std::string>;
+    /// `handle_auth` for a user the credential verifier vouches for.
+    auto auth_with_verifier(session& s, const std::string& user, const std::string& credential)
+        -> std::string;
+    auto handle_hello(session& s, const resp_command& cmd) -> std::string;
+    auto handle_client(session& s, const resp_command& cmd) -> std::string;
+
+    // ---- networking ------------------------------------------------------------
+    auto accept_loop(std::shared_ptr<boost::asio::ip::tcp::acceptor> acceptor, bool tls) -> void;
+    auto build_ssl_context() -> boost::asio::ssl::context;
+    auto register_connection(const std::shared_ptr<connection>& c) -> void;
+    auto unregister_connection(connection* c) -> void;
+
+    boost::asio::io_context _io;
+    std::optional<boost::asio::executor_work_guard<boost::asio::io_context::executor_type>> _work;
+    // One acceptor per address the listen host resolves to (net_bind.hpp),
+    // all on the same port.
+    std::vector<std::shared_ptr<boost::asio::ip::tcp::acceptor>> _acceptors;
+    std::vector<std::shared_ptr<boost::asio::ip::tcp::acceptor>> _tls_acceptors;
+    std::shared_ptr<boost::asio::ssl::context> _ssl_ctx;
+    std::vector<std::thread> _io_threads;
+    std::optional<boost::asio::thread_pool> _workers;
+    std::uint16_t _port = 0;
+    std::uint16_t _tls_port = 0;
+
+    std::mutex _connections_mutex;
+    std::unordered_map<connection*, std::weak_ptr<connection>> _connections;
+    std::atomic<std::size_t> _inflight_bytes{0};
+
+    redis_auth_limiter _auth_limiter;
 };
 
 }  // namespace kythira
