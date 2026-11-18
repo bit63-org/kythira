@@ -120,6 +120,13 @@ kythira_hsm_test(hsm_wire_test hsm_wire_test.cpp)
 set_tests_properties(hsm_wire_test PROPERTIES
     LABELS "unit;hsm;hsm-module" TIMEOUT 120)
 
+# hsm-independent-layers task 4, Requirement 6: the endpoint relay (L4
+# pass-through with backend pinning, least connections, health-driven
+# eviction and drain) in front of TLS wire servers.
+kythira_hsm_test(hsm_endpoint_relay_test hsm_endpoint_relay_test.cpp)
+set_tests_properties(hsm_endpoint_relay_test PROPERTIES
+    LABELS "unit;hsm;hsm-module" TIMEOUT 120)
+
 # Task 10, Requirement 5: libkythira_pkcs11.so, loaded with dlopen as a
 # consumer loads it, against wire servers on Unix sockets: the 3.0
 # interfaces, sessions and logins, signing through the length query,
