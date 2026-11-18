@@ -13,10 +13,6 @@
 # doc/TODO.md; un-gating one means deleting its line here in the same change.
 
 accept_post_retry_benchmark_test examples/ is added only when folly_FOUND (root CMakeLists.txt): the examples' main() functions initialize Folly
-alibaba_oss_persistence_mock_test Alibaba component tests are gated on folly_FOUND in tests/CMakeLists.txt
-alibaba_oss_persistence_unit_test Alibaba component tests are gated on folly_FOUND in tests/CMakeLists.txt
-alibaba_quorum_manager_mock_test Alibaba component tests are gated on folly_FOUND in tests/CMakeLists.txt
-alibaba_quorum_manager_unit_test Alibaba component tests are gated on folly_FOUND in tests/CMakeLists.txt
 async_operations_example_test examples/ is added only when folly_FOUND (root CMakeLists.txt): the examples' main() functions initialize Folly
 backend_non_interference_compile_fail_test every backend pair it checks has the Folly backend (`kythira::Future`, raft/future.hpp) on one side
 basic_cluster_test examples/ is added only when folly_FOUND (root CMakeLists.txt): the examples' main() functions initialize Folly
@@ -26,7 +22,6 @@ boost_backend_migration_guide_example_test examples/ is added only when folly_FO
 ca_cluster_node_rpc_tls_restart_test cmd/ca_cluster_node/CMakeLists.txt returns unless folly_FOUND
 ca_cluster_node_rpc_tls_test cmd/ca_cluster_node/CMakeLists.txt returns unless folly_FOUND
 ca_cluster_node_test cmd/ca_cluster_node/CMakeLists.txt returns unless folly_FOUND
-cache_http_front_end_test drives the front end over a multi_raft host with folly futures: gated on folly_FOUND in tests/CMakeLists.txt, like the gateway tests
 cbor_serializer_example_test examples/ is added only when folly_FOUND (root CMakeLists.txt): the examples' main() functions initialize Folly
 coap_block_transfer_example_test examples/ is added only when folly_FOUND (root CMakeLists.txt): the examples' main() functions initialize Folly
 coap_cantcoap_raft_node_test uses Folly directly (`folly::Init`)
@@ -124,13 +119,7 @@ proxygen_negotiation_integration_test the proxygen transport depends on Folly (K
 proxygen_textual_node_id_test the proxygen transport depends on Folly (Kconfig: PROXYGEN_TRANSPORT depends on FOLLY)
 proxygen_transport_example_test examples/ is added only when folly_FOUND (root CMakeLists.txt): the examples' main() functions initialize Folly
 proxygen_transport_test the proxygen transport depends on Folly (Kconfig: PROXYGEN_TRANSPORT depends on FOLLY)
-redis_gateway_disk_store_integration_test the disk-store twin of `redis_gateway_integration_test`: gated on folly_FOUND in tests/CMakeLists.txt
-redis_gateway_engine_store_integration_test the persistent-engine twin of `redis_gateway_integration_test`: gated on folly_FOUND in services/redis/tests/CMakeLists.txt, with redis_gateway_integration_test
-redis_differential_replay_test gated on folly_FOUND in services/redis/tests/CMakeLists.txt beside redis_gateway_snapshot_test, whose in-process cluster it reuses
-redis_gateway_integration_test gated on folly_FOUND in services/redis/tests/CMakeLists.txt, like the redis_gateway_node daemon
 redis_gateway_node_iam_switch checks redis_gateway_node --help, and the daemon is built only when folly_FOUND (services/redis/cmd/redis_gateway_node/CMakeLists.txt)
-redis_gateway_snapshot_test the snapshot-isolation twin of `redis_gateway_txn_test`: gated on folly_FOUND in tests/CMakeLists.txt, with redis_gateway_integration_test
-redis_gateway_txn_test gated on folly_FOUND in tests/CMakeLists.txt, with redis_gateway_integration_test
 semi_promise_concept_requirements_property_test uses Folly directly (`folly::Unit`, `folly::exception_wrapper`)
 snapshot_example_test examples/ is added only when folly_FOUND (root CMakeLists.txt): the examples' main() functions initialize Folly
 state_machine_example_test examples/ is added only when folly_FOUND (root CMakeLists.txt): the examples' main() functions initialize Folly

@@ -4258,9 +4258,11 @@ endif()
 # Alibaba component tests (quorum manager, OSS persistence engine).
 #
 # Wider guard than the client tests above: these use future_default, so they
-# need folly — which arrives via network_simulator, the same way the OCI
-# provider tests get it.
-if(KYTHIRA_ALIBABA_SHARED AND TARGET OpenSSL::SSL AND TARGET httplib::httplib AND folly_FOUND)
+# need a future backend, which arrives via network_simulator the same way the
+# OCI provider tests get it. Any backend will do: the quorum-manager suites
+# only call folly::Init under Folly's.
+if(KYTHIRA_ALIBABA_SHARED AND TARGET OpenSSL::SSL AND TARGET httplib::httplib
+   AND KYTHIRA_FUTURE_BACKEND_AVAILABLE)
     function(kythira_add_alibaba_component_test target_name)
         add_executable(${target_name} ${target_name}.cpp)
         target_link_libraries(${target_name} PRIVATE
@@ -4338,8 +4340,8 @@ if(KYTHIRA_ALIBABA_SHARED AND TARGET OpenSSL::SSL AND TARGET httplib::httplib AN
     endif()
 elseif(NOT KYTHIRA_ALIBABA_SHARED)
     message(STATUS "alibaba component tests: skipped (Alibaba support disabled by Kconfig)")
-elseif(NOT folly_FOUND)
-    message(STATUS "alibaba component tests: skipped (requires Folly)")
+elseif(NOT KYTHIRA_FUTURE_BACKEND_AVAILABLE)
+    message(STATUS "alibaba component tests: skipped (requires a future backend)")
 endif()
 
 

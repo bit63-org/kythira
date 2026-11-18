@@ -27,7 +27,8 @@ endfunction()
 # tree does not already require, but they are gated together with the gateway
 # anyway so that CONFIG_REDIS_GATEWAY=n leaves no trace of the feature in the
 # target list (Requirement 16.4). The ACL needs OpenSSL for PBKDF2; the gateway
-# integration test needs the in-process fabric, folly and Boost.Asio.
+# integration tests need the in-process fabric and Boost.Asio, on any future
+# backend: they only call folly::Init under Folly's.
 kythira_redis_test(resp_protocol_unit_test resp_protocol_unit_test.cpp)
 kythira_redis_test(redis_kv_commands_unit_test redis_kv_commands_unit_test.cpp)
 kythira_redis_test(redis_kv_state_machine_unit_test redis_kv_state_machine_unit_test.cpp)
@@ -100,74 +101,70 @@ set_tests_properties(cache_fsync_stall_test PROPERTIES
 kythira_redis_test(cache_disk_guard_unit_test cache_disk_guard_unit_test.cpp)
 set_tests_properties(cache_disk_guard_unit_test PROPERTIES
     LABELS "unit;redis;cache" TIMEOUT 60)
-if(folly_FOUND)
-    kythira_redis_test(redis_gateway_integration_test redis_gateway_integration_test.cpp)
-    target_compile_definitions(redis_gateway_integration_test PRIVATE
-        KYTHIRA_REDIS_GOLDEN_DIR="${KYTHIRA_REDIS_GOLDEN_DIR}")
-    target_link_libraries(redis_gateway_integration_test PRIVATE OpenSSL::SSL OpenSSL::Crypto)
-    set_tests_properties(redis_gateway_integration_test PROPERTIES LABELS "multi-raft;redis" TIMEOUT 600)
-    # The same cases over the disk-backed cache_kv_state_machine
-    # (.kiro/specs/disk-backed-build-cache/ Requirement 2.7).
-    kythira_redis_test(redis_gateway_disk_store_integration_test
-                       redis_gateway_disk_store_integration_test.cpp)
-    target_compile_definitions(redis_gateway_disk_store_integration_test PRIVATE
-        KYTHIRA_REDIS_GOLDEN_DIR="${KYTHIRA_REDIS_GOLDEN_DIR}")
-    target_link_libraries(redis_gateway_disk_store_integration_test PRIVATE
-                          OpenSSL::SSL OpenSSL::Crypto)
-    set_tests_properties(redis_gateway_disk_store_integration_test PROPERTIES
-        LABELS "multi-raft;redis;cache" TIMEOUT 600)
-    # The same cases over the persistent persistent_kv_state_machine, one
-    # memory_kv_engine per host (.kiro/specs/persistent-state-machine/ task 7).
-    kythira_redis_test(redis_gateway_engine_store_integration_test
-                       redis_gateway_engine_store_integration_test.cpp)
-    target_compile_definitions(redis_gateway_engine_store_integration_test PRIVATE
-        KYTHIRA_REDIS_GOLDEN_DIR="${KYTHIRA_REDIS_GOLDEN_DIR}")
-    target_link_libraries(redis_gateway_engine_store_integration_test PRIVATE
-                          OpenSSL::SSL OpenSSL::Crypto)
-    set_tests_properties(redis_gateway_engine_store_integration_test PROPERTIES
-        LABELS "multi-raft;redis" TIMEOUT 600)
-    # Task 6: the cache's HTTP front end over three in-process hosts,
-    # including a 1 GiB PUT whose peak RSS must stay under 64 MiB.
-    kythira_redis_test(cache_http_front_end_test cache_http_front_end_test.cpp)
-    target_link_libraries(cache_http_front_end_test PRIVATE OpenSSL::SSL OpenSSL::Crypto)
-    # In the `heavy_tu` pool (top-level CMakeLists.txt): this TU measured
-    # 11.9 GiB of compiler RSS (g++-13, -O2 -g, Boost backend, on main and
-    # on PR #745 alike), most of a 16 GiB runner. It only shows when the
-    # compiler cache misses, as it does for any change to the chunk store
-    # headers. Unpooled, it compiled beside the pooled redis_gateway_node
-    # TUs, and the arm64 g++-13 Build & Test runner was shut down for
-    # running out of memory three times in a row on PR #745.
-    set_target_properties(cache_http_front_end_test PROPERTIES JOB_POOL_COMPILE heavy_tu)
-    set_tests_properties(cache_http_front_end_test PROPERTIES
-        LABELS "multi-raft;redis;cache" TIMEOUT 900)
-    # .kiro/specs/multi-raft-transactions/ task 9: the gateway's
-    # transaction surface over a wrapped KV state machine.
-    kythira_redis_test(redis_gateway_txn_test redis_gateway_txn_test.cpp)
-    target_compile_definitions(redis_gateway_txn_test PRIVATE
-        KYTHIRA_REDIS_GOLDEN_DIR="${KYTHIRA_REDIS_GOLDEN_DIR}")
-    target_link_libraries(redis_gateway_txn_test PRIVATE OpenSSL::SSL OpenSSL::Crypto)
-    set_tests_properties(redis_gateway_txn_test PROPERTIES LABELS "multi-raft;redis;txn" TIMEOUT 600)
-    # Tier 2 (task 14): the gateway over a multi-versioned KV and an
-    # oracle group, as CONFIG_REDIS_GATEWAY_SNAPSHOT_ISOLATION builds it.
-    kythira_redis_test(redis_gateway_snapshot_test redis_gateway_snapshot_test.cpp)
-    target_link_libraries(redis_gateway_snapshot_test PRIVATE OpenSSL::SSL OpenSSL::Crypto)
-    set_tests_properties(redis_gateway_snapshot_test PROPERTIES LABELS "multi-raft;redis;txn" TIMEOUT 600)
-    # The differential harness's recordings (redis-general-data-types
-    # task 14 scaffold) replayed against the same snapshot-isolation
-    # cluster, so a command change is checked against Redis 7.2 and
-    # Valkey 8 in plain CTest, with no containers.
-    kythira_redis_test(redis_differential_replay_test
-                       differential/redis_differential_replay_test.cpp)
-    target_include_directories(redis_differential_replay_test PRIVATE
-        "${CMAKE_CURRENT_SOURCE_DIR}/differential")
-    target_compile_definitions(redis_differential_replay_test PRIVATE
-        KYTHIRA_REDIS_DIFF_RECS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/differential/recs")
-    target_link_libraries(redis_differential_replay_test PRIVATE OpenSSL::SSL OpenSSL::Crypto)
-    set_tests_properties(redis_differential_replay_test PROPERTIES
-        LABELS "multi-raft;redis;txn" TIMEOUT 600)
-else()
-    message(STATUS "redis_gateway_integration_test: skipped (requires folly)")
-endif()
+kythira_redis_test(redis_gateway_integration_test redis_gateway_integration_test.cpp)
+target_compile_definitions(redis_gateway_integration_test PRIVATE
+    KYTHIRA_REDIS_GOLDEN_DIR="${KYTHIRA_REDIS_GOLDEN_DIR}")
+target_link_libraries(redis_gateway_integration_test PRIVATE OpenSSL::SSL OpenSSL::Crypto)
+set_tests_properties(redis_gateway_integration_test PROPERTIES LABELS "multi-raft;redis" TIMEOUT 600)
+# The same cases over the disk-backed cache_kv_state_machine
+# (.kiro/specs/disk-backed-build-cache/ Requirement 2.7).
+kythira_redis_test(redis_gateway_disk_store_integration_test
+                   redis_gateway_disk_store_integration_test.cpp)
+target_compile_definitions(redis_gateway_disk_store_integration_test PRIVATE
+    KYTHIRA_REDIS_GOLDEN_DIR="${KYTHIRA_REDIS_GOLDEN_DIR}")
+target_link_libraries(redis_gateway_disk_store_integration_test PRIVATE
+                      OpenSSL::SSL OpenSSL::Crypto)
+set_tests_properties(redis_gateway_disk_store_integration_test PROPERTIES
+    LABELS "multi-raft;redis;cache" TIMEOUT 600)
+# The same cases over the persistent persistent_kv_state_machine, one
+# memory_kv_engine per host (.kiro/specs/persistent-state-machine/ task 7).
+kythira_redis_test(redis_gateway_engine_store_integration_test
+                   redis_gateway_engine_store_integration_test.cpp)
+target_compile_definitions(redis_gateway_engine_store_integration_test PRIVATE
+    KYTHIRA_REDIS_GOLDEN_DIR="${KYTHIRA_REDIS_GOLDEN_DIR}")
+target_link_libraries(redis_gateway_engine_store_integration_test PRIVATE
+                      OpenSSL::SSL OpenSSL::Crypto)
+set_tests_properties(redis_gateway_engine_store_integration_test PROPERTIES
+    LABELS "multi-raft;redis" TIMEOUT 600)
+# Task 6: the cache's HTTP front end over three in-process hosts,
+# including a 1 GiB PUT whose peak RSS must stay under 64 MiB.
+kythira_redis_test(cache_http_front_end_test cache_http_front_end_test.cpp)
+target_link_libraries(cache_http_front_end_test PRIVATE OpenSSL::SSL OpenSSL::Crypto)
+# In the `heavy_tu` pool (top-level CMakeLists.txt): this TU measured
+# 11.9 GiB of compiler RSS (g++-13, -O2 -g, Boost backend, on main and
+# on PR #745 alike), most of a 16 GiB runner. It only shows when the
+# compiler cache misses, as it does for any change to the chunk store
+# headers. Unpooled, it compiled beside the pooled redis_gateway_node
+# TUs, and the arm64 g++-13 Build & Test runner was shut down for
+# running out of memory three times in a row on PR #745.
+set_target_properties(cache_http_front_end_test PROPERTIES JOB_POOL_COMPILE heavy_tu)
+set_tests_properties(cache_http_front_end_test PROPERTIES
+    LABELS "multi-raft;redis;cache" TIMEOUT 900)
+# .kiro/specs/multi-raft-transactions/ task 9: the gateway's
+# transaction surface over a wrapped KV state machine.
+kythira_redis_test(redis_gateway_txn_test redis_gateway_txn_test.cpp)
+target_compile_definitions(redis_gateway_txn_test PRIVATE
+    KYTHIRA_REDIS_GOLDEN_DIR="${KYTHIRA_REDIS_GOLDEN_DIR}")
+target_link_libraries(redis_gateway_txn_test PRIVATE OpenSSL::SSL OpenSSL::Crypto)
+set_tests_properties(redis_gateway_txn_test PROPERTIES LABELS "multi-raft;redis;txn" TIMEOUT 600)
+# Tier 2 (task 14): the gateway over a multi-versioned KV and an
+# oracle group, as CONFIG_REDIS_GATEWAY_SNAPSHOT_ISOLATION builds it.
+kythira_redis_test(redis_gateway_snapshot_test redis_gateway_snapshot_test.cpp)
+target_link_libraries(redis_gateway_snapshot_test PRIVATE OpenSSL::SSL OpenSSL::Crypto)
+set_tests_properties(redis_gateway_snapshot_test PROPERTIES LABELS "multi-raft;redis;txn" TIMEOUT 600)
+# The differential harness's recordings (redis-general-data-types
+# task 14 scaffold) replayed against the same snapshot-isolation
+# cluster, so a command change is checked against Redis 7.2 and
+# Valkey 8 in plain CTest, with no containers.
+kythira_redis_test(redis_differential_replay_test
+                   differential/redis_differential_replay_test.cpp)
+target_include_directories(redis_differential_replay_test PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/differential")
+target_compile_definitions(redis_differential_replay_test PRIVATE
+    KYTHIRA_REDIS_DIFF_RECS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/differential/recs")
+target_link_libraries(redis_differential_replay_test PRIVATE OpenSSL::SSL OpenSSL::Crypto)
+set_tests_properties(redis_differential_replay_test PROPERTIES
+    LABELS "multi-raft;redis;txn" TIMEOUT 600)
 
 # The transaction rows of the multi-Raft bench (.kiro/specs/multi-raft-
 # transactions/ Requirement 13.6), one translation unit per wrapper tier.
@@ -231,7 +228,7 @@ target_compile_definitions(redis_differential_unit_test PRIVATE
 set_tests_properties(redis_differential_unit_test PROPERTIES LABELS "unit;redis" TIMEOUT 120)
 
 # The container scenarios, under the guard tests/docker_chaos/ is entered with.
-if(TARGET Folly::folly AND Boost_FOUND AND httplib_FOUND)
+if(Boost_FOUND AND httplib_FOUND)
     add_subdirectory(docker)
 endif()
 
