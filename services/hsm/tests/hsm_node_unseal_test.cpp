@@ -249,6 +249,7 @@ struct admin_host {
     [[nodiscard]] auto catalog() const { return store.catalog(); }
     [[nodiscard]] auto tokens() const { return store.tokens(); }
     [[nodiscard]] auto hosts(std::uint64_t id) const { return store.hosts(id); }
+    [[nodiscard]] auto crypto_members() const { return store.crypto_members(); }
     auto propose_catalog(std::vector<std::byte> cmd) {
         return store.propose_catalog(std::move(cmd));
     }
@@ -369,4 +370,262 @@ BOOST_FIXTURE_TEST_CASE(rekey_to_node_mode_redelivers_and_old_shares_retire, clu
                       static_cast<int>(hsm::node_unseal_outcome::unsealed));
         BOOST_TEST(!m[i]->store.find(old_check).has_value());
     }
+}
+
+// -- Crypto members (.kiro/specs/hsm-independent-layers/ task 2) ------------
+
+BOOST_AUTO_TEST_CASE(the_crypto_member_list_is_seeded_once_and_never_emptied) {
+    hsm::test::direct_store store;
+    const auto rv = [&](std::vector<std::byte> cmd) {
+        auto r = store.propose_catalog(std::move(cmd));
+        BOOST_REQUIRE(r.has_value());
+        return hsm::catalog_reply_rv(*r);
+    };
+    const std::vector<std::string> members = {"spiffe://hsm/node-1", "spiffe://hsm/node-2"};
+    BOOST_TEST(store.crypto_members().empty());
+    // Unseeded, the store members are the crypto members.
+    BOOST_TEST((hsm::effective_crypto_members({}, members) == members));
+    BOOST_TEST(rv(hsm::make_seed_crypto_members_command({})) == CKR_FUNCTION_REJECTED);
+    BOOST_TEST(rv(hsm::make_seed_crypto_members_command(members)) == CKR_OK);
+    BOOST_TEST((store.crypto_members() == members));
+    BOOST_TEST(rv(hsm::make_seed_crypto_members_command(members)) == CKR_FUNCTION_REJECTED);
+    // Admitting twice and removing a stranger are no-ops, so retries after
+    // an uncertain commit are safe.
+    BOOST_TEST(rv(hsm::make_admit_crypto_member_command("spiffe://hsm/crypto-1")) == CKR_OK);
+    BOOST_TEST(rv(hsm::make_admit_crypto_member_command("spiffe://hsm/crypto-1")) == CKR_OK);
+    BOOST_TEST(rv(hsm::make_remove_crypto_member_command("spiffe://hsm/stranger")) == CKR_OK);
+    BOOST_TEST(store.crypto_members().size() == 3U);
+    for (const auto& id : members) {
+        BOOST_TEST(rv(hsm::make_remove_crypto_member_command(id)) == CKR_OK);
+    }
+    // The last one stays: an empty list would hand shares back to the
+    // store members.
+    BOOST_TEST(rv(hsm::make_remove_crypto_member_command("spiffe://hsm/crypto-1")) ==
+               CKR_FUNCTION_REJECTED);
+    BOOST_TEST((store.crypto_members() == std::vector<std::string>{"spiffe://hsm/crypto-1"}));
+    BOOST_TEST((hsm::effective_crypto_members(store.crypto_members(), members) ==
+                std::vector<std::string>{"spiffe://hsm/crypto-1"}));
+}
+
+BOOST_AUTO_TEST_CASE(a_seeded_list_decides_who_may_hold_shares) {
+    member m;
+    split_key key(2, 3);
+    const hsm::peer_policy policy{{"spiffe://hsm/node-1"}, false};
+    const hsm::peer_caller store_node{true, true, {"spiffe://hsm/node-1"}, {}};
+    const hsm::peer_caller crypto_node{true, true, {"spiffe://hsm/crypto-1"}, {}};
+    const std::vector<std::string> listed = {"spiffe://hsm/crypto-1"};
+    // Unseeded: the members, as before.
+    BOOST_TEST(hsm::may_hold_share(policy, {}, store_node));
+    BOOST_TEST(!hsm::may_hold_share(policy, {}, crypto_node));
+    // Seeded: only the list, and a store member is refused.
+    BOOST_TEST(!hsm::may_hold_share(policy, listed, store_node));
+    BOOST_TEST(hsm::may_hold_share(policy, listed, crypto_node));
+    BOOST_TEST(!hsm::may_hold_share(policy, listed, {true, false, {"spiffe://hsm/crypto-1"}, {}}));
+    const auto bin = hsm::shamir_encode_binary(key.shares[0]);
+    const std::string body(reinterpret_cast<const char*>(bin.data()), bin.size());
+    const std::string check(key.catalog.mk_check.begin(), key.catalog.mk_check.end());
+    BOOST_TEST(
+        hsm::serve_share_peer(m.store, policy, store_node, "POST", "/v1/peer/share", body, listed)
+            ->status == 403U);
+    BOOST_TEST(
+        hsm::serve_share_peer(m.store, policy, crypto_node, "POST", "/v1/peer/share", body, listed)
+            ->status == 200U);
+    BOOST_TEST(hsm::serve_share_peer(m.store, policy, store_node, "POST", "/v1/peer/share-request",
+                                     check, listed)
+                   ->status == 403U);
+    BOOST_TEST(hsm::serve_share_peer(m.store, policy, crypto_node, "POST", "/v1/peer/share-request",
+                                     check, listed)
+                   ->status == 200U);
+}
+
+namespace {
+
+/// Three store members that start co-located (each also holds a share)
+/// and four crypto-only candidates, on one replicated store.
+struct split_cluster {
+    static auto store_id(std::size_t i) -> std::string {
+        return "spiffe://hsm/node-" + std::to_string(i + 1);
+    }
+    static auto crypto_id(std::size_t i) -> std::string {
+        return "spiffe://hsm/crypto-" + std::to_string(i + 1);
+    }
+
+    hsm::test::direct_store store;
+    admin_host host{store};
+    std::array<std::unique_ptr<member>, 3> m;
+    std::array<std::unique_ptr<member>, 4> c;
+    hsm::key_vault vault;  // the crypto node the operator calls
+    hsm::admin_api<admin_host> api{host, vault, policy()};
+
+    static auto policy() -> hsm::admin_policy {
+        hsm::admin_policy p{{k_operator}};
+        for (std::size_t i = 0; i < 3; ++i) {
+            p.store_members.push_back(store_id(i));
+        }
+        return p;
+    }
+
+    split_cluster() {
+        for (auto& p : m) {
+            p = std::make_unique<member>();
+        }
+        for (auto& p : c) {
+            p = std::make_unique<member>();
+        }
+        hsm::node_share_delivery d;
+        d.members = m.size();
+        d.deliver = [this](std::size_t i, const hsm::shamir_share& s) {
+            return m[i]->store.put(s);
+        };
+        d.deliver_to = [this](const std::string& id, const hsm::shamir_share& s) {
+            for (std::size_t i = 0; i < c.size(); ++i) {
+                if (id == crypto_id(i)) {
+                    return c[i]->store.put(s);
+                }
+            }
+            return false;  // not a crypto candidate: refused
+        };
+        api.set_node_share_delivery(std::move(d));
+    }
+
+    auto call(const std::string& method, const std::string& path, const std::string& body = "")
+        -> hsm::admin_response {
+        return api.handle({method, path, body, {k_operator}});
+    }
+
+    static auto json(const hsm::admin_response& r) -> boost::json::object {
+        return boost::json::parse(r.body).as_object();
+    }
+
+    static auto path_of(const std::string& id) -> std::string {
+        std::string out = "/v1/crypto-members/";
+        for (const char ch : id) {
+            if (ch == ':' || ch == '/') {
+                out += ch == ':' ? "%3A" : "%2F";
+            } else {
+                out += ch;
+            }
+        }
+        return out;
+    }
+
+    /// The listed crypto candidates' peers for candidate i.
+    auto crypto_peers(std::size_t i) -> std::vector<hsm::node_unseal::fetch_fn> {
+        std::vector<hsm::node_unseal::fetch_fn> out;
+        for (std::size_t j = 0; j < c.size(); ++j) {
+            if (j != i) {
+                out.push_back(c[j]->as_peer());
+            }
+        }
+        return out;
+    }
+
+    /// Unseal the operator's node from two of `holders`' shares.
+    void unseal_from(const std::array<std::unique_ptr<member>, 3>& holders) {
+        const auto cat = store.catalog();
+        std::vector<hsm::shamir_share> shares;
+        for (std::size_t i = 0; i < 2; ++i) {
+            auto s = holders[i]->store.find(cat->mk_check);
+            BOOST_REQUIRE(s.has_value());
+            shares.push_back(std::move(*s));
+        }
+        auto mk = hsm::shamir_combine(shares);
+        BOOST_REQUIRE(mk.has_value());
+        BOOST_REQUIRE(vault.unseal(std::move(*mk), cat) == hsm::unseal_result::unsealed);
+    }
+};
+
+auto members_of(const boost::json::object& o) -> std::vector<std::string> {
+    std::vector<std::string> out;
+    for (const auto& v : o.at("members").as_array()) {
+        out.emplace_back(v.as_string());
+    }
+    return out;
+}
+
+}  // namespace
+
+BOOST_FIXTURE_TEST_CASE(crypto_members_take_over_shares_and_removal_completes_with_a_rekey,
+                        split_cluster) {
+    // Co-located: unseeded, the store members are the crypto members, and
+    // node-mode init hands each of them a share, as before.
+    auto listing = json(call("GET", "/v1/crypto-members"));
+    BOOST_TEST(!listing.at("seeded").as_bool());
+    BOOST_TEST((members_of(listing) == policy().store_members));
+    BOOST_TEST(call("PUT", path_of(crypto_id(0))).status == 409U);  // seed first
+    BOOST_REQUIRE(call("POST", "/v1/init", R"({"mode": "node", "k": 2, "n": 3})").status == 200U);
+    unseal_from(m);
+    BOOST_REQUIRE(call("POST", "/v1/tokens", R"({"id": 1, "label": "kms"})").status == 201U);
+
+    // Seed, once, then admit three crypto-only nodes.
+    BOOST_REQUIRE(call("POST", "/v1/crypto-members/seed").status == 200U);
+    BOOST_TEST(call("POST", "/v1/crypto-members/seed").status == 409U);
+    for (std::size_t i = 0; i < 3; ++i) {
+        const auto r = call("PUT", path_of(crypto_id(i)));
+        BOOST_REQUIRE(r.status == 200U);
+        // Node mode: the share comes from the next rekey, not the admit.
+        BOOST_TEST(json(r).at("share").as_string().starts_with("from the next rekey"));
+        BOOST_TEST(!c[i]->store.find(store.catalog()->mk_check).has_value());
+    }
+    // Remove the store members without a rekey: reported incomplete,
+    // since each still holds a share of the current key.
+    for (std::size_t i = 0; i < 3; ++i) {
+        const auto r = call("DELETE", path_of(store_id(i)));
+        BOOST_REQUIRE(r.status == 202U);
+        BOOST_TEST(!json(r).at("complete").as_bool());
+    }
+    listing = json(call("GET", "/v1/crypto-members"));
+    BOOST_TEST(listing.at("seeded").as_bool());
+    BOOST_TEST(members_of(listing).size() == 3U);
+
+    // n must be the list's size; then shares go to the crypto members only.
+    BOOST_TEST(call("POST", "/v1/rekey", R"({"n": 4})").status == 400U);
+    BOOST_REQUIRE(call("POST", "/v1/rekey").status == 200U);
+    const auto cat = store.catalog();
+    BOOST_TEST(cat->generation == 2U);  // the n = 4 attempt committed nothing
+    for (std::size_t i = 0; i < 3; ++i) {
+        BOOST_TEST(!m[i]->store.find(cat->mk_check).has_value());
+        BOOST_TEST(static_cast<int>(m[i]->unseal.attempt(cat, {})) ==
+                   static_cast<int>(hsm::node_unseal_outcome::no_local_share));
+        BOOST_REQUIRE(static_cast<int>(c[i]->unseal.attempt(cat, crypto_peers(i))) ==
+                      static_cast<int>(hsm::node_unseal_outcome::unsealed));
+        BOOST_TEST(c[i]->vault.with_token_key(*store.token(1), [](auto) { return 0; }).has_value());
+    }
+    BOOST_TEST(!c[3]->store.find(cat->mk_check).has_value());  // never admitted
+
+    // Remove crypto-3 with the rekey in the same step: complete, n follows
+    // the list, and crypto-3's share opens nothing any more.
+    const auto r = call("DELETE", path_of(crypto_id(2)), R"({"rekey": true})");
+    BOOST_REQUIRE(r.status == 200U);
+    const auto body = json(r);
+    BOOST_TEST(body.at("complete").as_bool());
+    BOOST_TEST(body.at("n").to_number<int>() == 2);
+    const auto cat2 = store.catalog();
+    BOOST_TEST(cat2->n == 2U);
+    BOOST_TEST(!c[2]->store.find(cat2->mk_check).has_value());
+    BOOST_TEST(c[2]->vault.enforce(cat2));  // rekeyed past: sealed
+    BOOST_TEST(static_cast<int>(c[2]->unseal.attempt(cat2, crypto_peers(2))) ==
+               static_cast<int>(hsm::node_unseal_outcome::no_local_share));
+    for (std::size_t i = 0; i < 2; ++i) {
+        BOOST_TEST(c[i]->vault.enforce(cat2));
+        BOOST_TEST(static_cast<int>(c[i]->unseal.attempt(cat2, crypto_peers(i))) ==
+                   static_cast<int>(hsm::node_unseal_outcome::unsealed));
+    }
+    // The last two: one may go, the last may not.
+    BOOST_TEST(call("DELETE", path_of(crypto_id(1)), R"({"rekey": true, "k": 1})").status ==
+               400U);  // k = 1 needs the development switch; removal committed
+    BOOST_TEST(call("DELETE", path_of(crypto_id(0))).status == 409U);  // last member
+    BOOST_TEST((store.crypto_members() == std::vector<std::string>{crypto_id(0)}));
+}
+
+BOOST_FIXTURE_TEST_CASE(a_delivery_refused_by_a_crypto_member_commits_nothing, split_cluster) {
+    BOOST_REQUIRE(call("POST", "/v1/init", R"({"mode": "node", "k": 2, "n": 3})").status == 200U);
+    unseal_from(m);
+    BOOST_REQUIRE(call("POST", "/v1/crypto-members/seed").status == 200U);
+    // A listed identity with no node behind it cannot take its share.
+    BOOST_REQUIRE(call("PUT", path_of("spiffe://hsm/ghost")).status == 200U);
+    const auto before = store.catalog()->generation;
+    const auto r = call("POST", "/v1/rekey", R"({"n": 4})");
+    BOOST_TEST(r.status == 503U);
+    BOOST_TEST(store.catalog()->generation == before);
 }

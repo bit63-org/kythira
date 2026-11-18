@@ -22,10 +22,26 @@
 //   data  ns "x" be64(t)                 token t was deleted (ids are
 //                                        never reused: its group id is
 //                                        tombstoned on every member)
+//   data  ns "m" identity                a crypto member
+//                                        (hsm-independent-layers
+//                                        Requirement 5)
 //   meta  ns                             applied index
 //
 // Replies are a CK_RV (u32); CKR_FUNCTION_REJECTED is a conflict (already
-// initialized, a token id taken, a stale generation).
+// initialized, a token id taken, a stale generation, a crypto member list
+// seeded twice or emptied).
+//
+// The crypto member list (.kiro/specs/hsm-independent-layers/ task 2) names
+// the identities allowed to be crypto nodes: to be unsealed, to hold an MK
+// share and to ask for one. It changes only through these admin commands,
+// never from the layer membership group or self-announcement
+// (Requirement 5.1). While it is empty the crypto members are the store
+// members, which is every co-located cluster, so node unseal, init and
+// rekey behave as before (Requirement 1.2); seed_crypto_members writes
+// them in before the first split (Requirement 9.1). Once seeded it can
+// never be emptied again, because an empty list would silently hand share
+// release back to the store members. Older binaries do not know these
+// commands, so a cluster upgrades every node before using them.
 
 #include <kythira/hsm/codec.hpp>
 #include <kythira/hsm/persistent_group.hpp>
@@ -128,6 +144,9 @@ enum class catalog_command : std::uint8_t {
     unbind = 5,
     rekey = 6,
     seal = 7,
+    admit_crypto_member = 8,
+    remove_crypto_member = 9,
+    seed_crypto_members = 10,
 };
 
 [[nodiscard]] inline auto valid_unseal_parameters(unseal_mode mode, std::uint8_t k, std::uint8_t n)
@@ -218,6 +237,46 @@ struct split_parameters {
     return w.take();
 }
 
+/// Admits `identity` to the crypto member list; admitting a member again
+/// is a no-op, so a retry after an uncertain commit is safe.
+[[nodiscard]] inline auto make_admit_crypto_member_command(std::string_view identity)
+    -> std::vector<std::byte> {
+    byte_writer w;
+    w.u8(static_cast<std::uint8_t>(catalog_command::admit_crypto_member)).str(identity);
+    return w.take();
+}
+
+/// Removes `identity`; CKR_FUNCTION_REJECTED when it is the last member.
+/// Removing a non-member is a no-op. The removed node still holds its old
+/// share, so a rekey completes the removal (Requirement 5.4).
+[[nodiscard]] inline auto make_remove_crypto_member_command(std::string_view identity)
+    -> std::vector<std::byte> {
+    byte_writer w;
+    w.u8(static_cast<std::uint8_t>(catalog_command::remove_crypto_member)).str(identity);
+    return w.take();
+}
+
+/// Writes the co-located crypto members (the store members) into an
+/// empty list in one entry; CKR_FUNCTION_REJECTED once it is seeded.
+[[nodiscard]] inline auto make_seed_crypto_members_command(
+    const std::vector<std::string>& identities) -> std::vector<std::byte> {
+    byte_writer w;
+    w.u8(static_cast<std::uint8_t>(catalog_command::seed_crypto_members))
+        .u32(static_cast<std::uint32_t>(identities.size()));
+    for (const auto& id : identities) {
+        w.str(id);
+    }
+    return w.take();
+}
+
+/// The crypto members in effect: the list when seeded, else the store
+/// members (Requirement 1.2).
+[[nodiscard]] inline auto effective_crypto_members(std::vector<std::string> listed,
+                                                   const std::vector<std::string>& store_members)
+    -> std::vector<std::string> {
+    return listed.empty() ? store_members : listed;
+}
+
 [[nodiscard]] inline auto catalog_reply_rv(const std::vector<std::byte>& reply) -> CK_RV {
     byte_reader r(reply);
     const CK_RV rv = r.u32();
@@ -261,6 +320,13 @@ public:
                 break;
             case catalog_command::seal:
                 rv = apply_seal(batch);
+                break;
+            case catalog_command::admit_crypto_member:
+            case catalog_command::remove_crypto_member:
+                rv = apply_crypto_member(r, batch, tag == catalog_command::admit_crypto_member);
+                break;
+            case catalog_command::seed_crypto_members:
+                rv = apply_seed_crypto_members(r, batch);
                 break;
             default:
                 throw std::invalid_argument("hsm_catalog_state_machine: unknown command");
@@ -324,6 +390,16 @@ public:
         std::vector<std::uint64_t> out;
         this->scan_prefix("x", [&](std::string_view k, std::string_view) {
             out.push_back(from_be64_key(k.substr(1)));
+            return true;
+        });
+        return out;
+    }
+
+    /// The crypto member list in identity order; empty until seeded.
+    [[nodiscard]] auto crypto_members() const -> std::vector<std::string> {
+        std::vector<std::string> out;
+        this->scan_prefix("m", [&](std::string_view k, std::string_view) {
+            out.emplace_back(k.substr(1));
             return true;
         });
         return out;
@@ -468,6 +544,50 @@ private:
         c->k = split.k;
         c->n = split.n;
         put(batch, "c", c->encode());
+        return CKR_OK;
+    }
+
+    static auto valid_identity(std::string_view identity) -> bool {
+        return !identity.empty() && identity.find('\0') == std::string_view::npos;
+    }
+
+    auto apply_crypto_member(byte_reader& r, kythira::write_batch& batch, bool admit) -> CK_RV {
+        const auto identity = r.str();
+        if (!valid_identity(identity)) {
+            throw std::invalid_argument("hsm_catalog_state_machine: bad identity");
+        }
+        const bool present = this->get("m" + identity).has_value();
+        if (admit) {
+            if (!present) {
+                put(batch, "m" + identity, {});
+            }
+            return CKR_OK;
+        }
+        if (!present) {
+            return CKR_OK;
+        }
+        if (crypto_members().size() == 1) {
+            return CKR_FUNCTION_REJECTED;  // never empty once seeded
+        }
+        batch.erase(kythira::column_family::data, this->key("m" + identity));
+        return CKR_OK;
+    }
+
+    auto apply_seed_crypto_members(byte_reader& r, kythira::write_batch& batch) -> CK_RV {
+        std::set<std::string> ids;
+        for (auto n = r.u32(); n > 0; --n) {
+            auto id = r.str();
+            if (!valid_identity(id)) {
+                throw std::invalid_argument("hsm_catalog_state_machine: bad identity");
+            }
+            ids.insert(std::move(id));
+        }
+        if (ids.empty() || !crypto_members().empty()) {
+            return CKR_FUNCTION_REJECTED;
+        }
+        for (const auto& id : ids) {
+            put(batch, "m" + id, {});
+        }
         return CKR_OK;
     }
 

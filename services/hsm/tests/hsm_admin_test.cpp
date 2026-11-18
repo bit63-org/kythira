@@ -37,6 +37,7 @@ struct admin_host {
     [[nodiscard]] auto catalog() const { return store.catalog(); }
     [[nodiscard]] auto tokens() const { return store.tokens(); }
     [[nodiscard]] auto hosts(std::uint64_t id) const { return store.hosts(id); }
+    [[nodiscard]] auto crypto_members() const { return store.crypto_members(); }
     auto propose_catalog(std::vector<std::byte> cmd) {
         return store.propose_catalog(std::move(cmd));
     }

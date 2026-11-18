@@ -41,6 +41,10 @@ public:
         -> bool override {
         return _catalog.may_open(identity, id);
     }
+
+    [[nodiscard]] auto crypto_members() const -> std::vector<std::string> {
+        return _catalog.crypto_members();
+    }
     [[nodiscard]] auto hosts(std::uint64_t id) const -> bool override {
         const std::lock_guard lock(_mutex);
         return _tokens.contains(id);

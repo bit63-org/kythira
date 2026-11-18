@@ -38,6 +38,36 @@
 //                      shares handed out, the old ones stop working, and
 //                      every other node is sealed until unsealed with them
 //
+// and, for independent layers (.kiro/specs/hsm-independent-layers/ task 2,
+// Requirement 5):
+//
+//   GET    /v1/crypto-members                the crypto member list in
+//                                            effect and whether it is
+//                                            seeded (else the store
+//                                            members are the crypto
+//                                            members)
+//   POST   /v1/crypto-members/seed           write the store members
+//                                            (admin_policy::store_members)
+//                                            in as the list, once, before
+//                                            the first split
+//   PUT    /v1/crypto-members/<identity>     admit one; in node mode it
+//                                            gets a share only from the
+//                                            next rekey (Requirement 5.5)
+//   DELETE /v1/crypto-members/<identity>     remove one. The removed node
+//                      [{"rekey":true,       keeps its old share, so the
+//                        "k":K,"n":N}]       removal is complete only after
+//                                            a rekey: without "rekey" the
+//                                            answer is 202 with "complete":
+//                                            false; with it, the rekey runs
+//                                            in the same request and the
+//                                            answer is the rekey's
+//                                            (Requirement 5.4)
+//
+// With the list seeded, node-mode init and rekey hand share i to the i-th
+// listed member through node_share_delivery::deliver_to, and n must be the
+// list's size; store-only nodes get none and count toward neither k nor n
+// (Requirement 5.3).
+//
 // <identity> is percent-encoded (a SPIFFE URI has slashes). Only the
 // operator identities in admin_policy may call any of it; the client
 // certificate's URI or DNS SAN is the identity.
@@ -87,6 +117,9 @@ struct admin_policy {
     bool allow_single_share = false;
     /// How long partial operator shares are held (requirement 4.3).
     std::chrono::seconds unseal_timeout{std::chrono::minutes{10}};
+    /// The store members' identities, which the crypto member list is
+    /// seeded from.
+    std::vector<std::string> store_members;
 };
 
 /// How init and rekey hand node-mode shares to the members (task 8).
@@ -97,6 +130,9 @@ struct node_share_delivery {
     /// Stores `share` on member `index` (this node included); false when
     /// it could not.
     std::function<bool(std::size_t index, const shamir_share& share)> deliver;
+    /// Stores `share` on the crypto member `identity`, once the catalog's
+    /// crypto member list is seeded; false when it could not.
+    std::function<bool(const std::string& identity, const shamir_share& share)> deliver_to;
 };
 
 struct admin_request {
@@ -229,6 +265,15 @@ private:
         if (p == "/v1/rekey") {
             return "rekey";
         }
+        if (p.starts_with("/v1/crypto-members")) {
+            if (req.method == "GET") {
+                return "list_crypto_members";
+            }
+            if (p == "/v1/crypto-members/seed") {
+                return "seed_crypto_members";
+            }
+            return del ? "remove_crypto_member" : "admit_crypto_member";
+        }
         if (p == "/v1/tokens") {
             return req.method == "GET" ? "list_tokens" : "create_token";
         }
@@ -287,6 +332,9 @@ private:
         }
         if (req.path == "/v1/rekey") {
             return req.method == "POST" ? rekey(req.body) : not_allowed();
+        }
+        if (req.path == "/v1/crypto-members" || req.path.starts_with("/v1/crypto-members/")) {
+            return crypto_members_route(req);
         }
         if (req.path == tokens) {
             if (req.method == "GET") {
@@ -404,10 +452,30 @@ private:
 
     /// In node mode, share i to the i-th member, every one before the
     /// catalog entry is proposed (task 8): an error answer when that
-    /// cannot be done, so nothing is committed.
+    /// cannot be done, so nothing is committed. With the crypto member
+    /// list seeded, the members are the listed crypto members.
     auto deliver(const fresh_key& key, const split_parameters& split)
         -> std::optional<admin_response> {
         if (split.mode != unseal_mode::node_shares) {
+            return std::nullopt;
+        }
+        if (const auto crypto = _host->crypto_members(); !crypto.empty()) {
+            if (!_delivery.deliver_to) {
+                return error(400, "bad_request",
+                             "node unseal to listed crypto members is not available on this node");
+            }
+            if (split.n != crypto.size()) {
+                return error(400, "bad_request",
+                             "node unseal gives each crypto member one share: n must be " +
+                                 std::to_string(crypto.size()));
+            }
+            for (std::size_t i = 0; i < key.raw.size(); ++i) {
+                if (!_delivery.deliver_to(crypto[i], key.raw[i])) {
+                    return error(503, "unavailable",
+                                 "crypto member " + crypto[i] +
+                                     " could not take its share; nothing was committed");
+                }
+            }
             return std::nullopt;
         }
         if (!_delivery.deliver) {
@@ -586,6 +654,130 @@ private:
         // other node seals itself when it applies the entry.
         (void)_vault->unseal(std::move(key.mk), _host->catalog());
         return with_shares(200, *split, generation, key.shares);
+    }
+
+    auto crypto_members_route(const admin_request& req) -> admin_response {
+        constexpr std::string_view base = "/v1/crypto-members";
+        if (req.path == base) {
+            return req.method == "GET" ? list_crypto_members() : not_allowed();
+        }
+        const auto rest = std::string_view(req.path).substr(base.size() + 1);
+        if (rest == "seed") {
+            return req.method == "POST" ? seed_crypto_members() : not_allowed();
+        }
+        const auto identity = percent_decode(rest);
+        if (!identity || identity->empty() || identity->find('\0') != std::string::npos) {
+            return error(400, "bad_request", "malformed identity");
+        }
+        if (req.method == "PUT") {
+            return admit_crypto_member(*identity);
+        }
+        return req.method == "DELETE" ? remove_crypto_member(*identity, req.body) : not_allowed();
+    }
+
+    auto list_crypto_members() -> admin_response {
+        const auto listed = _host->crypto_members();
+        boost::json::array members;
+        for (const auto& id : effective_crypto_members(listed, _policy.store_members)) {
+            members.emplace_back(id);
+        }
+        boost::json::object o;
+        o["members"] = std::move(members);
+        o["seeded"] = !listed.empty();
+        return ok(200, o);
+    }
+
+    auto seed_crypto_members() -> admin_response {
+        if (_policy.store_members.empty()) {
+            return error(400, "bad_request", "this node does not know the store members");
+        }
+        const auto rv = propose(make_seed_crypto_members_command(_policy.store_members));
+        if (rv == CKR_FUNCTION_REJECTED) {
+            return error(409, "already_seeded", "the crypto member list is already seeded");
+        }
+        if (rv != CKR_OK) {
+            return refusal(rv);
+        }
+        return list_crypto_members();
+    }
+
+    auto admit_crypto_member(const std::string& identity) -> admin_response {
+        if (_host->crypto_members().empty()) {
+            // Admitting into an empty list would drop the store members
+            // from it: seed first, so the list and the unsealed set agree
+            // (Requirement 9.1).
+            return error(409, "not_seeded",
+                         "seed the crypto member list (POST /v1/crypto-members/seed) first");
+        }
+        const auto rv = propose(make_admit_crypto_member_command(identity));
+        if (rv != CKR_OK) {
+            return refusal(rv);
+        }
+        const auto c = _host->catalog();
+        boost::json::object o;
+        o["admitted"] = identity;
+        o["share"] = c && c->mode == unseal_mode::node_shares
+                         ? "from the next rekey (POST /v1/rekey)"
+                         : "unsealed by operators with their shares";
+        return ok(200, o);
+    }
+
+    auto remove_crypto_member(const std::string& identity, const std::string& text)
+        -> admin_response {
+        const auto v = boost::json::parse(text.empty() ? std::string("{}") : text);
+        if (!v.is_object()) {
+            return error(400, "bad_request", R"(expected {"rekey": true, "k": K, "n": N})");
+        }
+        auto opts = v.as_object();
+        const auto* rk = opts.if_contains("rekey");
+        const bool with_rekey = rk != nullptr && rk->is_bool() && rk->as_bool();
+        if (rk != nullptr && !rk->is_bool()) {
+            return error(400, "bad_request", "rekey is true or false");
+        }
+        if (_host->crypto_members().empty()) {
+            return error(409, "not_seeded", "the crypto member list is not seeded");
+        }
+        const auto rv = propose(make_remove_crypto_member_command(identity));
+        if (rv == CKR_FUNCTION_REJECTED) {
+            return error(409, "last_member", "the last crypto member cannot be removed");
+        }
+        if (rv != CKR_OK) {
+            return refusal(rv);
+        }
+        if (!with_rekey) {
+            boost::json::object o;
+            o["removed"] = identity;
+            o["complete"] = false;
+            o["message"] =
+                "the removed node still holds its share of the current master key; the "
+                "removal is complete after a rekey (POST /v1/rekey)";
+            return ok(202, o);
+        }
+        opts.erase("rekey");
+        // In node mode every listed member gets one share, so n follows
+        // the list unless the operator gave it; k stays the operator's.
+        if (const auto c = _host->catalog();
+            c && !opts.contains("n") &&
+            (c->mode == unseal_mode::node_shares ||
+             (opts.contains("mode") && opts.at("mode").is_string() &&
+              opts.at("mode").as_string() == "node"))) {
+            opts["n"] = _host->crypto_members().size();
+        }
+        auto res = rekey(boost::json::serialize(opts));
+        if (res.status == 200 || res.status == 503) {
+            auto body = boost::json::parse(res.body).as_object();
+            body["removed"] = identity;
+            body["complete"] = res.status == 200;
+            res.body = boost::json::serialize(body);
+            return res;
+        }
+        // The removal committed but the rekey did not run: say so, with
+        // the rekey's reason.
+        auto body = boost::json::parse(res.body).as_object();
+        body["removed"] = identity;
+        body["complete"] = false;
+        res.body = boost::json::serialize(body);
+        return res;
     }
 
     auto list_tokens() -> admin_response {

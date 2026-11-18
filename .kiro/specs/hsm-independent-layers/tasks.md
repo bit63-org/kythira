@@ -10,7 +10,7 @@ builds it to that spec's design. Each task is one PR unless noted.
     engine or groups without `store`; start-time validation
   - _Requirements: 1.1, 2.1-2.5_
 
-- [ ] 2. Crypto member list
+- [x] 2. Crypto member list
   - Catalog field and admin commands; co-located clusters seed it from
     the store members; node unseal checks it and the `crypto` role; init
     and rekey hand shares to crypto members only; removal completes with a
