@@ -193,6 +193,16 @@ PR unless noted.
 - [ ] 12. Client suites in CI
   - CLI, SDKs, JMS, Spring Cloud AWS, Celery/Kombu, Extended Client, on
     co-located and split layouts
+  - Done (November 18, 2026), co-located: `services/sqs/tests/clients/`
+    (`run_suite.sh`) runs the AWS CLI v2, boto3 on JSON and on the query
+    protocol, Kombu, aws-sdk-go-v2, aws-sdk-js-v3 (both JSON only now),
+    Java SDK v2, JMS, aws-sdk-java v1 1.12.575 (the last
+    query-era release), Spring Cloud AWS 3.4.2 (template and listener
+    container) and the Extended Client 2.1.3 (moto as S3) against
+    `sqs_node`, in `sqs-module.yml`'s client job. The query run found an
+    empty `ReceiveMessage` answering without `<ReceiveMessageResult>`,
+    which botocore needs; fixed in the codec. Left: the same suites
+    against the split layouts, with task 10 (`SQS_SUITE_ENDPOINT`).
   - _Requirements: 13.1, 13.2_
 
 - [ ] 13. Interoperability with real Amazon SQS
