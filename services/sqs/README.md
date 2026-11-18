@@ -25,6 +25,8 @@ Built when `CONFIG_SQS=y` (`services/sqs/Kconfig`, off by default).
 | `doc/unsupported.md` | every other operation, with its planned task, reason and the exact error it returns | 1 onward |
 | `tools/check_coverage.py`, `tools/test_check_coverage.py` | the coverage check (Requirement 2.1) and its fixture tests | 1 |
 | `tests/evidence/` | the recording stub, the clients and the checked-in wire evidence (AWS CLI v2, boto3 on JSON and query, Java SDK v2, JMS, Kombu); `sqs_wire_evidence` checks it | 1 |
+| `include/kythira/sqs/sqs_queue_commands.hpp` | the queue state machine's Raft entries and replies (send, receive, delete, change visibility, purge, drop, tick), versioned binary forms | 2 |
+| `include/kythira/sqs/sqs_queue_state_machine.hpp` | the replicated state of queue partitions on the `kv_engine`: key layout, receives as committed entries, receipt sequences, FIFO group heads, deduplication, retention, counts, splits at partition routing keys | 2 |
 | `cmd/sqs_node/` | the daemon; a placeholder whose `--self-test` checks the operation table until tasks 3 and 4 | 1 |
 
 ## Core pieces used
