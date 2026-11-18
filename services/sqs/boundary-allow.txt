@@ -4,6 +4,6 @@
 # Core *_impl.hpp headers the SQS module may include, one per line, with the
 # reason (services/README.md, "Boundary rules"). Only the composition root
 # (cmd/sqs_node) and tests that stand up an in-process cluster may be listed.
-# Empty until the daemon composes its multi-raft host.
 #
 # file                                   allowed core *_impl.hpp       why
+cmd/sqs_node/sqs_module.hpp            multi_raft_impl.hpp           instantiates the module's multi-raft host

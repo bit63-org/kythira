@@ -110,6 +110,22 @@ find_package(Threads REQUIRED)
 kythira_sqs_test(sqs_listener_test sqs_listener_test.cpp)
 target_link_libraries(sqs_listener_test PRIVATE OpenSSL::SSL Threads::Threads)
 
+# Task 4: the module on multi_raft, as whole in-process nodes over the Beast
+# Raft transport (sqs_module.hpp on memory_kv_engine): a restart, three
+# nodes forwarding to their leader, and the settings a durable node refuses.
+# Built where the module is (KYTHIRA_SQS_MODULE_AVAILABLE, services/sqs/cmd);
+# add_beast_test is tests/'s helper, defined before this directory.
+if(KYTHIRA_SQS_MODULE_AVAILABLE)
+    add_beast_test(sqs_module_test sqs_module_test.cpp)
+    target_link_libraries(sqs_module_test PRIVATE
+        kythira_sqs_node_common kythira_test_support Threads::Threads)
+    set_target_properties(sqs_module_test PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests")
+    set_tests_properties(sqs_module_test PROPERTIES
+        WORKING_DIRECTORY "${CMAKE_BINARY_DIR}/tests"
+        LABELS "integration;sqs;sqs-module" TIMEOUT 300)
+endif()
+
 # Task 3: the checked-in model, query-name and action headers are what their
 # generators make of the pinned inputs, so an upgrade of any input carries
 # its regenerated header and diff.

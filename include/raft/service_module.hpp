@@ -40,7 +40,7 @@ inline constexpr std::uint8_t iam = 5;
 inline constexpr std::uint8_t hsm = 6;
 inline constexpr std::uint8_t kms = 7;
 inline constexpr std::uint8_t s3 = 8;
-/// 9 is reserved for the SQS module (.kiro/specs/sqs-compatible-queues/).
+inline constexpr std::uint8_t sqs = 9;
 inline constexpr std::uint8_t sns = 10;
 /// The largest number a module may take: 255 would put the end of its
 /// range past 2^64.
