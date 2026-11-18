@@ -8,11 +8,13 @@ here with its reason and the exact error it returns.
 operation is in neither list, so a model upgrade that adds one fails until it
 is placed.
 
-Until the gateway exists (task 3) no request is served at all. Once it does,
-an operation listed here is answered like an action the model does not have:
-the query protocol's `InvalidAction` error (`<Type>Sender</Type>`, HTTP
-status 400) in SNS's `ErrorResponse` XML. Task 12's recorded SNS responses
-pin the exact body.
+The front end (`include/kythira/sns/sns_front_end.hpp`, task 3) answers an
+operation listed here like an action the model does not have: the query
+protocol's `InvalidAction` error (`<Type>Sender</Type>`, HTTP status 400) in
+SNS's `ErrorResponse` XML, with the message `Could not find operation
+<Action> for version 2010-03-31`. The request is authenticated first, so an
+unsigned caller gets SigV4's error instead. Task 12's recorded SNS
+responses pin the exact message.
 
 The pinned model has 42 operations. 21 are planned, all in task 4 (the
 topic, subscription and publish API, with the gateway and authorization of

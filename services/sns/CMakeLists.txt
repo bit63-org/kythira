@@ -13,12 +13,12 @@
 
 # The module's headers, as <kythira/sns/...>. Header-only, like the other
 # modules. OpenSSL for SigV4 and message signatures (KYTHIRA_BUILD_SNS
-# requires it).
+# requires it); Boost.JSON for topic policies (sns_topic_policy.hpp).
 set(KYTHIRA_SNS_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}")
 set(KYTHIRA_SNS_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/include")
 add_library(kythira_sns INTERFACE)
 target_include_directories(kythira_sns INTERFACE "${KYTHIRA_SNS_INCLUDE_DIR}")
-target_link_libraries(kythira_sns INTERFACE kythira_core_headers OpenSSL::Crypto)
+target_link_libraries(kythira_sns INTERFACE kythira_core_headers boost_json OpenSSL::Crypto)
 target_compile_features(kythira_sns INTERFACE cxx_std_23)
 
 # sns_node (task 1 placeholder; the daemon grows from task 3 on), before the

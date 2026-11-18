@@ -26,6 +26,11 @@ Built when `CONFIG_SNS=y` (`services/sns/Kconfig`, off by default).
 | `tools/check_coverage.py`, `tools/test_check_coverage.py` | the coverage check (Requirement 2.1) and its fixture tests | 1 |
 | `tests/evidence/` | the recording stub and checked-in wire evidence from the AWS CLI v2, boto3 and the Java, JS and Go SDKs, with what the gateway must accept (`tests/evidence/README.md`) | 1 |
 | `include/kythira/sns/sns_topic_state_machine.hpp`, `sns_codec.hpp` | the replicated topic state: topics, subscriptions, the publish log in the record segment store, FIFO dedup, delivery leases with fencing, cursors and retry state | 2 |
+| `tools/sns-service-reference.json`, `tools/gen_sns_actions.py`, `include/kythira/sns/sns_actions.hpp` | AWS's Service Authorization Reference entry for `sns` (v1.5, fetched 2026-11-18, unchanged, SHA-256 `36396847c543959df076d04811fa0fc7895a19ab31d946b3aacd0464c4433ed3`), and the action table, operation-to-action map and static-key roles generated from it | 3 |
+| `include/kythira/sns/sns_front_end.hpp` | the front end: framing, SigV4, the query codec, authorization on the topic with its policy, and dispatch to handlers | 3 |
+| `include/kythira/sns/sns_query.hpp`, `sns_errors.hpp` | query inputs (attribute maps, message attributes, batches, tags) and SNS's errors in the query protocol | 3 |
+| `include/kythira/sns/sns_topic_policy.hpp` | topic and subscription ARNs, the default topic policy, AddPermission and RemovePermission | 3 |
+| `include/kythira/sns/sns_compat_profile.hpp` | the `kythira:compat:*` switches and SNS's documented limits per region | 3 |
 | `cmd/sns_node/` | the daemon; a placeholder whose `--self-test` checks the operation table until tasks 3 and 4 | 1 |
 
 ## Upgrading the model
@@ -42,8 +47,9 @@ new operation fails `sns_model_coverage` until it is implemented or listed in
 
 | From core | Used for |
 |---|---|
-| `kythira_core_headers` | the public headers: `record_segment_store.hpp` (the publish log), `types.hpp` (the state machine concept); later the multi-raft host, SigV4 verifier, authorizer and AWS query codec |
-| `OpenSSL::Crypto` | SigV4, message signatures (versions 1 and 2) |
+| `kythira_core_headers` | the public headers: `record_segment_store.hpp` (the publish log), `types.hpp` (the state machine concept), `sigv4_verifier.hpp`, `aws_request_authorizer.hpp`, `static_key_authorizer.hpp` and `aws_query_protocol.hpp` (the front end); later the multi-raft host |
+| `OpenSSL::Crypto` | SigV4, request ids, message signatures (versions 1 and 2) |
+| `boost_json` | topic policy documents |
 | `cmake/kythira_test_helpers.cmake` | `kythira_scale_test_timeouts()` |
 
 ## Tests
