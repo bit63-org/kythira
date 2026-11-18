@@ -32,6 +32,11 @@ every role (7, 8, 10).
     checks on the Beast server; reload without restart
   - `kythira_node` and `kinesis_gateway_node` load it; HMAC forward secret
     still accepted between co-located data nodes without TLS
+  - Status: the core pieces are on `main` (`include/raft/layer_roles.hpp`,
+    `include/raft/layer_identity.hpp`, the Beast server's `tls_source`
+    rotation, `tests/layer_identity_test.cpp`); loading it in the two nodes
+    lands with task 4, after the channel delivery PRs that edit the
+    Kinesis node's configuration
   - _Requirements: 7.1-7.5_
 
 - [ ] 4. `KINESIS_ROLES` and role validation

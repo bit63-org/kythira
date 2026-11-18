@@ -5566,6 +5566,22 @@ if(TARGET certificate_authority)
         TIMEOUT 60
         LABELS "unit;https;iam"
     )
+    # kinesis-independent-layers task 3: layer identities (SAN URI roles),
+    # per-route role checks and certificate rotation on the Beast server.
+    add_executable(layer_identity_test layer_identity_test.cpp)
+    target_link_libraries(layer_identity_test PRIVATE
+        Boost::unit_test_framework
+        certificate_authority
+        OpenSSL::SSL
+        OpenSSL::Crypto
+        Threads::Threads
+    )
+    target_compile_features(layer_identity_test PRIVATE cxx_std_23)
+    add_test(NAME layer_identity_test COMMAND layer_identity_test)
+    set_tests_properties(layer_identity_test PROPERTIES
+        TIMEOUT 60
+        LABELS "unit;https;layers"
+    )
 else()
     message(STATUS "beast_https_server_test: skipped (requires certificate_authority)")
 endif()
