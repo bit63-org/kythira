@@ -42,36 +42,22 @@ BOOST_AUTO_TEST_CASE(cluster_lifecycle, *boost::unit_test::timeout(600)) {
 
     // A follower redirects an admin request to the leader, once it has
     // heard from it (503 until then). Leadership can move between finding
-    // the leader and asking a follower — a starved runner misses heartbeats
-    // and an election follows — so each attempt re-resolves the leader and
-    // only a 307 naming the leader of that moment counts.
+    // the leader and asking a follower, so on_follower re-resolves both on
+    // each attempt and only a 307 naming the leader of that moment counts.
     member* follower = nullptr;
-    std::optional<http_result> redirect;
     std::string expected_location;
-    const auto redirect_deadline = std::chrono::steady_clock::now() + 60s;
-    while (std::chrono::steady_clock::now() < redirect_deadline) {
-        leader = c.wait_leader();
-        BOOST_REQUIRE(leader != nullptr);
-        follower = nullptr;
-        for (auto* m : c.voters()) {
-            if (m != leader) {
-                follower = m;
-                break;
-            }
-        }
-        BOOST_REQUIRE(follower != nullptr);
-        expected_location =
-            "https://localhost:" + std::to_string(leader->http_port) + "/v1/admin/accounts";
-        redirect = https_call(follower->http_port, c.pki, http::verb::get, "/v1/admin/accounts",
+    auto redirect = c.on_follower(
+        "/v1/admin/accounts",
+        [&](member& f) {
+            follower = &f;
+            return https_call(f.http_port, c.pki, http::verb::get, "/v1/admin/accounts",
                               c.pki.admin_cert.string(), c.pki.admin_key.string());
-        if (redirect && redirect->status == 307U && redirect->location == expected_location) {
-            break;
-        }
-        std::this_thread::sleep_for(100ms);
-    }
+        },
+        &expected_location);
     BOOST_REQUIRE(redirect.has_value());
     BOOST_TEST(redirect->status == 307U);
     BOOST_TEST(redirect->location == expected_location);
+    BOOST_REQUIRE(follower != nullptr);
 
     // create-account through the follower: the CLI follows the redirect.
     const auto key_file = c.dir() / "root-key.ini";
@@ -115,12 +101,19 @@ BOOST_AUTO_TEST_CASE(cluster_lifecycle, *boost::unit_test::timeout(600)) {
     const std::string iam_auth =
         "AWS4-HMAC-SHA256 Credential=AKIAEXAMPLEKEYID0000/20261106/us-east-1/iam/aws4_request, "
         "SignedHeaders=host;x-amz-date, Signature=00";
-    // IAM is served by the leader; a follower redirects.
-    auto iam_call = https_call(follower->http_port, c.pki, http::verb::post, "/", {}, {}, iam_auth);
+    // IAM is served by the leader; a follower redirects. Every call below
+    // that is meant for the leader, or for a follower, re-resolves it on
+    // each attempt: an election here would otherwise turn the old leader's
+    // answers into 307s (one CI run on 11-17 saw exactly that).
+    auto iam_call = c.on_follower("/", [&](member& f) {
+        return https_call(f.http_port, c.pki, http::verb::post, "/", {}, {}, iam_auth);
+    });
     BOOST_REQUIRE(iam_call.has_value());
     BOOST_TEST(iam_call->status == 307U);
     // A signature with no X-Amz-Date is refused in AWS's Query error shape.
-    auto bad_key = https_call(leader->http_port, c.pki, http::verb::post, "/", {}, {}, iam_auth);
+    auto bad_key = c.on_leader([&](member& l) {
+        return https_call(l.http_port, c.pki, http::verb::post, "/", {}, {}, iam_auth);
+    });
     BOOST_REQUIRE(bad_key.has_value());
     BOOST_TEST(bad_key->status == 400U);
     BOOST_TEST(bad_key->body.find("<Code>IncompleteSignature</Code>") != std::string::npos);
@@ -130,33 +123,42 @@ BOOST_AUTO_TEST_CASE(cluster_lifecycle, *boost::unit_test::timeout(600)) {
     // a user.
     const auto root_id = ini_value(ini, "aws_access_key_id");
     const auto root_secret = ini_value(ini, "aws_secret_access_key");
-    auto created = signed_iam_call(leader->http_port, c.pki, root_id, root_secret,
-                                   "Action=CreateUser&UserName=node-test&Version=2010-05-08");
+    // A 307 means the write never reached a leader, so trying it again on
+    // the new one cannot create the user twice.
+    auto created = c.on_leader([&](member& l) {
+        return signed_iam_call(l.http_port, c.pki, root_id, root_secret,
+                               "Action=CreateUser&UserName=node-test&Version=2010-05-08");
+    });
     BOOST_REQUIRE(created.has_value());
     BOOST_TEST_INFO("CreateUser: " << created->body);
     BOOST_TEST(created->status == 200U);
     BOOST_TEST(created->body.find("<UserName>node-test</UserName>") != std::string::npos);
-    auto listed_users = signed_iam_call(leader->http_port, c.pki, root_id, root_secret,
-                                        "Action=ListUsers&Version=2010-05-08");
+    auto listed_users = c.on_leader([&](member& l) {
+        return signed_iam_call(l.http_port, c.pki, root_id, root_secret,
+                               "Action=ListUsers&Version=2010-05-08");
+    });
     BOOST_REQUIRE(listed_users.has_value());
     BOOST_TEST(listed_users->status == 200U);
     BOOST_TEST(listed_users->body.find("node-test") != std::string::npos);
-    auto wrong_secret = signed_iam_call(leader->http_port, c.pki, root_id, "not-the-secret",
-                                        "Action=ListUsers&Version=2010-05-08");
+    auto wrong_secret = c.on_leader([&](member& l) {
+        return signed_iam_call(l.http_port, c.pki, root_id, "not-the-secret",
+                               "Action=ListUsers&Version=2010-05-08");
+    });
     BOOST_REQUIRE(wrong_secret.has_value());
     BOOST_TEST(wrong_secret->status == 403U);
     BOOST_TEST(wrong_secret->body.find("SignatureDoesNotMatch") != std::string::npos);
-    auto sts_call = https_call(follower->http_port, c.pki, http::verb::get,
-                               "/?Action=GetCallerIdentity&X-Amz-Credential=AKIAEXAMPLEKEYID0000%"
-                               "2F20261106%2Fus-east-1%2Fsts%2Faws4_request");
+    const std::string sts_target =
+        "/?Action=GetCallerIdentity&X-Amz-Credential=AKIAEXAMPLEKEYID0000%"
+        "2F20261106%2Fus-east-1%2Fsts%2Faws4_request";
+    auto sts_call = c.on_follower(sts_target, [&](member& f) {
+        return https_call(f.http_port, c.pki, http::verb::get, sts_target);
+    });
     // STS, served since task 17, goes to the leader like IAM; there an
     // unverifiable signature is refused in STS's own Query namespace.
     BOOST_REQUIRE(sts_call.has_value());
     BOOST_TEST(sts_call->status == 307U);
-    auto sts_on_leader =
-        https_call(leader->http_port, c.pki, http::verb::get,
-                   "/?Action=GetCallerIdentity&X-Amz-Credential=AKIAEXAMPLEKEYID0000%"
-                   "2F20261106%2Fus-east-1%2Fsts%2Faws4_request");
+    auto sts_on_leader = c.on_leader(
+        [&](member& l) { return https_call(l.http_port, c.pki, http::verb::get, sts_target); });
     BOOST_REQUIRE(sts_on_leader.has_value());
     BOOST_TEST_INFO("STS on the leader: " << sts_on_leader->body);
     BOOST_TEST(sts_on_leader->status >= 400U);
