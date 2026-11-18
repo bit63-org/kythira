@@ -19,6 +19,7 @@ tests/multi_raft_txn_write_skew_test.cpp     multi_raft_impl.hpp               s
 tests/redis_gateway_integration_test.cpp     multi_raft_impl.hpp               stands up in-process hosts
 tests/redis_gateway_snapshot_test.cpp        multi_raft_impl.hpp               stands up in-process hosts
 tests/redis_gateway_txn_test.cpp             multi_raft_impl.hpp               stands up in-process hosts
+tests/differential/redis_differential_replay_test.cpp  multi_raft_impl.hpp  stands up in-process hosts
 
 # The composition root wiring in another module's adapter to a core concept
 # (scripts/check_module_boundaries.py, `module-adapter`), only in a
