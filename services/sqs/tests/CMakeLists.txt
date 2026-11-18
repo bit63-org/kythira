@@ -91,6 +91,13 @@ kythira_sqs_test(sqs_messages_test sqs_messages_test.cpp)
 # (Requirements 4.1, 4.2).
 kythira_sqs_test(sqs_catalog_test sqs_catalog_test.cpp)
 
+# Task 4: the queue and message handlers end to end through the front end
+# with real SigV4 over a local cluster with a test clock: queue lifecycle,
+# attributes, permissions, tags and purges; sends, receives, deletes and
+# visibility with their receipt rules; batches; FIFO; the query protocol
+# (Requirements 4.1, 4.2, 5.1-5.5).
+kythira_sqs_test(sqs_service_test sqs_service_test.cpp)
+
 # Task 3: the checked-in model, query-name and action headers are what their
 # generators make of the pinned inputs, so an upgrade of any input carries
 # its regenerated header and diff.
