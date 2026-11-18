@@ -234,3 +234,24 @@ BOOST_AUTO_TEST_CASE(resolve_follows_the_mode) {
     iam.known->insert("AKIDADMIN");
     BOOST_TEST(a->resolve(*parsed, sv4::error_protocol::s3).error().code == "InvalidAccessKeyId");
 }
+
+// Anonymous requests: IAM's answer when it is in use and has the hook,
+// nothing from static keys.
+BOOST_AUTO_TEST_CASE(anonymous_requests_go_to_iam_or_nowhere) {
+    auto a = make_authorizer();
+    BOOST_TEST(!a->authorize_anonymous(action("dynamodb:GetItem")).allowed);
+    fake_iam iam;
+    auto hooks = iam.hooks();
+    a->set_mode(az::auth_mode::iam, hooks);
+    BOOST_TEST(!a->authorize_anonymous(action("dynamodb:GetItem")).allowed);
+    hooks.authorize_anonymous = [](const az::authz_request& r) {
+        az::authz_decision d;
+        d.allowed = r.action == "dynamodb:GetItem";
+        return d;
+    };
+    a->set_mode(az::auth_mode::both, hooks);
+    BOOST_TEST(a->authorize_anonymous(action("dynamodb:GetItem")).allowed);
+    BOOST_TEST(!a->authorize_anonymous(action("dynamodb:PutItem")).allowed);
+    a->set_mode(az::auth_mode::static_keys, std::nullopt);
+    BOOST_TEST(!a->authorize_anonymous(action("dynamodb:GetItem")).allowed);
+}

@@ -347,3 +347,30 @@ BOOST_AUTO_TEST_CASE(a_policy_without_a_document_is_ignored) {
 }
 
 BOOST_AUTO_TEST_SUITE_END()
+
+// S3's public access (s3-compatible-storage Requirement 5.5): an anonymous
+// caller is allowed only by a resource policy granting anyone, written as
+// "*" or as {"AWS": "*"}, which AWS treats the same; an explicit deny to
+// anyone still wins.
+BOOST_AUTO_TEST_CASE(anonymous_callers_need_a_grant_to_anyone) {
+    fixture f;
+    iam::principal anon;
+    anon.kind = iam::principal_kind::anonymous;
+    const auto with = [&](std::string_view principal, std::string_view effect = "Allow") {
+        auto r = request(anon);
+        r.resource_policy =
+            f.named("bucket",
+                    std::string(R"({"Version":"2012-10-17","Statement":[{"Effect":")") +
+                        std::string(effect) + R"(","Principal":)" + std::string(principal) +
+                        R"(,"Action":"s3:GetObject","Resource":"arn:aws:s3:::bucket/*"}]})",
+                    iam::policy_type::resource);
+        return iam::evaluate(r);
+    };
+    BOOST_TEST(with(R"("*")").allowed());
+    BOOST_TEST(with(R"({"AWS":"*"})").allowed());
+    BOOST_TEST(!with(R"({"AWS":"111122223333"})").allowed());
+    BOOST_TEST(!with(R"({"AWS":"arn:aws:iam::111122223333:root"})").allowed());
+    BOOST_TEST(!with(R"({"Service":"logging.s3.amazonaws.com"})").allowed());
+    BOOST_TEST(!with(R"("*")", "Deny").allowed());
+    BOOST_TEST(!iam::evaluate(request(anon)).allowed());
+}

@@ -368,6 +368,28 @@ BOOST_AUTO_TEST_CASE(an_unregistered_action_is_denied_whatever_the_policy) {
     BOOST_TEST(d.reason == "the action is not registered by any service");
 }
 
+// aws_anonymous_authorizer: only a resource policy granting anyone allows
+// an unsigned request, and an unregistered action is still refused.
+BOOST_AUTO_TEST_CASE(anonymous_requests_need_a_public_resource_policy) {
+    fixture f;
+    aws_auth::authz_request r;
+    r.action = "s3:GetObject";
+    r.resource = "arn:aws:s3:::public/key";
+    r.resource_account = std::string(k_account);
+    BOOST_TEST(!f.authz.authorize_anonymous(r).allowed);
+    r.resource_policy =
+        R"({"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"AWS":"*"},)"
+        R"("Action":"s3:GetObject","Resource":"arn:aws:s3:::public/*"}]})";
+    BOOST_TEST(f.authz.authorize_anonymous(r).allowed);
+    r.resource_policy =
+        R"({"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"AWS":)"
+        R"("111122223333"},"Action":"s3:GetObject","Resource":"arn:aws:s3:::public/*"}]})";
+    BOOST_TEST(!f.authz.authorize_anonymous(r).allowed);
+    r.action = "kinesis:PutRecord";
+    BOOST_TEST(f.authz.authorize_anonymous(r).reason ==
+               "the action is not registered by any service");
+}
+
 BOOST_AUTO_TEST_CASE(role_sessions_use_the_role_and_its_session_policies) {
     fixture f;
     f.run(

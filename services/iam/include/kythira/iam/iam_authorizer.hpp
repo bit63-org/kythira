@@ -476,6 +476,72 @@ public:
         return out;
     }
 
+    /// An unsigned request (`aws_anonymous_authorizer`): no identity
+    /// policies, so only `r.resource_policy` granting anyone can allow it.
+    /// `aws:PrincipalType` is `Anonymous`.
+    [[nodiscard]] auto authorize_anonymous(const aws_auth::authz_request& r)
+        -> aws_auth::authz_decision {
+        aws_auth::principal_context audit_who;
+        audit_who.arn = "anonymous";
+        aws_auth::authz_decision out;
+        if (stale()) {
+            out.reason = "the IAM replica is stale";
+            record(audit_who, r, out);
+            return out;
+        }
+        if (_registry->find(r.action) == nullptr) {
+            out.reason = "the action is not registered by any service";
+            record(audit_who, r, out);
+            return out;
+        }
+        evaluation_request req;
+        req.who.kind = principal_kind::anonymous;
+        req.action = r.action;
+        req.resource = r.resource;
+        req.resource_account = r.resource_account;
+        req.resource_kind = resource_policy_kind::ordinary;
+        std::shared_ptr<const policy_document> doc;
+        if (r.resource_policy) {
+            try {
+                doc = std::make_shared<const policy_document>(parse_policy(
+                    *r.resource_policy, policy_type::resource,
+                    {.max_size = std::max<std::size_t>(r.resource_policy->size(), 1)}));
+                req.resource_policy = named_policy{"resource", doc.get()};
+            } catch (const policy_error&) {
+                // An unreadable resource policy grants nothing.
+            }
+        }
+        request_facts f;
+        f.now = _clock();
+        f.secure_transport = r.secure_transport;
+        f.source_ip = r.source_ip;
+        f.user_agent = r.user_agent;
+        f.requested_region = r.region;
+        f.principal_type = "Anonymous";
+        f.request_tags = r.request_tags;
+        f.resource_tags = r.resource_tags;
+        f.resource_account = r.resource_account;
+        auto ctx = global_condition_keys(f);
+        for (const auto& [key, values] : r.keys) {
+            if (values.size() == 1) {
+                ctx.set(key, values.front());
+            } else {
+                ctx.set_multi(key, values);
+            }
+        }
+        req.context = std::move(ctx);
+        const auto d = evaluate(req);
+        out.allowed = d.allowed();
+        out.explicit_deny = d.result == decision::outcome::explicit_deny;
+        if (d.deciding) {
+            out.policy = d.deciding->policy;
+            out.sid = d.deciding->sid;
+        }
+        out.reason = d.reason;
+        record(audit_who, r, out);
+        return out;
+    }
+
     /// Drop the signing keys derived for a key whose secret or status
     /// changed (the replica's apply loop calls this).
     void forget_key(std::string_view access_key_id) { _keys.invalidate(access_key_id); }
@@ -638,5 +704,6 @@ private:
 
 static_assert(aws_auth::aws_request_authorizer<iam_authorizer>);
 static_assert(aws_auth::aws_claim_resolver<iam_authorizer>);
+static_assert(aws_auth::aws_anonymous_authorizer<iam_authorizer>);
 
 }  // namespace kythira::iam
