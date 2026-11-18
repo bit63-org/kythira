@@ -27,7 +27,7 @@
 ///    (`s3_access.hpp`); a copy's source is checked against its own
 ///    bucket. DeleteObjects authorizes each key as it goes.
 /// 5. **Handle** (`s3_buckets.hpp`, `s3_objects.hpp`, `s3_listings.hpp`,
-///    `s3_multipart.hpp`).
+///    `s3_multipart.hpp`, `s3_versioning.hpp`).
 ///    Operations not built yet answer `501 NotImplemented`
 ///    (`doc/unsupported.md`).
 ///
@@ -46,6 +46,7 @@
 #include <kythira/s3/s3_objects.hpp>
 #include <kythira/s3/s3_post_policy.hpp>
 #include <kythira/s3/s3_routes.hpp>
+#include <kythira/s3/s3_versioning.hpp>
 
 #include <raft/aws_request_authorizer.hpp>
 #include <raft/aws_rest_xml_protocol.hpp>
@@ -89,7 +90,11 @@ struct http_request {
         "GetObjectAcl", "PutObjectAcl", "ListObjects", "ListObjectsV2",
         // Multipart upload.
         "CreateMultipartUpload", "UploadPart", "UploadPartCopy", "ListParts",
-        "ListMultipartUploads", "CompleteMultipartUpload", "AbortMultipartUpload"};
+        "ListMultipartUploads", "CompleteMultipartUpload", "AbortMultipartUpload",
+        // Versioning and object lock.
+        "GetBucketVersioning", "PutBucketVersioning", "ListObjectVersions",
+        "GetObjectLockConfiguration", "PutObjectLockConfiguration", "GetObjectRetention",
+        "PutObjectRetention", "GetObjectLegalHold", "PutObjectLegalHold"};
     return ops;
 }
 
@@ -149,6 +154,15 @@ private:
             {"ListMultipartUploads", &list_multipart_uploads<M>},
             {"CompleteMultipartUpload", &complete_multipart_upload<M>},
             {"AbortMultipartUpload", &abort_multipart_upload<M>},
+            {"GetBucketVersioning", &get_bucket_versioning<M>},
+            {"PutBucketVersioning", &put_bucket_versioning<M>},
+            {"ListObjectVersions", &list_object_versions<M>},
+            {"GetObjectLockConfiguration", &get_object_lock_configuration<M>},
+            {"PutObjectLockConfiguration", &put_object_lock_configuration<M>},
+            {"GetObjectRetention", &get_object_retention<M>},
+            {"PutObjectRetention", &put_object_retention<M>},
+            {"GetObjectLegalHold", &get_object_legal_hold<M>},
+            {"PutObjectLegalHold", &put_object_legal_hold<M>},
             {"DeletePublicAccessBlock", &delete_public_access_block<M>},
             {"PutObject", &put_object<M>},
             {"GetObject", &get_object<M>},

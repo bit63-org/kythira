@@ -25,6 +25,12 @@
 /// - **Uploads.** Create, upload part (a part number written again
 ///   replaces the old part), complete (part order, ETags and the minimum
 ///   part size checked; the multipart ETag computed) and abort.
+/// - **Object lock** (Requirement 8.2). Retention and legal hold live in
+///   a version's stored headers, and every removal of a version passes
+///   `lock_refuses`: a legal hold, COMPLIANCE retention, or GOVERNANCE
+///   retention without the bypass refuses it (`403 AccessDenied`).
+///   `set_object_lock` never weakens COMPLIANCE retention, and weakens
+///   GOVERNANCE only with the bypass. A copy never inherits a lock.
 /// - **Conditions in apply** (Requirement 7.3). `If-None-Match: *` and
 ///   `If-Match` on PUT, complete and copy, and the copy-source conditions,
 ///   are evaluated against the committed state when the entry applies, so
@@ -83,6 +89,51 @@ namespace kythira::s3 {
 // ---------------------------------------------------------------------------
 // Commands and results
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Object lock (Requirement 8.2)
+// ---------------------------------------------------------------------------
+
+/// A version's lock lives in its stored headers: the mode and legal hold
+/// under S3's response header names, the retain-until time in
+/// milliseconds under a private name (the front end renders S3's date).
+inline constexpr std::string_view lock_mode_metadata = "x-amz-object-lock-mode";
+inline constexpr std::string_view lock_until_metadata = "x-kythira-object-lock-until-ms";
+inline constexpr std::string_view legal_hold_metadata = "x-amz-object-lock-legal-hold";
+
+/// A version's retention and legal hold, read from its stored headers.
+struct object_lock_state {
+    std::string mode;  ///< `GOVERNANCE`, `COMPLIANCE`, or empty
+    std::uint64_t until_ms = 0;
+    bool legal_hold = false;
+
+    [[nodiscard]] auto retained_at(std::uint64_t now_ms) const -> bool {
+        return !mode.empty() && until_ms > now_ms;
+    }
+};
+
+[[nodiscard]] inline auto lock_state_of(const std::map<std::string, std::string>& m)
+    -> object_lock_state {
+    object_lock_state out;
+    if (auto it = m.find(std::string(lock_mode_metadata)); it != m.end()) {
+        out.mode = it->second;
+    }
+    if (auto it = m.find(std::string(lock_until_metadata)); it != m.end()) {
+        std::uint64_t n = 0;
+        for (char ch : it->second) {
+            if (ch < '0' || ch > '9') {
+                n = 0;
+                break;
+            }
+            n = n * 10 + static_cast<std::uint64_t>(ch - '0');
+        }
+        out.until_ms = n;
+    }
+    if (auto it = m.find(std::string(legal_hold_metadata)); it != m.end()) {
+        out.legal_hold = it->second == "ON";
+    }
+    return out;
+}
 
 /// `If-Match` and `If-None-Match: *` on a write (PUT, complete, copy).
 struct write_conditions {
@@ -150,6 +201,12 @@ struct index_command {
         /// marker has none (`405 MethodNotAllowed`), and nothing else about
         /// the version changes.
         set_object_metadata = 12,
+        /// Object lock on one version (`version_id`, the current one
+        /// without it): `config_name` `retention` with `document`
+        /// "<MODE> <until ms>" (none removes it), or `legal-hold` with
+        /// `ON`/`OFF`. COMPLIANCE retention is never shortened, removed or
+        /// weakened; GOVERNANCE only with `bypass_governance`.
+        set_object_lock = 13,
     };
 
     kind op = kind::put_object;
@@ -174,6 +231,10 @@ struct index_command {
     std::string source_key;
     source_conditions source_if;
     bool replace_metadata = false;  ///< copy_object: COPY or REPLACE
+    /// delete_object, set_object_lock:
+    /// `x-amz-bypass-governance-retention: true`, already authorized
+    /// (`s3:BypassGovernanceRetention`) by the front end.
+    bool bypass_governance = false;
     /// copy_object: stored headers taken from `content.system_metadata`
     /// whatever `replace_metadata` says (erased when absent there): the
     /// new object's ACL, which is never copied, and its tags under
@@ -274,7 +335,7 @@ inline void write_opt_u64(detail::writer& w, const std::optional<std::uint64_t>&
     for (const auto& name : c.override_metadata) {
         w.str(name);
     }
-    w.u64(c.min_part_bytes).u32(c.max_parts);
+    w.u64(c.min_part_bytes).u32(c.max_parts).boolean(c.bypass_governance);
     const auto s = w.take();
     std::vector<std::byte> out(s.size());
     std::memcpy(out.data(), s.data(), s.size());
@@ -287,7 +348,7 @@ inline void write_opt_u64(detail::writer& w, const std::optional<std::uint64_t>&
     r.expect_format(command_format, "command");
     index_command c;
     const auto op = r.u8();
-    if (op < 1 || op > 12) {
+    if (op < 1 || op > 13) {
         throw index_format_error("s3 index: unknown command");
     }
     c.op = static_cast<index_command::kind>(op);
@@ -331,6 +392,7 @@ inline void write_opt_u64(detail::writer& w, const std::optional<std::uint64_t>&
     }
     c.min_part_bytes = r.u64();
     c.max_parts = r.u32();
+    c.bypass_governance = r.boolean();
     r.done("command");
     return c;
 }
@@ -836,6 +898,8 @@ private:
                 return collect_chunks(t, c);
             case k::set_object_metadata:
                 return set_object_metadata(t, c);
+            case k::set_object_lock:
+                return set_object_lock(t, c);
         }
         return fail(400, "InvalidRequest", "Unknown index command");
     }
@@ -1157,6 +1221,91 @@ private:
         return r;
     }
 
+    /// Why a version may not be removed: a legal hold, COMPLIANCE
+    /// retention, or GOVERNANCE retention without the bypass. Removing a
+    /// version is the only way bytes leave the index, so every path that
+    /// removes one (DeleteObject, DeleteObjects, lifecycle) passes here.
+    [[nodiscard]] static auto lock_refuses(const object_version& v, std::uint64_t now_ms,
+                                           bool bypass) -> std::optional<index_result> {
+        if (v.delete_marker) {
+            return std::nullopt;
+        }
+        const auto lock = lock_state_of(v.content.system_metadata);
+        if (lock.legal_hold ||
+            (lock.retained_at(now_ms) && (lock.mode == "COMPLIANCE" || !bypass))) {
+            return fail(403, "AccessDenied",
+                        "Access Denied because object protected by object lock.");
+        }
+        return std::nullopt;
+    }
+
+    auto set_object_lock(txn& t, const index_command& c) -> index_result {
+        const auto& b = c.target;
+        if (!b.object_lock) {
+            return fail(400, "InvalidRequest", "Bucket is missing Object Lock Configuration");
+        }
+        if (c.version_id && *c.version_id != null_version_id && !parse_stamp_id(*c.version_id)) {
+            return fail(400, "InvalidArgument", "Invalid version id specified");
+        }
+        auto v = find_version(&t, b.id, c.key, c.version_id);
+        if (!v) {
+            return c.version_id
+                       ? fail(404, "NoSuchVersion", "The specified version does not exist.")
+                       : no_such_key();
+        }
+        if (v->delete_marker) {
+            return fail(405, "MethodNotAllowed",
+                        "The specified method is not allowed against this resource.");
+        }
+        auto& m = v->content.system_metadata;
+        if (c.config_name == "legal-hold") {
+            if (!c.document || (*c.document != "ON" && *c.document != "OFF")) {
+                return fail(400, "MalformedXML",
+                            "The XML you provided was not well-formed or did not validate "
+                            "against our published schema");
+            }
+            m[std::string(legal_hold_metadata)] = *c.document;
+        } else if (c.config_name == "retention") {
+            const auto old = lock_state_of(m);
+            std::string mode;
+            std::uint64_t until = 0;
+            if (c.document) {
+                const auto sp = c.document->find(' ');
+                mode = c.document->substr(0, sp);
+                if (sp == std::string::npos || (mode != "GOVERNANCE" && mode != "COMPLIANCE")) {
+                    return fail(400, "MalformedXML",
+                                "The XML you provided was not well-formed or did not validate "
+                                "against our published schema");
+                }
+                until =
+                    lock_state_of({{std::string(lock_until_metadata), c.document->substr(sp + 1)}})
+                        .until_ms;
+            }
+            if (old.retained_at(c.now_ms)) {
+                const bool weaker = !c.document || until < old.until_ms ||
+                                    (old.mode == "COMPLIANCE" && mode != "COMPLIANCE");
+                if (weaker && (old.mode == "COMPLIANCE" || !c.bypass_governance)) {
+                    return fail(403, "AccessDenied",
+                                "Access Denied because object protected by object lock.");
+                }
+            }
+            if (c.document) {
+                m[std::string(lock_mode_metadata)] = mode;
+                m[std::string(lock_until_metadata)] = std::to_string(until);
+            } else {
+                m.erase(std::string(lock_mode_metadata));
+                m.erase(std::string(lock_until_metadata));
+            }
+        } else {
+            return fail(400, "InvalidRequest", "Unknown object lock setting");
+        }
+        t.put(keys::versioned(keys::object_space, b.id, c.key, v->stamp), codec::encode(*v));
+        index_result r;
+        r.bucket_id = b.id;
+        r.version_id = v->version_id();
+        return r;
+    }
+
     auto delete_object(txn& t, const index_command& c, std::uint64_t index) -> index_result {
         const auto& b = c.target;
         if (c.version_id) {
@@ -1167,6 +1316,9 @@ private:
             r.bucket_id = b.id;
             r.version_id = *c.version_id;
             if (auto v = find_version(&t, b.id, c.key, c.version_id)) {
+                if (auto locked = lock_refuses(*v, c.now_ms, c.bypass_governance)) {
+                    return *locked;
+                }
                 r.delete_marker = v->delete_marker;
                 remove_version(t, b.id, *v, c.now_ms);
             }
@@ -1234,6 +1386,11 @@ private:
             v.content.system_metadata = c.content.system_metadata;
             v.content.system_metadata.insert(kept.begin(), kept.end());
             v.content.storage_class = c.content.storage_class;
+        }
+        // A copy never inherits the source's lock; the request's (or the
+        // bucket's default) comes through override_metadata.
+        for (const auto name : {lock_mode_metadata, lock_until_metadata, legal_hold_metadata}) {
+            v.content.system_metadata.erase(std::string(name));
         }
         for (const auto& name : c.override_metadata) {
             if (auto it = c.content.system_metadata.find(name);

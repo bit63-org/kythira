@@ -932,22 +932,24 @@ BOOST_AUTO_TEST_CASE(authentication_failures_and_unbuilt_operations) {
     const auto tampered = f.send("PUT", "/bkt/k", {}, "abc", "AKIDOWNER", "abd");
     BOOST_TEST(tampered.code() == "XAmzContentSHA256Mismatch");
     BOOST_TEST(f.send("GET", "/bkt/k").code() == "NoSuchKey");
-    const auto r = f.send("GET", "/bkt?versioning");
+    const auto r = f.send("GET", "/bkt?encryption");
     BOOST_TEST(r.status == 501U);
     BOOST_TEST(r.code() == "NotImplemented");
-    BOOST_TEST(f.send("GET", "/bkt/k?legal-hold").status == 501U);
+    BOOST_TEST(f.send("GET", "/bkt?cors").status == 501U);
 }
 
 BOOST_AUTO_TEST_CASE(versioned_buckets_answer_with_version_ids_and_delete_markers) {
     fixture f;
     f.make_bucket("vbk");
-    // PutBucketVersioning is task 10; set the state underneath.
-    s3::index_command c;
-    c.op = s3::index_command::kind::put_bucket_config;
-    c.bucket = "vbk";
-    c.config_name = "versioning";
-    c.document = "Enabled";
-    BOOST_TEST_REQUIRE(f.meta.propose(c).ok());
+    BOOST_TEST(f.send("GET", "/vbk?versioning").body.find("<Status>") == std::string::npos);
+    const std::string enable =
+        "<VersioningConfiguration><Status>Enabled</Status></VersioningConfiguration>";
+    BOOST_TEST_REQUIRE(f.send("PUT", "/vbk?versioning", {}, enable).status == 200U);
+    BOOST_TEST(contains(f.send("GET", "/vbk?versioning").body, "<Status>Enabled</Status>"));
+    BOOST_TEST(f.send("PUT", "/vbk?versioning", {},
+                      "<VersioningConfiguration><Status>Enabled</Status><MfaDelete>Enabled"
+                      "</MfaDelete></VersioningConfiguration>")
+                   .code() == "NotImplemented");
 
     const auto first = f.send("PUT", "/vbk/k", {}, "one");
     const auto second = f.send("PUT", "/vbk/k", {}, "two");
@@ -968,9 +970,157 @@ BOOST_AUTO_TEST_CASE(versioned_buckets_answer_with_version_ids_and_delete_marker
     BOOST_TEST(at_marker.header("Allow") == "DELETE");
     BOOST_TEST(f.send("GET", "/vbk/k?versionId=bad").code() == "InvalidArgument");
     BOOST_TEST(f.send("GET", "/vbk/k?versionId=0000000000000001").code() == "NoSuchVersion");
+
+    // ListObjectVersions: newest first per key, markers interleaved.
+    f.send("PUT", "/vbk/other", {}, "x");
+    const auto all = f.send("GET", "/vbk?versions");
+    BOOST_TEST_REQUIRE(all.status == 200U, all.body);
+    BOOST_TEST(count_of(all.body, "<Version>") == 3U);
+    BOOST_TEST(count_of(all.body, "<DeleteMarker>") == 1U);
+    BOOST_TEST(all.body.find("<DeleteMarker><Key>k</Key><VersionId>" + marker +
+                             "</VersionId><IsLatest>true</IsLatest>") < all.body.find(v1));
+    const auto page = f.send("GET", "/vbk?versions&max-keys=2");
+    BOOST_TEST(element(page.body, "IsTruncated") == "true");
+    const auto next =
+        f.send("GET", "/vbk?versions&key-marker=" + element(page.body, "NextKeyMarker") +
+                          "&version-id-marker=" + element(page.body, "NextVersionIdMarker"));
+    BOOST_TEST(count_of(page.body, "<Version>") + count_of(page.body, "<DeleteMarker>") +
+                   count_of(next.body, "<Version>") + count_of(next.body, "<DeleteMarker>") ==
+               4U);
+    BOOST_TEST(f.send("GET", "/vbk?versions&version-id-marker=" + v1).code() == "InvalidArgument");
+
     // Removing the marker brings the object back.
     BOOST_TEST(f.send("DELETE", "/vbk/k?versionId=" + marker).status == 204U);
     BOOST_TEST(f.send("GET", "/vbk/k").body == "two");
+
+    // Suspended: new writes replace the null version.
+    BOOST_TEST(f.send("PUT", "/vbk?versioning", {},
+                      "<VersioningConfiguration><Status>Suspended</Status>"
+                      "</VersioningConfiguration>")
+                   .status == 200U);
+    BOOST_TEST(f.send("PUT", "/vbk/k", {}, "three").header("x-amz-version-id") == "null");
+    BOOST_TEST(f.send("PUT", "/vbk/k", {}, "four").header("x-amz-version-id") == "null");
+    BOOST_TEST(f.send("GET", "/vbk/k?versionId=null").body == "four");
+    BOOST_TEST(f.send("GET", "/vbk/k?versionId=" + v1).body == "one");
+}
+
+BOOST_AUTO_TEST_CASE(object_lock_protects_versions) {
+    fixture f;
+    // A bucket created with object lock is versioned from the start.
+    BOOST_TEST_REQUIRE(
+        f.send("PUT", "/lck", {{"x-amz-bucket-object-lock-enabled", "true"}}).status == 200U);
+    BOOST_TEST(contains(f.send("GET", "/lck?versioning").body, "<Status>Enabled</Status>"));
+    BOOST_TEST(f.send("PUT", "/lck?versioning", {},
+                      "<VersioningConfiguration><Status>Suspended</Status>"
+                      "</VersioningConfiguration>")
+                   .code() == "InvalidBucketState");
+    f.make_bucket("open");
+    BOOST_TEST(f.send("GET", "/open?object-lock").code() == "ObjectLockConfigurationNotFoundError");
+
+    const std::string until = "2026-12-01T00:00:00Z";
+    const auto md5 = [](const std::string& body) {
+        return s3::header_list{{"Content-MD5", md5_b64(body)}};
+    };
+    // Explicit retention on the PUT, which needs an integrity header.
+    s3::header_list lock{{"x-amz-object-lock-mode", "GOVERNANCE"},
+                         {"x-amz-object-lock-retain-until-date", until}};
+    BOOST_TEST(f.send("PUT", "/lck/g", lock, "gov").code() == "InvalidRequest");
+    lock.emplace_back("Content-MD5", md5_b64("gov"));
+    const auto gov = f.send("PUT", "/lck/g", lock, "gov");
+    BOOST_TEST_REQUIRE(gov.status == 200U, gov.body);
+    const auto gv = gov.header("x-amz-version-id");
+    const auto head = f.send("HEAD", "/lck/g");
+    BOOST_TEST(head.header("x-amz-object-lock-mode") == "GOVERNANCE");
+    BOOST_TEST(head.header("x-amz-object-lock-retain-until-date") == "2026-12-01T00:00:00.000Z");
+    BOOST_TEST(head.header("x-kythira-object-lock-until-ms").empty());
+    BOOST_TEST(f.send("PUT", "/open/x", lock, "gov").code() == "InvalidRequest");
+    BOOST_TEST(f.send("PUT", "/lck/past",
+                      {{"x-amz-object-lock-mode", "GOVERNANCE"},
+                       {"x-amz-object-lock-retain-until-date", "2026-01-01T00:00:00Z"},
+                       {"Content-MD5", md5_b64("p")}},
+                      "p")
+                   .code() == "InvalidArgument");
+
+    // GOVERNANCE: a version delete needs the bypass; a plain delete only
+    // adds a marker.
+    BOOST_TEST(f.send("DELETE", "/lck/g?versionId=" + gv).code() == "AccessDenied");
+    BOOST_TEST(f.send("DELETE", "/lck/g").header("x-amz-delete-marker") == "true");
+    BOOST_TEST(f.send("GET", "/lck/g?versionId=" + gv).body == "gov");
+    const auto ret = f.send("GET", "/lck/g?retention&versionId=" + gv);
+    BOOST_TEST(contains(ret.body, "<Mode>GOVERNANCE</Mode>"));
+    // Shortening needs the bypass; extending does not.
+    const auto retention = [](const std::string& mode, const std::string& date) {
+        return "<Retention><Mode>" + mode + "</Mode><RetainUntilDate>" + date +
+               "</RetainUntilDate></Retention>";
+    };
+    const auto shorter = retention("GOVERNANCE", "2026-11-20T00:00:00Z");
+    BOOST_TEST(f.send("PUT", "/lck/g?retention&versionId=" + gv, md5(shorter), shorter).code() ==
+               "AccessDenied");
+    auto bypass = md5(shorter);
+    bypass.emplace_back("x-amz-bypass-governance-retention", "true");
+    BOOST_TEST(f.send("PUT", "/lck/g?retention&versionId=" + gv, bypass, shorter).status == 200U);
+    auto del_bypass = s3::header_list{{"x-amz-bypass-governance-retention", "true"}};
+    BOOST_TEST(f.send("DELETE", "/lck/g?versionId=" + gv, del_bypass).status == 204U);
+    BOOST_TEST(f.send("GET", "/lck/g?versionId=" + gv).code() == "NoSuchVersion");
+
+    // COMPLIANCE: nothing removes it or shortens it, bypass or not.
+    const auto comp = f.send("PUT", "/lck/c",
+                             {{"x-amz-object-lock-mode", "COMPLIANCE"},
+                              {"x-amz-object-lock-retain-until-date", until},
+                              {"Content-MD5", md5_b64("cmp")}},
+                             "cmp");
+    const auto cv = comp.header("x-amz-version-id");
+    BOOST_TEST(f.send("DELETE", "/lck/c?versionId=" + cv, del_bypass).code() == "AccessDenied");
+    const auto weaker = retention("GOVERNANCE", "2027-01-01T00:00:00Z");
+    auto weaker_bypass = md5(weaker);
+    weaker_bypass.emplace_back("x-amz-bypass-governance-retention", "true");
+    BOOST_TEST(f.send("PUT", "/lck/c?retention", weaker_bypass, weaker).code() == "AccessDenied");
+    const auto longer = retention("COMPLIANCE", "2027-01-01T00:00:00Z");
+    BOOST_TEST(f.send("PUT", "/lck/c?retention", md5(longer), longer).status == 200U);
+    const std::string del_body =
+        "<Delete><Object><Key>c</Key><VersionId>" + cv + "</VersionId></Object></Delete>";
+    const auto multi = f.send("POST", "/lck?delete", md5(del_body), del_body);
+    BOOST_TEST(contains(multi.body, "<Code>AccessDenied</Code>"));
+
+    // Legal hold blocks deletion until it is released.
+    const auto plain = f.send("PUT", "/lck/h", {}, "held");
+    const auto hv = plain.header("x-amz-version-id");
+    BOOST_TEST(f.send("GET", "/lck/h?legal-hold").code() == "NoSuchObjectLockConfiguration");
+    const std::string on = "<LegalHold><Status>ON</Status></LegalHold>";
+    BOOST_TEST(f.send("PUT", "/lck/h?legal-hold", {}, on).code() == "InvalidRequest");
+    BOOST_TEST(f.send("PUT", "/lck/h?legal-hold", md5(on), on).status == 200U);
+    BOOST_TEST(contains(f.send("GET", "/lck/h?legal-hold").body, "<Status>ON</Status>"));
+    BOOST_TEST(f.send("DELETE", "/lck/h?versionId=" + hv, del_bypass).code() == "AccessDenied");
+    const std::string off = "<LegalHold><Status>OFF</Status></LegalHold>";
+    BOOST_TEST(f.send("PUT", "/lck/h?legal-hold", md5(off), off).status == 200U);
+    BOOST_TEST(f.send("DELETE", "/lck/h?versionId=" + hv).status == 204U);
+
+    // Default retention applies to writes that name none, copies included,
+    // and a copy never inherits its source's lock.
+    const std::string config =
+        "<ObjectLockConfiguration><ObjectLockEnabled>Enabled</ObjectLockEnabled><Rule>"
+        "<DefaultRetention><Mode>GOVERNANCE</Mode><Days>1</Days></DefaultRetention></Rule>"
+        "</ObjectLockConfiguration>";
+    BOOST_TEST(f.send("PUT", "/lck?object-lock", {}, config).code() == "InvalidRequest");
+    BOOST_TEST(f.send("PUT", "/lck?object-lock", md5(config), config).status == 200U);
+    BOOST_TEST(contains(f.send("GET", "/lck?object-lock").body, "<Days>1</Days>"));
+    const auto d = f.send("HEAD", "/lck/" + std::string("c"));
+    BOOST_TEST(d.header("x-amz-object-lock-mode") == "COMPLIANCE");
+    f.send("PUT", "/lck/d", {}, "default");
+    BOOST_TEST(f.send("HEAD", "/lck/d").header("x-amz-object-lock-retain-until-date") ==
+               "2026-11-19T12:00:00.000Z");
+    f.send("PUT", "/lck/copy", {{"x-amz-copy-source", "/lck/c"}});
+    BOOST_TEST(f.send("HEAD", "/lck/copy").header("x-amz-object-lock-mode") == "GOVERNANCE");
+
+    // A bucket gains object lock once versioning is enabled.
+    BOOST_TEST(f.send("PUT", "/open?object-lock", md5(config), config).code() ==
+               "InvalidBucketState");
+    const std::string enable =
+        "<VersioningConfiguration><Status>Enabled</Status></VersioningConfiguration>";
+    f.send("PUT", "/open?versioning", {}, enable);
+    BOOST_TEST(f.send("PUT", "/open?object-lock", md5(config), config).status == 200U);
+    BOOST_TEST(contains(f.send("GET", "/open?object-lock").body,
+                        "<ObjectLockEnabled>Enabled</ObjectLockEnabled>"));
 }
 
 BOOST_AUTO_TEST_CASE(browser_post_uploads) {

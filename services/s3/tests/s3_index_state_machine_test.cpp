@@ -188,6 +188,7 @@ BOOST_AUTO_TEST_CASE(records_and_commands_round_trip) {
     c.override_metadata = {"x-amz-tagging", "x-kythira-acl"};
     c.min_part_bytes = 1234;
     c.max_parts = 17;
+    c.bypass_governance = true;
     BOOST_TEST((codec::decode_command(codec::encode(c)) == c));
 
     index_result r;
@@ -557,6 +558,94 @@ BOOST_AUTO_TEST_CASE(a_copy_of_a_delete_marker_version_is_refused) {
 }
 
 // ---- multipart uploads ------------------------------------------------------
+
+BOOST_AUTO_TEST_CASE(object_lock_is_enforced_on_every_removal) {
+    replica r;
+    r.create("lk", "acct", "us-west-2", true);
+    const auto b = r.ref("lk");
+    BOOST_TEST(b.object_lock);
+    auto locked = content_of({1}, "e1");
+    locked.system_metadata = {{std::string(lock_mode_metadata), "GOVERNANCE"},
+                              {std::string(lock_until_metadata), "5000"}};
+    const auto gov = r.put("lk", "g", locked).version_id;
+
+    auto remove = [&](const std::string& key, const std::string& version, std::uint64_t now,
+                      bool bypass) {
+        index_command c;
+        c.op = kind::delete_object;
+        c.now_ms = now;
+        c.target = b;
+        c.key = key;
+        c.version_id = version;
+        c.bypass_governance = bypass;
+        return r.apply(c);
+    };
+    auto lock = [&](const std::string& key, const std::string& what, std::optional<std::string> doc,
+                    std::uint64_t now, bool bypass) {
+        index_command c;
+        c.op = kind::set_object_lock;
+        c.now_ms = now;
+        c.target = b;
+        c.key = key;
+        c.config_name = what;
+        c.document = std::move(doc);
+        c.bypass_governance = bypass;
+        return r.apply(c);
+    };
+    BOOST_TEST(remove("g", gov, 1000, false).error == "AccessDenied");
+    BOOST_TEST(r.count(1) == 1U);
+    // Shortening or removing GOVERNANCE retention needs the bypass;
+    // extending it, or making it COMPLIANCE, does not.
+    BOOST_TEST(lock("g", "retention", "GOVERNANCE 4000", 1000, false).error == "AccessDenied");
+    BOOST_TEST(lock("g", "retention", std::nullopt, 1000, false).error == "AccessDenied");
+    BOOST_TEST(lock("g", "retention", "GOVERNANCE 6000", 1000, false).ok());
+    BOOST_TEST(lock("g", "retention", "GOVERNANCE 2000", 1000, true).ok());
+    // Past its date the retention no longer protects.
+    BOOST_TEST(remove("g", gov, 2001, false).ok());
+    BOOST_TEST(r.count(1) == 0U);
+
+    locked.manifest = content_of({2}).manifest;
+    locked.system_metadata[std::string(lock_mode_metadata)] = "COMPLIANCE";
+    const auto comp = r.put("lk", "c", locked).version_id;
+    BOOST_TEST(remove("c", comp, 1000, true).error == "AccessDenied");
+    BOOST_TEST(lock("c", "retention", "GOVERNANCE 9000", 1000, true).error == "AccessDenied");
+    BOOST_TEST(lock("c", "retention", "COMPLIANCE 4000", 1000, true).error == "AccessDenied");
+    BOOST_TEST(lock("c", "retention", std::nullopt, 1000, true).error == "AccessDenied");
+    BOOST_TEST(lock("c", "retention", "COMPLIANCE 9000", 1000, false).ok());
+    BOOST_TEST(lock("c", "retention", "BOGUS 9000", 1000, false).error == "MalformedXML");
+
+    // A legal hold blocks even an expired retention, bypass or not.
+    BOOST_TEST(lock("c", "legal-hold", "ON", 1000, false).ok());
+    BOOST_TEST(remove("c", comp, 10'000, true).error == "AccessDenied");
+    BOOST_TEST(lock("c", "legal-hold", "OFF", 10'000, false).ok());
+    BOOST_TEST(remove("c", comp, 10'000, false).ok());
+
+    // A copy never inherits its source's lock.
+    const auto src = r.put("lk", "s", locked).version_id;
+    index_command copy;
+    copy.op = kind::copy_object;
+    copy.now_ms = 1000;
+    copy.target = b;
+    copy.key = "dst";
+    copy.source = b;
+    copy.source_key = "s";
+    BOOST_TEST(r.apply(copy).ok());
+    const auto dst = r.sm.version(b.id, "dst").value();
+    BOOST_TEST(!dst.content.system_metadata.contains(std::string(lock_mode_metadata)));
+    BOOST_TEST(r.sm.version(b.id, "s", src)
+                   ->content.system_metadata.contains(std::string(lock_mode_metadata)));
+
+    // Without object lock the bucket takes no lock settings.
+    r.create("plain");
+    r.put("plain", "k", content_of({3}));
+    index_command c;
+    c.op = kind::set_object_lock;
+    c.target = r.ref("plain");
+    c.key = "k";
+    c.config_name = "legal-hold";
+    c.document = "ON";
+    BOOST_TEST(r.apply(c).error == "InvalidRequest");
+}
 
 BOOST_AUTO_TEST_CASE(multipart_upload_complete_and_abort) {
     replica r(index_options{.min_part_bytes = 150, .max_parts = 10'000});
