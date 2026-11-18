@@ -27,8 +27,9 @@
 /// | `SQS_SNS_CA` | `/etc/ssl/certs/ca-certificates.crt` | the roots those hosts' certificates chain to |
 /// | `SQS_COMPAT` | | compatibility switches, `name=value` comma-separated (`sqs_compat_profile.hpp`) |
 /// | `SQS_MAX_BODY_BYTES` | 4194304 | the largest request body the listener reads |
-/// | `KYTHIRA_SQS_ROLES` | `gateway,front_end,data` | the layers this node runs (`sqs_layers.md`); `gateway` and `front_end` go together for now |
-/// | `SQS_DATA_ENDPOINTS` | | base URLs of the data nodes' SQS listeners, comma-separated; required without the `data` role |
+/// | `KYTHIRA_SQS_ROLES` | `gateway,front_end,data` | the layers this node runs (`doc/configuration.md`) |
+/// | `SQS_DATA_ENDPOINTS` | | base URLs of the data nodes' SQS listeners, comma-separated; required by a front end without the `data` role |
+/// | `SQS_FRONT_END_ENDPOINTS` | | base URLs of the front ends' SQS listeners, comma-separated; required by a gateway without the `front_end` role |
 // clang-format on
 ///
 /// Everything is checked here, before a port is bound; a refusal names the
@@ -71,6 +72,7 @@ struct sqs_node_options {
     std::uint64_t _max_body_bytes = std::uint64_t{4} * 1024 * 1024;
     layers::role_set _roles{layers::role::gateway, layers::role::front_end, layers::role::data};
     std::vector<std::string> _data_endpoints;
+    std::vector<std::string> _front_end_endpoints;
 
     [[nodiscard]] auto has(layers::role r) const -> bool { return _roles.has(r); }
 };
@@ -220,35 +222,47 @@ namespace node_options_detail {
                 "KYTHIRA_SQS_ROLES must name at least one of gateway, front_end, "
                 "data");
         }
-        if (o._roles.has(layers::role::gateway) != o._roles.has(layers::role::front_end)) {
-            return std::string(
-                "KYTHIRA_SQS_ROLES: gateway and front_end run together on this "
-                "release");
-        }
     }
-    if (const auto v = get("SQS_DATA_ENDPOINTS"); v && !v->empty()) {
+    const auto urls = [&](std::string_view name,
+                          std::vector<std::string>& out) -> std::optional<std::string> {
+        const auto v = get(name);
+        if (!v || v->empty()) {
+            return std::nullopt;
+        }
         std::string_view rest = *v;
         while (!rest.empty()) {
             const auto comma = rest.find(',');
             const auto url = rest.substr(0, comma);
             rest = comma == std::string_view::npos ? std::string_view() : rest.substr(comma + 1);
             if (url.find("://") == std::string_view::npos || url.ends_with("/")) {
-                return std::string(
-                    "SQS_DATA_ENDPOINTS items must be scheme://host:port with no "
-                    "trailing slash");
+                return std::string(name) +
+                       " items must be scheme://host:port with no trailing slash";
             }
-            o._data_endpoints.emplace_back(url);
+            out.emplace_back(url);
         }
+        return std::nullopt;
+    };
+    if (auto refused = urls("SQS_DATA_ENDPOINTS", o._data_endpoints)) {
+        return *refused;
     }
-    if (!o._roles.has(layers::role::data)) {
-        if (o._data_endpoints.empty()) {
-            return std::string("SQS_DATA_ENDPOINTS is required without the data role");
-        }
-        if (o._forward_secret.empty()) {
-            return std::string(
-                "SQS_FORWARD_SECRET is required without the data role: calls to "
-                "the data nodes are signed with it");
-        }
+    if (auto refused = urls("SQS_FRONT_END_ENDPOINTS", o._front_end_endpoints)) {
+        return *refused;
+    }
+    const bool front_end = o._roles.has(layers::role::front_end);
+    const bool gateway = o._roles.has(layers::role::gateway);
+    if (front_end && !o._roles.has(layers::role::data) && o._data_endpoints.empty()) {
+        return std::string("SQS_DATA_ENDPOINTS is required by a front end without the data role");
+    }
+    if (gateway && !front_end && o._front_end_endpoints.empty()) {
+        return std::string(
+            "SQS_FRONT_END_ENDPOINTS is required by a gateway without the front_end role");
+    }
+    if (o._roles !=
+            layers::role_set{layers::role::gateway, layers::role::front_end, layers::role::data} &&
+        o._forward_secret.empty()) {
+        return std::string(
+            "SQS_FORWARD_SECRET is required when KYTHIRA_SQS_ROLES names only "
+            "some layers: calls between them are signed with it");
     }
     return o;
 }

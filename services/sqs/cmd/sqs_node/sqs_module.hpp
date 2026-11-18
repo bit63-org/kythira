@@ -40,12 +40,15 @@
 //   - With data, the node holds a replica, runs the leader-side workers,
 //     and serves the internal endpoints: propose, named reads, and the
 //     availability stream (sqs_availability.hpp).
-//   - With front_end (and, on this release, gateway with it), the node
-//     serves the SQS API; its handlers reach the data layer through a
-//     hybrid_queue_cluster, in-process for the groups held here and over
-//     SQS_DATA_ENDPOINTS for the rest. A front end without data follows
-//     every data node's availability stream into its long-poll hub.
-//   - Without front_end, the listener answers the internal endpoints only.
+//   - With front_end, the node runs the SQS handlers; they reach the data
+//     layer through a hybrid_queue_cluster, in-process for the groups held
+//     here and over SQS_DATA_ENDPOINTS for the rest. A front end without
+//     data follows every data node's availability stream into its
+//     long-poll hub. It also serves gateways' authenticated calls.
+//   - With gateway, the node checks clients' SigV4 signatures: with
+//     front_end it serves the API in-process, without it it hands each
+//     request to a front end of SQS_FRONT_END_ENDPOINTS (sqs_gateway.hpp).
+//   - Without gateway, the listener answers the internal endpoints only.
 // A drain ends parked long polls with empty answers before the listener
 // stops, so a front end restarts without its clients noticing.
 
@@ -54,6 +57,7 @@
 #include <kythira/sqs/sqs_compat_profile.hpp>
 #include <kythira/sqs/sqs_forward.hpp>
 #include <kythira/sqs/sqs_front_end.hpp>
+#include <kythira/sqs/sqs_gateway.hpp>
 #include <kythira/sqs/sqs_listener.hpp>
 #include <kythira/sqs/sqs_long_poll.hpp>
 #include <kythira/sqs/sqs_node_options.hpp>
@@ -376,7 +380,16 @@ public:
         if (_opt.has(layers::role::data)) {
             register_data(host, space);
         }
-        if (!_opt._data_endpoints.empty()) {
+        auto data_endpoints = _opt._data_endpoints;
+        if (data_endpoints.empty() && _cluster && _cluster_opt._peer_endpoints.size() > 1) {
+            // Co-located with peers: the other replicas are the data layer.
+            // A follower sends its writes and reads to the leader through
+            // it, so it reads its own writes.
+            for (const auto& [id, url] : _cluster_opt._peer_endpoints) {
+                data_endpoints.push_back(url);
+            }
+        }
+        if (!data_endpoints.empty()) {
             kythira::mtls::client_config dc;
             dc.ca_path = _cluster_opt._peer_ca;
             dc.plaintext = _opt._allow_plaintext;
@@ -385,17 +398,28 @@ public:
             dc.max_body_bytes = _opt._max_body_bytes + 1024;
             _data_client = std::make_shared<kythira::mtls::client>(dc);
             _remote = std::make_unique<sqs::remote_queue_cluster>(
-                _opt._data_endpoints, _opt._forward_secret, transport(_data_client));
+                std::move(data_endpoints), _opt._forward_secret, transport(_data_client));
+        }
+        if (_opt.has(layers::role::gateway) && !_opt.has(layers::role::front_end)) {
+            kythira::mtls::client_config gc;
+            gc.ca_path = _cluster_opt._peer_ca;
+            gc.plaintext = _opt._allow_plaintext;
+            gc.client_certificate = false;
+            // A call holds a long poll (20 s at most) and then a commit.
+            gc.timeout = std::chrono::seconds(25) + _cluster_opt._propose_timeout;
+            gc.max_body_bytes = _opt._max_body_bytes * 2 + 4096;  // base64 and headers
+            _front_end_client = std::make_shared<kythira::mtls::client>(gc);
+            _gateway = std::make_unique<sqs::gateway_forwarder>(
+                _opt._front_end_endpoints, _opt._forward_secret, transport(_front_end_client));
         }
         if (!_opt.has(layers::role::front_end)) {
             return;
         }
-        // One group over the whole key space until task 12: a data node
-        // holds every key, so the remote side only serves front ends
-        // without the data role.
+        // The leader of a key's group serves it in-process; anything else
+        // goes to the data layer, where the leader answers.
         _routed = std::make_unique<routed_type>(
-            _cluster.get(), _cluster ? nullptr : _remote.get(),
-            [this](const std::string&) { return _cluster != nullptr; });
+            _cluster.get(), _remote.get(),
+            [this](const std::string& key) { return _cluster && _cluster->leads(key); });
         _service_config._waits = &_hub;
         _service = std::make_unique<service_type>(*_routed, _service_config);
         if (!_cluster) {
@@ -485,12 +509,23 @@ public:
         }
         _handler_owner =
             std::make_unique<handler_type>(*_front_end, _opt._forward_secret, std::move(propose));
-        _handler_owner->set_client_api(_service != nullptr);
+        // The client API: here with gateway and front_end, through a front
+        // end with gateway alone, not at all without gateway.
+        _handler_owner->set_client_api(_opt.has(layers::role::gateway));
+        _handler_owner->set_gateway(_gateway.get());
+        // Gateways' authenticated calls, whenever this node is a front end.
+        _handler_owner->set_serve_calls(_service != nullptr);
         if (_cluster) {
-            _handler_owner->set_local_query([this](const sqs::data_query& q) {
-                ++_peer_requests;
-                return _cluster->query(q);
-            });
+            _handler_owner->set_local_query(
+                [this](const sqs::data_query& q) -> std::optional<sqs::data_answer> {
+                    ++_peer_requests;
+                    // Only the leader answers (503 otherwise): a follower
+                    // may not yet have applied the caller's last write.
+                    if (!_cluster->leads(sqs::query_key(q))) {
+                        return std::nullopt;
+                    }
+                    return _cluster->query(q);
+                });
             _handler_owner->set_availability_feed(_feed.get(), k_feed_wait);
         }
         if (_opt._sns_bridge && _service) {
@@ -552,6 +587,8 @@ public:
         _bridge.reset();
         _service.reset();
         _routed.reset();
+        _gateway.reset();
+        _front_end_client.reset();
         _follower.reset();
         _remote.reset();
         _data_client.reset();
@@ -589,6 +626,9 @@ public:
             {"long_polls_woken", static_cast<double>(_hub.notified()), {}},
             {"sns_bridge_delivered", static_cast<double>(_bridge ? _bridge->delivered() : 0), {}},
         };
+        if (_gateway) {
+            out.push_back({"gateway_call_failures", static_cast<double>(_gateway->failures()), {}});
+        }
         if (_follower) {
             out.push_back({"availability_batches", static_cast<double>(_follower->batches()), {}});
         }
@@ -622,6 +662,9 @@ private:
     /// The data layer over SQS_DATA_ENDPOINTS, when given.
     std::shared_ptr<kythira::mtls::client> _data_client;
     std::unique_ptr<sqs::remote_queue_cluster> _remote;
+    /// A gateway without the front-end role: hands calls to front ends.
+    std::shared_ptr<kythira::mtls::client> _front_end_client;
+    std::unique_ptr<sqs::gateway_forwarder> _gateway;
     /// What the handlers use: `_cluster` here, `_remote` for the rest.
     std::unique_ptr<routed_type> _routed;
     std::unique_ptr<service_type> _service;

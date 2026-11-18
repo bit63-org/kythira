@@ -68,6 +68,7 @@
 #include <string>
 #include <string_view>
 #include <utility>
+#include <variant>
 #include <vector>
 
 namespace kythira::sqs {
@@ -319,35 +320,17 @@ public:
     [[nodiscard]] auto codec() const -> const sqs_codec& { return _codec; }
     [[nodiscard]] auto config() const -> const sqs_front_end_config& { return _config; }
 
-    [[nodiscard]] auto handle(const sqs_request& req) -> aws_json::http_response {
-        const auto content_type = front_end_detail::header_value(req, "content-type");
-        const auto target = front_end_detail::header_value(req, "x-amz-target");
-        const sqs_request_view view{
-            .method = req._method,
-            .path = req._path,
-            .query_string = req._query,
-            .content_type = content_type,
-            .target = target,
-            .query_mode = front_end_detail::iequals(
-                front_end_detail::header_value(req, "x-amzn-query-mode"), "true"),
-            .body = req._body,
-        };
+    /// Steps 1 and 2 of `handle`: who signed `req`, or the answer that
+    /// refuses it. A gateway without the front-end role stops here and
+    /// hands the principal on (`sqs_gateway.hpp`).
+    [[nodiscard]] auto admit(const sqs_request& req)
+        -> std::variant<aws_auth::principal_context, aws_json::http_response> {
+        const auto view = view_of(req);
         const auto protocol = sqs_codec::protocol_of(view);
-        auto id = _codec.new_request_id();
-
         // Step 1.
-        if (protocol == sqs_protocol::json &&
-            _codec.json_codec().resolve_target(aws_json::http_request_view{
-                .method = req._method,
-                .path = req._path,
-                .content_type = content_type,
-                .target = target,
-                .body = req._body,
-            }) == nullptr) {
-            auto parsed = _codec.parse(view);
-            return _codec.respond(view, parsed ? unknown_operation() : parsed.error(), id);
+        if (auto refused = unknown_target(req, view)) {
+            return std::move(*refused);
         }
-
         // Step 2.
         sigv4::service_rules rules;
         rules.service = "sqs";
@@ -359,7 +342,35 @@ public:
         const sigv4::request sreq{req._method, req._path, req._query, req._headers, req._body};
         const auto who = _authorizer.authenticate(sreq, rules);
         if (!who) {
-            return _codec.respond(view, auth_error(who.error()), id);
+            return _codec.respond(view, auth_error(who.error()), _codec.new_request_id());
+        }
+        return *who;
+    }
+
+    [[nodiscard]] auto handle(const sqs_request& req) -> aws_json::http_response {
+        auto admitted = admit(req);
+        if (auto* refused = std::get_if<aws_json::http_response>(&admitted)) {
+            return std::move(*refused);
+        }
+        return handle_as(req, std::get<aws_auth::principal_context>(admitted));
+    }
+
+    /// `e`, answered in `req`'s protocol (a gateway's own failures).
+    [[nodiscard]] auto refuse(const sqs_request& req, const aws_json::error& e) const
+        -> aws_json::http_response {
+        return _codec.respond(view_of(req), e, _codec.new_request_id());
+    }
+
+    /// Steps 3 to 6 for a request a gateway has already authenticated as
+    /// `who` (step 1 runs again: it is cheap and keeps a bad call from a
+    /// gateway out of the handlers).
+    [[nodiscard]] auto handle_as(const sqs_request& req, const aws_auth::principal_context& who)
+        -> aws_json::http_response {
+        const auto view = view_of(req);
+        const auto protocol = sqs_codec::protocol_of(view);
+        auto id = _codec.new_request_id();
+        if (auto refused = unknown_target(req, view)) {
+            return std::move(*refused);
         }
 
         // Step 3.
@@ -380,7 +391,7 @@ public:
         sqs_call_context ctx;
         ctx._operation = op.name;
         ctx._request_id = id;
-        ctx._principal = *who;
+        ctx._principal = who;
         ctx._region = _config._region;
         ctx._partition = _config._partition;
         ctx._endpoint = _config._endpoint;
@@ -427,6 +438,40 @@ public:
 private:
     sqs_front_end_config _config;
     Authorizer& _authorizer;
+
+    [[nodiscard]] static auto view_of(const sqs_request& req) -> sqs_request_view {
+        const auto content_type = front_end_detail::header_value(req, "content-type");
+        const auto target = front_end_detail::header_value(req, "x-amz-target");
+        return sqs_request_view{
+            .method = req._method,
+            .path = req._path,
+            .query_string = req._query,
+            .content_type = content_type,
+            .target = target,
+            .query_mode = front_end_detail::iequals(
+                front_end_detail::header_value(req, "x-amzn-query-mode"), "true"),
+            .body = req._body,
+        };
+    }
+
+    /// Step 1: a JSON request naming no operation, answered before
+    /// anything else.
+    [[nodiscard]] auto unknown_target(const sqs_request& req, const sqs_request_view& view) const
+        -> std::optional<aws_json::http_response> {
+        if (sqs_codec::protocol_of(view) != sqs_protocol::json ||
+            _codec.json_codec().resolve_target(aws_json::http_request_view{
+                .method = req._method,
+                .path = req._path,
+                .content_type = view.content_type,
+                .target = view.target,
+                .body = req._body,
+            }) != nullptr) {
+            return std::nullopt;
+        }
+        auto parsed = _codec.parse(view);
+        return _codec.respond(view, parsed ? unknown_operation() : parsed.error(),
+                              _codec.new_request_id());
+    }
     sqs_codec _codec;
     std::map<std::string, sqs_handler, std::less<>> _handlers;
     queue_lookup _lookup;
