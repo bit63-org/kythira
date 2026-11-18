@@ -10,6 +10,7 @@
 
 #include <kythira/redis/redis_kv_state_machine.hpp>
 
+#include <algorithm>
 #include <cstddef>
 #include <string>
 #include <vector>
@@ -250,4 +251,101 @@ BOOST_AUTO_TEST_CASE(rejects_corrupt_entries_and_snapshots, *boost::unit_test::t
     BOOST_CHECK_THROW(
         sm.restore_from_snapshot({std::byte{0}, std::byte{0}, std::byte{0}, std::byte{5}}, 1),
         redis_kv_codec_error);
+}
+
+// ── command time and the KRV3 snapshot (redis-general-data-types task 1) ───
+
+// apply() runs a format-0x03 entry at max(entry time, applied time), so time
+// never runs backwards when leadership moves to a node whose clock is behind
+// (Requirement 2.3).
+BOOST_AUTO_TEST_CASE(command_time_has_a_monotonic_floor, *boost::unit_test::timeout(10)) {
+    sm_type sm;
+    BOOST_CHECK_EQUAL(sm.applied_time_ms(), 0U);
+    BOOST_CHECK_EQUAL(sm.advance_command_time(1000), 1000U);
+    BOOST_CHECK_EQUAL(sm.advance_command_time(900), 1000U);  // a leader whose clock is behind
+    BOOST_CHECK_EQUAL(sm.applied_time_ms(), 1000U);
+    BOOST_CHECK_EQUAL(sm.advance_command_time(1000), 1000U);
+    BOOST_CHECK_EQUAL(sm.advance_command_time(1001), 1001U);
+    BOOST_CHECK_EQUAL(sm.applied_time_ms(), 1001U);
+}
+
+// Before a format gate the snapshot is byte for byte the earlier format and
+// carries no command time; after it, the KRV3 header holds the level and the
+// applied time, and a restore brings both back (Requirement 14.2-14.3).
+BOOST_AUTO_TEST_CASE(the_krv3_header_appears_only_after_the_gate, *boost::unit_test::timeout(10)) {
+    sm_type sm;
+    set(sm, 1, "a", "1");
+    set(sm, 2, "b", "2");
+    const auto old_format = sm.get_state();
+    BOOST_CHECK(!std::equal(sm_type::k_state_marker.begin(), sm_type::k_state_marker.end(),
+                            old_format.begin()));
+    BOOST_CHECK_EQUAL(sm.format_level(), 0U);
+
+    sm.enable_format(1);
+    (void)sm.advance_command_time(5000);
+    const auto krv3 = sm.get_state();
+    BOOST_REQUIRE_EQUAL(krv3.size(), old_format.size() + 14);
+    BOOST_CHECK(
+        std::equal(sm_type::k_state_marker.begin(), sm_type::k_state_marker.end(), krv3.begin()));
+
+    sm_type restored;
+    restored.restore_from_snapshot(krv3, 2);
+    BOOST_CHECK_EQUAL(restored.format_level(), 1U);
+    BOOST_CHECK_EQUAL(restored.applied_time_ms(), 5000U);
+    BOOST_CHECK_EQUAL(value_of(restored, "a"), "1");
+    BOOST_CHECK(restored.get_state() == krv3);
+
+    // An old snapshot restores as pre-gate, whatever the node held before.
+    restored.restore_from_snapshot(old_format, 2);
+    BOOST_CHECK_EQUAL(restored.format_level(), 0U);
+    BOOST_CHECK_EQUAL(restored.applied_time_ms(), 0U);
+    BOOST_CHECK(restored.get_state() == old_format);
+
+    // The gate is one-way.
+    sm.enable_format(0);
+    BOOST_CHECK_EQUAL(sm.format_level(), 1U);
+}
+
+// Both halves of a split keep the level and the applied time, and a merge
+// keeps the larger of each, so neither runs backwards across a split and a
+// merge (design Component 1).
+BOOST_AUTO_TEST_CASE(split_and_absorb_carry_command_time, *boost::unit_test::timeout(10)) {
+    sm_type sm;
+    set(sm, 1, "a", "1");
+    set(sm, 2, "m", "2");
+    sm.enable_format(1);
+    (void)sm.advance_command_time(7000);
+    const auto halves = sm.split_state({"h"});
+    BOOST_REQUIRE_EQUAL(halves.size(), 2U);
+
+    sm_type left;
+    left.restore_from_snapshot(halves[0], 2);
+    sm_type right;
+    right.restore_from_snapshot(halves[1], 2);
+    for (const auto* half : {&left, &right}) {
+        BOOST_CHECK_EQUAL(half->format_level(), 1U);
+        BOOST_CHECK_EQUAL(half->applied_time_ms(), 7000U);
+    }
+    BOOST_CHECK_EQUAL(value_of(left, "a"), "1");
+    BOOST_CHECK_EQUAL(value_of(right, "m"), "2");
+
+    (void)right.advance_command_time(9000);
+    left.absorb(right.get_state(), shard_range<std::string>{});
+    BOOST_CHECK_EQUAL(left.applied_time_ms(), 9000U);
+    BOOST_CHECK_EQUAL(value_of(left, "m"), "2");
+
+    // A pre-gate sibling does not lower the merged group's level or time.
+    sm_type old_sibling;
+    set(old_sibling, 1, "z", "3");
+    left.absorb(old_sibling.get_state(), shard_range<std::string>{});
+    BOOST_CHECK_EQUAL(left.format_level(), 1U);
+    BOOST_CHECK_EQUAL(left.applied_time_ms(), 9000U);
+    BOOST_CHECK_EQUAL(value_of(left, "z"), "3");
+}
+
+BOOST_AUTO_TEST_CASE(a_marker_with_level_zero_is_refused, *boost::unit_test::timeout(10)) {
+    std::vector<std::byte> blob(sm_type::k_state_marker.begin(), sm_type::k_state_marker.end());
+    blob.resize(blob.size() + 2 + 8 + 4, std::byte{0});  // level 0, time 0, count 0
+    sm_type sm;
+    BOOST_CHECK_THROW(sm.restore_from_snapshot(blob, 1), redis_kv_codec_error);
 }
