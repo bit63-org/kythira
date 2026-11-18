@@ -30,6 +30,7 @@
 #include <kythira/redis/redis_gateway_value_access.hpp>
 #include <kythira/redis/redis_kv_state_machine.hpp>
 #include <kythira/redis/redis_server_identity.hpp>
+#include <kythira/redis/redis_layer_roles.hpp>
 #include <kythira/redis/resp_protocol.hpp>
 #include <raft/credential_verifier.hpp>
 #include <raft/future_default.hpp>
@@ -185,6 +186,12 @@ struct redis_gateway_config {
     /// Log every command at debug level. Off by default: at sccache rates it
     /// is a firehose.
     bool _log_commands = false;
+
+    /// The layers this node runs (`KYTHIRA_REDIS_ROLES`,
+    /// .kiro/specs/redis-general-data-types/ Requirement 16), reported as
+    /// `INFO`'s `kythira_roles:` (Requirement 16.7). Every role, the default,
+    /// is the gateway as it has always been.
+    layers::role_set _layer_roles = k_redis_all_roles;
 
     resp_parser_limits _parser_limits{};
 

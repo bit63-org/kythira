@@ -2330,6 +2330,7 @@ auto redis_gateway<Host, Logger, Metrics>::handle_info(session& s) -> std::strin
         << "kythira_gateway:1\r\n"
         << "redis_mode:" << server_mode() << "\r\n"
         << "uptime_in_seconds:" << uptime.count() << "\r\n"
+        << "kythira_roles:" << _config._layer_roles.to_string() << "\r\n"
         << "\r\n# Clients\r\n"
         << "connected_clients:" << _stats._connections_current.load() << "\r\n"
         << "maxclients:" << _config._max_clients << "\r\n"

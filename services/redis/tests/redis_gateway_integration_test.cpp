@@ -911,6 +911,9 @@ BOOST_AUTO_TEST_CASE(authentication_and_authorization, *boost::unit_test::timeou
         BOOST_CHECK_EQUAL(ops.auth("ops", "ops-secret"), "+OK\r\n");
         auto info = ops.call({"INFO"});
         BOOST_CHECK(info.find("kythira_gateway:1") != std::string::npos);
+        // redis-general-data-types Requirement 16.7: a node that sets no
+        // roles reports all three.
+        BOOST_CHECK(info.find("kythira_roles:gateway,front_end,data\r\n") != std::string::npos);
         BOOST_CHECK(info.find("kythira_authz_denials:") != std::string::npos);
         BOOST_CHECK_EQUAL(ops.call({"DBSIZE"}), ":1\r\n");
         BOOST_CHECK_EQUAL(ops.call({"COMMAND", "COUNT"}), ":17\r\n");

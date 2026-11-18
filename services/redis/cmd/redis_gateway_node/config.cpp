@@ -337,6 +337,20 @@ auto is_loopback_address(const std::string& address) -> bool {
 
 auto from_env() -> node_options {
     node_options o;
+    // The layers this node runs (redis-general-data-types Requirement 16).
+    // Read first: a role set this build cannot serve stops the node before
+    // anything else is checked or bound, naming the missing piece.
+    if (auto roles = env_get("KYTHIRA_REDIS_ROLES")) {
+        try {
+            o._gateway._layer_roles = parse_redis_roles(*roles);
+        } catch (const std::invalid_argument& e) {
+            throw std::invalid_argument(std::string("redis_gateway_node: KYTHIRA_REDIS_ROLES: ") +
+                                        e.what());
+        }
+    }
+    if (auto why = redis_roles_unservable(o._gateway._layer_roles)) {
+        throw std::invalid_argument("redis_gateway_node: " + *why);
+    }
     // Numeric or canonical composite text by `KYTHIRA_NODE_ID_KIND`; a text
     // build also takes `metadata:<provider>` and asks the instance metadata
     // service.
@@ -700,6 +714,8 @@ auto usage() -> std::string {
            "  KYTHIRA_EXECUTOR_STRIPES\n"
            "\n"
            "Gateway side (environment; design.md Component 9):\n"
+           "  KYTHIRA_REDIS_ROLES              layers this node runs: gateway,front_end,data\n"
+           "                                   (only all three serve in this build)  [all]\n"
            "  KYTHIRA_REDIS_LISTEN             plaintext RESP listener                "
            "[0.0.0.0:6379]\n"
            "  KYTHIRA_REDIS_TLS_LISTEN         TLS listener (needs _TLS_CERT and _TLS_KEY)\n"
