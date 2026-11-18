@@ -18,8 +18,10 @@
 ///   (`sqs_forward.hpp`); a data node that does not lead answers 503
 ///   without forwarding again, so the remote cluster tries the data nodes
 ///   in turn, starting from the one that last accepted, which is the
-///   leader until leadership moves. A query goes to any data node
-///   (`POST /_kythira/sqs/v1/query`), the last one that answered first.
+///   leader until leadership moves. A query (`POST /_kythira/sqs/v1/query`)
+///   goes the same way: only the leader answers it (a follower's replica
+///   may not yet hold a write the caller just made), so a front end reads
+///   its own writes.
 ///   It holds no replica, so `read` answers false and the leader-side
 ///   workers never run over it.
 /// - **hybrid**: `hybrid_queue_cluster`, what `sqs_node` gives its
@@ -102,7 +104,7 @@ public:
     }
 
     auto query(const data_query& q) -> std::optional<data_answer> {
-        const auto answer = call(std::string(data_wire::k_query_path), encode_query(q), _reader);
+        const auto answer = call(std::string(data_wire::k_query_path), encode_query(q), _leader);
         if (!answer) {
             return std::nullopt;
         }
@@ -131,10 +133,8 @@ private:
     data_transport _transport;
     clock_fn _clock;
     wall_clock_fn _wall;
-    /// The data node that last accepted a proposal, and the one that last
-    /// answered a query: where the next call starts.
+    /// The data node that last accepted a call: where the next one starts.
     std::atomic<std::size_t> _leader{0};
-    std::atomic<std::size_t> _reader{0};
 
     /// POSTs `body` to `path` on each data node in turn from `start`; the
     /// first 200's body. A 503 (not leader, not committed) or a failed

@@ -63,33 +63,47 @@ A node runs every layer by default. `KYTHIRA_SQS_ROLES` splits them:
 
 | Variable | Default | Notes |
 |---|---|---|
-| `KYTHIRA_SQS_ROLES` | `gateway,front_end,data` | The layers this node runs, comma-separated. On this release `gateway` and `front_end` go together. |
-| `SQS_DATA_ENDPOINTS` | | Base URLs of the data nodes' SQS listeners, comma-separated. Required without `data`. |
+| `KYTHIRA_SQS_ROLES` | `gateway,front_end,data` | The layers this node runs, comma-separated. Anything but all three needs `SQS_FORWARD_SECRET`, which signs the calls between layers. |
+| `SQS_DATA_ENDPOINTS` | | Base URLs of the data nodes' SQS listeners, comma-separated. Required by a front end without `data`. |
+| `SQS_FRONT_END_ENDPOINTS` | | Base URLs of the front ends' SQS listeners, comma-separated. Required by a gateway without `front_end`. |
 
+- **gateway** checks clients' SigV4 signatures. With `front_end` it
+  serves the API in-process. Without it, it hands each request with the
+  verified caller to a front end, taking them in turn; when the front end
+  cannot be reached the client gets `ServiceUnavailable` (503), which SDKs
+  retry. A node without `gateway` serves no client API.
+- **front_end** runs the SQS handlers and authorization. It serves
+  gateways' calls at `/_kythira/sqs/v1/call`. Without `data`, its writes and
+  reads go to the data nodes over `SQS_DATA_ENDPOINTS`. It tries them in
+  turn from the one that last answered, and only the leader answers, so a
+  client reads its own writes. Its long polls park locally, woken by a
+  stream from every data node (any one of them suffices).
 - **data** holds a replica of the queues, runs the leader-side workers
-  (delays and visibility ends, message moves, partition growth) and
-  serves the internal endpoints under `/_kythira/sqs/v1/`: propose, named
-  reads, and the availability stream that wakes long polls on other nodes.
-  Without `gateway,front_end` its listener answers nothing else.
-- **gateway,front_end** serves the SQS API. With `data` it serves
-  everything in-process. Without it, every write and read goes to a data
-  node over `SQS_DATA_ENDPOINTS`, trying them in turn from the one that last
-  answered, and long polls park locally, woken by a stream from every data
-  node (any one of them suffices). Such a node holds no state, so it needs
-  `SQS_FORWARD_SECRET` (its calls are signed with it, and its receipt and
-  SSE-SQS keys derive from it unless their files are given) but no
-  `KYTHIRA_NODE_PEERS` beyond itself.
+  (delays and visibility ends, message moves, partition growth) and serves
+  the internal endpoints under `/_kythira/sqs/v1/`: propose, named reads,
+  and the availability stream. On a co-located cluster a follower reaches
+  the leader the same way, through the other nodes' `SQS_PEER_ENDPOINTS`.
 
-Stopping a front end drains it first: parked long polls answer empty at
-once, which clients treat as an ordinary empty receive.
+The gateway and front end hold no queue state, and need
+`SQS_STATIC_KEYS_FILE` (the gateway authenticates with it, the front end
+authorizes) but no `KYTHIRA_NODE_PEERS` beyond themselves. Queue URLs are
+minted by the front end, so set its `SQS_ENDPOINT` to the address clients
+use, the gateways' load balancer.
+
+Stopping a front end drains it first: parked long polls answer
+empty at once, which clients treat as an ordinary empty receive.
 
 ```
 # data nodes 1-3: the durable cluster above, plus
 KYTHIRA_SQS_ROLES=data
-# a front end
-KYTHIRA_SQS_ROLES=gateway,front_end
+# front ends
+KYTHIRA_SQS_ROLES=front_end
 SQS_DATA_ENDPOINTS=https://d1:9324,https://d2:9324,https://d3:9324
-SQS_FORWARD_SECRET=...   # the data nodes' value
+SQS_ENDPOINT=https://sqs.example.com
+# gateways, behind https://sqs.example.com
+KYTHIRA_SQS_ROLES=gateway
+SQS_FRONT_END_ENDPOINTS=https://f1:9324,https://f2:9324
+# everywhere: the same SQS_FORWARD_SECRET and SQS_STATIC_KEYS_FILE
 ```
 
 ## Encryption with KMS keys

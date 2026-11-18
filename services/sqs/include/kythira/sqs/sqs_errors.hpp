@@ -66,12 +66,16 @@ inline constexpr protocol_error k_too_large_error{
     "com.amazon.coral.service#RequestEntityTooLargeException", "RequestEntityTooLarge", 413, true};
 inline constexpr protocol_error k_access_denied_error{
     "com.amazon.coral.service#AccessDeniedException", "AccessDenied", 403, true};
+/// A gateway that could not reach a front end (`sqs_gateway.hpp`); SDKs
+/// retry it.
+inline constexpr protocol_error k_service_unavailable_error{
+    "com.amazon.coral.availability#ServiceUnavailableException", "ServiceUnavailable", 503, false};
 
 /// Every protocol error, for the JSON-type-to-query-code lookup.
 inline constexpr std::array k_protocol_errors{
     k_validation_error,        k_missing_parameter_error, k_serialization_error,
     k_unknown_operation_error, k_missing_action_error,    k_internal_error,
-    k_too_large_error,         k_access_denied_error,
+    k_too_large_error,         k_access_denied_error,     k_service_unavailable_error,
 };
 
 /// The query codes of the authentication errors core's SigV4 verifier
