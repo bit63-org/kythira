@@ -31,6 +31,8 @@
 #include <kythira/sqs/sqs_service.hpp>
 #include <kythira/sqs/sqs_workers.hpp>
 
+#include "sns_bridge_setup.hpp"
+
 #include <raft/beast_https_server.hpp>
 #include <raft/static_key_authorizer.hpp>
 #include <raft/static_keys_file.hpp>
@@ -73,7 +75,9 @@ constexpr std::string_view usage =
     "environment: SQS_LISTEN, SQS_TLS_CERT, SQS_TLS_KEY, SQS_ALLOW_PLAINTEXT,\n"
     "SQS_ENDPOINT, SQS_REGION, SQS_PARTITION, SQS_STATIC_KEYS_FILE (required),\n"
     "SQS_RECEIPT_KEYS_FILE, SQS_FORWARD_SECRET, SQS_SSE_KEY_FILE, SQS_KMS\n"
-    "(none or local), SQS_KMS_PASSPHRASE_FILE, SQS_COMPAT, SQS_MAX_BODY_BYTES.\n"
+    "(none or local), SQS_KMS_PASSPHRASE_FILE, SQS_SNS_BRIDGE (on serves\n"
+    "/sns-bridge/<account>/<queue> for real SNS), SQS_SNS_CERT_HOSTS, SQS_SNS_CA,\n"
+    "SQS_COMPAT, SQS_MAX_BODY_BYTES.\n"
     "\n"
     "With KYTHIRA_NODE_DATA_DIR set (in builds with the durable module) the\n"
     "queues are kept on disk under Raft, on one node or several: KYTHIRA_NODE_ID,\n"
@@ -291,6 +295,16 @@ auto serve() -> int {
                 [&cluster](const std::string& key, std::vector<std::byte> entry) {
                     return cluster.propose(key, std::move(entry));
                 });
+        std::unique_ptr<s::sns_bridge<s::sqs_service<s::local_queue_cluster>>> bridge;
+        if (opt._sns_bridge) {
+            bridge = std::make_unique<s::sns_bridge<s::sqs_service<s::local_queue_cluster>>>(
+                service, s::sns_bridge_settings(opt, fc._endpoint));
+            handler->set_sns_bridge(
+                [&bridge](std::string_view method, std::string_view path, std::string_view body) {
+                    const auto r = bridge->handle(method, path, body);
+                    return std::pair{r._status, r._body};
+                });
+        }
         if (opt._listen_port != 0) {
             server.start();
         }

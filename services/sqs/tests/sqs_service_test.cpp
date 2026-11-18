@@ -18,6 +18,7 @@
 #include <kythira/sqs/sqs_front_end.hpp>
 #include <kythira/sqs/sqs_messages.hpp>
 #include <kythira/sqs/sqs_service.hpp>
+#include <kythira/sqs/sqs_sns_bridge.hpp>
 #include <kythira/sqs/sqs_sse.hpp>
 #include <kythira/sqs/sqs_workers.hpp>
 
@@ -25,12 +26,17 @@
 
 #include <boost/json.hpp>
 
+#include <openssl/evp.h>
+#include <openssl/pem.h>
+#include <openssl/x509.h>
+
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <memory>
 #include <optional>
 #include <set>
+#include <span>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -1073,4 +1079,212 @@ BOOST_FIXTURE_TEST_CASE(standard_queues_grow_with_their_send_rate, fixture) {
     BOOST_TEST(grower.run_once() == 0U);
     now += 1000;
     BOOST_TEST(grower.run_once() == 0U);
+}
+
+// -- task 9: SNS HTTPS bridge -----------------------------------------------------
+
+namespace {
+
+/// A signing key and its self-signed certificate, as SNS's.
+struct sns_signer {
+    EVP_PKEY* key = EVP_RSA_gen(2048);
+    std::string pem;
+
+    sns_signer() {
+        X509* x = X509_new();
+        ASN1_INTEGER_set(X509_get_serialNumber(x), 1);
+        X509_gmtime_adj(X509_getm_notBefore(x), -3600);
+        X509_gmtime_adj(X509_getm_notAfter(x), 3600);
+        X509_set_pubkey(x, key);
+        X509_NAME* n = X509_get_subject_name(x);
+        X509_NAME_add_entry_by_txt(
+            n, "CN", MBSTRING_ASC,
+            reinterpret_cast<const unsigned char*>("sns.amazonaws.com"),  // NOLINT
+            -1, -1, 0);
+        X509_set_issuer_name(x, n);
+        X509_sign(x, key, EVP_sha256());
+        BIO* b = BIO_new(BIO_s_mem());
+        PEM_write_bio_X509(b, x);
+        char* data = nullptr;
+        const auto len = BIO_get_mem_data(b, &data);
+        pem.assign(data, static_cast<std::size_t>(len));
+        BIO_free(b);
+        X509_free(x);
+    }
+    sns_signer(const sns_signer&) = delete;
+    auto operator=(const sns_signer&) -> sns_signer& = delete;
+    sns_signer(sns_signer&&) = delete;
+    auto operator=(sns_signer&&) -> sns_signer& = delete;
+    ~sns_signer() { EVP_PKEY_free(key); }
+
+    /// Signs `m` in place with SignatureVersion `version`.
+    void sign(json::object& m, const std::string& version = "2") const {
+        m["SignatureVersion"] = version;
+        m["SigningCertURL"] = std::string(k_cert_url);
+        const auto text = sqs::sns_detail::string_to_sign(m).value();
+        EVP_MD_CTX* c = EVP_MD_CTX_new();
+        std::size_t len = 0;
+        EVP_DigestSignInit(c, nullptr, version == "1" ? EVP_sha1() : EVP_sha256(), nullptr, key);
+        EVP_DigestSignUpdate(c, text.data(), text.size());
+        EVP_DigestSignFinal(c, nullptr, &len);
+        std::vector<unsigned char> sig(len);
+        EVP_DigestSignFinal(c, sig.data(), &len);
+        EVP_MD_CTX_free(c);
+        m["Signature"] = aj::base64_encode(std::as_bytes(std::span(sig.data(), len)));
+    }
+
+    static constexpr std::string_view k_cert_url =
+        "https://sns.us-east-1.amazonaws.com/SimpleNotificationService-abc.pem";
+};
+
+constexpr std::string_view k_topic = "arn:aws:sns:us-east-1:111122223333:orders";
+
+struct bridged : fixture {
+    sns_signer signer;
+    std::vector<std::string> fetched;
+    sqs::sns_bridge<sqs::sqs_service<sqs::local_queue_cluster>> bridge{
+        *service, sqs::sns_bridge_config{
+                      "us-east-1",
+                      "aws",
+                      "http://localhost:9324",
+                      {},
+                      [this](const std::string& url) -> std::optional<std::string> {
+                          fetched.push_back(url);
+                          if (url == sns_signer::k_cert_url) {
+                              return signer.pem;
+                          }
+                          if (url.find("Action=ConfirmSubscription") != std::string::npos) {
+                              return std::string("<ok/>");
+                          }
+                          return std::nullopt;
+                      }}};
+
+    static auto notification(const std::string& message) -> json::object {
+        return {{"Type", "Notification"},
+                {"MessageId", "5f1e0e2a-0000-4000-8000-000000000001"},
+                {"TopicArn", std::string(k_topic)},
+                {"Subject", "hello"},
+                {"Message", message},
+                {"Timestamp", "2026-11-18T12:00:00.000Z"},
+                {"UnsubscribeURL", "https://sns.us-east-1.amazonaws.com/?Action=Unsubscribe"}};
+    }
+
+    auto post(const std::string& queue, const json::object& m) -> sqs::sns_bridge_response {
+        return bridge.handle("POST", "/sns-bridge/" + std::string(k_account) + "/" + queue,
+                             json::serialize(m));
+    }
+
+    auto take(const std::string& queue, const json::array& names) -> std::string {
+        const auto url = "http://localhost:9324/" + std::string(k_account) + "/" + queue;
+        const auto got =
+            call("ReceiveMessage", {{"QueueUrl", url},
+                                    {"MessageAttributeNames", names},
+                                    {"MessageSystemAttributeNames", json::array{"All"}}});
+        BOOST_REQUIRE_MESSAGE(got.status == 200U && got.body.contains("Messages"),
+                              json::serialize(got.body));
+        last = got.body.at("Messages").as_array().at(0).as_object();
+        return std::string(last.at("Body").as_string());
+    }
+
+    json::object last;
+};
+
+}  // namespace
+
+BOOST_FIXTURE_TEST_CASE(the_bridge_confirms_subscriptions_from_allowed_topics, bridged) {
+    create("inbox");
+    json::object c{{"Type", "SubscriptionConfirmation"},
+                   {"MessageId", "m-1"},
+                   {"Token", "tok"},
+                   {"TopicArn", std::string(k_topic)},
+                   {"Message", "You have chosen to subscribe"},
+                   {"SubscribeURL",
+                    "https://sns.us-east-1.amazonaws.com/?Action=ConfirmSubscription&Token=tok"},
+                   {"Timestamp", "2026-11-18T12:00:00.000Z"}};
+    signer.sign(c);
+    // Not until the queue says it takes the topic.
+    BOOST_TEST(post("inbox", c)._status == 403U);
+    BOOST_TEST(post("nowhere", c)._status == 404U);
+    BOOST_TEST_REQUIRE(
+        call("TagQueue", {{"QueueUrl", "http://localhost:9324/111122223333/inbox"},
+                          {"Tags", {{"kythira:sns-bridge-topics", std::string(k_topic)}}}})
+            .status == 200U);
+    const auto r = post("inbox", c);
+    BOOST_TEST(r._status == 200U);
+    BOOST_TEST((fetched.back() == std::string(c.at("SubscribeURL").as_string())));
+    // A subscribe URL elsewhere is never fetched.
+    auto evil = c;
+    evil["SubscribeURL"] = "https://attacker.example/?Action=ConfirmSubscription";
+    signer.sign(evil);
+    const auto before = fetched.size();
+    BOOST_TEST(post("inbox", evil)._status == 403U);
+    BOOST_TEST(fetched.size() == before);
+    BOOST_TEST(bridge.handle("GET", "/sns-bridge/111122223333/inbox", "")._status == 405U);
+}
+
+BOOST_FIXTURE_TEST_CASE(the_bridge_enqueues_the_envelope_or_the_raw_message, bridged) {
+    for (const auto* q : {"wrapped", "raw"}) {
+        create(q);
+        json::object tags{{"kythira:sns-bridge-topics", "*"}};
+        if (std::string_view(q) == "raw") {
+            tags["kythira:sns-bridge-raw"] = "true";
+        }
+        BOOST_TEST_REQUIRE(
+            call("TagQueue", {{"QueueUrl", "http://localhost:9324/111122223333/" + std::string(q)},
+                              {"Tags", tags}})
+                .status == 200U);
+    }
+    auto m = notification("order 42 shipped");
+    m["MessageAttributes"] = {{"kind", {{"Type", "String"}, {"Value", "shipment"}}}};
+    signer.sign(m);
+    BOOST_TEST_REQUIRE(post("wrapped", m)._status == 200U);
+    const auto envelope = json::parse(take("wrapped", json::array{"All"})).as_object();
+    BOOST_TEST(envelope.at("Message").as_string() == "order 42 shipped");
+    BOOST_TEST(envelope.at("TopicArn").as_string() == k_topic);
+    BOOST_TEST(envelope.at("Type").as_string() == "Notification");
+    BOOST_TEST(envelope.at("MessageAttributes").at("kind").at("Value").as_string() == "shipment");
+    BOOST_TEST(last.at("Attributes").at("SenderId").as_string() == "sns.amazonaws.com");
+
+    BOOST_TEST_REQUIRE(post("raw", m)._status == 200U);
+    BOOST_TEST(take("raw", json::array{"All"}) == "order 42 shipped");
+    BOOST_TEST(last.at("MessageAttributes").at("kind").at("StringValue").as_string() == "shipment");
+    BOOST_TEST(bridge.delivered() == 2U);
+    // SignatureVersion 1 (SHA1withRSA) still verifies.
+    auto v1 = notification("by sha1");
+    signer.sign(v1, "1");
+    BOOST_TEST(post("raw", v1)._status == 200U);
+}
+
+BOOST_FIXTURE_TEST_CASE(the_bridge_refuses_what_sns_did_not_sign, bridged) {
+    create("strict", {{"SqsManagedSseEnabled", "false"}});
+    BOOST_TEST_REQUIRE(call("TagQueue", {{"QueueUrl", "http://localhost:9324/111122223333/strict"},
+                                         {"Tags", {{"kythira:sns-bridge-topics", "*"}}}})
+                           .status == 200U);
+    auto m = notification("genuine");
+    signer.sign(m);
+    auto forged = m;
+    forged["Message"] = "forged";
+    BOOST_TEST(post("strict", forged)._status == 403U);
+    // A certificate from another host is never fetched.
+    auto elsewhere = m;
+    elsewhere["SigningCertURL"] = "https://attacker.example/cert.pem";
+    const auto before = fetched.size();
+    BOOST_TEST(post("strict", elsewhere)._status == 403U);
+    BOOST_TEST(fetched.size() == before);
+    auto unsigned_ = notification("no signature");
+    BOOST_TEST(post("strict", unsigned_)._status == 403U);
+    // `*` is the queue's own account's topics only.
+    auto other = notification("from afar");
+    other["TopicArn"] = "arn:aws:sns:us-east-1:999999999999:theirs";
+    signer.sign(other);
+    BOOST_TEST(post("strict", other)._status == 403U);
+    BOOST_TEST(post("strict", m)._status == 200U);
+    BOOST_TEST(bridge.delivered() == 1U);
+    // FIFO queues: SNS sends HTTPS only from standard topics.
+    create("strict.fifo", {{"FifoQueue", "true"}});
+    BOOST_TEST_REQUIRE(
+        call("TagQueue", {{"QueueUrl", "http://localhost:9324/111122223333/strict.fifo"},
+                          {"Tags", {{"kythira:sns-bridge-topics", "*"}}}})
+            .status == 200U);
+    BOOST_TEST(post("strict.fifo", m)._status == 400U);
 }

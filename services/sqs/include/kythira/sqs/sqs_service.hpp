@@ -371,6 +371,14 @@ public:
         return f;
     }
 
+    /// A send made on the service's own behalf (the SNS bridge,
+    /// `sqs_sns_bridge.hpp`): `in` is SendMessage's input and `ctx` names
+    /// the queue and is already authorized.
+    auto deliver(sqs_call_context& ctx, boost::json::object& in)
+        -> aws_json::result<boost::json::object> {
+        return send_message_op(ctx, in);
+    }
+
     /// The catalog record of a queue, as this node's replica has it.
     [[nodiscard]] auto find(std::string_view account, std::string_view name)
         -> std::optional<queue_record> {

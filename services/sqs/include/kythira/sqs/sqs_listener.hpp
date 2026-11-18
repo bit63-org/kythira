@@ -88,6 +88,10 @@ namespace listener_detail {
 template<typename FrontEnd> class sqs_http_handler {
 public:
     using clock_fn = std::function<std::chrono::system_clock::time_point()>;
+    /// The SNS bridge (`sqs_sns_bridge.hpp`): method, path, body to status
+    /// and body.
+    using bridge_fn = std::function<std::pair<unsigned, std::string>(
+        std::string_view method, std::string_view path, std::string_view body)>;
 
     /// @param front_end Outlives the handler.
     /// @param forward_secret Empty: the forwarding path answers 404.
@@ -105,12 +109,22 @@ public:
         if (target == forward::k_path) {
             return forwarded(req);
         }
+        if (_bridge && target.starts_with("/sns-bridge/")) {
+            const auto method = req.method_string();
+            const auto [status, body] = _bridge(std::string_view(method.data(), method.size()),
+                                                target.substr(0, target.find('?')), req.body());
+            return listener_detail::plain(status, body, req.version());
+        }
         return listener_detail::to_beast(
             _front_end.handle(listener_detail::to_sqs_request(req, ctx)), req.version());
     }
 
+    /// Serves `/sns-bridge/...` through `bridge` (set before serving).
+    void set_sns_bridge(bridge_fn bridge) { _bridge = std::move(bridge); }
+
 private:
     FrontEnd& _front_end;
+    bridge_fn _bridge;
     std::string _secret;
     local_proposer _propose;
     clock_fn _clock;
