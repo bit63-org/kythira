@@ -389,17 +389,6 @@ unverified completion claim.
 
 ## Known Follow-ups
 
-- **FIXED November 10, 2026: `node<Types>::_known_leader` is written and
-  read under different mutexes** (found November 9, 2026, by
-  ThreadSanitizer on the RocksDB node suite). Now written under both
-  mutexes, so the reconnect thread's read under `_reconnect_cv_mutex` alone
-  is safe. `handle_append_entries` sets it under `_mutex`; `run_reconnect`
-  reads it under `_reconnect_cv_mutex`, so the reconnect thread can see a
-  torn `std::optional`. Not fixed with file-install-snapshot task 7, which
-  only exposed it. Fix: write it under `_reconnect_cv_mutex` too (the
-  writer already takes that lock right after to notify), or make it an
-  atomic. ThreadSanitizer's other reports from the same run were
-  exception_ptr refcounts in the uninstrumented libstdc++.
 - **OCI build cache: October is running at about twelve times
   September's daily rate** (`.kiro/specs/oci-build-cache/` task 11, measured October 9,
   2026). The bucket's first full month was $1.00 and 1.62 TB of egress,

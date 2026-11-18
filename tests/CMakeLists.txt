@@ -1174,6 +1174,13 @@ add_raft_completion_test(raft_batched_durable_writes_test raft_batched_durable_w
 add_raft_completion_test(raft_barrier_outlived_by_new_term_test
     raft_barrier_outlived_by_new_term_test.cpp)
 
+# node::_known_leader is set by an AppendEntries handler and read by the
+# reconnect thread's wait predicate; both must hold _reconnect_cv_mutex.
+# The race changes no visible result, so this is a ThreadSanitizer
+# regression check: the CI tsan job builds and runs it.
+add_raft_completion_test(raft_known_leader_race_test
+    raft_known_leader_race_test.cpp)
+
 # Leader group commit over the object store, at the raft level
 # (.kiro/specs/object-store-group-commit/ task 3): a three-node cluster on
 # write-behind object-store engines over the mock store. Concurrent commands
