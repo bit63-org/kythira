@@ -1545,6 +1545,18 @@ unverified completion claim.
     minutes of cold build per compat leg since the backend-matrix widening.
     Judged worth it against a failure mode whose whole danger is that it is
     invisible.
+  - **Narrowed November 18, 2026.** On GitHub's 20-job account cap, the full
+    matrix (~530 job-minutes, 31 runner slots) on every stacked push left 121
+    runs queued for 4-5 hours, with 20 of 42 open PRs stacked. A stacked PR
+    now runs every Build & Test leg, docs, and the cheap policy checks. Coverage,
+    the future-backend suites, the build variants and clang-tidy are skipped
+    until the PR targets `main`. Every stacked PR still shows a real build, so
+    the original trap (no run at all) stays closed. **The part of the trap that
+    comes back:** Coverage and the two Full suite checks are required, and a
+    skipped required check counts as passing. A PR retargeted to `main`
+    without a push would show those three green without having run them.
+    Always push a retargeted PR, which the rebase-onto-main merge procedure
+    already does.
   - The `gh pr checks <n>` habit below is still worth keeping, but it is now a
     backstop rather than the only defence.
   - Original entry follows, since the reasoning is what makes the fix legible.
