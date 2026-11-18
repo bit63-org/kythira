@@ -200,6 +200,19 @@ public:
         return false;
     }
 
+    /// The index this replica has applied (0 before the group opens).
+    [[nodiscard]] auto applied_index() const -> std::uint64_t {
+        const auto* node = _host->group_node(_opts.group);
+        return node == nullptr ? 0 : static_cast<std::uint64_t>(node->last_applied_index());
+    }
+
+    /// Waits until this replica has applied `index`, within the proposal
+    /// budget: the data layer's catalog API answers a query only then
+    /// (kms_catalog_api.hpp).
+    [[nodiscard]] auto await_applied(std::uint64_t index) -> bool {
+        return wait_applied(index, clock::now() + _opts.propose_timeout);
+    }
+
     // -- The leader's side of forwarding -------------------------------------
 
     /// Submit a member's proposal, which this node must lead; never

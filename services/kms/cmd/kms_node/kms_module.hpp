@@ -37,6 +37,7 @@
 #include <kythira/kms/kms_api.hpp>
 #include <kythira/kms/kms_backing.hpp>
 #include <kythira/kms/kms_catalog_access.hpp>
+#include <kythira/kms/kms_catalog_api.hpp>
 #include <kythira/kms/kms_crypto_api.hpp>
 #include <kythira/kms/kms_audit.hpp>
 #include <kythira/kms/kms_front_end.hpp>
@@ -239,6 +240,7 @@ public:
         _host = std::make_unique<kms_host>(*_raft, _ctx, hopts);
         _host->bootstrap();
         _access = std::make_unique<access_type>(access_type::over_host(*_host));
+        _catalog_server = kythira::kms::catalog_server_over(*_host, *_access);
         build_api();
     }
 
@@ -366,6 +368,7 @@ public:
             _store.reset();
         }
         _backend.reset();
+        _catalog_server = {};
         _access.reset();
         _host.reset();
         _raft.reset();
@@ -578,6 +581,22 @@ private:
         res.version(req.version());
         res.keep_alive(req.keep_alive());
         const std::string_view target(req.target().data(), req.target().size());
+        if (kythira::kms::is_catalog_path(target)) {
+            // The data layer's catalog API (kms-independent-layers task 3)
+            // for front ends without a replica. Until layer identities
+            // carry roles, the members' identities are who may call.
+            ++_peer_requests;
+            const kythira::kms::peer_caller caller{ctx.tls, ctx.client_verified,
+                                                   ctx.client_uri_sans, ctx.client_dns_sans};
+            const auto answer = kythira::kms::serve_catalog(
+                _catalog_server, kythira::kms::is_member(_peer_policy, caller),
+                std::string_view(req.method_string()), target, req.body());
+            res.result(answer->status);
+            res.set(http::field::content_type, "application/octet-stream");
+            res.body() = answer->body;
+            res.prepare_payload();
+            return res;
+        }
         if (kythira::kms::is_peer_path(target)) {
             ++_peer_requests;
             const kythira::kms::peer_caller caller{ctx.tls, ctx.client_verified,
@@ -909,6 +928,7 @@ private:
     std::unique_ptr<raft_host> _raft;
     std::unique_ptr<kms_host> _host;
     std::unique_ptr<access_type> _access;
+    kythira::kms::catalog_server_deps _catalog_server;
     std::shared_ptr<kythira::pkcs11::backend> _backend;
     // The backing store, shared by the jobs and the API once bound.
     std::mutex _store_mutex;

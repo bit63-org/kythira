@@ -16,6 +16,7 @@
 #include <kythira/kms/kms_backing.hpp>
 #include <kythira/kms/kms_catalog.hpp>
 #include <kythira/kms/kms_catalog_access.hpp>
+#include <kythira/kms/kms_catalog_api.hpp>
 #include <kythira/kms/kms_crypto_api.hpp>
 #include <kythira/kms/kms_front_end.hpp>
 #include <kythira/kms/kms_grants_api.hpp>
@@ -29,6 +30,7 @@
 #include <boost/json.hpp>
 
 #include <chrono>
+#include <cstdlib>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -52,6 +54,18 @@ inline const auto k_now = sv4::detail::parse_amz_date("20261115T120000Z").value(
 inline constexpr std::string_view k_service_arn = "arn:aws:iam::111122223333:user/kinesis-svc";
 
 using catalog_t = kms::kms_catalog_state_machine<>;
+
+/// Whether fixtures run the handlers in the split layout (a front end
+/// reaching the catalog through the data layer's API) rather than
+/// co-located: KMS_API_FIXTURE_LAYOUT=split, which CTest sets for the
+/// *_split runs of the API suites; a test may also set it.
+inline auto split_layout() -> bool& {
+    static bool split = [] {
+        const char* e = std::getenv("KMS_API_FIXTURE_LAYOUT");  // NOLINT(concurrency-mt-unsafe)
+        return e != nullptr && std::string_view(e) == "split";
+    }();
+    return split;
+}
 /// What the handlers and jobs are built over, as in the module
 /// (kms_catalog_access.hpp): every API test goes through the seam.
 using reader_t = kms::kms_catalog_reader;
@@ -162,13 +176,43 @@ struct fixture {
     int next_id = 0;
     /// The co-located access over `sm`: the barrier fails while
     /// `leaderless`, and proposals apply to `sm` directly.
-    kms::local_catalog_access<catalog_t> access{kms::local_catalog_access<catalog_t>::functions{
+    kms::local_catalog_access<catalog_t> local{kms::local_catalog_access<catalog_t>::functions{
         .replica =
             [this] { return std::shared_ptr<const catalog_t>(&sm, [](const catalog_t*) {}); },
         .barrier = [this] { return !leaderless; },
         .propose = [this](const std::vector<std::byte>& c) { return propose(c); },
     }};
-    kms::key_jobs<reader_t> jobs{*access.reader(), *hsm,
+    /// The split layout (kms-independent-layers task 3): the handlers sit
+    /// on a front end without a replica, reaching `sm` through the data
+    /// layer's catalog API (kms_catalog_api.hpp) served over `local`. The
+    /// catalog is unreachable while `data_layer_down`. Used when
+    /// split_layout() is set.
+    bool data_layer_down = false;
+    kms::catalog_server_deps data_node{
+        .read_index = [this]() -> std::optional<std::uint64_t> {
+            return leaderless ? std::nullopt : std::optional<std::uint64_t>(index);
+        },
+        .wait_applied = [this](std::uint64_t i) { return i <= index; },
+        .applied_index = [this] { return index; },
+        .reader = [this] { return local.reader(); },
+        .propose = [this](const std::vector<std::byte>& c) { return propose(c); },
+    };
+    kms::remote_catalog_access remote{
+        {"https://data-1:4000", "https://data-2:4000"},
+        [this](std::string_view, std::string_view target,
+               std::string body) -> std::optional<std::pair<unsigned, std::string>> {
+            if (data_layer_down) {
+                return std::nullopt;
+            }
+            const auto a = kms::serve_catalog(data_node, true, "POST", target, body);
+            BOOST_REQUIRE(a.has_value());
+            return std::make_pair(a->status, a->body);
+        }};
+    kms::kms_catalog_access& access =
+        split_layout() ? static_cast<kms::kms_catalog_access&>(remote) : local;
+    /// What the jobs read, kept as the module keeps it.
+    std::shared_ptr<const reader_t> jobs_reader = access.reader();
+    kms::key_jobs<reader_t> jobs{*jobs_reader, *hsm,
                                  [this](const std::vector<std::byte>& c) { return propose(c); },
                                  [this] { return now; }, std::chrono::minutes(5)};
     test_authorizer auth;
