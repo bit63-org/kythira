@@ -98,13 +98,18 @@ every role (7, 8, 10).
     the gateway; drain
   - _Requirements: 4.1-4.7, 8.2-8.5, 12.5_
 
-- [ ] 9. Volume service and `remote_segment_store`
+- [x] 9. Volume service and `remote_segment_store`
   - `include/raft/segment_volume_service.hpp` (one `record_segment_store`
     per volume under `<data_dir>/volumes/`) and `remote_segment_store`
     (pipelined appends, coalesced remote barrier, epoch on every write)
   - Restart, torn-tail truncation, `truncate_after` and `drop_stream`
     remotely; byte-identical files checked against a local store fed the
     same appends
+  - Built: each append is one request (it must return the segments that
+    rolled, and predicting rolls on the data node would re-implement the
+    file format), with no fsync until the coalesced barrier; the volume API
+    is served by `segment_volume_service::handle()` over a caller-supplied
+    transport, which task 10 puts on the internal listener
   - _Requirements: 9.1-9.3, 9.6, 9.7_
 
 - [ ] 10. Segment-store role and volume assignment
