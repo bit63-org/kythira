@@ -32,6 +32,14 @@ add_test(NAME s3_operations_up_to_date
             "${_s3_dir}model/s3-2006-03-01.json"
             "${_s3_dir}include/kythira/s3/model/operations.hpp" --check)
 
+# Task 6, Requirement 5.1: the action table is what tools/gen_s3_actions.py
+# makes of the pinned service reference, so an upgrade carries its
+# regenerated header and its diff.
+add_test(NAME s3_actions_up_to_date
+    COMMAND "${Python3_EXECUTABLE}" "${_s3_dir}tools/gen_s3_actions.py"
+            "${_s3_dir}tools/s3-service-reference.json"
+            "${_s3_dir}include/kythira/s3/s3_actions.hpp" --check)
+
 # Task 1: the checked-in wire evidence (tests/evidence/README.md) names only
 # model operations, shows every scenario finishing, and matches the
 # addressing and upload framing the README claims for each client.
@@ -75,6 +83,12 @@ target_link_libraries(s3_data_path_test PRIVATE
     kythira_s3 Boost::unit_test_framework Threads::Threads)
 add_test(NAME s3_data_path_test COMMAND s3_data_path_test)
 
+# Task 6: the actions, resources and condition keys each request asks the
+# authorizer for, against the reference's operation table.
+add_executable(s3_authz_test s3_authz_test.cpp)
+target_link_libraries(s3_authz_test PRIVATE kythira_s3 Boost::unit_test_framework)
+add_test(NAME s3_authz_test COMMAND s3_authz_test)
+
 set_tests_properties(
     s3_model_coverage
     s3_model_coverage_checker
@@ -84,6 +98,8 @@ set_tests_properties(
     s3_routing_test
     s3_index_state_machine_test
     s3_data_path_test
+    s3_actions_up_to_date
+    s3_authz_test
     PROPERTIES LABELS "unit;s3;s3-module" TIMEOUT 60)
 
 kythira_scale_test_timeouts()
