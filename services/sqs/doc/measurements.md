@@ -40,7 +40,9 @@ forwarding over loopback but no disk.
 | co-located, 3 nodes | standard | 16/16 | 509 | 29.4 / 68.3 | 1645 | 30.0 / 75.9 |
 | co-located, 3 nodes | FIFO | 16/16 | 509 | 29.6 / 66.8 | 1581 | 32.1 / 69.6 |
 | co-located, 3 nodes | FIFO (high throughput) | 16/16 | 504 | 29.9 / 68.3 | 1455 | 35.9 / 120.8 |
-| split | | | | | | |
+| split: gateway, front end, 3 data | standard | 16/16 | 454 | 33.4 / 72.4 | 1202 | 56.4 / 105.8 |
+| split: gateway, front end, 3 data | FIFO | 16/16 | 290 | 12.2 / 885.3 | 1040 | 54.2 / 94.1 |
+| split: gateway, front end, 3 data | FIFO (high throughput) | 16/16 | 397 | 39.0 / 74.0 | 802 | 115.6 / 188.2 |
 
 Taken 2026-11-18. Reading them:
 
@@ -52,7 +54,13 @@ Taken 2026-11-18. Reading them:
 - A receive costs one Raft round trip, like a send, and returns up to ten
   messages, so receive throughput runs about three times send throughput
   at the same call latency.
-- The split row waits for task 10 (independent layers).
+- The split rows run five nodes on the same four vCPUs (plaintext, the
+  in-memory engine), all load entering at the one gateway. Each call
+  crosses two extra hops (gateway to front end, front end to the data
+  leader), which costs a few milliseconds a send and more on receives,
+  which also carry the delete batch. FIFO without high throughput hits
+  the 300-calls-a-second limit again, because one front end counts every
+  call; add front ends to spread it, as on the co-located cluster.
 
 A row on production hardware (RocksDB on local NVMe, the generator on
 other machines, real TLS) belongs in this table before anyone sizes a
