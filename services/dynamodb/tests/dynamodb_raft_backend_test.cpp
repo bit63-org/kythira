@@ -155,8 +155,24 @@ struct stack {
         return reply{r.status, json::parse(r.body).as_object()};
     }
 
+    /// `op`, which must succeed. An unconditional PutItem or DeleteItem that
+    /// gets a 500 is sent again, as an AWS SDK sends it again: a write whose
+    /// leader is deposed after it was proposed may or may not commit, so the
+    /// backend answers it InternalServerError rather than retrying it
+    /// itself, and sending either again is safe. Cases that kill a leader and
+    /// write straight away hit that window on a loaded runner (CI, 13 of ~900
+    /// test jobs 2026-11-16..18: "PutItem failed: InternalServerError" and
+    /// "DeleteItem failed: ..." right after "Command cancelled due to
+    /// leadership loss"). No caller passes a ConditionExpression to these.
     auto ok(std::string_view op, const std::string& body) -> json::object {
         auto r = call(op, body);
+        if (op == "PutItem" || op == "DeleteItem") {
+            constexpr int k_attempts = 10;  // the AWS SDKs' legacy DynamoDB retry count
+            for (int attempt = 1; attempt < k_attempts && r.status == 500U; ++attempt) {
+                std::this_thread::sleep_for(std::chrono::milliseconds{50} * attempt);
+                r = call(op, body);
+            }
+        }
         BOOST_REQUIRE_MESSAGE(r.status == 200U,
                               std::string(op) + " failed: " + r.type() + ": " + r.message());
         return r.body;
@@ -1109,10 +1125,25 @@ BOOST_AUTO_TEST_CASE(gsi_entries_reach_other_groups_through_a_leader_loss) {
             put_g(c.node(live), pk, sk, "blue", 2);
         }
     }
-    BOOST_TEST(cluster::await([&] {
+    const bool moved = cluster::await([&] {
         return index_items(c.node(live), "blue") == expected(pks, k_per, 2) &&
                index_items(c.node(live), "red").empty();
-    }));
+    });
+    if (!moved) {
+        // CI saw this miss its 15 s four times (2026-11-16..18) with no word
+        // of what the index held; say which entries were missing or stale.
+        std::string held = "blue {";
+        for (const auto& e : index_items(c.node(live), "blue")) {
+            held += ' ' + e;
+        }
+        held += " } red {";
+        for (const auto& e : index_items(c.node(live), "red")) {
+            held += ' ' + e;
+        }
+        BOOST_ERROR("the index on node " << live << " did not follow the moves: " << held
+                                         << " }; old leader " << old << ", catalog leader "
+                                         << c.leader(k_catalog_group));
+    }
     c.fabric().revive(old);
 
     // Deleted items leave the index; the revived node catches up and every
