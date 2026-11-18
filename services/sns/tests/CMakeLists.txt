@@ -61,4 +61,22 @@ set_tests_properties(
     sns_node_self_test
     PROPERTIES LABELS "unit;sns;sns-module" TIMEOUT 60)
 
+# A C++ module test: Boost.Test through add_raft_completion_test, linked to
+# the module's headers.
+function(kythira_sns_test test_name source_file)
+    add_raft_completion_test(${test_name} ${source_file})
+    target_link_libraries(${test_name} PRIVATE kythira_sns)
+    set_target_properties(${test_name} PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests")
+    set_tests_properties(${test_name} PROPERTIES
+        WORKING_DIRECTORY "${CMAKE_BINARY_DIR}/tests"
+        LABELS "unit;sns;sns-module"
+        TIMEOUT 120)
+endfunction()
+
+# Task 2: the topic state machine (topics, subscriptions, the publish log in
+# the record segment store, FIFO dedup, leases with fencing, cursors and
+# retry state; property tests across replicas and a snapshot restore).
+kythira_sns_test(sns_topic_state_machine_test sns_topic_state_machine_test.cpp)
+
 kythira_scale_test_timeouts()

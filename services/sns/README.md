@@ -25,6 +25,7 @@ Built when `CONFIG_SNS=y` (`services/sns/Kconfig`, off by default).
 | `doc/unsupported.md` | every other operation, with its planned task (or out of scope: SMS and mobile push), reason and the exact error it returns | 1 onward |
 | `tools/check_coverage.py`, `tools/test_check_coverage.py` | the coverage check (Requirement 2.1) and its fixture tests | 1 |
 | `tests/evidence/` | the recording stub and checked-in wire evidence from the AWS CLI v2, boto3 and the Java, JS and Go SDKs, with what the gateway must accept (`tests/evidence/README.md`) | 1 |
+| `include/kythira/sns/sns_topic_state_machine.hpp`, `sns_codec.hpp` | the replicated topic state: topics, subscriptions, the publish log in the record segment store, FIFO dedup, delivery leases with fencing, cursors and retry state | 2 |
 | `cmd/sns_node/` | the daemon; a placeholder whose `--self-test` checks the operation table until tasks 3 and 4 | 1 |
 
 ## Upgrading the model
@@ -41,7 +42,7 @@ new operation fails `sns_model_coverage` until it is implemented or listed in
 
 | From core | Used for |
 |---|---|
-| `kythira_core_headers` | the public headers (later: multi-raft host, record segment store, SigV4 verifier, authorizer, AWS query codec) |
+| `kythira_core_headers` | the public headers: `record_segment_store.hpp` (the publish log), `types.hpp` (the state machine concept); later the multi-raft host, SigV4 verifier, authorizer and AWS query codec |
 | `OpenSSL::Crypto` | SigV4, message signatures (versions 1 and 2) |
 | `cmake/kythira_test_helpers.cmake` | `kythira_scale_test_timeouts()` |
 
