@@ -84,10 +84,30 @@ builds it to that design). Each task is one PR unless noted.
 
 ### Phase 2: the object store
 
-- [ ] 4. Object index state machine
+- [x] 4. Object index state machine
   - Buckets, versions, manifests, delete markers, uploads, refcounts with
     grace, conditions in apply; property tests for replicas and snapshots
   - _Requirements: 6.3, 7.2, 7.3, 8.1, 10.2, 10.3_
+  - Done: `s3_index_records.hpp` (key layout, records, binary codec) and
+    `s3_index_state_machine.hpp`, a `persistent_state_machine` over the
+    node's `kv_engine`. Keys carry an `s3/` prefix in front of the
+    design's `o/`, `u/`, `c/` so modules sharing an engine cannot collide
+    (HSM already uses `c/`), plus `s3/z/`, a zero-count index ordered by
+    time so collection never scans every count. Entries carry the
+    proposer's clock and the bucket's id, versioning state and object lock
+    flag, so applying needs no catalog read. Version and upload ids are
+    the log index raised past the key's newest stamp. A failed condition
+    or an entry writing outside the group's range changes nothing but the
+    applied index. Until task 18 spreads key spaces over groups, the
+    catalog, objects, uploads and counts share one group, and
+    `delete_bucket` checks emptiness only in its own range. Tests: S3's
+    behaviour for each versioning state, conditions, copy-source rules,
+    multipart (order, ETags, minimum size, S3's multipart ETag), listings
+    with prefixes and markers, collection after the grace period; and
+    randomized runs (20 seeds of 300 entries reaching every entry kind)
+    in which two replicas agree, a checkpoint restores the same state and
+    continues identically, and every count equals a recount of the
+    manifests.
 
 - [ ] 5. Write and read path
   - Chunking, SHA-256, write quorum, manifest commit, chunk verification
