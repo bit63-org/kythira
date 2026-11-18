@@ -2004,6 +2004,17 @@ unverified completion claim.
       order). Every user of the client was exposed (`iam_node`,
       `ca_cluster_node`), with whatever file or socket held the reused
       number as the target. Off the allowlist.
+      **Once more, November 18, 2026:** 1 rescue in 433 jobs from
+      November 17 to 18 (stdexec Full suite, before #820). Node 1 started
+      an election against a healthy leader in term 2 (most likely the
+      stale pre-vote round #820 stopped from campaigning), and from line
+      125 on every
+      request the test sent to the leader it had found earlier came back
+      307 NotLeader. The case now re-resolves the leader (or a follower)
+      on each attempt for every call it means for one, through
+      `cluster::on_leader` and `cluster::on_follower`, as the first
+      redirect check already did, so a legitimate election on a starved
+      runner no longer fails it.
     - **`http_pre_vote_timeout_now_test`, fixed November 12, 2026** (6
       rescues in 54 runs to November 12, all in
       `transfer_and_scatter_move_leadership`, across all three HTTP

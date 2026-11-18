@@ -420,6 +420,75 @@ public:
         return nullptr;
     }
 
+    /// Sends a request meant for the leader. Leadership can move between
+    /// finding the leader and asking it (a starved runner misses
+    /// heartbeats and an election follows), and the old leader then
+    /// answers 307 NotLeader (or 503 NoLeader while it knows of none). So
+    /// each attempt re-resolves the leader, and only an answer that is
+    /// neither is returned; one still standing at the deadline is returned
+    /// as is, for the caller's check to report. `call` gets the leader of
+    /// that attempt.
+    template<typename Call>
+    auto on_leader(Call call, std::chrono::seconds timeout = 60s) -> std::optional<http_result> {
+        const auto deadline = std::chrono::steady_clock::now() + timeout;
+        std::optional<http_result> r;
+        while (true) {
+            auto* leader = wait_leader();
+            if (leader == nullptr) {
+                return r;
+            }
+            r = call(*leader);
+            const bool moved =
+                r && (r->status == 307U ||
+                      (r->status == 503U && r->body.find("NoLeader") != std::string::npos));
+            if ((r && !moved) || std::chrono::steady_clock::now() >= deadline) {
+                return r;
+            }
+            std::this_thread::sleep_for(100ms);
+        }
+    }
+
+    /// Sends a request meant for a follower, which should redirect it to
+    /// the leader: each attempt re-resolves the leader, asks a running
+    /// voter that is not it, and returns once that answer is a 307 naming
+    /// the leader of that moment at `path_on_leader`, or at the deadline.
+    /// `call` gets the follower; `expected_location`, when given, gets the
+    /// Location that attempt expected.
+    template<typename Call>
+    auto on_follower(const std::string& path_on_leader, Call call,
+                     std::string* expected_location = nullptr, std::chrono::seconds timeout = 60s)
+        -> std::optional<http_result> {
+        const auto deadline = std::chrono::steady_clock::now() + timeout;
+        std::optional<http_result> r;
+        while (true) {
+            auto* leader = wait_leader();
+            if (leader == nullptr) {
+                return r;
+            }
+            member* follower = nullptr;
+            for (auto* m : voters()) {
+                if (m != leader && m->pid > 0) {
+                    follower = m;
+                    break;
+                }
+            }
+            if (follower == nullptr) {
+                return r;
+            }
+            const auto expected =
+                "https://localhost:" + std::to_string(leader->http_port) + path_on_leader;
+            if (expected_location != nullptr) {
+                *expected_location = expected;
+            }
+            r = call(*follower);
+            if ((r && r->status == 307U && r->location == expected) ||
+                std::chrono::steady_clock::now() >= deadline) {
+                return r;
+            }
+            std::this_thread::sleep_for(100ms);
+        }
+    }
+
     /// Waits until `m` reports `accounts` accounts applied.
     auto wait_accounts(const member& m, std::int64_t accounts, std::chrono::seconds timeout = 60s)
         -> bool {
