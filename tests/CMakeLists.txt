@@ -816,6 +816,23 @@ if(FIU_FOUND)
     target_include_directories(record_segment_store_test PRIVATE ${FIU_INCLUDE_DIRS})
 endif()
 
+# .kiro/specs/kinesis-independent-layers/ task 9: a segment node's volumes
+# and the remote segment store a data replica writes through, checked for
+# byte-identical files against a local store, epoch fencing, restart and
+# torn tails. Header-only, in-process transport.
+add_executable(segment_volume_test segment_volume_test.cpp)
+target_link_libraries(segment_volume_test PRIVATE
+    Boost::unit_test_framework
+    OpenSSL::Crypto
+    Threads::Threads
+)
+target_compile_features(segment_volume_test PRIVATE cxx_std_23)
+add_test(NAME segment_volume_test COMMAND segment_volume_test)
+set_tests_properties(segment_volume_test PROPERTIES
+    TIMEOUT 300
+    LABELS "unit;persistence;kinesis;layers"
+)
+
 # Cloud key-object persistence: the generic engine and its conformance suite
 # (.kiro/specs/cloud-object-persistence/ tasks 1-2).
 #
