@@ -51,6 +51,11 @@ add_test(NAME sqs_wire_evidence
             "${_sqs_dir}model/service-2.json"
             "${_sqs_dir}tests/evidence/data")
 
+# Task 13: the differential tool's normaliser and comparison, offline (the
+# replay against sqs_node runs in sqs-module.yml's client job).
+add_test(NAME sqs_differential_tool
+    COMMAND "${Python3_EXECUTABLE}" "${_sqs_dir}tests/differential/test_sqs_differential.py")
+
 # Task 1: sqs_node links and runs.
 add_test(NAME sqs_node_self_test COMMAND sqs_node --self-test)
 
@@ -59,6 +64,7 @@ set_tests_properties(
     sqs_model_coverage_checker
     sqs_operations_up_to_date
     sqs_wire_evidence
+    sqs_differential_tool
     sqs_node_self_test
     PROPERTIES LABELS "unit;sqs;sqs-module" TIMEOUT 60)
 

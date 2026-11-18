@@ -213,6 +213,12 @@ PR unless noted.
     the bridge
   - Each run needs Clark's go, reports cost, deletes what it made
   - _Requirements: 13.4_
+  - Progress (November 18, 2026): `services/sqs/tests/differential/`
+    (`sqs_differential.py`, seeded mix, normaliser, comparison, offline
+    test `sqs_differential_tool`, `run_replay.sh` in `sqs-module.yml`'s
+    client job), self-checked against `sqs_node` on several seeds. Left:
+    the first real-SQS recordings (Clark's go) and the real-cloud
+    bundle.
 
 - [ ] 14. Measurement and documentation
   - _Requirements: 13.5, 14.1_
