@@ -11,13 +11,14 @@
 # this file and its subdirectories use are listed in README.md.
 
 # The module's headers, as <kythira/sqs/...>. Header-only, like the other
-# modules. OpenSSL for SigV4, MD5 digests and receipt-handle HMACs
+# modules. Boost.JSON for both protocols' request objects (sqs_codec.hpp),
+# OpenSSL for SigV4, MD5 digests and receipt-handle HMACs
 # (KYTHIRA_BUILD_SQS requires it).
 set(KYTHIRA_SQS_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}")
 set(KYTHIRA_SQS_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/include")
 add_library(kythira_sqs INTERFACE)
 target_include_directories(kythira_sqs INTERFACE "${KYTHIRA_SQS_INCLUDE_DIR}")
-target_link_libraries(kythira_sqs INTERFACE kythira_core_headers OpenSSL::Crypto)
+target_link_libraries(kythira_sqs INTERFACE kythira_core_headers boost_json OpenSSL::Crypto)
 target_compile_features(kythira_sqs INTERFACE cxx_std_23)
 
 # sqs_node (task 1 placeholder; the daemon grows from task 3 on), before the
