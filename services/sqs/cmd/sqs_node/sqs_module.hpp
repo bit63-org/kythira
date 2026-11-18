@@ -40,11 +40,13 @@
 #include <kythira/sqs/sqs_forward.hpp>
 #include <kythira/sqs/sqs_front_end.hpp>
 #include <kythira/sqs/sqs_listener.hpp>
+#include <kythira/sqs/sqs_long_poll.hpp>
 #include <kythira/sqs/sqs_node_options.hpp>
 #include <kythira/sqs/sqs_queue_state_machine.hpp>
 #include <kythira/sqs/sqs_raft_cluster.hpp>
 #include <kythira/sqs/sqs_receipts.hpp>
 #include <kythira/sqs/sqs_service.hpp>
+#include <kythira/sqs/sqs_workers.hpp>
 
 #include <raft/beast_https_server.hpp>
 #include <raft/binary_file_persistence.hpp>
@@ -257,6 +259,7 @@ public:
     using front_end_type = sqs::sqs_front_end<authorizer_type>;
     using handler_type = sqs::sqs_http_handler<front_end_type>;
     using service_type = sqs::sqs_service<cluster_type>;
+    using worker_type = sqs::tick_worker<cluster_type>;
 
     /// The local id of the bootstrap group.
     static constexpr std::uint64_t k_first_group = 1;
@@ -350,13 +353,19 @@ public:
             [this](const kythira::host_node_id& leader, const std::string& key,
                    const std::vector<std::byte>& entry) { return forward(leader, key, entry); },
             _cluster_opt._propose_timeout);
+        _service_config._waits = &_hub;
         _service = std::make_unique<service_type>(*_cluster, _service_config);
+        _worker = std::make_unique<worker_type>(
+            *_cluster, [this](const std::string& key) { return _cluster->leads(key); });
+        _worker_ptr.store(_worker.get(), std::memory_order_release);
     }
 
     void publish(service_node::module_registry& /*registry*/) override {}
 
     void start(service_node::module_registry& /*registry*/) override {
+        _hub.reopen();
         _raft->start();
+        _worker->start();
         _driving = true;
         _driver = std::thread([this] {
             while (_driving.load(std::memory_order_acquire)) {
@@ -419,8 +428,10 @@ public:
                   << " queue URLs on " << fc._endpoint << std::endl;
     }
 
-    /// No request in flight once the listener has stopped.
+    /// No request in flight once the listener has stopped. Parked long
+    /// polls answer empty first (Requirement 12.1).
     void drain() override {
+        _hub.close();
         if (_server) {
             _server->stop();
         }
@@ -428,6 +439,9 @@ public:
 
     void stop() override {
         drain();
+        if (_worker) {
+            _worker->stop();
+        }
         _driving.store(false, std::memory_order_release);
         if (_driver.joinable()) {
             _driver.join();
@@ -441,6 +455,8 @@ public:
         _handler_owner.reset();
         _front_end.reset();
         _service.reset();
+        _worker_ptr.store(nullptr, std::memory_order_release);
+        _worker.reset();
         _cluster.reset();
         _peers.reset();
         _raft.reset();
@@ -466,6 +482,9 @@ public:
             {"peer_requests", static_cast<double>(_peer_requests.load()), {}},
             {"proposals_forwarded", static_cast<double>(_cluster->forwarded_count()), {}},
             {"forward_failures", static_cast<double>(_forward_failures.load()), {}},
+            {"long_polls_parked", static_cast<double>(_hub.parked()), {}},
+            {"long_polls_woken", static_cast<double>(_hub.notified()), {}},
+            {"ticks_proposed", static_cast<double>(_worker ? _worker->ticks() : 0), {}},
             {"raft_term_sum", service_node::raft_term_sum(*_raft), {}},
         };
     }
@@ -482,6 +501,11 @@ private:
     std::unique_ptr<kythira::mtls::client> _peers;
     std::unique_ptr<cluster_type> _cluster;
     std::unique_ptr<service_type> _service;
+    sqs::availability_hub _hub;
+    std::unique_ptr<worker_type> _worker;
+    /// For the state machines' listener, which may run before the worker
+    /// exists or after it has gone.
+    std::atomic<worker_type*> _worker_ptr{nullptr};
     std::unique_ptr<front_end_type> _front_end;
     std::unique_ptr<handler_type> _handler_owner;
     std::atomic<handler_type*> _handler{nullptr};
@@ -561,8 +585,17 @@ private:
         } else {
             cfg.state_engine = std::make_shared<Engine>();  // memory_kv_engine, in tests
         }
-        cfg.state_machine_factory = [](const std::uint64_t&) {
-            return typename types::state_machine_type{};
+        cfg.state_machine_factory = [this](const std::uint64_t&) {
+            typename types::state_machine_type sm;
+            sm.set_availability_listener([this](const sqs::queue_target& t, bool visible) {
+                if (visible) {
+                    _hub.notify(sqs::queue_keys::partition_prefix(t));
+                }
+                if (auto* w = _worker_ptr.load(std::memory_order_acquire)) {
+                    w->wake();
+                }
+            });
+            return sm;
         };
         cfg.automatic_split_merge_enabled = false;  // one group until task 12
         cfg.hibernation = kythira::hibernation_mode::off;

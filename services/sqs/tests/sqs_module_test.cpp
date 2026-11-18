@@ -36,6 +36,7 @@
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <future>
 #include <map>
 #include <memory>
 #include <optional>
@@ -315,6 +316,37 @@ BOOST_AUTO_TEST_CASE(every_node_of_three_answers_and_followers_forward) {
     }
     std::sort(got.begin(), got.end());
     BOOST_TEST((got == std::vector<std::string>{"from 0", "from 1", "from 2"}));
+
+    // A long poll parked on one node answers when a send commits through
+    // another: its own replica applies the entry and wakes it.
+    auto parked = std::async(std::launch::async, [&nodes] {
+        return nodes[2]->call("ReceiveMessage",
+                              {{"QueueUrl", k_queue_url}, {"WaitTimeSeconds", 15}});
+    });
+    const auto metric = [&nodes](const std::string& name) {
+        for (const auto& m : nodes[2]->module().metrics()) {
+            if (m.name == name) {
+                return m.value;
+            }
+        }
+        return 0.0;
+    };
+    const auto end = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (metric("long_polls_parked") < 1 && std::chrono::steady_clock::now() < end) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    BOOST_TEST_REQUIRE(metric("long_polls_parked") >= 1);
+    const auto start = std::chrono::steady_clock::now();
+    BOOST_TEST_REQUIRE(nodes[0]
+                           ->call_until_ok("SendMessage", {{"QueueUrl", k_queue_url},
+                                                           {"MessageBody", "long polled"}})
+                           .result_int() == 200U);
+    const auto r = parked.get();
+    BOOST_TEST_REQUIRE(r.result_int() == 200U, r.body());
+    const auto o = body_of(r);
+    BOOST_TEST_REQUIRE(o.contains("Messages"), r.body());
+    BOOST_TEST(o.at("Messages").as_array().at(0).at("Body").as_string() == "long polled");
+    BOOST_TEST((std::chrono::steady_clock::now() - start < std::chrono::seconds(10)));
 }
 
 BOOST_AUTO_TEST_CASE(a_durable_node_refuses_settings_that_would_break_handles) {

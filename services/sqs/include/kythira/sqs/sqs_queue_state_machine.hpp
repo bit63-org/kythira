@@ -391,6 +391,18 @@ public:
         discard_staged();
     }
 
+    /// Called once per queue entry this replica commits, after its batch
+    /// reached the engine: the partition, and whether it now has visible
+    /// messages. Long polls park on the first (`sqs_long_poll.hpp`); the
+    /// leader's tick worker (`sqs_workers.hpp`) re-reads its deadlines on
+    /// every call, since an entry may have added an earlier one. Runs on
+    /// the applying thread, so it must not call back into the cluster.
+    using availability_listener = std::function<void(const queue_target&, bool visible)>;
+
+    auto set_availability_listener(availability_listener listener) -> void {
+        _listener = std::move(listener);
+    }
+
     auto apply(const std::vector<std::byte>& entry, LogIndex index) -> std::vector<std::byte> {
         if (index <= _applied) {
             return {};
@@ -421,6 +433,9 @@ public:
             result.outcome = queue_result::status::malformed;
         } else {
             result = run(*c);
+            if (_listener && c->op != queue_command::kind::drop) {
+                _events.emplace_back(c->target, counts(c->target).visible > 0);
+            }
         }
         _batch = nullptr;
         return record_detail::to_bytes(encode_queue_result(result));
@@ -430,16 +445,23 @@ public:
     auto commit_staged(kythira::write_batch& batch, LogIndex index) -> void {
         put_applied_at(batch, _range.start, index);
         const auto seq = engine().write(batch);
+        auto events = std::move(_events);
         discard_staged();
         _applied = index;
         _ring.emplace_back(index, seq);
         trim_ring();
+        if (_listener) {
+            for (const auto& [target, visible] : events) {
+                _listener(target, visible);
+            }
+        }
     }
 
     /// Forgets what was staged; nothing reached the engine.
     auto discard_staged() -> void {
         _overlay.clear();
         _erased.clear();
+        _events.clear();
     }
 
     /// Engine keys are partition keys already.
@@ -654,6 +676,19 @@ public:
             return true;
         });
         return out;
+    }
+
+    /// Every queue of every account this replica's range holds, in key
+    /// order, until `visit` returns false (the tick worker's walk).
+    template<typename Visit> auto for_each_queue(Visit&& visit) const -> void {
+        scan_prefix(catalog_keys::prefix() + "queues/", [&](std::string_view, std::string_view v) {
+            auto q = decode_queue_record(v);
+            if (!q) {
+                throw kythira::persistent_storage_error(
+                    "sqs_queue_state_machine: corrupt queue record");
+            }
+            return visit(*q);
+        });
     }
 
     [[nodiscard]] auto engine() const -> engine_type& {
@@ -1342,6 +1377,9 @@ private:
     kythira::write_batch* _batch = nullptr;
     std::map<std::string, std::optional<std::string>, std::less<>> _overlay;
     std::vector<kythira::key_range> _erased;
+    availability_listener _listener;
+    /// What the entries staged since the last commit did, for `_listener`.
+    std::vector<std::pair<queue_target, bool>> _events;
 };
 
 }  // namespace kythira::sqs
