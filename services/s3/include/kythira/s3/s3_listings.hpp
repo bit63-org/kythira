@@ -208,6 +208,14 @@ template<metadata_access M>
                 400, "BadDigest", "The Content-MD5 you specified did not match what we received.");
         }
     }
+    auto want = requested(req.headers);
+    if (!want) {
+        return want.error();
+    }
+    if (auto e = verify(*want, checksum_of(want->algorithm, *body),
+                        req.trailers ? req.trailers() : header_list{})) {
+        return *e;
+    }
     auto doc = aws_rest_xml::parse_xml(*body);
     if (!doc) {
         return doc.error();

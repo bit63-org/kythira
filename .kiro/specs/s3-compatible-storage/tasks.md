@@ -181,10 +181,28 @@ builds it to that design). Each task is one PR unless noted.
     Content-MD5 but verifies only MD5), SSE-KMS/SSE-C requests answer
     `NotImplemented` until task 11.
 
-- [ ] 8. Checksums
+- [x] 8. Checksums
   - CRC32, CRC32C, CRC64NVME, SHA-1, SHA-256, full-object and composite,
     trailing checksums
   - _Requirements: 7.4_
+  - Done: `s3_checksums.hpp` has the five algorithms (CRCs from
+    Boost.CRC, SHAs from OpenSSL EVP), streaming, base64 wire values,
+    CRC combination (zlib's GF(2) method) so task 9 can derive a
+    multipart upload's full-object CRC from its parts, and composite
+    `<b64>-N` checksums. `requested()` reads what a request asks for
+    (one `x-amz-checksum-*` header, or `x-amz-trailer` with
+    `x-amz-sdk-checksum-algorithm`; CRC64NVME when nothing is named)
+    and `verify()` checks the computed value against the header or the
+    aws-chunked trailer (`BadDigest`, or `InvalidRequest` for a missing
+    trailer). PutObject stores and returns the checksum; GET/HEAD return
+    it under `x-amz-checksum-mode: ENABLED` on whole-object reads only;
+    GetObjectAttributes reports it; CopyObject keeps it (also under
+    `REPLACE`); DeleteObjects accepts a checksum header in place of
+    `Content-MD5`. Tests: `s3_checksums_test` (published check values,
+    combination, composites, header parsing) and
+    `checksums_are_verified_stored_and_returned` in `s3_service_test`
+    (header, trailer, mismatch, checksum mode, range, copy, attributes,
+    DeleteObjects).
 
 - [ ] 9. Multipart upload
   - All operations, part copy, complete with checksums and conditions,

@@ -25,7 +25,15 @@
 /// returned. An object's ACL, when it is not just its owner's, is kept as
 /// `x-kythira-acl`, which is never returned as a header.
 ///
-/// **Not here yet.** Checksums (task 8), multipart (9), object lock
+/// **Checksums** (task 8). Every PUT stores one full-object checksum: the
+/// algorithm the request names (a header value or an aws-chunked
+/// trailer, verified, `BadDigest` on a mismatch) or CRC64NVME when it
+/// names none, as S3 does since 2025. It is kept as system metadata
+/// `x-amz-checksum-<alg>` with `x-amz-checksum-type`, returned on the
+/// PUT, by GetObjectAttributes, and on a whole-object GET or HEAD with
+/// `x-amz-checksum-mode: ENABLED` (never on a range). A copy keeps it.
+///
+/// **Not here yet.** Multipart (9), object lock
 /// headers (10) and SSE (11): a request that asks for SSE-KMS or SSE-C
 /// is refused with `NotImplemented` rather than stored unencrypted.
 /// Storage classes other than `STANDARD` are stored and returned; their
@@ -34,6 +42,7 @@
 #include <kythira/s3/s3_access.hpp>
 #include <kythira/s3/s3_auth.hpp>
 #include <kythira/s3/s3_buckets.hpp>
+#include <kythira/s3/s3_checksums.hpp>
 #include <kythira/s3/s3_context.hpp>
 #include <kythira/s3/s3_http.hpp>
 #include <kythira/s3/s3_metadata.hpp>
@@ -389,8 +398,11 @@ struct byte_range {
     return owner_only(v.owner);
 }
 
-/// Headers every object response carries for `v`.
-inline void object_headers(s3_response& r, const object_version& v, const bucket_state& b) {
+/// Headers every object response carries for `v`; the stored checksum
+/// only when `checksums` (a whole-object read with
+/// `x-amz-checksum-mode: ENABLED`).
+inline void object_headers(s3_response& r, const object_version& v, const bucket_state& b,
+                           bool checksums = false) {
     const auto& c = v.content;
     r.set("Last-Modified", aws_rest_xml::http_date(bucket_detail::time_of(v.last_modified_ms)));
     r.set("ETag", quote(c.etag));
@@ -404,6 +416,9 @@ inline void object_headers(s3_response& r, const object_version& v, const bucket
     }
     for (const auto& [k, val] : c.system_metadata) {
         if (k == tagging_metadata || k == object_acl_metadata) {
+            continue;
+        }
+        if (k.starts_with("x-amz-checksum-") && !checksums) {
             continue;
         }
         r.set(k, val);
@@ -598,6 +613,11 @@ template<metadata_access M>
     if (!content) {
         return content.error();
     }
+    auto want = requested(req.headers);
+    if (!want) {
+        return want.error();
+    }
+    checksummer sum(want->algorithm);
     const std::string writer = auth.who ? auth.who->account : std::string{};
     const auto owner = new_owner(b, writer, req.headers);
     auto acl = requested_acl(b, owner, req.headers);
@@ -633,10 +653,15 @@ template<metadata_access M>
             return too_large();
         }
         if (!buf.empty()) {
+            sum.update(buf);
             if (auto e = w.append(std::as_bytes(std::span(buf.data(), buf.size())))) {
                 return *e;
             }
         }
+    }
+    const auto checksum = sum.value();
+    if (auto e = verify(*want, checksum, req.trailers ? req.trailers() : header_list{})) {
+        return *e;
     }
     auto written = w.finish();
     if (!written) {
@@ -656,6 +681,8 @@ template<metadata_access M>
     }
     content->manifest = std::move(written->manifest);
     content->etag = written->md5_hex;
+    content->system_metadata[checksum_header(want->algorithm)] = checksum;
+    content->system_metadata["x-amz-checksum-type"] = "FULL_OBJECT";
 
     index_command c;
     c.op = index_command::kind::put_object;
@@ -677,6 +704,8 @@ template<metadata_access M>
     }
     s3_response out;
     out.set("ETag", quote(r.etag));
+    out.set(checksum_header(want->algorithm), checksum);
+    out.set("x-amz-checksum-type", "FULL_OBJECT");
     if (auto v = version_header(b, r)) {
         out.set("x-amz-version-id", *v);
     }
@@ -722,8 +751,12 @@ template<metadata_access M>
     }
     const auto size = v.content.size();
 
+    // Checksums cover the whole object, so a range read carries none.
+    const bool checksum_mode =
+        authz_detail::lower(req.header("x-amz-checksum-mode").value_or("")) == "enabled";
+    const bool whole = !range_header && (!part || v.content.part_sizes.size() <= 1);
     s3_response out;
-    object_headers(out, v, b);
+    object_headers(out, v, b, checksum_mode && whole);
     std::uint64_t first = 0;
     std::uint64_t length = size;
     if (part) {
@@ -1051,6 +1084,19 @@ template<metadata_access M>
     auto w = aws_rest_xml::document("GetObjectAttributesResponse");
     if (has("ETag")) {
         w.element("ETag", v.content.etag);
+    }
+    if (has("Checksum")) {
+        const auto& m = v.content.system_metadata;
+        for (auto a : all_checksum_algorithms) {
+            if (auto it = m.find(checksum_header(a)); it != m.end()) {
+                w.open("Checksum").element(checksum_element(a), it->second);
+                if (auto t = m.find("x-amz-checksum-type"); t != m.end()) {
+                    w.element("ChecksumType", t->second);
+                }
+                w.close();
+                break;
+            }
+        }
     }
     if (has("ObjectParts") && !v.content.part_sizes.empty()) {
         w.open("ObjectParts")

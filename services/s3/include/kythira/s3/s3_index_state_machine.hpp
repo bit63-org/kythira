@@ -1191,9 +1191,17 @@ private:
         v.owner = c.owner;
         v.content = src->content;
         if (c.replace_metadata) {
+            // Checksums describe the bytes, which a copy does not change.
+            std::map<std::string, std::string> kept;
+            for (const auto& [k, val] : v.content.system_metadata) {
+                if (k.starts_with("x-amz-checksum-")) {
+                    kept.emplace(k, val);
+                }
+            }
             v.content.content_type = c.content.content_type;
             v.content.user_metadata = c.content.user_metadata;
             v.content.system_metadata = c.content.system_metadata;
+            v.content.system_metadata.insert(kept.begin(), kept.end());
             v.content.storage_class = c.content.storage_class;
         }
         for (const auto& name : c.override_metadata) {

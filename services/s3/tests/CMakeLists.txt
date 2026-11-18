@@ -119,6 +119,18 @@ elseif(TARGET Boost::json)
 endif()
 add_test(NAME s3_post_policy_test COMMAND s3_post_policy_test)
 
+# Task 8: additional checksums: check values, streaming, CRC combination
+# for multipart full-object checksums, composite checksums, and what a
+# request's checksum headers ask for.
+add_executable(s3_checksums_test s3_checksums_test.cpp)
+target_link_libraries(s3_checksums_test PRIVATE kythira_s3 Boost::unit_test_framework)
+if(TARGET boost_json)
+    target_link_libraries(s3_checksums_test PRIVATE boost_json)
+elseif(TARGET Boost::json)
+    target_link_libraries(s3_checksums_test PRIVATE Boost::json)
+endif()
+add_test(NAME s3_checksums_test COMMAND s3_checksums_test)
+
 # Task 7: the request pipeline end to end (routing, SigV4, the access check,
 # bucket, object and listing handlers) over the in-process metadata layer.
 # It includes the persistent state machine contract, hence the shared test
@@ -146,6 +158,7 @@ set_tests_properties(
     s3_auth_test
     s3_access_test
     s3_post_policy_test
+    s3_checksums_test
     s3_service_test
     PROPERTIES LABELS "unit;s3;s3-module" TIMEOUT 60)
 

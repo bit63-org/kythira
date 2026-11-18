@@ -40,8 +40,9 @@ module's consumers (Requirement 17.3).
 | `include/kythira/s3/s3_compat.hpp` | the compatibility profile and its `kythira:compat:*` bucket tags | 7 |
 | `include/kythira/s3/s3_context.hpp` | service options, handler context, a bucket's access state from its stored config | 7 |
 | `include/kythira/s3/s3_buckets.hpp` | bucket operations and the access, tagging and logging sub-resources | 6, 7 |
-| `include/kythira/s3/s3_objects.hpp` | object put, get/head (ranges, `partNumber`, overrides, conditions), delete, copy, attributes, tagging, ACLs | 6, 7 |
-| `include/kythira/s3/s3_listings.hpp` | ListObjects V1/V2 and DeleteObjects | 7 |
+| `include/kythira/s3/s3_objects.hpp` | object put, get/head (ranges, `partNumber`, overrides, conditions), delete, copy, attributes, tagging, ACLs, stored checksums | 6, 7, 8 |
+| `include/kythira/s3/s3_listings.hpp` | ListObjects V1/V2 and DeleteObjects | 7, 8 |
+| `include/kythira/s3/s3_checksums.hpp` | additional checksums (CRC32, CRC32C, CRC64NVME, SHA-1, SHA-256): streaming, CRC combination for full-object multipart checksums, composite checksums, what a request asks for and its verification against a header or trailer; `s3_checksums_test` | 8 |
 | `include/kythira/s3/s3_service.hpp` | the request pipeline and browser POST uploads; `s3_service_test` | 6, 7 |
 | `include/kythira/s3/s3_routes.hpp` | the operation table as routes for core's REST-XML router, and `route_request` (addressing, query, operation); `s3_routing_test` routes every recorded client request | 3 |
 | `implemented-operations.txt` | operations the gateway implements | 1 onward |
