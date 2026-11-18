@@ -8,11 +8,18 @@
 # check every MD5 digest).
 #
 # Usage: run_suite.sh [CLIENT...]
-#   With SQS_SUITE_ENDPOINT set, the clients talk to that endpoint (a split
+#   With SQS_SUITE_ENDPOINT set, the clients talk to that endpoint (a
 #   layout someone else started; it must take keys.txt's key). Otherwise the
-#   script starts $SQS_NODE (sqs_node, in-memory, one node) on a free port
-#   with the deletion and purge cool-downs off, because every client reuses
-#   its queue names, and stops it afterwards.
+#   script starts $SQS_NODE with the deletion and purge cool-downs off,
+#   because every client reuses its queue names, and stops it afterwards,
+#   in the layout SQS_SUITE_LAYOUT names:
+#     single     one in-memory node (the default)
+#     split      three layers on five durable nodes (task 10): three data
+#                nodes, a front end, and a gateway the clients talk to
+#     split-tls  the same over TLS, each node holding a layer identity
+#                (doc/configuration.md, "Layer identities") from a CA the
+#                script makes with openssl; the clients trust that CA
+#   The split layouts need a durable sqs_node (built with RocksDB).
 #
 # Clients (all by default):
 #   awscli       AWS CLI v2                          $AWS_CLI (default aws)
@@ -50,19 +57,119 @@ wait_port() {
 }
 
 pids=()
-cleanup() { for p in "${pids[@]}"; do kill "$p" 2>/dev/null || true; done; }
+scratch=()
+cleanup() {
+  for p in "${pids[@]}"; do kill "$p" 2>/dev/null || true; done
+  wait 2>/dev/null || true
+  for d in "${scratch[@]}"; do rm -rf -- "$d"; done
+}
 trap cleanup EXIT
+
+# A CA and one certificate per node, each with its layer identity, and the
+# clients told to trust the CA (botocore, Go, Node and the JVM each their
+# own way).
+make_identities() {
+  local d=$1
+  openssl ecparam -name prime256v1 -genkey -noout -out "$d/ca.key"
+  openssl req -x509 -new -key "$d/ca.key" -subj /CN=sqs-suite-ca -days 2 -out "$d/ca.pem"
+  local n id roles
+  for spec in d1:1:data d2:2:data d3:3:data fe:4:front_end gw:5:gateway; do
+    IFS=: read -r n id roles <<<"$spec"
+    openssl ecparam -name prime256v1 -genkey -noout -out "$d/$n.key"
+    openssl req -new -key "$d/$n.key" -subj "/CN=$n" -out "$d/$n.csr"
+    printf 'subjectAltName=DNS:localhost,IP:127.0.0.1,URI:kythira://sqs/suite/%s?roles=%s\nextendedKeyUsage=serverAuth,clientAuth\n' \
+      "$id" "$roles" >"$d/$n.ext"
+    openssl x509 -req -in "$d/$n.csr" -CA "$d/ca.pem" -CAkey "$d/ca.key" -CAcreateserial \
+      -days 2 -extfile "$d/$n.ext" -out "$d/$n.crt" 2>/dev/null
+  done
+  cat /etc/ssl/certs/ca-certificates.crt "$d/ca.pem" >"$d/bundle.pem"
+  keytool -importcert -noprompt -alias sqs-suite -file "$d/ca.pem" -keystore "$d/trust.p12" \
+    -storetype PKCS12 -storepass changeit >/dev/null
+  export AWS_CA_BUNDLE=$d/bundle.pem SSL_CERT_FILE=$d/bundle.pem NODE_EXTRA_CA_CERTS=$d/ca.pem
+  export JAVA_TOOL_OPTIONS="${JAVA_TOOL_OPTIONS:-} -Djavax.net.ssl.trustStore=$d/trust.p12 -Djavax.net.ssl.trustStorePassword=changeit -Djavax.net.ssl.trustStoreType=PKCS12"
+}
+
+# Three data nodes, a front end over them and a gateway in front of it.
+start_split() {
+  local tls=$1 dir scheme
+  dir=$(mktemp -d)
+  scratch+=("$dir")
+  scheme=http
+  if [ "$tls" = 1 ]; then
+    scheme=https
+    make_identities "$dir" 2>/dev/null
+  fi
+  local api=() raft=() i
+  for i in 1 2 3 4 5; do api+=("$(free_port)"); raft+=("$(free_port)"); done
+  local gw_url=$scheme://127.0.0.1:${api[4]}
+  # shellcheck disable=SC2054 # SQS_COMPAT takes a comma-separated list
+  local common=(KYTHIRA_NODE_INSECURE_PLAINTEXT=1 SQS_STATIC_KEYS_FILE="$here/keys.txt"
+    SQS_FORWARD_SECRET=suite-forwarding-secret-0123456789 KYTHIRA_LOG_LEVEL=warning
+    SQS_COMPAT=delete-cooldown=0,purge-cooldown=0 SQS_ENDPOINT="$gw_url"
+    KYTHIRA_NODE_RAFT_BIND=127.0.0.1)
+  if [ "$tls" = 1 ]; then
+    common+=(SQS_ALLOW_PLAINTEXT=off SQS_PEER_CA="$dir/ca.pem" SQS_IDENTITY_CLUSTER=suite)
+  else
+    common+=(SQS_ALLOW_PLAINTEXT=on)
+  fi
+  local peers="1=127.0.0.1:${raft[0]},2=127.0.0.1:${raft[1]},3=127.0.0.1:${raft[2]}"
+  local listeners="1=$scheme://127.0.0.1:${api[0]},2=$scheme://127.0.0.1:${api[1]},3=$scheme://127.0.0.1:${api[2]}"
+  local data="$scheme://127.0.0.1:${api[0]},$scheme://127.0.0.1:${api[1]},$scheme://127.0.0.1:${api[2]}"
+  local names=(d1 d2 d3 fe gw)
+  for i in 0 1 2 3 4; do
+    local id=$((i + 1)) n=${names[$i]} own=()
+    mkdir -p "$dir/$n"
+    case $n in
+      d*) own=(KYTHIRA_SQS_ROLES=data KYTHIRA_NODE_PEERS="$peers" SQS_PEER_ENDPOINTS="$listeners") ;;
+      fe) own=(KYTHIRA_SQS_ROLES=front_end KYTHIRA_NODE_PEERS="$id=127.0.0.1:${raft[$i]}"
+               SQS_DATA_ENDPOINTS="$data") ;;
+      gw) own=(KYTHIRA_SQS_ROLES=gateway KYTHIRA_NODE_PEERS="$id=127.0.0.1:${raft[$i]}"
+               SQS_FRONT_END_ENDPOINTS="$scheme://127.0.0.1:${api[3]}") ;;
+    esac
+    [ "$tls" = 1 ] && own+=(SQS_TLS_CERT="$dir/$n.crt" SQS_TLS_KEY="$dir/$n.key")
+    env "${common[@]}" "${own[@]}" KYTHIRA_NODE_ID=$id KYTHIRA_NODE_DATA_DIR="$dir/$n" \
+      KYTHIRA_NODE_RAFT_PORT="${raft[$i]}" SQS_LISTEN="127.0.0.1:${api[$i]}" \
+      "$SQS_NODE" >"$dir/$n.log" 2>&1 &
+    pids+=($!)
+  done
+  for i in 0 1 2 3 4; do
+    wait_port "${api[$i]}" || { tail -n 20 "$dir"/*.log; exit 1; }
+  done
+  # Listening is not serving: wait until the data nodes have a leader.
+  "$py" - "$gw_url" <<'PY' || { tail -n 20 "$dir"/*.log; exit 1; }
+import sys, time
+import boto3
+sqs = boto3.client("sqs", endpoint_url=sys.argv[1])
+end = time.monotonic() + 60
+while True:
+    try:
+        sqs.list_queues()
+        break
+    except Exception as e:  # noqa: BLE001 - any failure means not yet
+        if time.monotonic() > end:
+            sys.exit(f"the split layout did not start serving: {e}")
+        time.sleep(0.5)
+PY
+  endpoint=$gw_url
+}
 
 endpoint=${SQS_SUITE_ENDPOINT:-}
 if [ -z "$endpoint" ]; then
-  port=$(free_port)
-  log=$(mktemp)
-  SQS_LISTEN=127.0.0.1:$port SQS_ALLOW_PLAINTEXT=1 SQS_STATIC_KEYS_FILE=$here/keys.txt \
-    SQS_COMPAT=delete-cooldown=0,purge-cooldown=0 \
-    "${SQS_NODE:?set SQS_NODE to the sqs_node binary, or SQS_SUITE_ENDPOINT}" >"$log" 2>&1 &
-  pids+=($!)
-  wait_port "$port" || { cat "$log"; exit 1; }
-  endpoint=http://127.0.0.1:$port
+  : "${SQS_NODE:?set SQS_NODE to the sqs_node binary, or SQS_SUITE_ENDPOINT}"
+  case ${SQS_SUITE_LAYOUT:-single} in
+    single)
+      port=$(free_port)
+      log=$(mktemp)
+      SQS_LISTEN=127.0.0.1:$port SQS_ALLOW_PLAINTEXT=1 SQS_STATIC_KEYS_FILE=$here/keys.txt \
+        SQS_COMPAT=delete-cooldown=0,purge-cooldown=0 "$SQS_NODE" >"$log" 2>&1 &
+      pids+=($!)
+      wait_port "$port" || { cat "$log"; exit 1; }
+      endpoint=http://127.0.0.1:$port
+      ;;
+    split) start_split 0 ;;
+    split-tls) start_split 1 ;;
+    *) echo "unknown SQS_SUITE_LAYOUT: $SQS_SUITE_LAYOUT" >&2; exit 2 ;;
+  esac
 fi
 
 java_bin() { echo "${JAVA_CLIENTS:?set JAVA_CLIENTS to the evidence installDist bin directory}/$1"; }

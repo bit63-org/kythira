@@ -174,11 +174,25 @@ PR unless noted.
     is the SNS spec's side
   - _Requirements: 10.1, 10.2_
 
-- [ ] 10. Independent layers
+- [x] 10. Independent layers
   - `KYTHIRA_SQS_ROLES`; local, remote and hybrid data access;
     authenticated call; cross-layer availability stream; workers on data
     nodes only; drain that ends long polls early
   - _Requirements: 11.1-11.6, 12.1_
+  - Done (November 18, 2026): any subset of gateway, front_end and data
+    per node. Front ends without `data` reach the data nodes through
+    named reads and forwarded proposals (`sqs_data_access.hpp`,
+    `sqs_remote_cluster.hpp`, hybrid when co-located), answered only by a
+    group's leader so a client reads its own writes; long polls park on
+    the front end, woken by each data node's availability stream
+    (`sqs_availability.hpp`). A gateway without `front_end` checks SigV4
+    and hands the request and principal to a front end at
+    `/_kythira/sqs/v1/call` (`sqs_gateway.hpp`); an unreachable front end
+    is a retryable 503. Over TLS every internal route checks the caller's
+    layer identity (`sqs_layers.hpp`): propose, query and availability
+    for front_end and data, call for gateway; the forwarding secret
+    alone holds data. Tests: `sqs_layers_test` (TLS identities with the
+    test CA), `sqs_listener_test`, `sqs_module_test`.
 
 - [ ] 11. Migration operations and path tests
   - `evacuate` for the data role
@@ -190,7 +204,7 @@ PR unless noted.
     Docker and rootless Podman
   - _Requirements: 12.2, 12.3, 13.3_
 
-- [ ] 12. Client suites in CI
+- [x] 12. Client suites in CI
   - CLI, SDKs, JMS, Spring Cloud AWS, Celery/Kombu, Extended Client, on
     co-located and split layouts
   - Done (November 18, 2026), co-located: `services/sqs/tests/clients/`
@@ -201,8 +215,12 @@ PR unless noted.
     container) and the Extended Client 2.1.3 (moto as S3) against
     `sqs_node`, in `sqs-module.yml`'s client job. The query run found an
     empty `ReceiveMessage` answering without `<ReceiveMessageResult>`,
-    which botocore needs; fixed in the codec. Left: the same suites
-    against the split layouts, with task 10 (`SQS_SUITE_ENDPOINT`).
+    which botocore needs; fixed in the codec.
+  - Done (November 18, 2026), split: `SQS_SUITE_LAYOUT=split` and
+    `split-tls` start a gateway, a front end and three durable data
+    nodes, plaintext or over TLS with a layer identity per node from a
+    CA the script makes; all 11 clients pass on both, in the same CI
+    job. Kombu's evidence client now follows the endpoint's scheme.
   - _Requirements: 13.1, 13.2_
 
 - [ ] 13. Interoperability with real Amazon SQS

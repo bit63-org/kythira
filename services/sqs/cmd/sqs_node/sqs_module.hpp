@@ -58,6 +58,7 @@
 #include <kythira/sqs/sqs_forward.hpp>
 #include <kythira/sqs/sqs_front_end.hpp>
 #include <kythira/sqs/sqs_gateway.hpp>
+#include <kythira/sqs/sqs_layers.hpp>
 #include <kythira/sqs/sqs_listener.hpp>
 #include <kythira/sqs/sqs_long_poll.hpp>
 #include <kythira/sqs/sqs_node_options.hpp>
@@ -390,10 +391,7 @@ public:
             }
         }
         if (!data_endpoints.empty()) {
-            kythira::mtls::client_config dc;
-            dc.ca_path = _cluster_opt._peer_ca;
-            dc.plaintext = _opt._allow_plaintext;
-            dc.client_certificate = false;  // the forwarding HMAC authenticates
+            auto dc = internal_client_config();
             dc.timeout = _cluster_opt._propose_timeout + std::chrono::seconds(2);
             dc.max_body_bytes = _opt._max_body_bytes + 1024;
             _data_client = std::make_shared<kythira::mtls::client>(dc);
@@ -401,10 +399,7 @@ public:
                 std::move(data_endpoints), _opt._forward_secret, transport(_data_client));
         }
         if (_opt.has(layers::role::gateway) && !_opt.has(layers::role::front_end)) {
-            kythira::mtls::client_config gc;
-            gc.ca_path = _cluster_opt._peer_ca;
-            gc.plaintext = _opt._allow_plaintext;
-            gc.client_certificate = false;
+            auto gc = internal_client_config();
             // A call holds a long poll (20 s at most) and then a commit.
             gc.timeout = std::chrono::seconds(25) + _cluster_opt._propose_timeout;
             gc.max_body_bytes = _opt._max_body_bytes * 2 + 4096;  // base64 and headers
@@ -423,10 +418,7 @@ public:
         _service_config._waits = &_hub;
         _service = std::make_unique<service_type>(*_routed, _service_config);
         if (!_cluster) {
-            kythira::mtls::client_config fc;
-            fc.ca_path = _cluster_opt._peer_ca;
-            fc.plaintext = _opt._allow_plaintext;
-            fc.client_certificate = false;
+            auto fc = internal_client_config();
             // Longer than the data node holds an availability call.
             fc.timeout = k_feed_wait + std::chrono::seconds(5);
             _feed_client = std::make_shared<kythira::mtls::client>(fc);
@@ -469,6 +461,13 @@ public:
         hc.tls_key_path = _opt._tls_key_path;
         hc.insecure_plaintext = _opt._allow_plaintext;
         hc.max_body_bytes = _opt._max_body_bytes;
+        // Over TLS with a peer CA, ask callers for a certificate (the API's
+        // clients need none) so the internal routes can check layer
+        // identities.
+        const bool identities = !_opt._allow_plaintext && !_cluster_opt._peer_ca.empty();
+        if (identities) {
+            hc.client_ca_path = _cluster_opt._peer_ca;
+        }
         // The front end needs the endpoint, which may need the port the
         // listener picks, so the handler is bound late; a request before
         // it is answered 503.
@@ -512,6 +511,10 @@ public:
         // The client API: here with gateway and front_end, through a front
         // end with gateway alone, not at all without gateway.
         _handler_owner->set_client_api(_opt.has(layers::role::gateway));
+        if (identities) {
+            _handler_owner->set_peer_check(sqs::identity_peer_check(
+                sqs::internal_route_guard(_opt._identity_cluster, _opt._forward_secret)));
+        }
         _handler_owner->set_gateway(_gateway.get());
         // Gateways' authenticated calls, whenever this node is a front end.
         _handler_owner->set_serve_calls(_service != nullptr);
@@ -712,10 +715,7 @@ private:
         }
         _raft->create_group(space.to_host(k_first_group), voters);
 
-        kythira::mtls::client_config pc;
-        pc.ca_path = _cluster_opt._peer_ca;
-        pc.plaintext = _opt._allow_plaintext;
-        pc.client_certificate = false;  // the forwarding HMAC authenticates
+        auto pc = internal_client_config();
         pc.timeout = _cluster_opt._propose_timeout + std::chrono::seconds(2);
         pc.max_body_bytes = _opt._max_body_bytes + 1024;
         _peers = std::make_unique<kythira::mtls::client>(pc);
@@ -732,6 +732,20 @@ private:
             sqs::sqs_arn_queue);
         _grower = std::make_unique<grower_type>(
             *_cluster, [this](const std::string& key) { return _cluster->leads(key); });
+    }
+
+    /// An internal client: over TLS it checks the callee against the peer
+    /// CA and presents this node's certificate, whose layer identity
+    /// (`sqs_layers.hpp`) the callee checks against the route; the
+    /// forwarding HMAC rides along for callees that check no identity.
+    [[nodiscard]] auto internal_client_config() const -> kythira::mtls::client_config {
+        kythira::mtls::client_config c;
+        c.ca_path = _cluster_opt._peer_ca;
+        c.plaintext = _opt._allow_plaintext;
+        c.client_certificate = !_opt._allow_plaintext && !_opt._tls_cert_path.empty();
+        c.cert_path = _opt._tls_cert_path;
+        c.key_path = _opt._tls_key_path;
+        return c;
     }
 
     /// Internal calls to the data nodes over `client`.
@@ -777,9 +791,12 @@ private:
             }
         }
         c._peer_ca = env("SQS_PEER_CA").value_or("");
-        if (!_opt._allow_plaintext && c._voters.size() > 1 && c._peer_ca.empty()) {
+        const bool all_layers =
+            _opt._roles ==
+            layers::role_set{layers::role::gateway, layers::role::front_end, layers::role::data};
+        if (!_opt._allow_plaintext && (c._voters.size() > 1 || !all_layers) && c._peer_ca.empty()) {
             throw std::invalid_argument(
-                "SQS_PEER_CA (or KYTHIRA_NODE_TLS_CA) is required to forward over TLS");
+                "SQS_PEER_CA (or KYTHIRA_NODE_TLS_CA) is required to call other nodes over TLS");
         }
         c._propose_timeout = millis(env, "SQS_PROPOSE_TIMEOUT_MS", c._propose_timeout);
         c._tick_interval = millis(env, "KYTHIRA_TICK_INTERVAL_MS", c._tick_interval);

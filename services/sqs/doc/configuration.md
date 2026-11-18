@@ -66,6 +66,7 @@ A node runs every layer by default. `KYTHIRA_SQS_ROLES` splits them:
 | `KYTHIRA_SQS_ROLES` | `gateway,front_end,data` | The layers this node runs, comma-separated. Anything but all three needs `SQS_FORWARD_SECRET`, which signs the calls between layers. |
 | `SQS_DATA_ENDPOINTS` | | Base URLs of the data nodes' SQS listeners, comma-separated. Required by a front end without `data`. |
 | `SQS_FRONT_END_ENDPOINTS` | | Base URLs of the front ends' SQS listeners, comma-separated. Required by a gateway without `front_end`. |
+| `SQS_IDENTITY_CLUSTER` | `default` | The cluster part of the layer identities this node accepts over TLS (below). |
 
 - **gateway** checks clients' SigV4 signatures. With `front_end` it
   serves the API in-process. Without it, it hands each request with the
@@ -105,6 +106,37 @@ KYTHIRA_SQS_ROLES=gateway
 SQS_FRONT_END_ENDPOINTS=https://f1:9324,https://f2:9324
 # everywhere: the same SQS_FORWARD_SECRET and SQS_STATIC_KEYS_FILE
 ```
+
+### Layer identities
+
+Over TLS with a peer CA (`SQS_PEER_CA` or `KYTHIRA_NODE_TLS_CA`, which a
+node running only some layers requires), each node presents its
+listener's certificate (`SQS_TLS_CERT`) when it calls another, and checks
+callers of the internal routes against the identity in theirs: a URI SAN
+`kythira://sqs/<SQS_IDENTITY_CLUSTER>/<node id>?roles=<roles>`, which
+Kythira's CA issues (core's `layer_identity.hpp`) or you put in a
+certificate yourself. The listener asks for a client certificate but does
+not require one, so SDK clients connect as before.
+
+| Route | Open to |
+|---|---|
+| `/_kythira/sqs/v1/propose`, `/query`, `/availability` | `front_end`, `data` |
+| `/_kythira/sqs/v1/call` | `gateway` |
+
+A front end's certificate therefore cannot make a gateway's call, which
+names any principal it likes, and a gateway's cannot read or write
+queues. A refusal is a 403 naming the reason; to the client behind a
+gateway it is `ServiceUnavailable`. A caller whose certificate names no
+identity of this cluster (a co-located cluster whose certificates predate
+identities) may still prove `SQS_FORWARD_SECRET`, and then holds `data`
+alone: it reaches what replicas call each other on, never `/call`. So a
+gateway on its own nodes needs an identity with `gateway`. On plaintext
+(`SQS_ALLOW_PLAINTEXT`) the forwarding secret opens every internal route:
+there is nothing else to tell the layers apart by, which is one more
+reason plaintext is for development only.
+
+The forwarding secret is still needed with identities: it derives the
+receipt-handle and SSE-SQS keys unless their files are given.
 
 ## Encryption with KMS keys
 

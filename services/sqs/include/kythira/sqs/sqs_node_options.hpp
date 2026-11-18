@@ -30,6 +30,7 @@
 /// | `KYTHIRA_SQS_ROLES` | `gateway,front_end,data` | the layers this node runs (`doc/configuration.md`) |
 /// | `SQS_DATA_ENDPOINTS` | | base URLs of the data nodes' SQS listeners, comma-separated; required by a front end without the `data` role |
 /// | `SQS_FRONT_END_ENDPOINTS` | | base URLs of the front ends' SQS listeners, comma-separated; required by a gateway without the `front_end` role |
+/// | `SQS_IDENTITY_CLUSTER` | `default` | the cluster part of the layer identities this node accepts over TLS (`sqs_layers.hpp`) |
 // clang-format on
 ///
 /// Everything is checked here, before a port is bound; a refusal names the
@@ -73,6 +74,7 @@ struct sqs_node_options {
     layers::role_set _roles{layers::role::gateway, layers::role::front_end, layers::role::data};
     std::vector<std::string> _data_endpoints;
     std::vector<std::string> _front_end_endpoints;
+    std::string _identity_cluster = "default";
 
     [[nodiscard]] auto has(layers::role r) const -> bool { return _roles.has(r); }
 };
@@ -247,6 +249,14 @@ namespace node_options_detail {
     }
     if (auto refused = urls("SQS_FRONT_END_ENDPOINTS", o._front_end_endpoints)) {
         return *refused;
+    }
+    o._identity_cluster = get("SQS_IDENTITY_CLUSTER").value_or(o._identity_cluster);
+    if (o._identity_cluster.empty() || o._identity_cluster.size() > 128 ||
+        o._identity_cluster.find_first_not_of("abcdefghijklmnopqrstuvwxyz"
+                                              "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~") !=
+            std::string::npos) {
+        return std::string(
+            "SQS_IDENTITY_CLUSTER must be 1-128 letters, digits, '-', '.', '_' or '~'");
     }
     const bool front_end = o._roles.has(layers::role::front_end);
     const bool gateway = o._roles.has(layers::role::gateway);
