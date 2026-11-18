@@ -89,6 +89,13 @@ add_executable(s3_authz_test s3_authz_test.cpp)
 target_link_libraries(s3_authz_test PRIVATE kythira_s3 Boost::unit_test_framework)
 add_test(NAME s3_authz_test COMMAND s3_authz_test)
 
+# Task 6: SigV4 in headers and query strings, every payload mode including
+# signed and unsigned streaming bodies, refused SigV2 and SigV4a, anonymous
+# requests.
+add_executable(s3_auth_test s3_auth_test.cpp)
+target_link_libraries(s3_auth_test PRIVATE kythira_s3 Boost::unit_test_framework)
+add_test(NAME s3_auth_test COMMAND s3_auth_test)
+
 set_tests_properties(
     s3_model_coverage
     s3_model_coverage_checker
@@ -100,6 +107,7 @@ set_tests_properties(
     s3_data_path_test
     s3_actions_up_to_date
     s3_authz_test
+    s3_auth_test
     PROPERTIES LABELS "unit;s3;s3-module" TIMEOUT 60)
 
 kythira_scale_test_timeouts()
