@@ -17,6 +17,20 @@ builds it to that design). Each task is one PR unless noted.
     Java, Go and JS SDKs, rclone and Mountpoint (addressing, payload
     signing modes, checksums, 100-continue)
   - _Requirements: 1.1-1.5, 2.1-2.3_
+  - Done (first part): `CONFIG_S3`, `services/s3/` with `kythira_s3` and
+    the `s3_gateway_node` placeholder (`--self-test`), an empty
+    boundary list, `module_numbers::s3 = 8` in core, `ci_full` and its
+    verbatim copies turning it on, `ci_no_s3_defconfig`, and
+    `s3-module.yml` (boundary check, module-on build and tests,
+    module-off assertion). botocore 1.43.126's `s3` model (116
+    operations) pinned in `model/`; `tools/gen_operations.py` generates
+    `include/kythira/s3/model/operations.hpp` (method, request URI,
+    status, streaming and checksum flags), checked by
+    `s3_operations_up_to_date`; `s3_model_coverage` places every
+    operation: 75 planned in tasks 6-15, 41 out of scope or open
+    questions (annotations, bucket ABAC, `UpdateObjectEncryption`).
+    Still open: the recording stub and the wire evidence. The
+    container job joins with the first daemon that serves requests.
 
 ### Phase 1: core pieces
 
