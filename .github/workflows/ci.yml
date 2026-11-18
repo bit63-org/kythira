@@ -2984,6 +2984,10 @@ jobs:
   # was split into these; see .kiro/specs/boost-beast-http-transport/tasks.md's
   # Known Follow-ups for the round-2 bugs a per-binary TSan pass against this
   # split found beyond what the original monolithic binary surfaced).
+  # raft_known_leader_race_test is the one Raft-node target here: a
+  # regression check for node::_known_leader, which the reconnect thread
+  # reads under _reconnect_cv_mutex alone and a race on it changes no
+  # result a plain test can see.
   tsan:
     permissions:
       contents: read
@@ -3169,7 +3173,8 @@ jobs:
             --target tcp_connection_tracker_unit_test \
             --target tcp_rpc_unit_test \
             --target tls_tcp_rpc_integration_test \
-            --target tcp_gossip_transport_integration_test
+            --target tcp_gossip_transport_integration_test \
+            --target raft_known_leader_race_test
 
       # Same check as build-and-test's; see scripts/check-linker.sh.
       - name: Assert binaries were linked by mold
@@ -3189,7 +3194,8 @@ jobs:
                    beast_ssl_test beast_cross_transport_equivalence_test \
                    proxygen_transport_test three_way_http_transport_equivalence_test \
                    tcp_connection_tracker_unit_test tcp_rpc_unit_test \
-                   tls_tcp_rpc_integration_test tcp_gossip_transport_integration_test; do
+                   tls_tcp_rpc_integration_test tcp_gossip_transport_integration_test \
+                   raft_known_leader_race_test; do
             bin="build-tsan/tests/$t"
             if [ ! -x "$bin" ]; then
               echo "::error::$t was not built"
@@ -3206,7 +3212,7 @@ jobs:
             fi
           done
           if [ "$uninstrumented" -ne 0 ]; then exit 1; fi
-          echo "confirmed: all 11 targets are ThreadSanitizer-instrumented"
+          echo "confirmed: all 12 targets are ThreadSanitizer-instrumented"
 
       # The numbers Requirement 5.5 wants in the job summary, and the ones
       # Requirement 6 is checked against. `always()` so a failed build still
@@ -3234,7 +3240,7 @@ jobs:
         run: |
           set -o pipefail
           ctest --test-dir build-tsan \
-            -R 'beast_client_test|beast_server_test|beast_integration_test|beast_ssl_test|beast_cross_transport_equivalence_test|proxygen_transport_test|three_way_http_transport_equivalence_test|tcp_connection_tracker_unit_test|^tcp_rpc_unit_test$|tls_tcp_rpc_integration_test|tcp_gossip_transport_integration_test' \
+            -R 'beast_client_test|beast_server_test|beast_integration_test|beast_ssl_test|beast_cross_transport_equivalence_test|proxygen_transport_test|three_way_http_transport_equivalence_test|tcp_connection_tracker_unit_test|^tcp_rpc_unit_test$|tls_tcp_rpc_integration_test|tcp_gossip_transport_integration_test|^raft_known_leader_race_test$' \
             --output-on-failure \
             --no-tests=error \
             --timeout 1800 \
@@ -3242,17 +3248,17 @@ jobs:
             2>&1 | tee ctest-tsan-out.txt
         continue-on-error: true
 
-      # This job's `-R` is an explicit list of eleven target names, which is the
+      # This job's `-R` is an explicit list of twelve target names, which is the
       # shape most prone to silent decay: rename or drop any one of them and
-      # ctest matches ten, runs ten, and still exits 0.
+      # ctest matches eleven, runs eleven, and still exits 0.
       #
       # This comment used to claim that deriving the expectation from `ctest -N`
       # made that mismatch fail loudly. It does not, and the claim was the
       # dangerous part: `ctest -N` applies the same `-R` to the same registry,
-      # so it also answers ten, the derived expectation becomes ten, ten run,
+      # so it also answers eleven, the derived expectation becomes eleven, eleven run,
       # and the check passes. The protection being relied on did not exist.
       #
-      # `--floor 11` is what actually holds the list to its length, because 11 is
+      # `--floor 12` is what actually holds the list to its length, because 12 is
       # written here rather than read from the build. Adding a target to the
       # `-R` list means raising it in the same edit.
       - name: Check the ThreadSanitizer run did the work
@@ -3262,10 +3268,10 @@ jobs:
             --build-dir build-tsan \
             --log ctest-tsan-out.txt \
             --case-reports ${{ github.workspace }}/case-reports \
-            --floor 11 \
+            --floor 12 \
             ${{ vars.CTEST_STRICT_RETRIES == 'true' && '--strict-retries' || '' }} \
             --allow-retry-file .github/ctest-retry-allowlist.txt \
-            -- -R 'beast_client_test|beast_server_test|beast_integration_test|beast_ssl_test|beast_cross_transport_equivalence_test|proxygen_transport_test|three_way_http_transport_equivalence_test|tcp_connection_tracker_unit_test|^tcp_rpc_unit_test$|tls_tcp_rpc_integration_test|tcp_gossip_transport_integration_test'
+            -- -R 'beast_client_test|beast_server_test|beast_integration_test|beast_ssl_test|beast_cross_transport_equivalence_test|proxygen_transport_test|three_way_http_transport_equivalence_test|tcp_connection_tracker_unit_test|^tcp_rpc_unit_test$|tls_tcp_rpc_integration_test|tcp_gossip_transport_integration_test|^raft_known_leader_race_test$'
 
       - name: Publish ThreadSanitizer test results
         uses: dorny/test-reporter@d1b5dff021aa968b288b02285a8bf47471c5928a # v3.2.0
