@@ -847,6 +847,30 @@ set_tests_properties(segment_volume_test PROPERTIES
     LABELS "unit;persistence;kinesis;layers"
 )
 
+# The content-addressed chunk store and its pack files
+# (.kiro/specs/disk-backed-build-cache/ task 2), core since
+# .kiro/specs/s3-compatible-storage/ task 2 because the build cache and the
+# S3 service both keep their bytes in it. Registered unconditionally: the
+# store needs only OpenSSL. The crash and write-failure cases need libfiu's
+# control API; without it they compile away and the rest still run.
+add_executable(chunk_store_test chunk_store_test.cpp)
+target_link_libraries(chunk_store_test PRIVATE
+    Boost::unit_test_framework
+    OpenSSL::Crypto
+    Threads::Threads
+)
+target_compile_features(chunk_store_test PRIVATE cxx_std_23)
+add_test(NAME chunk_store_test COMMAND chunk_store_test)
+set_tests_properties(chunk_store_test PROPERTIES
+    TIMEOUT 600
+    LABELS "unit;persistence;cache;s3"
+)
+if(FIU_FOUND)
+    target_compile_definitions(chunk_store_test PRIVATE FIU_ENABLE)
+    target_link_libraries(chunk_store_test PRIVATE ${FIU_LDFLAGS})
+    target_include_directories(chunk_store_test PRIVATE ${FIU_INCLUDE_DIRS})
+endif()
+
 # Cloud key-object persistence: the generic engine and its conformance suite
 # (.kiro/specs/cloud-object-persistence/ tasks 1-2).
 #

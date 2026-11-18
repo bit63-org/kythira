@@ -1,15 +1,15 @@
 // Copyright (c) 2026 Clark Rawlins
 // SPDX-License-Identifier: Apache-2.0
 
-/// @file cache_chunk_store_unit_test.cpp
-/// @brief `cache_chunk_store` and `chunk_refcounts`
+/// @file chunk_store_test.cpp
+/// @brief `chunk_store` and `chunk_refcounts`
 ///        (.kiro/specs/disk-backed-build-cache/ task 2; Requirements 2.1, 2.5,
 ///        3.3, 6.7, 6.8 and 10.1).
 
-#define BOOST_TEST_MODULE cache_chunk_store_unit_test
+#define BOOST_TEST_MODULE chunk_store_test
 #include <boost/test/unit_test.hpp>
 
-#include <kythira/redis/cache_chunk_store.hpp>
+#include <raft/chunk_store.hpp>
 
 #ifdef FIU_ENABLE
 #include <fiu-control.h>
@@ -79,8 +79,8 @@ auto make_bytes(std::size_t size, std::uint32_t seed) -> std::vector<std::byte> 
     return out;
 }
 
-auto options_for(const fs::path& dir) -> cache_chunk_store_options {
-    cache_chunk_store_options o;
+auto options_for(const fs::path& dir) -> chunk_store_options {
+    chunk_store_options o;
     o._data_dir = dir;
     o._pack_threshold_bytes = 1024;
     o._pack_max_bytes = std::size_t{64} * 1024;
@@ -124,7 +124,7 @@ BOOST_AUTO_TEST_CASE(hex_round_trip, *boost::unit_test::timeout(10)) {
 
 BOOST_AUTO_TEST_CASE(put_read_remove_loose_and_packed, *boost::unit_test::timeout(30)) {
     temp_dir dir;
-    cache_chunk_store store(options_for(dir._path));
+    chunk_store store(options_for(dir._path));
     const auto small = make_bytes(100, 1);
     const auto large = make_bytes(4096, 2);
     const auto small_sha = sha256_of(small);
@@ -150,7 +150,7 @@ BOOST_AUTO_TEST_CASE(put_read_remove_loose_and_packed, *boost::unit_test::timeou
     BOOST_CHECK_EQUAL(s._loose_bytes, 4096U);
     BOOST_CHECK_EQUAL(s._packed_chunks, 1U);
     BOOST_CHECK_EQUAL(s._pack_files, 1U);
-    BOOST_CHECK_EQUAL(s._pack_bytes, 100U + cache_chunk_store::pack_record_overhead);
+    BOOST_CHECK_EQUAL(s._pack_bytes, 100U + chunk_store::pack_record_overhead);
 
     BOOST_CHECK(store.remove(small_sha));
     BOOST_CHECK(store.remove(large_sha));
@@ -162,12 +162,12 @@ BOOST_AUTO_TEST_CASE(put_read_remove_loose_and_packed, *boost::unit_test::timeou
     s = store.stats();
     BOOST_CHECK_EQUAL(s._loose_files, 0U);
     BOOST_CHECK_EQUAL(s._packed_chunks, 0U);
-    BOOST_CHECK_EQUAL(s._pack_dead_bytes, 100U + cache_chunk_store::pack_record_overhead);
+    BOOST_CHECK_EQUAL(s._pack_dead_bytes, 100U + chunk_store::pack_record_overhead);
 }
 
 BOOST_AUTO_TEST_CASE(threshold_boundary_and_bad_input, *boost::unit_test::timeout(10)) {
     temp_dir dir;
-    cache_chunk_store store(options_for(dir._path));
+    chunk_store store(options_for(dir._path));
     const auto below = make_bytes(1023, 3);
     const auto at = make_bytes(1024, 4);
     store.put(sha256_of(below), below);
@@ -193,7 +193,7 @@ BOOST_AUTO_TEST_CASE(state_survives_reopen, *boost::unit_test::timeout(30)) {
         values.push_back(make_bytes(i % 2 == 0 ? 200 : 2000, 100 + i));
     }
     {
-        cache_chunk_store store(options_for(dir._path));
+        chunk_store store(options_for(dir._path));
         for (const auto& v : values) {
             store.put(sha256_of(v), v);
         }
@@ -202,7 +202,7 @@ BOOST_AUTO_TEST_CASE(state_survives_reopen, *boost::unit_test::timeout(30)) {
             store.remove(sha256_of(values[i]));
         }
     }
-    cache_chunk_store store(options_for(dir._path));
+    chunk_store store(options_for(dir._path));
     for (std::size_t i = 0; i < values.size(); ++i) {
         const auto got = store.read(sha256_of(values[i]));
         if (i < 4) {
@@ -216,7 +216,7 @@ BOOST_AUTO_TEST_CASE(state_survives_reopen, *boost::unit_test::timeout(30)) {
     BOOST_CHECK_EQUAL(s._loose_files, 8U);
     BOOST_CHECK_EQUAL(s._loose_bytes, 8U * 2000U);
     // The two removed packed records are still in the file, counted dead.
-    BOOST_CHECK_EQUAL(s._pack_dead_bytes, 2U * (200U + cache_chunk_store::pack_record_overhead));
+    BOOST_CHECK_EQUAL(s._pack_dead_bytes, 2U * (200U + chunk_store::pack_record_overhead));
 
     std::size_t seen = 0;
     store.for_each_chunk([&](const chunk_sha&, std::uint64_t) { ++seen; });
@@ -228,20 +228,20 @@ BOOST_AUTO_TEST_CASE(removed_then_stored_again_in_same_pack, *boost::unit_test::
     const auto v = make_bytes(50, 7);
     const auto sha = sha256_of(v);
     {
-        cache_chunk_store store(options_for(dir._path));
+        chunk_store store(options_for(dir._path));
         store.put(sha, v);
         store.remove(sha);
         BOOST_CHECK(store.put(sha, v));
     }
     // Two records for the same sha in one pack, the first dead: the dead
     // sidecar names offsets, so the second stays live.
-    cache_chunk_store store(options_for(dir._path));
+    chunk_store store(options_for(dir._path));
     BOOST_CHECK(store.read(sha) == v);
 }
 
 BOOST_AUTO_TEST_CASE(concurrent_put_of_the_same_sha, *boost::unit_test::timeout(60)) {
     temp_dir dir;
-    cache_chunk_store store(options_for(dir._path));
+    chunk_store store(options_for(dir._path));
     for (const std::size_t size : {std::size_t{100}, std::size_t{100000}}) {
         const auto v = make_bytes(size, static_cast<std::uint32_t>(size));
         const auto sha = sha256_of(v);
@@ -272,14 +272,14 @@ BOOST_AUTO_TEST_CASE(concurrent_put_of_the_same_sha, *boost::unit_test::timeout(
 BOOST_AUTO_TEST_CASE(leftover_temporary_files_are_wiped_on_open, *boost::unit_test::timeout(10)) {
     temp_dir dir;
     {
-        cache_chunk_store store(options_for(dir._path));
+        chunk_store store(options_for(dir._path));
     }
     // What a crash between write and rename leaves: bytes under tmp/, no name.
     {
         std::ofstream f(dir._path / "chunks" / "tmp" / "123.456.0", std::ios::binary);
         f << std::string(5000, 'x');
     }
-    cache_chunk_store store(options_for(dir._path));
+    chunk_store store(options_for(dir._path));
     BOOST_CHECK(fs::is_empty(dir._path / "chunks" / "tmp"));
     BOOST_CHECK_EQUAL(store.stats()._loose_files, 0U);
 }
@@ -291,16 +291,16 @@ BOOST_AUTO_TEST_CASE(crash_between_write_and_rename_leaves_no_named_chunk,
     const auto v = make_bytes(5000, 9);
     const auto sha = sha256_of(v);
     {
-        cache_chunk_store store(options_for(dir._path));
+        chunk_store store(options_for(dir._path));
         ::fiu_enable("raft/cache/chunk_store/before_rename", 1, nullptr, 0);
-        BOOST_CHECK_THROW(store.put(sha, v), cache_chunk_store_error);
+        BOOST_CHECK_THROW(store.put(sha, v), chunk_store_error);
         ::fiu_disable("raft/cache/chunk_store/before_rename");
         BOOST_CHECK(!fs::exists(store.loose_path(sha)));
         BOOST_CHECK(!store.contains(sha));
         // The "crashed" write's bytes are still under tmp/.
         BOOST_CHECK(!fs::is_empty(dir._path / "chunks" / "tmp"));
     }
-    cache_chunk_store store(options_for(dir._path));
+    chunk_store store(options_for(dir._path));
     BOOST_CHECK(fs::is_empty(dir._path / "chunks" / "tmp"));
     BOOST_CHECK(!store.contains(sha));
     BOOST_CHECK(store.put(sha, v));
@@ -309,12 +309,12 @@ BOOST_AUTO_TEST_CASE(crash_between_write_and_rename_leaves_no_named_chunk,
 
 BOOST_AUTO_TEST_CASE(write_failure_is_an_error_and_leaves_nothing, *boost::unit_test::timeout(10)) {
     temp_dir dir;
-    cache_chunk_store store(options_for(dir._path));
+    chunk_store store(options_for(dir._path));
     ::fiu_enable("raft/cache/chunk_store/write", 1, nullptr, 0);
     const auto small = make_bytes(10, 10);
     const auto large = make_bytes(5000, 11);
-    BOOST_CHECK_THROW(store.put(sha256_of(small), small), cache_chunk_store_error);
-    BOOST_CHECK_THROW(store.put(sha256_of(large), large), cache_chunk_store_error);
+    BOOST_CHECK_THROW(store.put(sha256_of(small), small), chunk_store_error);
+    BOOST_CHECK_THROW(store.put(sha256_of(large), large), chunk_store_error);
     ::fiu_disable("raft/cache/chunk_store/write");
     BOOST_CHECK(!store.contains(sha256_of(small)));
     BOOST_CHECK(!store.contains(sha256_of(large)));
@@ -326,7 +326,7 @@ BOOST_AUTO_TEST_CASE(write_failure_is_an_error_and_leaves_nothing, *boost::unit_
 
 BOOST_AUTO_TEST_CASE(statvfs_fault_points_zero_one_field, *boost::unit_test::timeout(10)) {
     temp_dir dir;
-    cache_chunk_store store(options_for(dir._path));
+    chunk_store store(options_for(dir._path));
     ::fiu_enable("raft/cache/statvfs_low_inodes", 1, nullptr, 0);
     auto s = store.space();
     BOOST_CHECK_EQUAL(s._free_inodes, 0U);
@@ -346,12 +346,12 @@ BOOST_AUTO_TEST_CASE(statvfs_probe_reports_bytes_and_inodes, *boost::unit_test::
     // Some filesystems (btrfs) report no inode limit as f_favail == 0; tmp
     // dirs in CI are ext4/overlay/tmpfs, all of which report a real count.
     BOOST_CHECK_GT(s._free_inodes, 0U);
-    BOOST_CHECK_THROW((void)probe_filesystem_space(dir._path / "missing"), cache_chunk_store_error);
+    BOOST_CHECK_THROW((void)probe_filesystem_space(dir._path / "missing"), chunk_store_error);
 }
 
 BOOST_AUTO_TEST_CASE(corrupted_chunks_fail_verify_and_read, *boost::unit_test::timeout(10)) {
     temp_dir dir;
-    cache_chunk_store store(options_for(dir._path));
+    chunk_store store(options_for(dir._path));
     const auto large = make_bytes(4096, 12);
     const auto small = make_bytes(64, 13);
     store.put(sha256_of(large), large);
@@ -372,7 +372,7 @@ BOOST_AUTO_TEST_CASE(corrupted_chunks_fail_verify_and_read, *boost::unit_test::t
     {
         const auto pack = pack_files(dir._path).at(0);
         std::fstream f(pack, std::ios::in | std::ios::out | std::ios::binary);
-        f.seekp(static_cast<std::streamoff>(cache_chunk_store::pack_header_bytes + 10));
+        f.seekp(static_cast<std::streamoff>(chunk_store::pack_header_bytes + 10));
         f.put('\x55');
     }
     BOOST_CHECK(!store.verify(sha256_of(small)));
@@ -390,7 +390,7 @@ BOOST_AUTO_TEST_CASE(corrupted_chunks_fail_verify_and_read, *boost::unit_test::t
 BOOST_AUTO_TEST_CASE(a_corrupt_chunk_is_dropped_so_a_repair_can_store_it,
                      *boost::unit_test::timeout(10)) {
     temp_dir dir;
-    cache_chunk_store store(options_for(dir._path));
+    chunk_store store(options_for(dir._path));
     const auto large = make_bytes(4096, 14);
     const auto small = make_bytes(64, 15);
     const auto large_sha = sha256_of(large);
@@ -412,7 +412,7 @@ BOOST_AUTO_TEST_CASE(a_corrupt_chunk_is_dropped_so_a_repair_can_store_it,
     };
     flip(store.loose_path(large_sha), 100);
     flip(pack_files(dir._path).at(0),
-         static_cast<std::streamoff>(cache_chunk_store::pack_header_bytes + 10));
+         static_cast<std::streamoff>(chunk_store::pack_header_bytes + 10));
     BOOST_CHECK(!store.read(large_sha));
     BOOST_CHECK(!store.read(small_sha));
     BOOST_CHECK_EQUAL(store.stats()._hash_failures, 2U);
@@ -443,7 +443,7 @@ BOOST_AUTO_TEST_CASE(torn_pack_tail_is_truncated_on_open, *boost::unit_test::tim
     }
     std::uintmax_t good_size = 0;
     {
-        cache_chunk_store store(options_for(dir._path));
+        chunk_store store(options_for(dir._path));
         for (const auto& v : values) {
             store.put(sha256_of(v), v);
         }
@@ -457,7 +457,7 @@ BOOST_AUTO_TEST_CASE(torn_pack_tail_is_truncated_on_open, *boost::unit_test::tim
         f << std::string(20, '\x01');
     }
     {
-        cache_chunk_store store(options_for(dir._path));
+        chunk_store store(options_for(dir._path));
         BOOST_CHECK_EQUAL(fs::file_size(pack), good_size);
         for (const auto& v : values) {
             BOOST_CHECK(store.read(sha256_of(v)) == v);
@@ -472,7 +472,7 @@ BOOST_AUTO_TEST_CASE(torn_pack_tail_is_truncated_on_open, *boost::unit_test::tim
         f << std::string(100, '\x03');
     }
     {
-        cache_chunk_store store(options_for(dir._path));
+        chunk_store store(options_for(dir._path));
         BOOST_CHECK_EQUAL(fs::file_size(pack), good_size);
     }
 
@@ -490,12 +490,12 @@ BOOST_AUTO_TEST_CASE(torn_pack_tail_is_truncated_on_open, *boost::unit_test::tim
     }
     const auto later = make_bytes(500, 30);
     {
-        cache_chunk_store store(options_for(dir._path));
+        chunk_store store(options_for(dir._path));
         BOOST_CHECK_EQUAL(fs::file_size(pack), good_size);
         BOOST_CHECK(!store.contains(sha256_of(make_bytes(40, 99))));
         store.put(sha256_of(later), later);
     }
-    cache_chunk_store store(options_for(dir._path));
+    chunk_store store(options_for(dir._path));
     BOOST_CHECK(store.read(sha256_of(later)) == later);
     for (const auto& v : values) {
         BOOST_CHECK(store.read(sha256_of(v)) == v);
@@ -511,7 +511,7 @@ struct compaction_setup {
     std::vector<std::vector<std::byte>> _removed;
 };
 
-auto fill_and_hollow_first_pack(cache_chunk_store& store) -> compaction_setup {
+auto fill_and_hollow_first_pack(chunk_store& store) -> compaction_setup {
     compaction_setup out;
     // 64 KiB packs, 1 KiB threshold: ~110 records of 500 bytes overflow one.
     std::uint32_t seed = 1000;
@@ -536,7 +536,7 @@ BOOST_AUTO_TEST_CASE(compaction_rewrites_live_records_and_frees_the_pack,
     temp_dir dir;
     compaction_setup setup;
     {
-        cache_chunk_store store(options_for(dir._path));
+        chunk_store store(options_for(dir._path));
         setup = fill_and_hollow_first_pack(store);
         const auto before = store.stats();
         BOOST_CHECK_EQUAL(before._pack_files, 2U);
@@ -555,7 +555,7 @@ BOOST_AUTO_TEST_CASE(compaction_rewrites_live_records_and_frees_the_pack,
             BOOST_CHECK(!store.contains(sha256_of(v)));
         }
     }
-    cache_chunk_store store(options_for(dir._path));
+    chunk_store store(options_for(dir._path));
     for (const auto& v : setup._kept) {
         BOOST_CHECK(store.read(sha256_of(v)) == v);
     }
@@ -576,7 +576,7 @@ BOOST_AUTO_TEST_CASE(crash_mid_compaction_loses_and_resurrects_nothing,
     const auto saved = dir._path / "saved";
     fs::create_directories(saved);
     {
-        cache_chunk_store store(options_for(dir._path));
+        chunk_store store(options_for(dir._path));
         setup = fill_and_hollow_first_pack(store);
         fs::copy_file(store.pack_path(1), saved / "pack.1");
         fs::copy_file(store.dead_path(1), saved / "pack.1.dead");
@@ -588,7 +588,7 @@ BOOST_AUTO_TEST_CASE(crash_mid_compaction_loses_and_resurrects_nothing,
     BOOST_REQUIRE(!setup._kept.empty());
     const auto victim = setup._kept.front();
     {
-        cache_chunk_store store(options_for(dir._path));
+        chunk_store store(options_for(dir._path));
         // No live chunk lost, none of the removed ones back, and each live
         // chunk indexed once even though two packs hold it.
         for (const auto& v : setup._kept) {
@@ -603,7 +603,7 @@ BOOST_AUTO_TEST_CASE(crash_mid_compaction_loses_and_resurrects_nothing,
         // Compaction can finish the interrupted job.
         BOOST_CHECK_GE(store.compact(), 1U);
     }
-    cache_chunk_store store(options_for(dir._path));
+    chunk_store store(options_for(dir._path));
     BOOST_CHECK(!store.contains(sha256_of(victim)));
     for (std::size_t i = 1; i < setup._kept.size(); ++i) {
         BOOST_CHECK(store.read(sha256_of(setup._kept[i])) == setup._kept[i]);
@@ -618,14 +618,14 @@ BOOST_AUTO_TEST_CASE(injected_crash_before_compaction_unlink, *boost::unit_test:
     temp_dir dir;
     compaction_setup setup;
     {
-        cache_chunk_store store(options_for(dir._path));
+        chunk_store store(options_for(dir._path));
         setup = fill_and_hollow_first_pack(store);
         ::fiu_enable("raft/cache/chunk_store/compact_before_unlink", 1, nullptr, 0);
-        BOOST_CHECK_THROW(store.compact(), cache_chunk_store_error);
+        BOOST_CHECK_THROW(store.compact(), chunk_store_error);
         ::fiu_disable("raft/cache/chunk_store/compact_before_unlink");
         BOOST_CHECK(fs::exists(store.pack_path(1)));
     }
-    cache_chunk_store store(options_for(dir._path));
+    chunk_store store(options_for(dir._path));
     for (const auto& v : setup._kept) {
         BOOST_CHECK(store.read(sha256_of(v)) == v);
     }
@@ -639,13 +639,13 @@ BOOST_AUTO_TEST_CASE(injected_crash_before_compaction_unlink, *boost::unit_test:
 BOOST_AUTO_TEST_CASE(orphan_sidecar_is_deleted_on_open, *boost::unit_test::timeout(10)) {
     temp_dir dir;
     {
-        cache_chunk_store store(options_for(dir._path));
+        chunk_store store(options_for(dir._path));
     }
     {
         std::ofstream f(dir._path / "packs" / "pack.7.dead", std::ios::binary);
         f << std::string(8, '\0');
     }
-    cache_chunk_store store(options_for(dir._path));
+    chunk_store store(options_for(dir._path));
     BOOST_CHECK(!fs::exists(dir._path / "packs" / "pack.7.dead"));
 }
 
@@ -656,7 +656,7 @@ BOOST_AUTO_TEST_CASE(hundred_thousand_small_puts_create_few_files,
     temp_dir dir;
     auto options = options_for(dir._path);
     options._pack_max_bytes = std::size_t{64} * 1024 * 1024;
-    cache_chunk_store store(options);
+    chunk_store store(options);
     constexpr std::uint32_t count = 100000;
     for (std::uint32_t i = 0; i < count; ++i) {
         const auto v = make_bytes(64, i);
@@ -673,7 +673,7 @@ BOOST_AUTO_TEST_CASE(hundred_thousand_small_puts_create_few_files,
 
 BOOST_AUTO_TEST_CASE(refcounts_remove_at_zero, *boost::unit_test::timeout(10)) {
     temp_dir dir;
-    cache_chunk_store store(options_for(dir._path));
+    chunk_store store(options_for(dir._path));
     chunk_refcounts refs(store);
     const auto v = make_bytes(3000, 40);
     const auto sha = sha256_of(v);
@@ -699,7 +699,7 @@ BOOST_AUTO_TEST_CASE(refcounts_remove_at_zero, *boost::unit_test::timeout(10)) {
 
 BOOST_AUTO_TEST_CASE(refcounts_race_between_shards, *boost::unit_test::timeout(60)) {
     temp_dir dir;
-    cache_chunk_store store(options_for(dir._path));
+    chunk_store store(options_for(dir._path));
     chunk_refcounts refs(store);
     const auto v = make_bytes(5000, 50);
     const auto sha = sha256_of(v);
@@ -731,7 +731,7 @@ BOOST_AUTO_TEST_CASE(refcounts_race_between_shards, *boost::unit_test::timeout(6
 
 BOOST_AUTO_TEST_CASE(refcounts_in_bulk_and_forget, *boost::unit_test::timeout(10)) {
     temp_dir dir;
-    cache_chunk_store store(options_for(dir._path));
+    chunk_store store(options_for(dir._path));
     chunk_refcounts refs(store);
     const auto v = make_bytes(2000, 60);
     const auto sha = sha256_of(v);
@@ -763,7 +763,7 @@ BOOST_AUTO_TEST_CASE(refcounts_in_bulk_and_forget, *boost::unit_test::timeout(10
 BOOST_AUTO_TEST_CASE(orphan_collection_keeps_only_referenced_chunks,
                      *boost::unit_test::timeout(30)) {
     temp_dir dir;
-    cache_chunk_store store(options_for(dir._path));
+    chunk_store store(options_for(dir._path));
     chunk_refcounts refs(store);
     const auto kept_loose = make_bytes(200 * 1024, 70);
     const auto kept_packed = make_bytes(1000, 71);
@@ -808,7 +808,7 @@ struct fsync_probe {
                 std::this_thread::sleep_for(std::chrono::milliseconds{ms});
             }
             if (_fail.load()) {
-                throw cache_chunk_store_error("cache_chunk_store: injected fsync failure");
+                throw chunk_store_error("chunk_store: injected fsync failure");
             }
         };
     }
@@ -833,7 +833,7 @@ BOOST_AUTO_TEST_CASE(deferred_puts_leave_the_fsync_to_the_syncer, *boost::unit_t
     fsync_probe probe;
     auto opts = options_for(dir._path);
     opts._before_fsync = probe.hook();
-    cache_chunk_store store(opts);
+    chunk_store store(opts);
     probe._stall_ms = 500;
 
     const auto loose = make_bytes(200 * 1024, 80);
@@ -877,20 +877,20 @@ BOOST_AUTO_TEST_CASE(a_failed_deferred_fsync_is_sticky_and_links_nothing,
     {
         auto opts = options_for(dir._path);
         opts._before_fsync = probe.hook();
-        cache_chunk_store store(opts);
+        chunk_store store(opts);
         probe._fail = true;
         BOOST_CHECK(store.put(sha256_of(loose), loose, chunk_durability::deferred));
         // Still served from its temporary file.
         BOOST_CHECK(store.read(sha256_of(loose)) == loose);
-        BOOST_CHECK_THROW(store.wait_durable(), cache_chunk_store_error);
+        BOOST_CHECK_THROW(store.wait_durable(), chunk_store_error);
         BOOST_CHECK(!fs::exists(store.loose_path(sha256_of(loose))));
         const auto other = make_bytes(500, 83);
         BOOST_CHECK_THROW(store.put(sha256_of(other), other, chunk_durability::deferred),
-                          cache_chunk_store_error);
-        BOOST_CHECK_THROW(store.put(sha256_of(other), other), cache_chunk_store_error);
+                          chunk_store_error);
+        BOOST_CHECK_THROW(store.put(sha256_of(other), other), chunk_store_error);
     }
     probe._fail = false;
-    cache_chunk_store reopened(options_for(dir._path));
+    chunk_store reopened(options_for(dir._path));
     BOOST_CHECK(!reopened.contains(sha256_of(loose)));
     BOOST_CHECK_EQUAL(tmp_entries(dir._path), 0U);
 }
@@ -902,7 +902,7 @@ BOOST_AUTO_TEST_CASE(removing_a_staged_chunk_unstages_it, *boost::unit_test::tim
     fsync_probe probe;
     auto opts = options_for(dir._path);
     opts._before_fsync = probe.hook();
-    cache_chunk_store store(opts);
+    chunk_store store(opts);
     probe._stall_ms = 300;
     const auto loose = make_bytes(200 * 1024, 84);
     const auto packed = make_bytes(500, 85);
@@ -938,7 +938,7 @@ BOOST_AUTO_TEST_CASE(refcount_writes_are_deferred_and_survive_a_clean_close,
     {
         auto opts = options_for(dir._path);
         opts._before_fsync = probe.hook();
-        cache_chunk_store store(opts);
+        chunk_store store(opts);
         chunk_refcounts refs(store);
         for (std::uint32_t i = 0; i < 40; ++i) {
             values.push_back(make_bytes(i % 2 == 0 ? 3000 : 400, 90 + i));
@@ -950,7 +950,7 @@ BOOST_AUTO_TEST_CASE(refcount_writes_are_deferred_and_survive_a_clean_close,
         BOOST_CHECK(refs.put_if_referenced(sha256_of(values[2]), values[2]));
         BOOST_CHECK_EQUAL(probe._on_caller.load(), 0);
     }
-    cache_chunk_store reopened(options_for(dir._path));
+    chunk_store reopened(options_for(dir._path));
     BOOST_CHECK(!reopened.contains(sha256_of(values[0])));
     BOOST_CHECK(!reopened.contains(sha256_of(values[1])));
     for (std::size_t i = 2; i < values.size(); ++i) {
