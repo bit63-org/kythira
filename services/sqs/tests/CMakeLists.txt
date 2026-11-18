@@ -73,6 +73,12 @@ kythira_sqs_test(sqs_codec_test sqs_codec_test.cpp)
 target_compile_definitions(sqs_codec_test PRIVATE
     KYTHIRA_SQS_EVIDENCE_DIR="${_sqs_dir}tests/evidence/data")
 
+# Task 3: the front end: SigV4 in both protocols' wording, unsupported
+# operations, queue resolution, authorization of the primary action on the
+# queue with its tags and policy (Requirements 3.1-3.3), and the queue-policy
+# edits of AddPermission and RemovePermission.
+kythira_sqs_test(sqs_front_end_test sqs_front_end_test.cpp)
+
 # Task 3: the checked-in model, query-name and action headers are what their
 # generators make of the pinned inputs, so an upgrade of any input carries
 # its regenerated header and diff.

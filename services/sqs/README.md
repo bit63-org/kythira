@@ -34,6 +34,8 @@ Built when `CONFIG_SQS=y` (`services/sqs/Kconfig`, off by default).
 | `include/kythira/sqs/sqs_codec.hpp` | both wire protocols over one model: JSON 1.0 through core's codec, query forms read and XML written through the query names; queue URLs given as the request path | 3 |
 | `include/kythira/sqs/sqs_errors.hpp` | errors in both protocols, `x-amzn-query-error` for query-compatible JSON clients | 3 |
 | `include/kythira/sqs/sqs_compat_profile.hpp` | the AWS-behaviour switches (message size, retention, batch size, in-flight, FIFO throughput, long-poll maximum, cool-downs), per cluster and per queue tag | 3 |
+| `include/kythira/sqs/sqs_front_end.hpp` | the transport-free front end: SigV4 in the request's protocol, queue resolution (QueueUrl, QueueName, SourceArn), authorization of each operation's primary action on the queue with its tags and policy, dispatch to handlers | 3 |
+| `include/kythira/sqs/sqs_queue_policy.hpp` | queue-policy edits as AddPermission and RemovePermission make them | 3 |
 | `cmd/sqs_node/` | the daemon; a placeholder whose `--self-test` checks the operation table until tasks 3 and 4 | 1 |
 
 ## Core pieces used
