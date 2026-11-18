@@ -96,6 +96,18 @@ add_executable(s3_auth_test s3_auth_test.cpp)
 target_link_libraries(s3_auth_test PRIVATE kythira_s3 Boost::unit_test_framework)
 add_test(NAME s3_auth_test COMMAND s3_auth_test)
 
+# Task 6: Object Ownership, canned and header ACLs, ACL XML, Block Public
+# Access, policy publicness, and the decision combining the authorizer,
+# ACLs and anonymous access.
+add_executable(s3_access_test s3_access_test.cpp)
+target_link_libraries(s3_access_test PRIVATE kythira_s3 Boost::unit_test_framework)
+if(TARGET boost_json)
+    target_link_libraries(s3_access_test PRIVATE boost_json)
+elseif(TARGET Boost::json)
+    target_link_libraries(s3_access_test PRIVATE Boost::json)
+endif()
+add_test(NAME s3_access_test COMMAND s3_access_test)
+
 set_tests_properties(
     s3_model_coverage
     s3_model_coverage_checker
@@ -108,6 +120,7 @@ set_tests_properties(
     s3_actions_up_to_date
     s3_authz_test
     s3_auth_test
+    s3_access_test
     PROPERTIES LABELS "unit;s3;s3-module" TIMEOUT 60)
 
 kythira_scale_test_timeouts()
