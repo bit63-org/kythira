@@ -2028,6 +2028,52 @@ unverified completion claim.
         and required a value; a re-election in between failed them. They
         now wait for a leader.
       Off the allowlist.
+    - **Re-surveyed November 18, 2026**, after the Tier 5 fixes (#820,
+      #834, #841, #846-#850). The free plan's 20-job limit left most of the
+      133 `ci.yml` runs created since #820 merged (08:06Z) queued or
+      cancelled, so the sample is thin: 27 runs that finished test jobs,
+      314 test jobs. **3 of the 27 runs would have failed strict mode**
+      (11%), against 52 of 76 on November 16 and 34 of 70 in the runs from
+      November 16 12:00Z up to #820 (926 test jobs). Every retry was in a
+      different test, none allowlisted, and no allowlisted test needed one.
+      - The repeaters of the window before #820 are gone, and every one of
+        their rescues ran on a head without the fix:
+        `leader_transfer_test` (16, without the stale pre-vote fix),
+        `dynamodb_strong_cluster_test` (15, "terminate called after
+        throwing std::system_error: Invalid argument", without the
+        backend-before-host teardown order) and `hsm_object_import_test`
+        (3, without #847). The one `dynamodb_strong_cluster_test` rescue
+        after #820 was the same abort on a PR branch that had not been
+        rebased onto it.
+      - `dynamodb_raft_backend_test` (13 before, 1 after): a PutItem or
+        DeleteItem answered InternalServerError when its leader was deposed
+        after the proposal, which `raft_backend` returns by design and an
+        SDK retries; the test's helper now retries the same way (#898).
+        Four of the thirteen were instead
+        `gsi_entries_reach_other_groups_through_a_leader_loss` missing its
+        15 s wait for the index to follow the moves, unexplained; #898
+        makes that check print what the index held.
+      - `kythira_node_cluster_test` (1 after): a node ignored SIGTERM for
+        30 s at teardown and left no trace, because the fixture removes the
+        node directories. It now prints the node's log tail and thread
+        stacks before the SIGKILL (#899).
+      - `multi_raft_split_integration_test` (1 after, Full suite stdexec):
+        `a_new_leader_holding_an_unapplied_split_never_loses_a_write`. The
+        old leader stopped sending AppendEntries and heartbeats for 430 ms
+        right after proposing the split, while still answering RPCs, so `b`
+        timed out and won an election without the split. Not explained:
+        `node` sends asynchronously and the test fabric fails a partitioned
+        peer's RPC at once, so whatever held the host's tick is still to be
+        found.
+      - `multi_raft_driver_agreement_test`: no rescue in the 190 Build &
+        Test, Full suite, No Folly, TSan, Coverage and Config Variants jobs
+        whose head has the stale pre-vote fix, and none since #850, so its
+        new shortfall breakdown has not fired. Its 11-17 rescue showed no
+        leader churn, so that fix is not known to be the cause; it stays
+        allowlisted until the breakdown names one or a week passes without
+        a rescue.
+      Strict mode stays off until a week of the fixed code is in; re-survey
+      around November 25.
   - **Disk mode applies under the node mutex. DONE** (found November 9,
     2026; fixed November 13). `cache_kv_state_machine` fsynced a chunk,
     its pack record and the directory inside `apply()`, and
