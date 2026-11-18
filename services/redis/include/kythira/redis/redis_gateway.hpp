@@ -29,6 +29,7 @@
 #include <kythira/redis/redis_kv_commands.hpp>
 #include <kythira/redis/redis_gateway_value_access.hpp>
 #include <kythira/redis/redis_kv_state_machine.hpp>
+#include <kythira/redis/redis_server_identity.hpp>
 #include <kythira/redis/resp_protocol.hpp>
 #include <raft/credential_verifier.hpp>
 #include <raft/future_default.hpp>
@@ -219,6 +220,21 @@ struct redis_gateway_config {
     /// password in the same admission slot.
     credential_verifier_fn _credential_verifier;
     std::function<bool(std::string_view user)> _credential_verifier_users;
+
+    /// Server identity (.kiro/specs/redis-general-data-types/ Requirement
+    /// 1.5-1.6, kythira/redis/redis_server_identity.hpp). `HELLO`'s
+    /// `kythira_version` and `INFO`'s `kythira_version:`.
+    /// The build's version (kythira::build_version(), linked through
+    /// kythira_redis); tests that pin reply bytes set a fixed one.
+    std::string _kythira_version{kythira::build_version()};
+    /// `HELLO`'s `version` and `INFO`'s `redis_version:`: a plain
+    /// `major.minor.patch`, checked at `start()`.
+    std::string _redis_compat_version{k_redis_compat_version};
+    /// The Redis Cluster protocol compatibility mode (Requirement 34, phase
+    /// 2). Until it is on, `HELLO` and `INFO` report `standalone`, because
+    /// cluster-aware tools treat `cluster` as a promise that `CLUSTER`
+    /// commands work.
+    bool _cluster_compat_mode = false;
 };
 
 /// Counters the gateway keeps for INFO and for the metrics back-end.
@@ -494,6 +510,12 @@ private:
     auto handle_set(session& s, const resp_command& cmd, bool with_expiry) -> std::string;
     auto handle_del(session& s, const resp_command& cmd) -> std::string;
     auto handle_info(session& s) -> std::string;
+    /// `HELLO`'s `mode` and `INFO`'s `redis_mode`: `cluster` only in the
+    /// Cluster protocol compatibility mode (redis-general-data-types
+    /// Requirement 1.6).
+    [[nodiscard]] auto server_mode() const noexcept -> const char* {
+        return _config._cluster_compat_mode ? "cluster" : "standalone";
+    }
     auto handle_command(session& s, const resp_command& cmd) -> std::string;
     auto handle_dbsize(session& s) -> std::string;
 

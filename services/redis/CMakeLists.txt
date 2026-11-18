@@ -14,7 +14,10 @@
 set(KYTHIRA_REDIS_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/include")
 add_library(kythira_redis INTERFACE)
 target_include_directories(kythira_redis INTERFACE "${KYTHIRA_REDIS_INCLUDE_DIR}")
-target_link_libraries(kythira_redis INTERFACE kythira_core_headers OpenSSL::SSL OpenSSL::Crypto)
+# kythira_build_version: kythira_version in HELLO and INFO
+# (kythira/redis/redis_server_identity.hpp).
+target_link_libraries(kythira_redis INTERFACE kythira_core_headers kythira_build_version
+                      OpenSSL::SSL OpenSSL::Crypto)
 
 # The images' Dockerfiles, compose files and staging directories. Images
 # build from KYTHIRA_IMAGE_CONTEXT (cmake/kythira_test_helpers.cmake), so

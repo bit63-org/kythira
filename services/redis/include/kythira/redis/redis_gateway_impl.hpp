@@ -787,6 +787,14 @@ auto redis_gateway<Host, Logger, Metrics>::start() -> void {
     if (_running.exchange(true)) {
         return;
     }
+    if (!is_plain_redis_version(_config._redis_compat_version)) {
+        // Requirement 1.5 (redis-general-data-types): clients parse this
+        // field, and a suffix or a missing part breaks their parsers.
+        _running = false;
+        throw std::runtime_error("redis gateway: the Redis compatibility version '" +
+                                 _config._redis_compat_version +
+                                 "' is not a plain major.minor.patch (e.g. 7.0.0)");
+    }
     if (_config._transactions) {
         // Requirement 11.1: refused unless the build wrapped the KV state
         // machine; Requirement 10.2: a level the build cannot give is an
@@ -1912,10 +1920,11 @@ auto redis_gateway<Host, Logger, Metrics>::handle_hello(session& s, const resp_c
     s._writer.set_version(version);
     resp_writer& w = s._writer;
     return w.map({{"server", w.bulk("kythira")},
-                  {"version", w.bulk("7.0.0-kythira")},
+                  {"version", w.bulk(_config._redis_compat_version)},
+                  {"kythira_version", w.bulk(_config._kythira_version)},
                   {"proto", w.integer(version)},
                   {"id", w.integer(0)},
-                  {"mode", w.bulk("cluster")},
+                  {"mode", w.bulk(server_mode())},
                   {"role", w.bulk("master")},
                   {"modules", w.array({})}});
 }
@@ -2315,9 +2324,11 @@ auto redis_gateway<Host, Logger, Metrics>::handle_info(session& s) -> std::strin
         std::chrono::steady_clock::now() - _started_at);
     std::ostringstream out;
     out << "# Server\r\n"
-        << "redis_version:7.0.0-kythira\r\n"
+        << "redis_version:" << _config._redis_compat_version << "\r\n"
+        << "server_name:kythira\r\n"
+        << "kythira_version:" << _config._kythira_version << "\r\n"
         << "kythira_gateway:1\r\n"
-        << "redis_mode:cluster\r\n"
+        << "redis_mode:" << server_mode() << "\r\n"
         << "uptime_in_seconds:" << uptime.count() << "\r\n"
         << "\r\n# Clients\r\n"
         << "connected_clients:" << _stats._connections_current.load() << "\r\n"

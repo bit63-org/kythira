@@ -181,6 +181,7 @@ keeps the C++ side of it honest; the CMake side is this list.
 | Target | Used for |
 |---|---|
 | `kythira_core_headers` | the public headers under `include/` and the Kconfig header |
+| `kythira_build_version` | `kythira::build_version()` (`<raft/build_version.hpp>`), the `kythira_version` `HELLO` and `INFO` report |
 | `kythira_test_support` | the in-process test fabric's headers, by name (tests only) |
 | `kythira_test_pch` | linked by `add_raft_completion_test` (tests only) |
 | `certificate_authority` | `KYTHIRA_HAS_OPENSSL` for the IAM replica's TLS RPC headers (`CONFIG_REDIS_GATEWAY_IAM` builds of `redis_gateway_node` only) |
