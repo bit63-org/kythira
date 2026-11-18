@@ -1,8 +1,10 @@
 # Copyright (c) 2026 Clark Rawlins
 # SPDX-License-Identifier: Apache-2.0
 
-if(NOT POCO_DNSSD_FOUND OR NOT folly_FOUND OR NOT Boost_FOUND OR NOT httplib_FOUND)
-    message(STATUS "poco_discovery_node: skipped (requires Poco DNSSD, Folly, Boost, httplib)")
+# No folly_FOUND: main() initialises Folly through raft/process_init.hpp only
+# where it is linked; the parent CMakeLists.txt requires a future backend.
+if(NOT POCO_DNSSD_FOUND OR NOT Boost_FOUND OR NOT httplib_FOUND)
+    message(STATUS "poco_discovery_node: skipped (requires Poco DNSSD, Boost, httplib)")
     return()
 endif()
 
@@ -13,7 +15,7 @@ target_include_directories(poco_discovery_node PRIVATE
     "${CMAKE_SOURCE_DIR}/cmd/discovery_node_common"
 )
 
-# network_simulator INTERFACE target propagates KYTHIRA_HAS_POCO_DNSSD, Folly, Poco DNSSD libs.
+# network_simulator INTERFACE target propagates KYTHIRA_HAS_POCO_DNSSD, the future backend, Poco DNSSD libs.
 target_link_libraries(poco_discovery_node PRIVATE
     network_simulator
     httplib::httplib

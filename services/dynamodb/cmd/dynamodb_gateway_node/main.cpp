@@ -27,11 +27,9 @@
 
 #include <raft/node_core.hpp>
 
-#if !defined(KYTHIRA_FUTURE_BACKEND_STDEXEC) && !defined(KYTHIRA_FUTURE_BACKEND_BOOST)
-// The Folly backend (the default, which defines no macro of its own) needs
-// folly::Init before the first future: its timekeeper is a Folly singleton.
-#include <folly/init/Init.h>
-#endif
+// folly::Init where Folly is linked, before the first future: its
+// timekeeper is a Folly singleton.
+#include <raft/process_init.hpp>
 
 #include <csignal>
 #include <cstdio>
@@ -88,10 +86,8 @@ auto main(int argc, char** argv) -> int {
     sigaddset(&set, SIGINT);
     sigaddset(&set, SIGTERM);
     pthread_sigmask(SIG_BLOCK, &set, nullptr);
-#if !defined(KYTHIRA_FUTURE_BACKEND_STDEXEC) && !defined(KYTHIRA_FUTURE_BACKEND_BOOST)
     // After the mask, so any thread Folly starts leaves SIGTERM to sigwait().
-    const folly::Init folly_init(&argc, &argv);
-#endif
+    const kythira::process_init process_init(argv[0]);
 
     const kythira::dynamodb::env_lookup env =
         [](std::string_view name) -> std::optional<std::string> {

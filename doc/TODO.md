@@ -3731,6 +3731,12 @@ unverified completion claim.
   `cmd/multi_raft_node`) switched to `kythira::process_init`
   (`include/raft/process_init.hpp`), which runs `folly::Init` only where
   Folly is linked, and they and the 21 suites that run them left the gate.
+  The rest of the daemons followed: `chaos_node`, the Poco, DNS and DNS-SD
+  discovery nodes and `multi_raft_bench` lost their `folly_FOUND` gates (as
+  did the docker-chaos image targets that stage them), and `kythira_node`,
+  `iam_node`, `kms_node`, `hsm_node`, `ledger_node` and
+  `dynamodb_gateway_node` traded their own `folly::Init` guards for the
+  shim. No daemon `main()` calls `folly::Init` directly any more.
   What remains are the examples and the suites that use Folly by name. Un-gating one means building and running it on the
   Boost backend, then deleting its allowlist line in the same change (the
   checker rejects stale lines).

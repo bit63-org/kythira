@@ -1,7 +1,9 @@
 # Copyright (c) 2026 Clark Rawlins
 # SPDX-License-Identifier: Apache-2.0
 
-if(NOT folly_FOUND OR NOT Boost_FOUND OR NOT httplib_FOUND)
+# No folly_FOUND: main() initialises Folly through raft/process_init.hpp only
+# where it is linked; the parent CMakeLists.txt requires a future backend.
+if(NOT Boost_FOUND OR NOT httplib_FOUND)
     return()
 endif()
 
@@ -28,7 +30,7 @@ target_include_directories(chaos_node PRIVATE
 )
 
 target_link_libraries(chaos_node PRIVATE
-    network_simulator   # brings in Folly::folly + boost_context + Boost::system/thread
+    network_simulator   # the future backend (and Folly where found), Boost::system/thread
     boost_json
     httplib::httplib
     kythira_host_node_id   # KYTHIRA_NODE_ID_KIND

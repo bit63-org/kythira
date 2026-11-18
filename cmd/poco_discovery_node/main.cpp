@@ -19,7 +19,7 @@
 
 #include <httplib.h>
 #include "peers_endpoint.hpp"
-#include <folly/init/Init.h>
+#include <raft/process_init.hpp>
 
 #include <atomic>
 #include <csignal>
@@ -52,7 +52,7 @@ const char* env_or(const char* key, const char* fallback) {
 }  // namespace
 
 int main(int argc, char** argv) {
-    folly::Init folly_init(&argc, &argv);
+    const kythira::process_init process_init(argv[0]);
 
     const std::string node_id = env_or("NODE_ID", "node1");
     const int http_port = std::stoi(env_or("HTTP_PORT", "9011"));

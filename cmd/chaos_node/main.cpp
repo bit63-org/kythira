@@ -11,7 +11,7 @@
 #include "fiu_remote.hpp"
 #endif
 
-#include <folly/init/Init.h>
+#include <raft/process_init.hpp>
 
 #ifdef KYTHIRA_HAS_AWS_SDK
 #include <aws/core/Aws.h>
@@ -83,7 +83,7 @@ auto rpc_tls_config_of(const chaos_node::node_config& cfg)
 // ── Main ─────────────────────────────────────────────────────────────────────
 
 int main(int argc, char** argv) {
-    folly::Init init_(&argc, &argv, false);
+    const kythira::process_init process_init(argv[0]);
 
     // ── Config ───────────────────────────────────────────────────────────────
     chaos_node::node_config cfg;
