@@ -84,6 +84,12 @@ PR unless noted.
     HTTP listener on the shared Beast host and the `sqs_node` wiring
     (static keys from core's `static_keys_file.hpp`), moved here from
     task 3 so they arrive with handlers to serve
+  - Done so far: message attributes, MD5 and receipt handles
+    (`sqs_messages.hpp`, `sqs_receipts.hpp`); queue attributes
+    (`sqs_queue_attributes.hpp`); the catalog in the queue state machine
+    (`sqs_catalog.hpp`); every queue and message handler including
+    AddPermission and RemovePermission (`sqs_service.hpp`) over
+    `queue_cluster`. Left: the HTTP listener and `sqs_node`
   - _Requirements: 4.1, 5.1, 5.3, 5.5_
 
 - [ ] 5. Long polling

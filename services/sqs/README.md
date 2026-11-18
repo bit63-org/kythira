@@ -36,6 +36,12 @@ Built when `CONFIG_SQS=y` (`services/sqs/Kconfig`, off by default).
 | `include/kythira/sqs/sqs_compat_profile.hpp` | the AWS-behaviour switches (message size, retention, batch size, in-flight, FIFO throughput, long-poll maximum, cool-downs), per cluster and per queue tag | 3 |
 | `include/kythira/sqs/sqs_front_end.hpp` | the transport-free front end: SigV4 in the request's protocol, queue resolution (QueueUrl, QueueName, SourceArn), authorization of each operation's primary action on the queue with its tags and policy, dispatch to handlers | 3 |
 | `include/kythira/sqs/sqs_queue_policy.hpp` | queue-policy edits as AddPermission and RemovePermission make them | 3 |
+| `include/kythira/sqs/sqs_messages.hpp` | message bodies and attributes: validation, the MD5 digests SDKs check, stored encodings, attribute selection on receive | 4 |
+| `include/kythira/sqs/sqs_receipts.hpp` | stateless HMAC-SHA256 receipt handles, the receipt key ring (`SQS_RECEIPT_KEYS_FILE` or derived from the forwarding secret) | 4 |
+| `include/kythira/sqs/sqs_queue_attributes.hpp` | queue settings at SQS's defaults, CreateQueue/SetQueueAttributes checks against the compatibility profile, GetQueueAttributes rendering | 4 |
+| `include/kythira/sqs/sqs_catalog.hpp` | the queue catalog's keys, records and entries, applied by the queue state machine: never-reused ids, the deletion and purge cool-downs, compare-and-set settings changes | 4 |
+| `include/kythira/sqs/sqs_cluster.hpp` | `queue_cluster`, what the handlers need from the data layer, and `local_queue_cluster` over one in-process state machine | 4 |
+| `include/kythira/sqs/sqs_service.hpp` | the queue and message handlers: queue lifecycle, attributes, permissions, tags, purge; send, receive, delete and visibility with batches; partition choice; receipt handles | 4 |
 | `cmd/sqs_node/` | the daemon; a placeholder whose `--self-test` checks the operation table until tasks 3 and 4 | 1 |
 
 ## Core pieces used
