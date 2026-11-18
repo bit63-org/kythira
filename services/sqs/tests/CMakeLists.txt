@@ -117,6 +117,9 @@ target_link_libraries(sqs_listener_test PRIVATE OpenSSL::SSL Threads::Threads)
 kythira_sqs_test(sqs_long_poll_test sqs_long_poll_test.cpp)
 target_link_libraries(sqs_long_poll_test PRIVATE Threads::Threads)
 
+# Task 7: sealing bodies and attributes, wrapping data keys, data key reuse.
+kythira_sqs_test(sqs_sse_test sqs_sse_test.cpp)
+
 # Task 4: the module on multi_raft, as whole in-process nodes over the Beast
 # Raft transport (sqs_module.hpp on memory_kv_engine): a restart, three
 # nodes forwarding to their leader, and the settings a durable node refuses.

@@ -72,14 +72,16 @@ constexpr std::string_view usage =
     "API on SQS_LISTEN until SIGINT or SIGTERM. Settings come from the\n"
     "environment: SQS_LISTEN, SQS_TLS_CERT, SQS_TLS_KEY, SQS_ALLOW_PLAINTEXT,\n"
     "SQS_ENDPOINT, SQS_REGION, SQS_PARTITION, SQS_STATIC_KEYS_FILE (required),\n"
-    "SQS_RECEIPT_KEYS_FILE, SQS_FORWARD_SECRET, SQS_COMPAT, SQS_MAX_BODY_BYTES.\n"
+    "SQS_RECEIPT_KEYS_FILE, SQS_FORWARD_SECRET, SQS_SSE_KEY_FILE, SQS_KMS\n"
+    "(none or local), SQS_KMS_PASSPHRASE_FILE, SQS_COMPAT, SQS_MAX_BODY_BYTES.\n"
     "\n"
     "With KYTHIRA_NODE_DATA_DIR set (in builds with the durable module) the\n"
     "queues are kept on disk under Raft, on one node or several: KYTHIRA_NODE_ID,\n"
     "KYTHIRA_NODE_PEERS, KYTHIRA_NODE_RAFT_BIND, KYTHIRA_NODE_RAFT_PORT,\n"
     "KYTHIRA_NODE_TLS_CERT, _TLS_KEY, _TLS_CA, KYTHIRA_NODE_INSECURE_PLAINTEXT,\n"
     "plus SQS_PEER_ENDPOINTS, SQS_PEER_CA and SQS_PROPOSE_TIMEOUT_MS; a durable\n"
-    "node needs SQS_RECEIPT_KEYS_FILE or SQS_FORWARD_SECRET, and more than one\n"
+    "node needs SQS_RECEIPT_KEYS_FILE or SQS_FORWARD_SECRET, SQS_SSE_KEY_FILE or\n"
+    "SQS_FORWARD_SECRET (SSE-SQS is on by default), and more than one\n"
     "node needs SQS_FORWARD_SECRET. Without it, one node keeps its queues in\n"
     "memory and loses them when it stops.\n"
     "\n"
@@ -232,6 +234,13 @@ auto serve() -> int {
         mover.start();
         s::sqs_service_config sc;
         sc._receipt_keys = receipt_keys(opt);
+        sc._sse = s::node_sse_keys(
+            opt._sse_key_file.empty() ? std::string()
+                                      : read_file(opt._sse_key_file, "SQS_SSE_KEY_FILE"),
+            opt._forward_secret,
+            opt._kms == "local" ? std::optional<std::string>(read_file(opt._kms_passphrase_file,
+                                                                       "SQS_KMS_PASSPHRASE_FILE"))
+                                : std::nullopt);
         sc._profile = *profile;
         sc._waits = &hub;
         s::sqs_service<s::local_queue_cluster> service(cluster, sc);
