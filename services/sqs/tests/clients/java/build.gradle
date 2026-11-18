@@ -1,0 +1,63 @@
+// Copyright (c) 2026 Clark Rawlins
+// SPDX-License-Identifier: Apache-2.0
+
+// The SQS client suites that the wire evidence leaves to task 12
+// (.kiro/specs/sqs-compatible-queues/): Spring Cloud AWS's SQS template
+// and listener container, the Amazon SQS Extended Client, which offloads
+// large bodies to S3, and aws-sdk-java v1 pinned to its query-protocol era. Versions are pinned so a suite
+// failure points at Kythira, not at a client that moved. The SDK BOM is
+// the same 2.57.11 the evidence clients pin.
+
+plugins {
+    id 'application'
+}
+
+repositories {
+    // repo1 is the same Maven Central; the CI proxy rate-limits the other name less.
+    maven { url = 'https://repo1.maven.org/maven2' }
+}
+
+dependencies {
+    implementation platform('software.amazon.awssdk:bom:2.57.11')
+    implementation 'software.amazon.awssdk:sqs'
+    implementation 'software.amazon.awssdk:s3'
+    implementation 'software.amazon.awssdk:url-connection-client'
+    implementation 'software.amazon.awssdk:netty-nio-client'
+    implementation 'io.awspring.cloud:spring-cloud-aws-sqs:3.4.2'
+    implementation 'com.amazonaws:amazon-sqs-java-extended-client-lib:2.1.3'
+    // The last v1 release on the query protocol: 1.12.585 and later speak
+    // AWS JSON 1.0 like v2, so a current v1 would add no new wire path.
+    implementation 'com.amazonaws:aws-java-sdk-sqs:1.12.575'
+    runtimeOnly 'org.slf4j:slf4j-nop:2.0.17'
+}
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(21)
+    }
+}
+
+application {
+    mainClass = 'kythira.sqssuite.SpringSuite'
+    applicationName = 'sqs-suite-spring'
+}
+
+// The Extended Client and v1 suites, as start scripts beside the Spring one.
+tasks.register('extendedStartScripts', CreateStartScripts) {
+    mainClass = 'kythira.sqssuite.ExtendedSuite'
+    applicationName = 'sqs-suite-extended'
+    outputDir = layout.buildDirectory.dir('extended-scripts').get().asFile
+    classpath = startScripts.classpath
+}
+tasks.register('javaV1StartScripts', CreateStartScripts) {
+    mainClass = 'kythira.sqssuite.JavaSdkV1Suite'
+    applicationName = 'sqs-suite-java-v1'
+    outputDir = layout.buildDirectory.dir('java-v1-scripts').get().asFile
+    classpath = startScripts.classpath
+}
+distributions.main.contents {
+    into('bin') {
+        from(tasks.named('extendedStartScripts'))
+        from(tasks.named('javaV1StartScripts'))
+    }
+}

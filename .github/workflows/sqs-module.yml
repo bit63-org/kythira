@@ -12,7 +12,11 @@
 #     test labelled sqs), so a module change gets an answer in minutes
 #     instead of after the full build-and-test legs;
 #   - a module-off configure (configs/ci_no_sqs_defconfig) that asserts
-#     no SQS target or sqs-module test exists with the switch off.
+#     no SQS target or sqs-module test exists with the switch off;
+#   - the client suites (services/sqs/tests/clients/): the AWS CLI, boto3
+#     on both protocols, Kombu, the Go, JavaScript and Java SDKs (v2, and v1
+#     on query), JMS, Spring Cloud AWS and the Extended Client against the
+#     sqs_node the build job made.
 #
 # The module-off configure does not build core: ci.yml's config-variants job
 # already builds every target of minimal_defconfig, where CONFIG_SQS is
@@ -220,6 +224,15 @@ jobs:
       - name: Run the module's tests
         run: ctest --test-dir build -L '^sqs$' --output-on-failure --no-tests=error
 
+      # The client suites run in their own job, on this build's daemon.
+      - name: Hand sqs_node to the client suites
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: sqs-node
+          path: build/sqs_node
+          retention-days: 1
+          if-no-files-found: error
+
       - name: Configure (module off, ci_no_sqs_defconfig, strict)
         run: |
           cmake -B build-off -G Ninja \
@@ -251,3 +264,103 @@ jobs:
             rc=1
           fi
           exit $rc
+
+  clients:
+    # Task 12 (Requirements 13.1, 13.2): real SQS clients against the
+    # in-memory sqs_node this run built, through
+    # services/sqs/tests/clients/run_suite.sh. Every client is pinned: the
+    # Python ones by requirements files, the AWS CLI by version, Go by
+    # go.sum, JavaScript by package-lock.json, the Java ones by their
+    # Gradle builds, which run in the digest-pinned Gradle
+    # image the Kinesis module uses so there is one JDK and Gradle to keep
+    # current. The split-layout runs join with task 10.
+    name: SQS client suites
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Fetch sqs_node
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: sqs-node
+          path: ${{ runner.temp }}/sqs
+
+      - name: Install system dependencies
+        run: |
+          ./scripts/drop-unused-apt-repos.sh
+          # libcurl's headers build pycurl, which Kombu's SQS transport needs.
+          for attempt in 1 2 3; do
+            if timeout 300 sudo apt-get update -q \
+                 && timeout 600 sudo apt-get install -y --no-install-recommends \
+                 libcurl4-openssl-dev libssl-dev python3-venv unzip; then
+              exit 0
+            fi
+            echo "::warning::apt-get install failed (attempt ${attempt}/3), retrying in 30s..."
+            sleep 30
+          done
+          echo "::error::apt-get install failed after 3 attempts" >&2
+          exit 1
+
+      - name: Python clients
+        run: |
+          python3 -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/pip" install -q -r services/sqs/tests/clients/requirements.txt
+          python3 -m venv "$RUNNER_TEMP/venvq"
+          "$RUNNER_TEMP/venvq/bin/pip" install -q -r services/sqs/tests/evidence/requirements-query.txt
+
+      - name: AWS CLI v2 (2.31.0, the evidence pin)
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/awscli.zip" \
+            https://awscli.amazonaws.com/awscli-exe-linux-x86_64-2.31.0.zip
+          unzip -q "$RUNNER_TEMP/awscli.zip" -d "$RUNNER_TEMP/awscli-src"
+          "$RUNNER_TEMP/awscli-src/aws/install" -i "$RUNNER_TEMP/awscli" -b "$RUNNER_TEMP/awsbin"
+          "$RUNNER_TEMP/awsbin/aws" --version
+
+      - name: Java clients
+        env:
+          GRADLE_IMAGE: gradle:8.14.3-jdk21@sha256:21bd311ed01360c189b8870c6b6e988199ff10f72d445d02fb39d3cff9da91d7
+        run: |
+          # One worker: Maven Central answers bursts of parallel downloads
+          # with 429s.
+          for dir in services/sqs/tests/evidence/clients/java services/sqs/tests/clients/java; do
+            docker run --rm --user "$(id -u):$(id -g)" \
+              -e GRADLE_USER_HOME=/work/.gradle-home \
+              -v "$PWD:/work" -w "/work/$dir" \
+              "$GRADLE_IMAGE" gradle --no-daemon --max-workers=1 installDist
+          done
+
+      - name: Go and JavaScript clients
+        env:
+          GO_IMAGE: golang:1.24.7-bookworm@sha256:b8bae5bd9ba9b1f89b635c91c24cc75cea335a16fb5076310f38566fc674b1ec
+          NODE_IMAGE: node:22.21.1-bookworm-slim@sha256:25b3eb23a00590b7499f2a2ce939322727fcce1b15fdd69754fcd09536a3ae2c
+        run: |
+          # Built in pinned images, run on the runner: a static Go binary,
+          # and the lockfile's node_modules for the runner's Node.
+          docker run --rm --user "$(id -u):$(id -g)" \
+            -e GOCACHE=/work/.go-cache -e GOMODCACHE=/work/.go-mod -e CGO_ENABLED=0 \
+            -v "$PWD:/work" -v "$RUNNER_TEMP:/out" -w /work/services/sqs/tests/clients/go \
+            "$GO_IMAGE" go build -o /out/sqs-suite-go .
+          docker run --rm --user "$(id -u):$(id -g)" -e npm_config_cache=/work/.npm-cache \
+            -v "$PWD:/work" -w /work/services/sqs/tests/clients/js \
+            "$NODE_IMAGE" npm ci --no-audit --no-fund
+
+      - name: Run the client suites
+        env:
+          SUITE_GO: ${{ runner.temp }}/sqs-suite-go
+          SQS_NODE: ${{ runner.temp }}/sqs/sqs_node
+          SUITE_PYTHON: ${{ runner.temp }}/venv/bin/python
+          QUERY_PYTHON: ${{ runner.temp }}/venvq/bin/python
+          AWS_CLI: ${{ runner.temp }}/awsbin/aws
+          JAVA_CLIENTS: ${{ github.workspace }}/services/sqs/tests/evidence/clients/java/build/install/sqs-evidence-java/bin
+          SUITE_JAVA_CLIENTS: ${{ github.workspace }}/services/sqs/tests/clients/java/build/install/sqs-suite-spring/bin
+        run: |
+          chmod +x "$SQS_NODE"
+          # The start scripts were built for the image's JDK 21; run them on
+          # the runner's.
+          export JAVA_HOME=$JAVA_HOME_21_X64
+          services/sqs/tests/clients/run_suite.sh

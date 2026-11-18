@@ -1,0 +1,10 @@
+{
+  "name": "sqs-suite-js",
+  "private": true,
+  "type": "module",
+  "description": "The aws-sdk-js-v3 SQS suite of services/sqs/tests/clients/run_suite.sh",
+  "license": "Apache-2.0",
+  "dependencies": {
+    "@aws-sdk/client-sqs": "3.1160.0"
+  }
+}

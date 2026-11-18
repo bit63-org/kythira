@@ -50,6 +50,7 @@ Built when `CONFIG_SQS=y` (`services/sqs/Kconfig`, off by default).
 | `include/kythira/sqs/sqs_long_poll.hpp` | where long polls park: subscriptions to a queue's partitions, woken when a committed entry leaves one with visible messages, closed by a drain | 5 |
 | `include/kythira/sqs/sqs_workers.hpp` | the leader's tick worker: proposes a `tick` when a partition's earliest deadline passes, so ended delays and visibility timeouts become committed facts that wake long polls; the move worker, which runs message move tasks at their rate on the catalog leader; the grow worker, which adds partitions to standard queues as their send rate rises | 5, 6, 8 |
 | `cmd/sqs_node/sqs_module.hpp`, `cmd/sqs_node/sqs_module_registrar.cpp` | the service module, number 9: the queues on a `multi_raft` host in the node's engine (RocksDB), one group over every node of `KYTHIRA_NODE_PEERS`, followers forwarding to the leader's listener; registered for `kythira_node` (`KYTHIRA_SERVICES=sqs`) | 4 |
+| `tests/clients/` | the client suites (`run_suite.sh`): the AWS CLI, boto3 on JSON and query, Kombu, the Go and JavaScript SDKs, Java SDK v2, JMS, aws-sdk-java v1 (query era), Spring Cloud AWS and the Extended Client (moto as S3) run their scenarios against `sqs_node`; `sqs-module.yml`'s client job runs them | 12 |
 | `cmd/sqs_node/` | the daemon: with `KYTHIRA_NODE_DATA_DIR` set, the module alone on a node (durable, one or more nodes); otherwise one node with its queues in memory, for development (`SQS_LISTEN`, `SQS_STATIC_KEYS_FILE`, ...); `--self-test` checks the operation table | 1, 4 |
 
 ## Core pieces used
@@ -68,4 +69,18 @@ Every module test carries the labels `sqs` and `sqs-module`:
 
 ```
 ctest --test-dir build -L '^sqs$' --output-on-failure
+```
+
+The client suites need the clients themselves, so they run outside ctest:
+
+```
+python3 -m venv /tmp/venv && /tmp/venv/bin/pip install -r services/sqs/tests/clients/requirements.txt
+python3 -m venv /tmp/venvq && /tmp/venvq/bin/pip install -r services/sqs/tests/evidence/requirements-query.txt
+(cd services/sqs/tests/evidence/clients/java && gradle installDist)
+(cd services/sqs/tests/clients/java && gradle installDist)
+(cd services/sqs/tests/clients/js && npm ci)
+SQS_NODE=build/sqs_node SUITE_PYTHON=/tmp/venv/bin/python QUERY_PYTHON=/tmp/venvq/bin/python \
+  JAVA_CLIENTS=services/sqs/tests/evidence/clients/java/build/install/sqs-evidence-java/bin \
+  SUITE_JAVA_CLIENTS=services/sqs/tests/clients/java/build/install/sqs-suite-spring/bin \
+  services/sqs/tests/clients/run_suite.sh
 ```

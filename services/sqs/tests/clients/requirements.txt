@@ -1,0 +1,7 @@
+# Copyright (c) 2026 Clark Rawlins
+# SPDX-License-Identifier: Apache-2.0
+
+# The Python side of run_suite.sh: the evidence clients' pins, plus moto,
+# whose server stands in for S3 under the Extended Client suite.
+-r ../evidence/requirements.txt
+moto[server]==5.1.17
