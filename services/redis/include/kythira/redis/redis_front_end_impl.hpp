@@ -631,6 +631,24 @@ auto redis_front_end<Host, Logger, Metrics>::forward_argv(const std::vector<std:
     if (!endpoint) {
         return std::nullopt;
     }
+    return forward_to_endpoint(argv, *endpoint, what);
+}
+
+template<typename Host, typename Logger, typename Metrics>
+auto redis_front_end<Host, Logger, Metrics>::data_call(const std::string& endpoint,
+                                                       const std::vector<std::string>& argv)
+    -> std::optional<std::string> {
+    if (!_running.load() || _config._internal_secret.empty() ||
+        (!_config._forward_tls && !_config._allow_plaintext_forwarding)) {
+        return std::nullopt;
+    }
+    return forward_to_endpoint(argv, endpoint, "KYTHIRA.DATA");
+}
+
+template<typename Host, typename Logger, typename Metrics>
+auto redis_front_end<Host, Logger, Metrics>::forward_to_endpoint(
+    const std::vector<std::string>& argv, const std::string& endpoint, std::string_view what)
+    -> std::optional<std::string> {
     ++_stats._forwards;
     emit("redis.forwards", what);
     try {
@@ -641,7 +659,7 @@ auto redis_front_end<Host, Logger, Metrics>::forward_argv(const std::vector<std:
         const auto budget = _config._command_timeout.count() > 0
                                 ? std::chrono::steady_clock::duration{_config._command_timeout}
                                 : std::chrono::steady_clock::duration{std::chrono::hours{24}};
-        auto sock = forward_socket(*endpoint, std::chrono::steady_clock::now() + budget);
+        auto sock = forward_socket(endpoint, std::chrono::steady_clock::now() + budget);
         resp_writer w;
         std::vector<std::string> parts;
         parts.reserve(argv.size());
@@ -664,20 +682,16 @@ auto redis_front_end<Host, Logger, Metrics>::forward_argv(const std::vector<std:
             auto n = sock->read_some(boost::asio::buffer(chunk));
             buf.append(chunk.data(), n);
         }
-        return_forward_socket(*endpoint, std::move(sock));
+        return_forward_socket(endpoint, std::move(sock));
         buf.resize(len);
         return buf;
     } catch (const std::exception& e) {
         ++_stats._forward_failures;
         _logger.log(log_level::warning, "redis gateway: forward failed",
-                    {{"endpoint", *endpoint}, {"error", e.what()}});
+                    {{"endpoint", endpoint}, {"error", e.what()}});
         return std::nullopt;
     }
 }
-
-// ─────────────────────────────────────────────────────────────────────────────
-// dispatch
-// ─────────────────────────────────────────────────────────────────────────────
 
 // ─────────────────────────────────────────────────────────────────────────────
 // dispatch
@@ -697,6 +711,13 @@ auto redis_front_end<Host, Logger, Metrics>::execute_command(session& s, std::st
         }
         return std::nullopt;
     };
+
+    // The data-layer API (task 16), on internal sessions, whatever the
+    // transaction settings: a front end without a replica sends every
+    // proposal for a group through it.
+    if (upper == "KYTHIRA.DATA") {
+        return handle_data(s, cmd);
+    }
 
     if (_config._transactions) {
         if (s._in_multi && upper != "EXEC" && upper != "DISCARD" && upper != "MULTI") {
@@ -2352,6 +2373,138 @@ auto redis_front_end<Host, Logger, Metrics>::handle_internal_txn(session& s,
             }
         }
         return s._writer.error("ERR unknown KYTHIRA.TXN subcommand '" + cmd._argv[1] + "'");
+    }
+}
+
+/// `KYTHIRA.DATA ROUTE <key>`, `ROUTES <range>` and `PROPOSE <group>
+/// <version> <conf_version> <entry>`: the data-layer API of a node with a
+/// replica (Requirement 18.4). Only on a connection authenticated as the
+/// internal identity. A refusal is answered, never forwarded (Requirement
+/// 18.3): the caller makes every hop. Each answer is a bulk string in
+/// redis_data_wire.hpp's encoding; a RESP error means the call itself was
+/// malformed.
+template<typename Host, typename Logger, typename Metrics>
+auto redis_front_end<Host, Logger, Metrics>::handle_data(session& s, const resp_command& cmd)
+    -> std::string {
+    if (!s._internal) {
+        audit(s, "KYTHIRA.DATA", "internal command from a client");
+        return s._writer.error("NOPERM KYTHIRA.DATA is internal to the gateways");
+    }
+    if (cmd._argv.size() < 3) {
+        return s._writer.error("ERR wrong number of arguments for 'kythira.data' command");
+    }
+    if (!_data.running()) {
+        return s._writer.error("LOADING Kythira is loading the dataset in memory");
+    }
+    const auto sub = resp_to_upper(cmd._argv[1]);
+    if (sub == "ROUTE" || sub == "ROUTES") {
+        if (cmd._argv.size() != 3) {
+            return s._writer.error("ERR wrong number of arguments for 'kythira.data' command");
+        }
+        if (sub == "ROUTE") {
+            return s._writer.bulk(
+                redis_data_wire::encode_routes(data_routes_payload(_data.route_row(cmd._argv[2]))));
+        }
+        auto range = redis_data_wire::decode_range(cmd._argv[2]);
+        if (!range) {
+            return s._writer.error("ERR malformed range for 'kythira.data routes'");
+        }
+        return s._writer.bulk(
+            redis_data_wire::encode_routes(data_routes_payload(_data.routes(*range))));
+    }
+    if (sub == "PROPOSE") {
+        if (cmd._argv.size() != 6) {
+            return s._writer.error("ERR wrong number of arguments for 'kythira.data' command");
+        }
+        return s._writer.bulk(data_propose(cmd));
+    }
+    return s._writer.error("ERR unknown KYTHIRA.DATA subcommand '" + cmd._argv[1] + "'");
+}
+
+template<typename Host, typename Logger, typename Metrics>
+auto redis_front_end<Host, Logger, Metrics>::data_routes_payload(
+    std::vector<typename Host::descriptor_type> routes)
+    -> redis_data_wire::routes_payload<group_id_type, node_id_type> {
+    redis_data_wire::routes_payload<group_id_type, node_id_type> out;
+    std::set<node_id_type> seen;
+    auto add = [&](const node_id_type& n) {
+        if (!seen.insert(n).second) {
+            return;
+        }
+        if (auto endpoint = forward_endpoint(n)) {
+            out.addresses.emplace_back(n, std::move(*endpoint));
+        }
+    };
+    for (const auto& d : routes) {
+        for (const auto& v : d._voters) {
+            add(v);
+        }
+        for (const auto& l : d._learners) {
+            add(l);
+        }
+        if (d._leader_hint) {
+            add(*d._leader_hint);
+        }
+    }
+    out.routes = std::move(routes);
+    return out;
+}
+
+template<typename Host, typename Logger, typename Metrics>
+auto redis_front_end<Host, Logger, Metrics>::data_propose(const resp_command& cmd) -> std::string {
+    using redis_data_wire::propose_status;
+    std::uint64_t group = 0;
+    shard_epoch epoch{};
+    auto number = [](const std::string& a, std::uint64_t& v) {
+        return std::from_chars(a.data(), a.data() + a.size(), v).ec == std::errc{};
+    };
+    if (!number(cmd._argv[2], group) || !number(cmd._argv[3], epoch._version) ||
+        !number(cmd._argv[4], epoch._conf_version)) {
+        return redis_data_wire::encode_propose_status(propose_status::failed,
+                                                      "malformed group or epoch");
+    }
+    const auto group_id = static_cast<group_id_type>(group);
+    // A refusal that only says "not now" (a split or merge in flight, this
+    // replica's epoch behind the caller's): name this node as the leader to
+    // ask again, after the caller's pause.
+    auto again = [this] {
+        return redis_data_wire::encode_propose_not_leader(
+            std::optional<node_id_type>{_data.self()});
+    };
+    try {
+        auto f = _data.propose_to(group_id, epoch, redis_gateway_detail::to_bytes(cmd._argv[5]),
+                                  _config._command_timeout);
+        if (!f.wait(_config._command_timeout)) {
+            return redis_data_wire::encode_propose_status(propose_status::timeout);
+        }
+        const auto result = std::move(f).get();
+        return redis_data_wire::encode_propose_ok(
+            std::string_view(reinterpret_cast<const char*>(result.data()), result.size()));
+    } catch (const shard_epoch_mismatch_exception<group_id_type, std::string, node_id_type>& e) {
+        return redis_data_wire::encode_propose_stale(data_routes_payload(e.current_descriptors()));
+    } catch (const cross_shard_command_exception<group_id_type, std::string>& e) {
+        // The entry's key left the group (a split the caller has not seen).
+        auto routes = _data.route_row(e.key());
+        if (routes.empty()) {
+            return redis_data_wire::encode_propose_status(propose_status::unrouted);
+        }
+        return redis_data_wire::encode_propose_stale(data_routes_payload(std::move(routes)));
+    } catch (const shard_not_leader_exception<group_id_type, node_id_type>& e) {
+        return redis_data_wire::encode_propose_not_leader(e.leader_hint());
+    } catch (const unknown_shard_exception<group_id_type>&) {
+        return redis_data_wire::encode_propose_status(propose_status::unknown_group);
+    } catch (const unrouted_key_exception<std::string>&) {
+        return redis_data_wire::encode_propose_status(propose_status::unrouted);
+    } catch (const key_locked_exception<std::string>& e) {
+        return redis_data_wire::encode_propose_locked(e.key(), e.holder(), e.primary());
+    } catch (const shard_busy_exception<group_id_type>&) {
+        return again();
+    } catch (const shard_merging_exception<group_id_type>&) {
+        return again();
+    } catch (const shard_epoch_ahead_exception<group_id_type>&) {
+        return again();
+    } catch (const std::exception& e) {
+        return redis_data_wire::encode_propose_status(propose_status::failed, e.what());
     }
 }
 

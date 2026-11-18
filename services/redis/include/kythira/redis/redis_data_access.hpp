@@ -35,6 +35,7 @@
 /// counts, the transaction forwarders) that only a node with `data` runs.
 
 #include <kythira/redis/redis_gateway_value_access.hpp>
+#include <raft/route_cache.hpp>
 #include <raft/txn_state_machine.hpp>
 
 #include <chrono>
@@ -162,6 +163,24 @@ public:
         }
         status = redis_data_status::ok;
         return node;
+    }
+
+    /// Every routing row overlapping `range`, in key order, with each row's
+    /// leader hint replaced by the leader a local replica knows (fresher
+    /// than the map's hint): the `KYTHIRA.DATA ROUTES` answer.
+    [[nodiscard]] auto routes(const shard_range<std::string>& range) const {
+        return routes_answer(_host.shard_map_snapshot(), range,
+                             [this](const group_id_type& g) -> std::optional<node_id_type> {
+                                 if (auto* node = _host.group_node(g); node != nullptr) {
+                                     return node->known_leader();
+                                 }
+                                 return std::nullopt;
+                             });
+    }
+    /// The full routing row (descriptor) that owns `key`, as `routes` gives
+    /// it; empty when no group owns it.
+    [[nodiscard]] auto route_row(const std::string& key) const {
+        return routes(shard_range<std::string>{key, key + std::string(1, '\0')});
     }
 
     // ── proposals (KYTHIRA.DATA PROPOSE, KYTHIRA.TXN) ───────────────────────
