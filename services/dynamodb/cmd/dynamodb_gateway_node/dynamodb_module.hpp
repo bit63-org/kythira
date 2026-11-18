@@ -45,6 +45,7 @@
 #include <raft/module_registry.hpp>
 #include <raft/service_module.hpp>
 #if defined(KYTHIRA_DYNAMODB_ROCKSDB)
+#include <raft/raft_log_kms.hpp>
 #include <raft/rocksdb_kv_engine.hpp>
 #endif
 
@@ -302,14 +303,20 @@ public:
         // Layout: engine/ (the database) and raft/<group> (the Raft logs);
         // the strong host's (task 27) the same under strong/.
         const std::filesystem::path dir(_cfg.data_dir);
-        const auto storage_in = [](const std::filesystem::path& d) {
+        // Raft logs sealed at rest when KYTHIRA_RAFT_LOG_KMS says so
+        // (.kiro/specs/raft-log-encryption/): DynamoDB seals a value when it
+        // applies the write, so the log entry carrying it is otherwise in
+        // the clear until compaction.
+        const auto log_settings = kythira::raft_log_encryption_settings::from_environment();
+        const auto storage_in = [&log_settings](const std::filesystem::path& d) {
             std::filesystem::create_directories(d / "engine");
             std::filesystem::create_directories(d / "raft");
+            auto log_options = kythira::raft_log_options_for(d, log_settings);
             return host_storage<rocksdb_storage>{
                 std::make_shared<kythira::rocksdb_kv_engine>(d / "engine"),
-                [d](std::uint64_t group) {
-                    return rocksdb_storage::persistence_engine_type{d / "raft" /
-                                                                    std::to_string(group)};
+                [d, log_options](std::uint64_t group) {
+                    return rocksdb_storage::persistence_engine_type{
+                        d / "raft" / std::to_string(group), log_options};
                 }};
         };
         std::optional<host_storage<rocksdb_storage>> strong;

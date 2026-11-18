@@ -114,6 +114,11 @@ x-node-env: &node-env
   KINESIS_FORWARD_SECRET: kythira-hsm-chaos-kinesis-forward-secret
   KINESIS_KMS: kythira
   KINESIS_DISK_FLOOR_BYTES: "0"
+  # Every module's Raft logs sealed at rest under a passphrase-wrapped key
+  # ring (.kiro/specs/raft-log-encryption/), so the encrypted-services scan
+  # can search the logs too. hsm_node reads it in every layout.
+  KYTHIRA_RAFT_LOG_KMS: local
+  KYTHIRA_RAFT_LOG_PASSPHRASE: kythira-hsm-chaos-raft-log-passphrase
 
 services:
   hsm-1:
