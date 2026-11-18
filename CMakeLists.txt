@@ -931,6 +931,21 @@ else()
 endif()
 kythira_kconfig_require(KMS KYTHIRA_BUILD_KMS "the HSM or IAM module")
 
+# sqs-compatible-queues spec: the services/sqs/ module (an Amazon
+# SQS-compatible message queue service). Off unless CONFIG_SQS=y, like every
+# new module; needs OpenSSL (SigV4, MD5 digests, receipt-handle HMACs) and
+# Boost (the Beast front end). Entered with add_subdirectory(services/sqs)
+# below, after tests/.
+kythira_kconfig_gate(SQS)
+set(KYTHIRA_BUILD_SQS FALSE)
+if(_KYTHIRA_GATE_SQS AND DEFINED KCONFIG_SQS AND OpenSSL_FOUND AND Boost_FOUND)
+    set(KYTHIRA_BUILD_SQS TRUE)
+    message(STATUS "SQS module enabled (services/sqs/, .kiro/specs/sqs-compatible-queues/)")
+else()
+    message(STATUS "SQS module disabled (CONFIG_SQS=n, or OpenSSL/Boost not found)")
+endif()
+kythira_kconfig_require(SQS KYTHIRA_BUILD_SQS "OpenSSL and Boost")
+
 # Core's generator of AWS JSON service models (include/raft/aws_json_protocol.hpp),
 # exported for the modules that pin a botocore model (DynamoDB, Kinesis), so
 # they reach it by variable rather than by core's source path.
@@ -2336,6 +2351,12 @@ endif()
 # its keys in.
 if(KYTHIRA_BUILD_KMS)
     add_subdirectory(services/kms)
+endif()
+
+# The SQS module (services/README.md, .kiro/specs/sqs-compatible-queues/),
+# entered likewise.
+if(KYTHIRA_BUILD_SQS)
+    add_subdirectory(services/sqs)
 endif()
 
 # kythira_node, the composite daemon (.kiro/specs/service-colocation/),

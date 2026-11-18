@@ -11,6 +11,14 @@ PR unless noted.
     `sqs-module.yml`; pinned model and coverage test; recorded wire
     evidence from the CLI, SDKs (JSON and query), JMS, Spring and Kombu
   - _Requirements: 1.1-1.3, 2.1_
+  - Part done (November 18, 2026): the module skeleton (`SQS`, CMake,
+    empty boundary allow list, `sqs_node` placeholder with `--self-test`),
+    `configs/ci_no_sqs_defconfig` and `sqs-module.yml` (boundary, module-on
+    tests, module-off assertion), the pinned model (botocore 1.43.100, 23
+    operations), the generated operation table with its `--check` test, and
+    the coverage test with every operation listed in
+    `services/sqs/doc/unsupported.md` against its task. Still open: the
+    recording stub and wire evidence.
 
 - [ ] 2. Queue state machine
   - Messages, visibility index, receipt sequence, counts, delays,

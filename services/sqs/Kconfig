@@ -1,0 +1,23 @@
+# Copyright (c) 2026 Clark Rawlins
+# SPDX-License-Identifier: Apache-2.0
+
+# The Amazon SQS-compatible message queue service (services/sqs/,
+# .kiro/specs/sqs-compatible-queues/). Sourced from the top-level Kconfig's
+# "Service Modules" menu.
+
+config SQS
+	bool "Amazon SQS-compatible message queue service"
+	default n
+	depends on OPENSSL
+	help
+	  Builds the services/sqs/ module: an Amazon SQS-compatible queue
+	  service that unmodified AWS SDKs, the AWS CLI, JMS, Spring Cloud
+	  AWS, Celery and Kombu can point at, with each queue's messages,
+	  visibility and FIFO state kept in Kythira's Raft groups on the
+	  persistent key-value engine. So far the module holds the pinned
+	  botocore model, the generated operation table, the coverage check
+	  and the sqs_node placeholder (task 1); the gateway, front end and
+	  queue state machine follow. It needs IAM's core SigV4 and authorizer
+	  headers, not the IAM module. OpenSSL is needed for SigV4, MD5
+	  digests and receipt-handle HMACs. Off by default like every new
+	  module (services/README.md). See .kiro/specs/sqs-compatible-queues/.
