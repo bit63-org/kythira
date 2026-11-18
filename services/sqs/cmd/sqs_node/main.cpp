@@ -4,13 +4,15 @@
 // sqs_node: the Amazon SQS-compatible daemon
 // (.kiro/specs/sqs-compatible-queues/).
 //
-// Today a single node that keeps its queues in memory
-// (`local_queue_cluster`): the whole API on one listener, for development
-// and for client suites, with settings from the environment
-// (`sqs_node_options.hpp`). Queues and messages are lost when it stops.
-// The durable multi-node form, the kythira_node module on multi_raft
-// (`sqs_raft_cluster.hpp`, `sqs_forward.hpp`), replaces the in-memory
-// cluster without changing anything a client sees.
+// Two modes, the same API and settings (`sqs_node_options.hpp`):
+// - durable, when KYTHIRA_NODE_DATA_DIR is set: the SQS module of
+//   kythira_node (sqs_module.hpp) alone on a node, its queues in RocksDB
+//   under multi_raft, one or more nodes (KYTHIRA_NODE_*), a send
+//   acknowledged once committed. Built where the module is
+//   (KYTHIRA_SQS_NODE_DURABLE).
+// - in memory otherwise: one node keeping its queues in
+//   `local_queue_cluster`, for development and client suites. Queues and
+//   messages are lost when it stops.
 //
 // --self-test checks the generated operation table and exits; it is all a
 // build without the listener (no Boost.Beast or OpenSSL TLS) offers.
@@ -30,6 +32,14 @@
 #include <raft/beast_https_server.hpp>
 #include <raft/static_key_authorizer.hpp>
 #include <raft/static_keys_file.hpp>
+
+#ifdef KYTHIRA_SQS_NODE_DURABLE
+#include "sqs_module.hpp"
+
+#include <raft/kythira_node_host.hpp>
+#include <raft/node_core.hpp>
+#include <raft/rocksdb_kv_engine.hpp>
+#endif
 
 #include <openssl/rand.h>
 
@@ -57,11 +67,19 @@ constexpr std::string_view usage =
     "usage: sqs_node [--help | --self-test]\n"
     "\n"
     "The Kythira Amazon SQS-compatible daemon. With no argument it serves the SQS\n"
-    "API on SQS_LISTEN until SIGINT or SIGTERM, keeping queues in memory (a\n"
-    "single development node). Settings come from the environment: SQS_LISTEN,\n"
-    "SQS_TLS_CERT, SQS_TLS_KEY, SQS_ALLOW_PLAINTEXT, SQS_ENDPOINT, SQS_REGION,\n"
-    "SQS_PARTITION, SQS_STATIC_KEYS_FILE (required), SQS_RECEIPT_KEYS_FILE,\n"
-    "SQS_FORWARD_SECRET, SQS_COMPAT, SQS_MAX_BODY_BYTES.\n"
+    "API on SQS_LISTEN until SIGINT or SIGTERM. Settings come from the\n"
+    "environment: SQS_LISTEN, SQS_TLS_CERT, SQS_TLS_KEY, SQS_ALLOW_PLAINTEXT,\n"
+    "SQS_ENDPOINT, SQS_REGION, SQS_PARTITION, SQS_STATIC_KEYS_FILE (required),\n"
+    "SQS_RECEIPT_KEYS_FILE, SQS_FORWARD_SECRET, SQS_COMPAT, SQS_MAX_BODY_BYTES.\n"
+    "\n"
+    "With KYTHIRA_NODE_DATA_DIR set (in builds with the durable module) the\n"
+    "queues are kept on disk under Raft, on one node or several: KYTHIRA_NODE_ID,\n"
+    "KYTHIRA_NODE_PEERS, KYTHIRA_NODE_RAFT_BIND, KYTHIRA_NODE_RAFT_PORT,\n"
+    "KYTHIRA_NODE_TLS_CERT, _TLS_KEY, _TLS_CA, KYTHIRA_NODE_INSECURE_PLAINTEXT,\n"
+    "plus SQS_PEER_ENDPOINTS, SQS_PEER_CA and SQS_PROPOSE_TIMEOUT_MS; a durable\n"
+    "node needs SQS_RECEIPT_KEYS_FILE or SQS_FORWARD_SECRET, and more than one\n"
+    "node needs SQS_FORWARD_SECRET. Without it, one node keeps its queues in\n"
+    "memory and loses them when it stops.\n"
     "\n"
     "  --help       print this text\n"
     "  --self-test  check the generated operation table, then exit\n";
@@ -258,6 +276,69 @@ auto serve() -> int {
 
 #endif
 
+#ifdef KYTHIRA_SQS_NODE_DURABLE
+
+auto process_env(std::string_view name) -> std::optional<std::string> {
+    const auto* v = std::getenv(std::string(name).c_str());
+    return v == nullptr || *v == '\0' ? std::nullopt : std::optional<std::string>(v);
+}
+
+/// The SQS module alone on a node: kythira_node's transport and host, the
+/// module in a stand-alone group space (no id offset or key prefix).
+auto serve_durable() -> int {
+    namespace sn = kythira::service_node;
+    using host_type = sn::kythira_node_host;
+    sigset_t set;
+    sigemptyset(&set);
+    sigaddset(&set, SIGINT);
+    sigaddset(&set, SIGTERM);
+    pthread_sigmask(SIG_BLOCK, &set, nullptr);
+
+    auto parsed = sn::node_config_from_env(process_env);
+    if (const auto* refused = std::get_if<std::string>(&parsed)) {
+        std::cerr << "sqs_node: " << *refused << std::endl;
+        return 2;
+    }
+    const auto config = std::get<sn::node_config>(parsed);
+    int status = 0;
+    try {
+        sn::kythira_node_stack stack(config);
+        host_type host(config, sn::kythira_node_stack::parse_id(config.node_id), stack.client(),
+                       stack.server());
+        sn::module_plan<host_type> plan;
+        plan.modules.push_back(
+            std::make_unique<kythira::sqs_node::sqs_module<host_type, kythira::rocksdb_kv_engine>>(
+                true));
+        plan.spaces.push_back(sn::group_space::standalone(sn::module_numbers::sqs));
+        sn::node_runner<host_type> runner(
+            std::move(plan), config, [](bool error, std::string_view line) {
+                std::cerr << "sqs_node: " << (error ? "error: " : "") << line << std::endl;
+            });
+        try {
+            runner.start(host, process_env);
+            wait_for_signal();
+        } catch (const std::invalid_argument& e) {
+            std::cerr << "sqs_node: " << e.what() << std::endl;
+            status = 2;
+        } catch (const std::exception& e) {
+            std::cerr << "sqs_node: " << e.what() << std::endl;
+            status = 1;
+        }
+        // The module closes its listener and stops its groups before the
+        // transport goes.
+        runner.stop([&stack] { stack.shutdown(); });
+    } catch (const std::exception& e) {
+        std::cerr << "sqs_node: " << e.what() << std::endl;
+        return 1;
+    }
+    if (status == 0) {
+        std::cout << "sqs_node stopped" << std::endl;
+    }
+    return status;
+}
+
+#endif
+
 }  // namespace
 
 auto main(int argc, char** argv) -> int {
@@ -265,6 +346,11 @@ auto main(int argc, char** argv) -> int {
     if (argc == 2 && arg == "--self-test") {
         return self_test();
     }
+#ifdef KYTHIRA_SQS_NODE_DURABLE
+    if (argc == 1 && process_env("KYTHIRA_NODE_DATA_DIR")) {
+        return serve_durable();
+    }
+#endif
 #ifdef KYTHIRA_SQS_NODE_SERVE
     if (argc == 1) {
         return serve();

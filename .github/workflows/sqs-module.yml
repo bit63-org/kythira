@@ -41,6 +41,7 @@ on:
       - "scripts/check_module_boundaries.py"
       - "scripts/tests/test_check_module_boundaries.py"
       - "configs/ci_full_defconfig"
+      - "configs/ci_dynamodb_defconfig"
       - "configs/ci_no_sqs_defconfig"
       - "Kconfig"
       - "CMakeLists.txt"
@@ -56,6 +57,7 @@ on:
       - "scripts/check_module_boundaries.py"
       - "scripts/tests/test_check_module_boundaries.py"
       - "configs/ci_full_defconfig"
+      - "configs/ci_dynamodb_defconfig"
       - "configs/ci_no_sqs_defconfig"
       - "Kconfig"
       - "CMakeLists.txt"
@@ -148,14 +150,16 @@ jobs:
           namespace: ${{ vars.OCI_BUILD_CACHE_NAMESPACE }}
           region: ${{ vars.OCI_CI_REGION }}
 
-      # Byte-identical to ci.yml's x64 clang++-18 key (config-variants and
-      # the clang build-and-test leg), so this job reuses their tree.
+      # With RocksDB, which the durable sqs_node keeps its replica in: the
+      # module tests, the split client suites and the container scenario
+      # all run it. Byte-identical to dynamodb-module.yml's key and ci.yml's
+      # rocksdb config variant, so this job reuses their tree.
       - name: Cache vcpkg packages
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         id: vcpkg-cache
         with:
           path: vcpkg_installed
-          key: vcpkg-${{ runner.os }}-${{ runner.arch }}-edhoc-clang++-18-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json', 'vcpkg-overlays/**') }}
+          key: vcpkg-${{ runner.os }}-${{ runner.arch }}-edhoc-rocksdb-clang++-18-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json', 'vcpkg-overlays/**') }}
 
       - name: Bootstrap vcpkg and install dependencies
         if: steps.vcpkg-cache.outputs.cache-hit != 'true'
@@ -167,7 +171,7 @@ jobs:
           git clone --filter=blob:none https://github.com/microsoft/vcpkg.git /tmp/vcpkg
           git -C /tmp/vcpkg checkout 9a7f7340a6c5f11f24c3d59f85e07143feb84e06
           /tmp/vcpkg/bootstrap-vcpkg.sh -disableMetrics
-          /tmp/vcpkg/vcpkg install --triplet ${{ steps.triplet.outputs.value }} --no-print-usage --x-feature=edhoc
+          /tmp/vcpkg/vcpkg install --triplet ${{ steps.triplet.outputs.value }} --no-print-usage --x-feature=edhoc --x-feature=rocksdb
         env:
           VCPKG_DEFAULT_TRIPLET: ${{ steps.triplet.outputs.value }}
 
@@ -176,12 +180,14 @@ jobs:
         if: steps.buildcache.outputs.enabled == 'true'
         run: scripts/oci-build-cache/start-sccache.sh
 
-      - name: Configure (module on, ci_full_defconfig, strict)
+      # ci_full_defconfig plus the RocksDB engine (ci_dynamodb_defconfig,
+      # which keeps CONFIG_SQS=y), so sqs_node is built durable.
+      - name: Configure (module on, ci_dynamodb_defconfig, strict)
         run: |
           cmake -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_CXX_COMPILER=clang++-18 \
-            -DKYTHIRA_KCONFIG=configs/ci_full_defconfig \
+            -DKYTHIRA_KCONFIG=configs/ci_dynamodb_defconfig \
             -DKYTHIRA_KCONFIG_STRICT=ON \
             -DKYTHIRA_COMPILER_LAUNCHER=${{ steps.sccache.outputs.launcher || 'none' }} \
             -DKYTHIRA_LINKER=mold \

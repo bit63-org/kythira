@@ -77,25 +77,28 @@ PR unless noted.
     listener and daemon wiring come with task 4's handlers (nothing to
     serve before then).
 
-- [ ] 4. Queue and message API
+- [x] 4. Queue and message API
   - Queue operations; send, receive, delete, visibility and batches;
     attributes and MD5; receipt handles
   - AddPermission and RemovePermission over `sqs_queue_policy.hpp`; the
     HTTP listener on the shared Beast host and the `sqs_node` wiring
     (static keys from core's `static_keys_file.hpp`), moved here from
     task 3 so they arrive with handlers to serve
-  - Done so far: message attributes, MD5 and receipt handles
+  - Done: message attributes, MD5 and receipt handles
     (`sqs_messages.hpp`, `sqs_receipts.hpp`); queue attributes
     (`sqs_queue_attributes.hpp`); the catalog in the queue state machine
     (`sqs_catalog.hpp`); every queue and message handler including
     AddPermission and RemovePermission (`sqs_service.hpp`) over
     `queue_cluster`; `raft_queue_cluster` and leader forwarding; the
-    listener (`sqs_listener.hpp`) and `sqs_node` serving the API from one
-    in-memory node (checked end to end with AWS CLI v2). Left: the
-    kythira_node module on `multi_raft`, so a send is acknowledged only
-    once committed (Requirement 5.2) and sqs_node runs durable and
-    multi-node
-  - _Requirements: 4.1, 5.1, 5.3, 5.5_
+    listener (`sqs_listener.hpp`); the service module, number 9, on
+    `multi_raft` (`cmd/sqs_node/sqs_module.hpp`), registered for
+    kythira_node and run alone by `sqs_node` when `KYTHIRA_NODE_DATA_DIR`
+    is set, so a send is acknowledged only once committed (Requirement
+    5.2); `sqs_node`'s in-memory development mode otherwise. Checked end
+    to end with AWS CLI v2 in both modes, across a restart. One group
+    holds every queue until the independent layers (task 12) spread
+    partitions over groups
+  - _Requirements: 1.2, 4.1, 5.1, 5.2, 5.3, 5.5_
 
 - [ ] 5. Long polling
   - Parking, availability subscriptions, leader deadline ticks
