@@ -249,6 +249,17 @@ auto agreement_workload() -> workload_options {
     return workload;
 }
 
+/// Where the operations that did not complete went. A CI run once completed
+/// 60 of 64 on the data path with no election anywhere in the log, and the
+/// bare "60 != 64" could not say whether the four were not-leader answers,
+/// timeouts or transport errors.
+auto shortfall(const kythira::testing::operation_tally& t) -> std::string {
+    return "not_leader=" + std::to_string(t._not_leader) +
+           " epoch_mismatch=" + std::to_string(t._epoch_mismatch) +
+           " merging=" + std::to_string(t._merging) + " timeout=" + std::to_string(t._timeout) +
+           " transport=" + std::to_string(t._transport) + " other=" + std::to_string(t._other);
+}
+
 }  // namespace
 
 BOOST_AUTO_TEST_SUITE(driver_agreement)
@@ -274,6 +285,7 @@ BOOST_AUTO_TEST_CASE(both_paths_offer_the_same_workload,
         BOOST_TEST_MESSAGE("  in-process: " << row._ops_per_second << " ops/sec, p50 "
                                             << row._p50.count() / 1000 << " us, completed "
                                             << row._tally._completed << '/' << row._tally._offered);
+        BOOST_TEST_INFO("shortfall: " << shortfall(row._tally));
         BOOST_CHECK_EQUAL(row._tally._completed, row._tally._offered);
         BOOST_CHECK(row._internal_counters);
     }
@@ -296,6 +308,7 @@ BOOST_AUTO_TEST_CASE(both_paths_offer_the_same_workload,
         BOOST_TEST_MESSAGE("  data path:  " << row._ops_per_second << " ops/sec, p50 "
                                             << row._p50.count() / 1000 << " us, completed "
                                             << row._tally._completed << '/' << row._tally._offered);
+        BOOST_TEST_INFO("shortfall: " << shortfall(row._tally));
         BOOST_CHECK_EQUAL(row._tally._completed, row._tally._offered);
         // The row must say the cluster's own counters were not visible, so the
         // artifacts write those columns empty rather than zero.
