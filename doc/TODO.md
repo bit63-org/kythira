@@ -3733,9 +3733,12 @@ unverified completion claim.
   and suites with no Folly use at all. Three the list called "no direct
   Folly" really test `kythira::Future` from raft/future.hpp, which includes
   Folly unconditionally, and stay gated with that reason. `tests/chaos/`
-  and `tests/docker_chaos/` moved out of the Folly block too (16 suites).
-  Still gated on Folly as a whole: the Alibaba component tests,
-  `redis_gateway_integration_test` and its twins, and `cmd/ca_cluster_node`. Un-gating one means building and running it on the
+  and `tests/docker_chaos/` moved out of the Folly block too (16 suites),
+  as did the Alibaba component tests (4) and the in-process Redis gateway
+  suites (6). What remains are daemons whose `main()` calls `folly::Init`
+  (`cmd/ca_cluster_node`, `redis_gateway_node`, the Kinesis daemon,
+  `cmd/multi_raft_node`) and the suites that run them, plus the suites that
+  use Folly by name. Un-gating one means building and running it on the
   Boost backend, then deleting its allowlist line in the same change (the
   checker rejects stale lines).
 
