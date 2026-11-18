@@ -6917,15 +6917,19 @@ if(TARGET Folly::folly)
         LABELS "performance;benchmark;future-backend"
         TIMEOUT 120
     )
-
-    # ── Chaos tests (libfiu required) ─────────────────────────────────────────────
-    add_subdirectory(chaos)
-
-    # ── Docker chaos tests (Boost + httplib required) ─────────────────────────────
-    add_subdirectory(docker_chaos)
 else()
     message(STATUS "future_backend_benchmark_test: skipped (requires Folly)")
 endif()
+
+# ── Chaos tests (libfiu required) ─────────────────────────────────────────────
+# Outside the Folly gate: the suites run on whichever future backend the build
+# picks, and chaos_test_types.hpp only calls folly::Init under Folly's.
+add_subdirectory(chaos)
+
+# ── Docker chaos tests (Boost + httplib required) ─────────────────────────────
+# The harness and scenario tests use neither network_simulator nor Folly; the
+# image targets that need chaos_node keep their own folly_FOUND guards inside.
+add_subdirectory(docker_chaos)
 
 # ── gRPC plaintext gate: target classification (.kiro/specs/grpc-plaintext-opt-in/)
 # Deliberately outside the raft_grpc_transport gate below: raft/grpc_target.hpp
