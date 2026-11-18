@@ -33,6 +33,8 @@ module's consumers (Requirement 17.3).
 | `tools/s3-service-reference.json`, `tools/gen_s3_actions.py`, `include/kythira/s3/s3_actions.hpp` | AWS's Service Authorization Reference for `s3` (v1.5, pinned byte for byte, SHA-256 `42a0406559f357e77fad1e4a77c1d3d9aa62bc90da4dd990c13149ae92147c6d`, from `https://servicereference.us-east-1.amazonaws.com/v1/s3/s3.json`) and the generated action table, operation-to-action map and static-key roles; `s3_actions_up_to_date` fails when stale | 6 |
 | `include/kythira/s3/s3_authz.hpp` | the actions, resources and condition keys each request asks the authorizer for; `s3_authz_test` | 6 |
 | `include/kythira/s3/s3_auth.hpp` | SigV4 authentication with S3's rules (header and presigned, every payload mode; SigV2 and SigV4a refused) and the body reader that checks a hashed payload or decodes `aws-chunked` streams; `s3_auth_test` | 6 |
+| `include/kythira/s3/s3_access.hpp` | Object Ownership, ACLs (canned, header and XML), Block Public Access, policy publicness, and the access decision combining the authorizer, ACLs and anonymous access; `s3_access_test` | 6 |
+| `include/kythira/s3/s3_post_policy.hpp` | browser POST uploads: streaming multipart/form-data parser, policy document and conditions, policy signature; `s3_post_policy_test` | 6 |
 | `include/kythira/s3/s3_routes.hpp` | the operation table as routes for core's REST-XML router, and `route_request` (addressing, query, operation); `s3_routing_test` routes every recorded client request | 3 |
 | `implemented-operations.txt` | operations the gateway implements | 1 onward |
 | `doc/unsupported.md` | every other operation, with its planned task, reason and the exact error it returns (`NotImplemented`, 501) | 1 onward |

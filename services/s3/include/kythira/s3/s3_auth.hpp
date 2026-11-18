@@ -62,6 +62,7 @@ enum class auth_kind : std::uint8_t {
     anonymous,
     header,     ///< SigV4 in the Authorization header
     presigned,  ///< SigV4 in the query string
+    post,       ///< a browser POST form's policy signature (s3_post_policy.hpp)
 };
 
 /// What authentication established.
@@ -77,13 +78,15 @@ struct authenticated {
     [[nodiscard]] auto payload() const -> sigv4::payload_mode {
         return claim ? claim->payload : sigv4::payload_mode::unsigned_payload;
     }
-    /// `s3:authType`: `REST-HEADER`, `REST-QUERY-STRING`, or empty.
+    /// `s3:authType`: `REST-HEADER`, `REST-QUERY-STRING`, `POST`, or empty.
     [[nodiscard]] auto auth_type() const -> std::string {
         switch (kind) {
             case auth_kind::header:
                 return "REST-HEADER";
             case auth_kind::presigned:
                 return "REST-QUERY-STRING";
+            case auth_kind::post:
+                return "POST";
             case auth_kind::anonymous:
                 break;
         }
