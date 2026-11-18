@@ -20,6 +20,9 @@
 //     KYTHIRA_NODE_INSECURE_PLAINTEXT=1.
 //   - KYTHIRA_DYNAMODB_PEER_GATEWAYS from each other peer's host and this
 //     node's API port, as Kinesis's peer gateways default.
+// - KYTHIRA_DYNAMODB_ROLES is never filled in: the role set is the
+//   module's own (.kiro/specs/dynamodb-independent-layers/ Requirement
+//   2.1), all four unless set, whatever roles other modules run.
 
 #include <kythira/dynamodb/gateway.hpp>
 

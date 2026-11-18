@@ -116,3 +116,18 @@ BOOST_AUTO_TEST_CASE(a_node_without_peers_runs_without_raft) {
     const auto c = parse(dynamodb_gateway::composite_env(lookup(vars)));
     BOOST_TEST(!c.cluster.enabled());
 }
+
+// .kiro/specs/dynamodb-independent-layers/ task 1 (Requirement 2.1): in
+// kythira_node the role set is the DynamoDB module's own. No node setting
+// fills it in and another module's roles do not reach it, so a node that
+// runs Kinesis as a gateway alone still runs DynamoDB with all four.
+BOOST_AUTO_TEST_CASE(the_role_set_is_the_modules_own) {
+    auto vars = node_vars();
+    vars["KINESIS_ROLES"] = "gateway";
+    BOOST_TEST((parse(dynamodb_gateway::composite_env(lookup(vars))).roles ==
+                kythira::layers::role_set::all()));
+    vars["KYTHIRA_DYNAMODB_ROLES"] = "data,segments";
+    const auto c = parse(dynamodb_gateway::composite_env(lookup(vars)));
+    BOOST_TEST(c.roles.to_string() == "data,segments");
+    BOOST_TEST(c.cluster.node_id == "2");  // still a voter
+}

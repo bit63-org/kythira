@@ -35,6 +35,7 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <tuple>
 #include <variant>
 #include <vector>
 
@@ -228,6 +229,108 @@ BOOST_AUTO_TEST_CASE(requests_on_every_node_reach_one_table) {
     BOOST_TEST(type == "ResourceNotFoundException");
 
     for (int i = 0; i < k_nodes; ++i) {
+        BOOST_TEST(!c.failures.at(i), "node " << i + 1 << " stopped early");
+    }
+}
+
+namespace {
+
+/// A raw request to `port`: the status, the role header and the body.
+auto raw_request(std::uint16_t port, http::verb verb, const std::string& body)
+    -> std::tuple<unsigned, std::string, std::string> {
+    http::request<http::string_body> req{verb, "/", 11};
+    req.set(http::field::host, "127.0.0.1:" + std::to_string(port));
+    req.set(http::field::content_type, "application/x-amz-json-1.0");
+    req.body() = body;
+    req.prepare_payload();
+    boost::asio::io_context ioc;
+    boost::beast::tcp_stream s(ioc);
+    s.expires_after(std::chrono::seconds(30));
+    s.connect({boost::asio::ip::make_address("127.0.0.1"), port});
+    http::write(s, req);
+    boost::beast::flat_buffer buf;
+    http::response<http::string_body> res;
+    http::read(s, buf, res);
+    return {static_cast<unsigned>(res.result_int()), std::string(res[ddb::k_roles_header]),
+            res.body()};
+}
+
+}  // namespace
+
+// .kiro/specs/dynamodb-independent-layers/ task 1: a voter started with
+// KYTHIRA_DYNAMODB_ROLES=data,segments holds replicas, votes, and serves
+// the ops the other voters' gateways forward to the groups it leads, but
+// answers no client.
+BOOST_AUTO_TEST_CASE(a_data_only_voter_holds_replicas_and_serves_no_client) {
+    constexpr int k_data_only = 2;
+    cluster c(false, {}, false, {{k_data_only, {{"KYTHIRA_DYNAMODB_ROLES", "data,segments"}}}});
+    BOOST_REQUIRE(c.wait_for_log(k_data_only, "roles data,segments", std::chrono::seconds(60)));
+    BOOST_REQUIRE(
+        c.wait_for_log(0, "roles gateway,front_end,data,segments", std::chrono::seconds(60)));
+
+    const auto created = c.call_until_served(
+        0, "CreateTable",
+        R"({"TableName":"orders","BillingMode":"PAY_PER_REQUEST",)"
+        R"("AttributeDefinitions":[{"AttributeName":"pk","AttributeType":"S"}],)"
+        R"("KeySchema":[{"AttributeName":"pk","KeyType":"HASH"}]})");
+    BOOST_REQUIRE_MESSAGE(created.status == 200U || created.type() == "ResourceInUseException",
+                          json::serialize(created.body));
+    const auto active = [&](int i) {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(60);
+        while (std::chrono::steady_clock::now() < deadline) {
+            const auto d = c.call_until_served(i, "DescribeTable", R"({"TableName":"orders"})");
+            if (d.status == 200U && d.body.at("Table").at("TableStatus").as_string() == "ACTIVE") {
+                return true;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+        return false;
+    };
+    BOOST_REQUIRE(active(0));
+    BOOST_REQUIRE(active(1));
+
+    // Writes and consistent reads through both client nodes, whichever
+    // voter leads the item's group.
+    for (int k = 0; k < 8; ++k) {
+        const auto key = "k" + std::to_string(k);
+        const auto put = c.call_until_served(
+            k % 2, "PutItem", R"({"TableName":"orders","Item":{"pk":{"S":")" + key + R"("}}})");
+        BOOST_REQUIRE_MESSAGE(put.status == 200U, json::serialize(put.body));
+        const auto got = c.call_until_served(
+            1 - k % 2, "GetItem",
+            R"({"TableName":"orders","ConsistentRead":true,"Key":{"pk":{"S":")" + key + R"("}}})");
+        BOOST_REQUIRE_MESSAGE(got.status == 200U && got.body.contains("Item"),
+                              json::serialize(got.body));
+    }
+
+    // The data node answers health with its roles, and clients with 404.
+    const auto port = c.gateway_ports.at(k_data_only);
+    const auto [health, health_roles, health_body] = raw_request(port, http::verb::get, "");
+    BOOST_TEST(health == 200U);
+    BOOST_TEST(health_roles == "data,segments");
+    const auto [refused, refused_roles, refused_body] =
+        raw_request(port, http::verb::post, R"({"TableName":"orders"})");
+    BOOST_TEST(refused == 404U);
+    BOOST_TEST(refused_roles == "data,segments");
+    BOOST_TEST(refused_body.find("no DynamoDB gateway") != std::string::npos);
+    const auto [full, full_roles, full_body] =
+        raw_request(c.gateway_ports.at(0), http::verb::get, "");
+    BOOST_TEST(full_roles == "gateway,front_end,data,segments");
+
+    // It is a voter: with node 1 stopped, node 2 and the data node are the
+    // quorum every write needs.
+    c.stop(0);
+    for (int k = 0; k < 8; ++k) {
+        const auto key = "after-" + std::to_string(k);
+        const auto put = c.call_until_served(
+            1, "PutItem", R"({"TableName":"orders","Item":{"pk":{"S":")" + key + R"("}}})");
+        BOOST_REQUIRE_MESSAGE(put.status == 200U, json::serialize(put.body));
+    }
+    const auto scan = c.call_until_served(
+        1, "Scan", R"({"TableName":"orders","ConsistentRead":true,"Select":"COUNT"})");
+    BOOST_REQUIRE_MESSAGE(scan.status == 200U, json::serialize(scan.body));
+    BOOST_TEST(scan.body.at("Count").to_number<int>() == 16);
+    for (int i = 1; i < k_nodes; ++i) {
         BOOST_TEST(!c.failures.at(i), "node " << i + 1 << " stopped early");
     }
 }

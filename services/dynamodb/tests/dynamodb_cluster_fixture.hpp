@@ -291,6 +291,8 @@ struct cluster {
     std::array<std::vector<std::string>, k_nodes> logs{};
 
     std::map<std::string, std::string> extra_vars;
+    /// Settings for one node only, over `extra_vars` (index to settings).
+    std::map<int, std::map<std::string, std::string>> node_vars;
     // After `mutex` and `logs`, which its report reads, and before the
     // relays, so it is destroyed after them: the destructor's body stops
     // the nodes under their own watchdogs, and this one also covers the
@@ -307,8 +309,9 @@ struct cluster {
     /// `relayed` every link between two regions' strong hosts and gateways
     /// through a relay `cut_off` can cut.
     explicit cluster(bool three_regions = false, std::map<std::string, std::string> extra = {},
-                     bool relayed = false)
-        : regions(three_regions), extra_vars(std::move(extra)) {
+                     bool relayed = false,
+                     std::map<int, std::map<std::string, std::string>> per_node = {})
+        : regions(three_regions), extra_vars(std::move(extra)), node_vars(std::move(per_node)) {
         for (int i = 0; i < k_nodes; ++i) {
             gateway_ports.at(i) = kythira::testing::free_port();
             raft_ports.at(i) = kythira::testing::free_port();
@@ -443,6 +446,11 @@ struct cluster {
         };
         for (const auto& [k, v] : extra_vars) {
             vars[k] = v;
+        }
+        if (const auto it = node_vars.find(i); it != node_vars.end()) {
+            for (const auto& [k, v] : it->second) {
+                vars[k] = v;
+            }
         }
         return parse(vars);
     }
