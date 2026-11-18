@@ -68,6 +68,20 @@ foreach(_rdb_test IN ITEMS redis_rdb_file_unit_test redis_rdb_golden_test redis_
     set_tests_properties(${_rdb_test} PROPERTIES LABELS "unit;redis" TIMEOUT 300)
 endforeach()
 target_link_libraries(redis_acl_unit_test PRIVATE OpenSSL::Crypto)
+# redis-general-data-types task 1: the generated command registry, its
+# agreement with the commands the gateway accepts, and its append-only ids;
+# and the header's freshness against tools/redis_commands.yaml.
+kythira_redis_test(redis_command_registry_test redis_command_registry_test.cpp)
+target_compile_definitions(redis_command_registry_test PRIVATE
+    KYTHIRA_REDIS_GOLDEN_DIR="${KYTHIRA_REDIS_GOLDEN_DIR}")
+set_tests_properties(redis_command_registry_test PROPERTIES LABELS "unit;redis" TIMEOUT 60)
+find_package(Python3 REQUIRED COMPONENTS Interpreter)
+add_test(NAME redis_command_ids_header_fresh
+    COMMAND "${Python3_EXECUTABLE}" tools/gen_redis_commands.py
+            tools/redis_commands.yaml
+            include/kythira/redis/redis_command_ids.hpp --check
+    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/..")
+set_tests_properties(redis_command_ids_header_fresh PROPERTIES LABELS "unit;redis" TIMEOUT 60)
 kythira_redis_test(redis_auth_limiter_unit_test redis_auth_limiter_unit_test.cpp)
 # redis_gateway_node's own environment parsing (the plaintext-Raft opt-in).
 kythira_redis_test(redis_gateway_node_config_unit_test
