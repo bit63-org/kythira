@@ -1632,8 +1632,16 @@ private:
                            std::uint64_t now, const receipt_ref& r) -> entry_result {
         entry_result e{r.entry_id, entry_result::status::ok, {}, r.sequence};
         auto m = load_message(p, r.sequence);
-        if (!m || m->receive_sequence != r.receive_sequence || r.receive_sequence == 0) {
+        if (!m || r.receive_sequence == 0) {
             e.outcome = entry_result::status::invalid_receipt;
+            return e;
+        }
+        if (m->receive_sequence != r.receive_sequence) {
+            // A handle from an earlier receive: SQS accepts the change
+            // (task 13's recordings, seed 1 step 12). Like a stale delete
+            // it does nothing here, so it cannot shorten or stretch the
+            // newer receiver's lease.
+            e.outcome = entry_result::status::stale;
             return e;
         }
         e.message_id = m->message_id;

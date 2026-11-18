@@ -48,9 +48,15 @@ import json
 import pathlib
 import sys
 
-# Query errors that neither model gives. Empty until task 13's recordings
-# show a code that differs from the shape name.
-QUERY_ERROR_OVERRIDES = {}
+# Query errors that neither model gives, as (code, status, sender fault),
+# each from task 13's recordings of real SQS
+# (tests/differential/recordings/aws-seed-*.json).
+QUERY_ERROR_OVERRIDES = {
+    # ChangeMessageVisibility and DeleteMessage with "not-a-handle" answer
+    # 404 (seed 1 step 75, seed 2 step 144); the botocore models give no
+    # status, and the Smithy model's awsQueryError trait agrees on 404.
+    "ReceiptHandleIsInvalid": ("ReceiptHandleIsInvalid", 404, True),
+}
 
 HEADER = """\
 // Copyright (c) 2026 Clark Rawlins

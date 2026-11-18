@@ -51,8 +51,11 @@ questions with one right answer:
   message id quoted in an error message. The endpoint, account, region and
   queue-name prefix are replaced in every string.
 - MD5 digests are compared: they depend only on what was sent.
+- A batch answer's `Successful` and `Failed` entries are compared as sets
+  sorted by `Id`: SQS lists them in no particular order.
 - An error compares as its code and HTTP status. Its message is printed as
-  a note and fails only with `--strict-messages`.
+  a note and fails only with `--strict-messages`, which `run_replay.sh`
+  passes.
 
 A comparison stops at the first step whose request differs, since every
 later step diverges.
@@ -78,8 +81,19 @@ comparison offline.
 
 A recording touches a real AWS account, so each one needs Clark's go. A
 run is a few hundred requests, inside SQS's free tier. See
-`tests/differential/recordings/README.md`. Until the first one is checked
-in, CI runs the self-check only.
+`tests/differential/recordings/README.md`.
+
+Seeds 1, 2 and 3 were recorded on 2026-11-18. Their first replay found
+217 differences, now all fixed, with nothing in `allow.json`:
+
+| SQS does | Kythira did |
+|---|---|
+| accepts ChangeMessageVisibility with a handle from an earlier receive | InvalidParameterValue; now accepted, and like a stale delete it changes nothing |
+| answers an unknown SetQueueAttributes name with InvalidAttributeName, "Unknown Attribute X." | the model validator's enum error |
+| answers ReceiptHandleIsInvalid with HTTP 404 | 400 (no model gives the status) |
+| leaves an empty `Successful` or `Failed` list out of a batch answer | `[]` |
+| lists batch entries in any order | request order (a comparison change, not a fix) |
+| words five errors its own way | other wordings, now SQS's |
 
 The rest of task 13, the dispatch-only real-cloud bundle (client suite
 against SQS and Kythira, the Extended Client on real S3, a real SNS topic

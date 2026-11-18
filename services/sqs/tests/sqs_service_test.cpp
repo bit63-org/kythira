@@ -404,13 +404,13 @@ BOOST_FIXTURE_TEST_CASE(a_handle_is_good_only_for_its_receive, fixture) {
                    .at("ApproximateReceiveCount")
                    .as_string() == "2");
 
-    // The first handle's delete is accepted and ignored; its visibility
-    // change is refused.
+    // The first handle's delete and visibility change are accepted and
+    // ignored, as SQS accepts them (task 13's recordings).
     const auto old = field(first.at(0), "ReceiptHandle");
     BOOST_TEST(call("DeleteMessage", {{"QueueUrl", url}, {"ReceiptHandle", old}}).status == 200U);
     BOOST_TEST(call("ChangeMessageVisibility",
                     {{"QueueUrl", url}, {"ReceiptHandle", old}, {"VisibilityTimeout", 0}})
-                   .type() == "com.amazon.coral.validate#ValidationException");
+                   .status == 200U);
     BOOST_TEST(attributes(url).at("ApproximateNumberOfMessagesNotVisible").as_string() == "1");
 
     // The current handle can make it visible at once.

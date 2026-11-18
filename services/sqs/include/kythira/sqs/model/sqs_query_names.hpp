@@ -205,7 +205,7 @@ inline constexpr std::array<query_error, 28> k_errors{{
     {"QueueDeletedRecently", "AWS.SimpleQueueService.QueueDeletedRecently", 400, true},
     {"QueueDoesNotExist", "AWS.SimpleQueueService.NonExistentQueue", 400, true},
     {"QueueNameExists", "QueueAlreadyExists", 400, true},
-    {"ReceiptHandleIsInvalid", "ReceiptHandleIsInvalid", 400, true},
+    {"ReceiptHandleIsInvalid", "ReceiptHandleIsInvalid", 404, true},
     {"RequestThrottled", "RequestThrottled", 400, true},
     {"ResourceNotFoundException", "ResourceNotFoundException", 404, true},
     {"TooManyEntriesInBatchRequest", "AWS.SimpleQueueService.TooManyEntriesInBatchRequest", 400, true},

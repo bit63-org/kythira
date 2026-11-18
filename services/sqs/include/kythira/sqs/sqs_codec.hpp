@@ -244,14 +244,27 @@ private:
     using form_params = std::map<std::string, std::string, std::less<>>;
     using failure = std::optional<aws_json::error>;
 
-    /// Members validated as a list of strings instead of by their model
-    /// shape. ReceiveMessage's `AttributeNames` is modeled as queue
-    /// attribute names, but every SDK sends message system attribute names
-    /// in it (`SentTimestamp`, `MessageGroupId`; boto3 and the Java SDK in
-    /// the task 1 evidence), which SQS accepts: it predates
-    /// `MessageSystemAttributeNames`. The handler checks the names.
-    static constexpr std::array<std::pair<std::string_view, std::string_view>, 1> k_lenient{{
-        {"ReceiveMessage", "AttributeNames"},
+    /// Members validated as a list (or map) of strings instead of by their
+    /// model shape; the handler checks the names.
+    ///
+    /// - ReceiveMessage's `AttributeNames` is modeled as queue attribute
+    ///   names, but every SDK sends message system attribute names in it
+    ///   (`SentTimestamp`, `MessageGroupId`; boto3 and the Java SDK in the
+    ///   task 1 evidence), which SQS accepts: it predates
+    ///   `MessageSystemAttributeNames`.
+    /// - SetQueueAttributes' `Attributes` with a name outside the model's
+    ///   enum answers InvalidAttributeName "Unknown Attribute X." in SQS
+    ///   (task 13's recordings, seed 1 step 21), not a validation error;
+    ///   CreateQueue's names go the same way to the same check.
+    struct lenient_member {
+        std::string_view op;
+        std::string_view member;
+        bool map;
+    };
+    static constexpr std::array<lenient_member, 3> k_lenient{{
+        {"ReceiveMessage", "AttributeNames", false},
+        {"SetQueueAttributes", "Attributes", true},
+        {"CreateQueue", "Attributes", true},
     }};
 
     /// Validates `input` against `op`'s input shape, with `k_lenient`'s
@@ -262,24 +275,36 @@ private:
             return std::nullopt;
         }
         std::vector<std::pair<std::string_view, boost::json::value>> lifted;
-        for (const auto& [name, member] : k_lenient) {
+        for (const auto& [name, member, map] : k_lenient) {
             if (op.name != name) {
                 continue;
             }
             if (auto* v = input.if_contains(member)) {
-                const bool strings =
-                    v->is_array() &&
-                    std::all_of(v->get_array().begin(), v->get_array().end(),
-                                [](const boost::json::value& e) { return e.is_string(); });
+                const auto is_string = [](const boost::json::value& e) { return e.is_string(); };
+                bool strings = false;
+                if (map) {
+                    strings = v->is_object() &&
+                              std::all_of(v->get_object().begin(), v->get_object().end(),
+                                          [&](const auto& kv) { return is_string(kv.value()); });
+                } else {
+                    strings = v->is_array() &&
+                              std::all_of(v->get_array().begin(), v->get_array().end(), is_string);
+                }
                 if (!strings) {
                     return make_error(k_validation_error,
                                       "1 validation error detected: Value at '" +
                                           std::string(member) +
-                                          "' failed to satisfy constraint: Member must be a "
-                                          "list of strings");
+                                          "' failed to satisfy constraint: Member must be a " +
+                                          (map ? "map" : "list") + " of strings");
                 }
                 lifted.emplace_back(member, std::move(*v));
-                input.erase(member);
+                if (map) {
+                    // Required in SetQueueAttributes: an empty map stands
+                    // in for the lifted one.
+                    input[member] = boost::json::object{};
+                } else {
+                    input.erase(member);
+                }
             }
         }
         const boost::json::value whole(input);
