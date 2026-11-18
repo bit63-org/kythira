@@ -27,6 +27,7 @@
 #include <kythira/redis/redis_auth_limiter.hpp>
 #include <kythira/redis/redis_forward_link.hpp>
 #include <kythira/redis/redis_kv_commands.hpp>
+#include <kythira/redis/redis_data_access.hpp>
 #include <kythira/redis/redis_gateway_value_access.hpp>
 #include <kythira/redis/redis_kv_state_machine.hpp>
 #include <kythira/redis/redis_server_identity.hpp>
@@ -594,6 +595,7 @@ private:
     auto forward_endpoint(const node_id_type& to) -> std::optional<std::string>;
     auto locate(const std::string& key, std::string& error_reply,
                 std::optional<node_id_type>& forward_to) -> group_node_type*;
+    [[nodiscard]] static auto data_error(redis_data_status status) -> std::string;
     auto authorize(session& s, std::string_view upper, const std::vector<std::string_view>& keys)
         -> std::optional<std::string>;
     auto audit(session& s, std::string_view command, std::string_view outcome) -> void;
@@ -628,7 +630,9 @@ private:
     auto return_forward_socket(const std::string& endpoint,
                                std::unique_ptr<redis_forward_link> sock) -> void;
 
-    Host& _host;
+    /// The data layer (redis_data_access.hpp). Every command reaches data
+    /// through it, never through the host directly (Requirement 16.5).
+    redis_local_data_access<Host> _data;
     redis_acl& _acl;
     Logger& _logger;
     Metrics& _metrics;
