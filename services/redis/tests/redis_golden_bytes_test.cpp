@@ -457,3 +457,38 @@ BOOST_AUTO_TEST_CASE(state_machine_bytes_match_the_golden_file, *boost::unit_tes
     out += cache_kv();
     check_golden("state_machines.txt", out);
 }
+
+// The KRV3 snapshot format (Requirement 14.2, 14.6): the plain stream's
+// store after a format gate, with an applied command time, and each half of
+// a split. In a file of its own so state_machines.txt keeps the pre-gate
+// bytes, which every group that never passes the gate still writes.
+BOOST_AUTO_TEST_CASE(krv3_state_matches_the_golden_file, *boost::unit_test::timeout(60)) {
+    std::string out =
+        "# get_state() and split_state() of redis_kv_state_machine after a format\n"
+        "# gate (redis-general-data-types task 1, marker KRV3). Regenerate with\n"
+        "# KYTHIRA_UPDATE_GOLDENS=1; a change here is a snapshot format change.\n";
+    redis_kv_state_machine<std::uint64_t> sm;
+    std::uint64_t index = 0;
+    for (const auto& c : kv_stream()) {
+        (void)sm.apply(encode_redis_kv_command(c), ++index);
+    }
+    const auto before_gate = sm.get_state();
+    sm.enable_format(1);
+    (void)sm.advance_command_time(k_deadline_ms + 5);
+    out += "## after the gate, level 1\n";
+    const auto state = sm.get_state();
+    render_state(out, state);
+    // The store bytes are the pre-gate blob after the 14-byte header.
+    BOOST_CHECK(
+        std::equal(before_gate.begin(), before_gate.end(), state.begin() + 14, state.end()));
+    redis_kv_state_machine<std::uint64_t> restored;
+    restored.restore_from_snapshot(state, index);
+    BOOST_CHECK_EQUAL(restored.format_level(), 1U);
+    BOOST_CHECK_EQUAL(restored.applied_time_ms(), k_deadline_ms + 5);
+    BOOST_CHECK(restored.get_state() == state);
+    out += "## split at \"sccache/m\"\n";
+    for (const auto& half : sm.split_state({"sccache/m"})) {
+        render_state(out, half);
+    }
+    check_golden("state_machines_krv3.txt", out);
+}

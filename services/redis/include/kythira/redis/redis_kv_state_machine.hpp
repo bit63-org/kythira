@@ -32,6 +32,7 @@
 #include <raft/types.hpp>
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -81,15 +82,24 @@ public:
     /// key, u64 BE expire_at_ms, u32 BE value len, value`, preceded by a
     /// `u32 BE` entry count. This is also the format of every blob
     /// `split_state` produces, so the split/absorb law holds by construction.
+    ///
+    /// Once the group has passed a format gate (`format_level() > 0`,
+    /// redis-general-data-types Requirement 14.2-14.3), the blob starts with
+    /// the marker `KRV3`, then `u16 BE` format level and `u64 BE` applied
+    /// command time, then the store as above. Before the gate the bytes are
+    /// exactly the earlier format, so a group that never enables the new
+    /// commands writes the snapshots it always did.
     [[nodiscard]] auto get_state() const -> std::vector<std::byte> {
-        return serialize_store(_store.begin(), _store.end(), _store.size());
+        return serialize_store(_store.begin(), _store.end(), _store.size(), header());
     }
 
     auto restore_from_snapshot(const std::vector<std::byte>& snapshot_data, LogIndex index)
         -> void {
         store_type incoming;
         std::size_t bytes = 0;
-        deserialize_store(snapshot_data, incoming, bytes);
+        const auto head = deserialize_store(snapshot_data, incoming, bytes);
+        _format_level = head._format_level;
+        _applied_time_ms = head._applied_time_ms;
         _store = std::move(incoming);
         _bytes = bytes;
         _expiring = 0;
@@ -101,6 +111,36 @@ public:
 
     [[nodiscard]] auto last_applied_index() const noexcept -> LogIndex {
         return _last_applied_index;
+    }
+
+    // ---- command time and format level (redis-general-data-types) ---------
+
+    /// The command time a format-0x03 entry stamped `entry_now_ms` runs at:
+    /// `max(entry_now_ms, applied time)`, which also becomes the new applied
+    /// time (Requirement 2.2-2.3). The floor keeps time from running
+    /// backwards when leadership moves to a node whose clock is behind, so
+    /// two entries in log order never see expiry in the opposite order.
+    /// Called only from `apply()`; reads no clock.
+    auto advance_command_time(std::uint64_t entry_now_ms) noexcept -> std::uint64_t {
+        _applied_time_ms = std::max(_applied_time_ms, entry_now_ms);
+        return _applied_time_ms;
+    }
+
+    /// The largest command time this group has applied; 0 before any
+    /// format-0x03 entry. In snapshots and `split_state` output once the
+    /// group has passed the format gate.
+    [[nodiscard]] auto applied_time_ms() const noexcept -> std::uint64_t {
+        return _applied_time_ms;
+    }
+
+    /// The format level the group has passed a gate for; 0 is the earlier
+    /// formats only. One-way (Requirement 14.5).
+    [[nodiscard]] auto format_level() const noexcept -> std::uint16_t { return _format_level; }
+
+    /// Raise the format level, as an applied `format_gate` entry does. A
+    /// lower level than the current one changes nothing.
+    auto enable_format(std::uint16_t level) noexcept -> void {
+        _format_level = std::max(_format_level, level);
     }
 
     // ---- kythira::splittable_state_machine ---------------------------------
@@ -168,25 +208,29 @@ public:
                 ++it;
                 ++n;
             }
-            out.push_back(serialize_store(begin, it, n));
+            out.push_back(serialize_store(begin, it, n, header()));
         }
         std::size_t n = 0;
         for (auto tail = it; tail != _store.end(); ++tail) {
             ++n;
         }
-        out.push_back(serialize_store(it, _store.end(), n));
+        out.push_back(serialize_store(it, _store.end(), n, header()));
         return out;
     }
 
     /// Take on a sibling's state. `range` is unused: there is no range-scoped
     /// structure to update. Incoming entries win on a key collision, which
     /// cannot happen between siblings of one split and is the documented
-    /// behaviour if it ever does.
+    /// behaviour if it ever does. The merged group keeps the larger applied
+    /// command time and the higher format level, so neither time nor the
+    /// gate runs backwards across a merge.
     auto absorb(const std::vector<std::byte>& other_state,
                 [[maybe_unused]] const shard_range<key_type>& range) -> void {
         store_type incoming;
         std::size_t bytes = 0;
-        deserialize_store(other_state, incoming, bytes);
+        const auto head = deserialize_store(other_state, incoming, bytes);
+        enable_format(head._format_level);
+        advance_command_time(head._applied_time_ms);
         for (auto& [key, entry] : incoming) {
             insert_or_replace(key, std::move(entry));
         }
@@ -231,10 +275,26 @@ public:
 
     using store_type = std::map<key_type, entry_handle, std::less<>>;
 
+    /// The `KRV3` snapshot marker (Requirement 14.2).
+    static constexpr std::array<std::byte, 4> k_state_marker{std::byte{'K'}, std::byte{'R'},
+                                                             std::byte{'V'}, std::byte{'3'}};
+
+    /// What precedes the store in a post-gate blob. A level of 0 means no
+    /// header at all: the earlier format.
+    struct state_header {
+        std::uint16_t _format_level = 0;
+        std::uint64_t _applied_time_ms = 0;
+    };
+
     template<typename It>
-    [[nodiscard]] static auto serialize_store(It begin, It end, std::size_t count)
-        -> std::vector<std::byte> {
+    [[nodiscard]] static auto serialize_store(It begin, It end, std::size_t count,
+                                              state_header head = {}) -> std::vector<std::byte> {
         std::vector<std::byte> out;
+        if (head._format_level > 0) {
+            redis_kv_detail::put_bytes(out, k_state_marker);
+            redis_kv_detail::put_u16(out, head._format_level);
+            redis_kv_detail::put_u64(out, head._applied_time_ms);
+        }
         redis_kv_detail::put_u32(out, static_cast<std::uint32_t>(count));
         for (auto it = begin; it != end; ++it) {
             const auto& [key, entry] = *it;
@@ -247,9 +307,23 @@ public:
         return out;
     }
 
+    /// Reads both formats. An earlier-format blob starts with its `u32 BE`
+    /// entry count; `KRV3` read as a count is 1,263,687,219 entries, which
+    /// would need a blob of over 20 GB, so the marker cannot be mistaken for
+    /// one in a blob that fits the shard limit.
     static auto deserialize_store(const std::vector<std::byte>& blob, store_type& into,
-                                  std::size_t& bytes) -> void {
+                                  std::size_t& bytes) -> state_header {
         redis_kv_detail::reader in(blob);
+        state_header head;
+        if (blob.size() >= k_state_marker.size() &&
+            std::equal(k_state_marker.begin(), k_state_marker.end(), blob.begin())) {
+            (void)in.bytes(k_state_marker.size());
+            head._format_level = in.u16();
+            head._applied_time_ms = in.u64();
+            if (head._format_level == 0) {
+                throw redis_kv_codec_error("redis kv state marker with format level 0");
+            }
+        }
         auto count = in.u32();
         for (std::uint32_t i = 0; i < count; ++i) {
             auto key = in.string(in.u32());
@@ -263,6 +337,7 @@ public:
         if (in.remaining() != 0) {
             throw redis_kv_codec_error("trailing bytes after redis kv state blob");
         }
+        return head;
     }
 
 private:
@@ -335,10 +410,16 @@ private:
         return true;
     }
 
+    [[nodiscard]] auto header() const noexcept -> state_header {
+        return {_format_level, _applied_time_ms};
+    }
+
     store_type _store;
     std::size_t _bytes = 0;
     std::size_t _expiring = 0;
     LogIndex _last_applied_index{};
+    std::uint16_t _format_level = 0;
+    std::uint64_t _applied_time_ms = 0;
 };
 
 static_assert(state_machine<redis_kv_state_machine<std::uint64_t>, std::uint64_t>,
