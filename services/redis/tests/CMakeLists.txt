@@ -83,6 +83,9 @@ add_test(NAME redis_command_ids_header_fresh
     WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/..")
 set_tests_properties(redis_command_ids_header_fresh PROPERTIES LABELS "unit;redis" TIMEOUT 60)
 kythira_redis_test(redis_auth_limiter_unit_test redis_auth_limiter_unit_test.cpp)
+# redis-general-data-types task 16: the data-layer API's bytes and the
+# remote data access, against scripted data nodes.
+kythira_redis_test(redis_data_wire_unit_test redis_data_wire_unit_test.cpp)
 # redis_gateway_node's own environment parsing (the plaintext-Raft opt-in).
 kythira_redis_test(redis_gateway_node_config_unit_test
                    redis_gateway_node_config_unit_test.cpp)

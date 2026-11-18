@@ -43,6 +43,7 @@
 #include <raft/persistence.hpp>
 #include <kythira/redis/redis_gateway_impl.hpp>
 #include <kythira/redis/redis_kv_state_machine.hpp>
+#include <kythira/redis/redis_remote_data_access.hpp>
 #if defined(KYTHIRA_GATEWAY_TEST_DISK_STORE)
 #include <kythira/redis/cache_chunk_fetcher.hpp>
 #include <kythira/redis/cache_kv_state_machine.hpp>
@@ -75,6 +76,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <filesystem>
 #include <functional>
 #include <map>
@@ -2449,4 +2451,128 @@ BOOST_AUTO_TEST_CASE(colocated_measurement,
                         static_cast<double>(ops.load()) / 3.0);
         }
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// The data-layer API (.kiro/specs/redis-general-data-types/ task 16): a
+// node's routes and proposals over `KYTHIRA.DATA`, as a front end with no
+// replica of the key's group reaches them.
+// ─────────────────────────────────────────────────────────────────────────────
+
+namespace {
+
+auto set_entry(const std::string& key, const std::string& value) -> std::vector<std::byte> {
+    kythira::redis_kv_set_command set;
+    set._key = key;
+    set._value.resize(value.size());
+    std::memcpy(set._value.data(), value.data(), value.size());
+    return kythira::encode_redis_kv_command(set);
+}
+
+auto propose_answer(const std::optional<std::string>& reply)
+    -> std::optional<kythira::redis_data_wire::propose_outcome<group_id_type, node_id_t>> {
+    if (!reply) {
+        return std::nullopt;
+    }
+    auto answer = kythira::parse_redis_peer_answer(*reply);
+    if (answer._kind != kythira::redis_peer_answer::kind::bulk) {
+        return std::nullopt;
+    }
+    return kythira::redis_data_wire::decode_propose<group_id_type, node_id_t>(answer._text);
+}
+
+}  // namespace
+
+BOOST_AUTO_TEST_CASE(remote_data_access_routes_and_proposes_over_kythira_data,
+                     *boost::unit_test::timeout(120)) {
+    cluster c;
+    BOOST_REQUIRE(c.await_all_leaders(std::chrono::seconds{20}));
+    const auto leader = c.leader_of(k_sccache_group);
+    const auto follower = c.a_follower_of(k_sccache_group);
+    BOOST_REQUIRE(leader != 0 && follower != 0);
+    auto address = [&](node_id_t id) { return "127.0.0.1:" + std::to_string(c.port(id)); };
+    // The forward link of the follower's gateway stands in for a front end
+    // with no data: every call below crosses it to a data node.
+    auto& link = c.gateway(follower);
+    kythira::redis_remote_data_access<group_id_type, node_id_t> remote(
+        {address(follower)}, [&link](const std::string& to, const std::vector<std::string>& argv) {
+            return link.data_call(to, argv);
+        });
+
+    // Routes come from the seed, with the leader its replica knows and an
+    // address for every voter.
+    const std::string key = "sccache/remote";
+    auto route = remote.route(key);
+    BOOST_REQUIRE(route.has_value());
+    BOOST_CHECK_EQUAL(route->_group_id, k_sccache_group);
+    BOOST_CHECK(route->_leader_hint == std::optional<node_id_t>{leader});
+    for (node_id_t id = 1; id <= k_node_count; ++id) {
+        BOOST_CHECK(remote.cache().address_of(id) == std::optional<std::string>{address(id)});
+    }
+
+    // A proposal reaches the leader and applies; a client reads it back.
+    (void)remote.propose(key, set_entry(key, "v1"), std::chrono::seconds{3});
+    resp_client client(c.port(leader));
+    BOOST_REQUIRE_EQUAL(client.auth("farm", "farm-secret"), "+OK\r\n");
+    BOOST_CHECK_EQUAL(client.call({"GET", key}), "$2\r\nv1\r\n");
+
+    // A wrong leader hint costs one refusal that names the real leader.
+    remote.cache().on_not_leader(k_sccache_group, follower);
+    (void)remote.propose(key, set_entry(key, "v2"), std::chrono::seconds{3});
+    BOOST_CHECK_EQUAL(client.call({"GET", key}), "$2\r\nv2\r\n");
+    BOOST_CHECK_GE(remote.cache().stats().not_leader, 2u);
+    BOOST_CHECK(remote.leader_of(key) == std::optional<node_id_t>{leader});
+
+    // The refusals themselves, straight off the wire. A follower answers
+    // with the leader and never forwards (Requirement 18.3).
+    const auto entry = set_entry(key, "v3");
+    const std::string entry_text(reinterpret_cast<const char*>(entry.data()), entry.size());
+    auto propose_to = [&](node_id_t at, group_id_type group, std::uint64_t version) {
+        return propose_answer(link.data_call(
+            address(at), {"KYTHIRA.DATA", "PROPOSE", std::to_string(group), std::to_string(version),
+                          std::to_string(route->_epoch._conf_version), entry_text}));
+    };
+    using kythira::redis_data_wire::propose_status;
+    auto refused = propose_to(follower, k_sccache_group, route->_epoch._version);
+    BOOST_REQUIRE(refused.has_value());
+    BOOST_CHECK(refused->status == propose_status::not_leader);
+    BOOST_CHECK(refused->leader == std::optional<node_id_t>{leader});
+    BOOST_CHECK_EQUAL(client.call({"GET", key}), "$2\r\nv2\r\n");
+
+    // An epoch the group is not at gets the current route back.
+    auto stale = propose_to(leader, k_sccache_group, route->_epoch._version + 5);
+    BOOST_REQUIRE(stale.has_value());
+    BOOST_CHECK(stale->status == propose_status::stale_route);
+    BOOST_REQUIRE_EQUAL(stale->routes.routes.size(), 1u);
+    BOOST_CHECK(stale->routes.routes[0]._epoch == route->_epoch);
+    BOOST_CHECK(!stale->routes.addresses.empty());
+
+    // A group nobody has.
+    auto unknown = propose_to(leader, 99, 0);
+    BOOST_REQUIRE(unknown.has_value());
+    BOOST_CHECK(unknown->status == propose_status::unknown_group);
+
+    // The entry's key is outside the named group: the route that owns it.
+    auto elsewhere = propose_to(leader, 1, 0);
+    BOOST_REQUIRE(elsewhere.has_value());
+    BOOST_CHECK(elsewhere->status == propose_status::stale_route ||
+                elsewhere->status == propose_status::not_leader);
+
+    // ROUTE for one key, and malformed calls.
+    auto one = kythira::parse_redis_peer_answer(
+        *link.data_call(address(leader), {"KYTHIRA.DATA", "ROUTE", "a"}));
+    BOOST_REQUIRE(one._kind == kythira::redis_peer_answer::kind::bulk);
+    auto rows = kythira::redis_data_wire::decode_routes<group_id_type, node_id_t>(one._text);
+    BOOST_REQUIRE(rows.has_value());
+    BOOST_REQUIRE_EQUAL(rows->routes.size(), 1u);
+    BOOST_CHECK_EQUAL(rows->routes[0]._group_id, 1u);
+    BOOST_CHECK(link.data_call(address(leader), {"KYTHIRA.DATA", "ROUTES", "\xff"})
+                    ->rfind("-ERR malformed range", 0) == 0);
+    BOOST_CHECK(link.data_call(address(leader), {"KYTHIRA.DATA", "NOPE", "x"})
+                    ->rfind("-ERR unknown KYTHIRA.DATA subcommand", 0) == 0);
+
+    // Never from a client, whatever its role.
+    resp_client ops(c.port(leader));
+    BOOST_REQUIRE_EQUAL(ops.auth("ops", "ops-secret"), "+OK\r\n");
+    BOOST_CHECK(ops.call({"KYTHIRA.DATA", "ROUTE", key}).rfind("-NOPERM", 0) == 0);
 }
