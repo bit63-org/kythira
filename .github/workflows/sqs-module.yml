@@ -364,3 +364,12 @@ jobs:
           # the runner's.
           export JAVA_HOME=$JAVA_HOME_21_X64
           services/sqs/tests/clients/run_suite.sh
+
+      # Task 13: the differential mix against a node at SQS's default
+      # limits, self-checked, then compared with every checked-in recording
+      # of real SQS (services/sqs/tests/differential/recordings/).
+      - name: Replay the SQS differential
+        env:
+          SQS_NODE: ${{ runner.temp }}/sqs/sqs_node
+          SUITE_PYTHON: ${{ runner.temp }}/venv/bin/python
+        run: services/sqs/tests/differential/run_replay.sh
