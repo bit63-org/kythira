@@ -47,6 +47,19 @@ every role (7, 8, 10).
   - Relax service colocation's same-module-set check to Raft members of a
     module's groups
   - _Requirements: 2.1-2.6, 1.5_
+  - Status: `KINESIS_ROLES` is parsed and checked at start. A set this
+    build cannot serve stops the node, naming the task it waits on. All
+    four roles and `data,segments` are served. A `data,segments` node
+    keeps the internal endpoints, `/healthz` and `/metrics`, and answers
+    the Kinesis API, the Lease API and `SubscribeToShard` with a 404
+    naming its roles. The roles appear in `describe`, in an
+    `x-kythira-roles` header, and as `kythira_kinesis_role{role=...}`.
+    Still open:
+    - roles in `/healthz` through `module_health::roles` (it comes with
+      the DynamoDB layers' #863);
+    - `KYTHIRA_PEERS` without self, and no Raft log without `data`, which
+      only become reachable with task 6;
+    - relaxing service colocation's same-module-set check.
 
 - [x] 5. Route cache in core
   - `include/raft/route_cache.hpp`: range map with epochs, leader hints,

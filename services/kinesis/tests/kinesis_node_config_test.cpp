@@ -374,3 +374,67 @@ BOOST_AUTO_TEST_CASE(the_kythira_provider_and_a_previous_one) {
     vars["KINESIS_KMS_CALLER_TTL_MS"] = "0";
     BOOST_CHECK_THROW((void)kn::from_env(kn::composite_env(lookup(vars))), std::invalid_argument);
 }
+
+// The layers a node runs (.kiro/specs/kinesis-independent-layers/ task 4,
+// Requirements 2.1, 2.4 and 2.5): KINESIS_ROLES, all four by default, and
+// every set this build cannot serve refused at start naming what is
+// missing.
+namespace {
+
+auto role_vars(std::string roles) -> std::map<std::string, std::string> {
+    std::map<std::string, std::string> vars{
+        {"KYTHIRA_NODE_ID", "1"},           {"KYTHIRA_PEERS", "1=http://127.0.0.1:7001"},
+        {"KYTHIRA_RAFT_BIND", "127.0.0.1"}, {"KINESIS_ALLOW_PLAINTEXT", "true"},
+        {"KINESIS_STATIC_KEYS_FILE", "/k"}, {"KINESIS_DATA_DIR", "/d"},
+    };
+    if (!roles.empty()) {
+        vars["KINESIS_ROLES"] = std::move(roles);
+    }
+    return vars;
+}
+
+}  // namespace
+
+BOOST_AUTO_TEST_CASE(a_node_runs_every_layer_unless_told_otherwise) {
+    const auto o = kn::from_env(lookup(role_vars("")));
+    BOOST_TEST(o._roles.to_string() == "gateway,front_end,data,segments");
+    BOOST_TEST(kn::describe(o).find("roles=gateway,front_end,data,segments") != std::string::npos);
+}
+
+BOOST_AUTO_TEST_CASE(a_data_and_segments_node_is_served) {
+    const auto o = kn::from_env(lookup(role_vars("data,segments")));
+    BOOST_TEST(o._roles.to_string() == "data,segments");
+    // Order in the setting does not matter.
+    BOOST_TEST(kn::from_env(lookup(role_vars("segments,data")))._roles.to_string() ==
+               "data,segments");
+}
+
+BOOST_AUTO_TEST_CASE(a_role_set_this_build_cannot_serve_is_refused_naming_what_is_missing) {
+    // No data role: the data-layer API.
+    BOOST_TEST(refused_naming(role_vars("gateway,front_end"), "data-layer API"));
+    BOOST_TEST(refused_naming(role_vars("segments"), "data-layer API"));
+    // Data without segments: segment-node volumes.
+    BOOST_TEST(refused_naming(role_vars("gateway,front_end,data"), "segment node"));
+    // A gateway apart from its front end, and the reverse.
+    BOOST_TEST(refused_naming(role_vars("gateway,data,segments"), "hands each call"));
+    BOOST_TEST(refused_naming(role_vars("front_end,data,segments"), "front-end API"));
+    // Every refusal names the setting and the value it was given.
+    BOOST_TEST(refused_naming(role_vars("gateway,front_end"), "KINESIS_ROLES=gateway,front_end"));
+}
+
+BOOST_AUTO_TEST_CASE(a_malformed_role_list_is_refused) {
+    BOOST_TEST(refused_naming(role_vars("gateway,frontend"), "unknown layer role \"frontend\""));
+    BOOST_TEST(refused_naming(role_vars("data,data,segments"), "listed twice"));
+    BOOST_TEST(refused_naming(role_vars("data,,segments"), "KINESIS_ROLES"));
+}
+
+BOOST_AUTO_TEST_CASE(kythira_node_never_fills_in_the_roles) {
+    // Roles are per module: the node's settings say nothing about them, so
+    // a Kinesis module in kythira_node runs every layer unless KINESIS_ROLES
+    // itself says otherwise.
+    auto vars = node_vars();
+    BOOST_TEST(kn::from_env(kn::composite_env(lookup(vars)))._roles.to_string() ==
+               "gateway,front_end,data,segments");
+    vars["KINESIS_ROLES"] = "data,segments";
+    BOOST_TEST(kn::from_env(kn::composite_env(lookup(vars)))._roles.to_string() == "data,segments");
+}

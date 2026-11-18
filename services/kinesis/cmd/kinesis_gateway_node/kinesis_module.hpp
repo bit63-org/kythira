@@ -501,9 +501,19 @@ public:
         if (!_started) {
             return {};
         }
-        return {{"groups", static_cast<double>(_groups), {}},
-                {"voters", static_cast<double>(_voters.size()), {}},
-                {"raft_term_sum", service_node::raft_term_sum(*_raft), {}}};
+        std::vector<service_node::module_metric> out{
+            {"groups", static_cast<double>(_groups), {}},
+            {"voters", static_cast<double>(_voters.size()), {}},
+            {"raft_term_sum", service_node::raft_term_sum(*_raft), {}}};
+        // One series per role this node runs (kinesis-independent-layers
+        // Requirement 2.6), so a dashboard can count each layer.
+        for (const auto r : kythira::layers::every_role) {
+            if (_opt._roles.has(r)) {
+                out.push_back(
+                    {"role", 1.0, {{"role", std::string(kythira::layers::role_name(r))}}});
+            }
+        }
+        return out;
     }
 
     /// The API's port once started (tests pass port 0).
@@ -693,6 +703,7 @@ private:
             [this](const std::string& key, const std::vector<std::byte>& command,
                    kinesis::admission mode) { return _cluster->propose_local(key, command, mode); },
             _store.get(), _opt._forward_secret);
+        _gateway->set_roles(_opt._roles);
         _leases = std::make_unique<kinesis::lease_api<cluster_type, authorizer_type>>(
             *_cluster, *_authorizer, fc);
         _gateway->set_lease_handler(

@@ -39,6 +39,12 @@
 /// The internal endpoints answer 404 when no forwarding secret is
 /// configured: a single-node gateway has no peers to listen to.
 ///
+/// A node without the `gateway` role (`KINESIS_ROLES=data,segments`,
+/// kinesis-independent-layers task 4) keeps the internal endpoints,
+/// `/healthz` and `/metrics`, and answers the Kinesis API, the Lease API
+/// and `SubscribeToShard` with a 404 naming its roles. `/healthz` and that
+/// refusal carry the roles in `x-kythira-roles`.
+///
 /// This file also holds the client halves: the forwarder
 /// `raft_stream_cluster` calls on a follower, and the segment fetch
 /// transport.
@@ -50,9 +56,11 @@
 #include <kythira/kinesis/kinesis_stream_state_machine.hpp>
 
 #include <raft/beast_https_server.hpp>
+#include <raft/layer_roles.hpp>
 #include <raft/record_segment_store.hpp>
 
 #include <boost/beast/http.hpp>
+#include <boost/json.hpp>
 
 #include <atomic>
 #include <chrono>
@@ -71,6 +79,8 @@ namespace kythira::kinesis {
 inline constexpr std::string_view k_segment_path = "/_kythira/kinesis/v1/segment";
 inline constexpr std::string_view k_health_path = "/healthz";
 inline constexpr std::string_view k_metrics_path = "/metrics";
+/// The node's role set, on `/healthz` and on a refusal for want of one.
+inline constexpr std::string_view k_roles_header = "x-kythira-roles";
 
 /// Proposes a forwarded command on this node without forwarding it again
 /// (`raft_stream_cluster::propose_local`).
@@ -264,7 +274,9 @@ public:
         const auto path = target.substr(0, q);
         const auto query = q == std::string_view::npos ? std::string_view() : target.substr(q + 1);
         if (path == k_health_path && req.method() == http::verb::get) {
-            return gateway_detail::reply(req, 200, "ok\n", "text/plain");
+            auto res = gateway_detail::reply(req, 200, "ok\n", "text/plain");
+            res.set(k_roles_header, _roles_text);
+            return res;
         }
         if (_metrics && path == k_metrics_path && req.method() == http::verb::get) {
             return gateway_detail::reply(req, 200, _metrics(), "text/plain; version=0.0.4");
@@ -277,6 +289,9 @@ public:
         }
         if (path == forward::k_txn_path) {
             return txn(req);
+        }
+        if (!_roles.has(layers::role::gateway)) {
+            return not_a_gateway(req);
         }
         const auto r = _leases && path.starts_with(k_lease_path_prefix)
                            ? _leases(gateway_detail::to_front_end_request(req, ctx))
@@ -298,8 +313,10 @@ public:
     [[nodiscard]] auto stream(const https::request& req, const https::request_context& ctx)
         -> std::optional<https::streaming_response> {
         namespace http = boost::beast::http;
+        // Without the gateway role, handle() refuses it whole.
         if (req.method() != http::verb::post ||
-            !gateway_detail::is_streaming_target(req["x-amz-target"])) {
+            !gateway_detail::is_streaming_target(req["x-amz-target"]) ||
+            !_roles.has(layers::role::gateway)) {
             return std::nullopt;
         }
         auto r = _front_end.handle_streaming(gateway_detail::to_front_end_request(req, ctx));
@@ -345,8 +362,19 @@ public:
     /// listener starts.
     void set_metrics_handler(std::function<std::string()> h) { _metrics = std::move(h); }
 
+    /// The layers this node runs (all four unless set). Set before the
+    /// listener starts.
+    void set_roles(layers::role_set roles) {
+        _roles = roles;
+        _roles_text = roles.to_string();
+    }
+
+    [[nodiscard]] auto roles() const noexcept -> layers::role_set { return _roles; }
+
 private:
     FrontEnd& _front_end;
+    layers::role_set _roles{layers::role_set::all()};
+    std::string _roles_text{layers::role_set::all().to_string()};
     std::function<std::string()> _metrics;
     lease_handler _leases;
     txn_handler _txn;
@@ -355,6 +383,20 @@ private:
     std::string _secret;
     clock_fn _clock;
     gateway_stats _stats;
+
+    /// A client call to a node that runs no gateway: 404, in the API's own
+    /// error shape, naming the node's roles so an operator sees at once
+    /// that the load balancer points at the wrong layer.
+    [[nodiscard]] auto not_a_gateway(const https::request& req) const -> https::response {
+        boost::json::object body;
+        body["__type"] = "LayerNotServed";
+        body["message"] = "This node runs " + _roles_text +
+                          " and does not serve the Kinesis API. Send API calls to a gateway.";
+        auto res = gateway_detail::reply(req, 404, boost::json::serialize(body),
+                                         "application/x-amz-json-1.1");
+        res.set(k_roles_header, _roles_text);
+        return res;
+    }
 
     auto refuse(const https::request& req, unsigned status, std::string_view why)
         -> https::response {

@@ -14,6 +14,7 @@
 /// a malformed one is an `std::invalid_argument` naming it.
 
 #include <raft/host_node_id.hpp>
+#include <raft/layer_roles.hpp>
 #include <raft/logger.hpp>
 #include <raft/service_module.hpp>
 #include <raft/static_or_iam_authorizer.hpp>
@@ -98,6 +99,11 @@ struct node_options {
     /// `KINESIS_METRICS`: serve per-stream and per-shard metrics on
     /// `GET /metrics` (unauthenticated; it names streams and accounts).
     bool _metrics{false};
+    /// `KINESIS_ROLES`: the layers this node runs, a comma-separated subset
+    /// of gateway, front_end, data and segments (all four by default).
+    /// kinesis-independent-layers task 4. Only for the Kinesis module:
+    /// `composite_env` never fills it in.
+    kythira::layers::role_set _roles{kythira::layers::role_set::all()};
     /// `KINESIS_KMS`: the key provider encrypted streams use (task 14):
     /// `off` (StartStreamEncryption refused), `local` (data keys wrapped
     /// under `KINESIS_KMS_PASSPHRASE[_FILE]`, the same on every node) or
@@ -219,6 +225,12 @@ using env_lookup = std::function<const char*(const char*)>;
 [[nodiscard]] auto composite_env(service_node::env_lookup env) -> service_node::env_lookup;
 
 [[nodiscard]] auto is_loopback_address(const std::string& address) -> bool;
+
+/// Why this build cannot serve `roles`, naming what is missing; nullopt
+/// when it can. All four roles, and `data,segments` (a voter that serves
+/// only the internal endpoints), are served today. The other sets need the
+/// later tasks of kinesis-independent-layers.
+[[nodiscard]] auto unserved_roles(kythira::layers::role_set roles) -> std::optional<std::string>;
 
 /// One line per setting, secrets elided: what `--check-config` prints.
 [[nodiscard]] auto describe(const node_options& o) -> std::string;
