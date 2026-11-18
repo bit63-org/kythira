@@ -1011,6 +1011,83 @@ BOOST_AUTO_TEST_CASE(a_drain_past_its_deadline_returns_the_machine_to_service) {
     BOOST_CHECK_EQUAL(h->counter("drain{outcome=abandoned}"), 1U);
 }
 
+namespace {
+/// A gateway or front end holds no replica. Without drain hooks it would be
+/// decommissioned at once. With them, it is decommissioned only after it
+/// reports that its own work has drained (kinesis-independent-layers
+/// Requirement 10.5).
+struct work_drain_probe {
+    std::vector<cap_node> begun;
+    std::vector<cap_node> cancelled;
+    bool work_left = true;
+
+    auto hooks() -> kythira::capacity_drain_hooks<cap_node> {
+        return {.begin = [this](const cap_node& n) { begun.push_back(n); },
+                .holds_work = [this](const cap_node&) { return work_left; },
+                .cancel = [this](const cap_node& n) { cancelled.push_back(n); }};
+    }
+};
+
+auto with_stateless_machine(elastic_capacity_config cfg = base_config())
+    -> std::unique_ptr<harness> {
+    auto h = four_machines(cfg);
+    h->sim.add_host(5, "a");
+    h->mgr.add_existing(5, "a");
+    return h;
+}
+}  // namespace
+
+BOOST_AUTO_TEST_CASE(a_machine_without_replicas_is_decommissioned_only_after_its_work_drains) {
+    auto h = with_stateless_machine();
+    work_drain_probe probe;
+    h->start().set_drain_hooks(probe.hooks());
+    h->settle_in();
+    h->policy.push(scale_in(5));
+    h->rounds(6);
+    BOOST_REQUIRE_EQUAL(h->intents().size(), 1U);
+    BOOST_CHECK(h->intents().front()._state == capacity_intent_state::draining);
+    BOOST_CHECK_EQUAL(h->mgr.call_count("decommission"), 0U);
+    // Asked to stop taking work exactly once, however many steps the drain
+    // takes.
+    BOOST_REQUIRE_EQUAL(probe.begun.size(), 1U);
+    BOOST_CHECK_EQUAL(probe.begun.front(), 5U);
+
+    probe.work_left = false;
+    h->rounds(10);
+    BOOST_CHECK(h->intents().front()._state == capacity_intent_state::completed);
+    BOOST_CHECK_EQUAL(h->mgr.call_count("decommission"), 1U);
+    BOOST_CHECK_EQUAL(probe.begun.size(), 1U);
+    BOOST_CHECK(probe.cancelled.empty());
+}
+
+BOOST_AUTO_TEST_CASE(a_work_drain_past_its_deadline_returns_the_machine_to_service) {
+    auto cfg = base_config();
+    cfg.drain_deadline = 4min;
+    auto h = with_stateless_machine(cfg);
+    work_drain_probe probe;  // never finishes draining
+    h->start().set_drain_hooks(probe.hooks());
+    h->settle_in();
+    h->policy.push(scale_in(5));
+    h->rounds(40);
+    BOOST_REQUIRE_EQUAL(h->intents().size(), 1U);
+    BOOST_CHECK(h->intents().front()._state == capacity_intent_state::abandoned);
+    BOOST_CHECK_EQUAL(h->mgr.call_count("decommission"), 0U);
+    BOOST_REQUIRE_EQUAL(probe.cancelled.size(), 1U);
+    BOOST_CHECK_EQUAL(probe.cancelled.front(), 5U);
+}
+
+BOOST_AUTO_TEST_CASE(without_drain_hooks_a_machine_without_replicas_leaves_at_once) {
+    // The behaviour before the hooks existed, kept for shard-only clusters.
+    auto h = with_stateless_machine();
+    h->start();
+    h->settle_in();
+    h->policy.push(scale_in(5));
+    h->rounds(10);
+    BOOST_REQUIRE_EQUAL(h->intents().size(), 1U);
+    BOOST_CHECK(h->intents().front()._state == capacity_intent_state::completed);
+    BOOST_CHECK_EQUAL(h->mgr.call_count("decommission"), 1U);
+}
+
 BOOST_AUTO_TEST_CASE(a_removal_waits_while_the_group_has_a_down_replica) {
     // Requirement 11.3, checked before each removal, not once at the start.
     auto h = four_machines();

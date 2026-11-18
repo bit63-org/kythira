@@ -142,6 +142,13 @@ every role (7, 8, 10).
   - Docker quorum manager test that scales front ends up and down under
     load without failed requests
   - _Requirements: 10.4, 10.5_
+  - Status: the core is in `include/raft/layer_capacity.hpp`:
+    `layer_capacity_snapshot`, `layer_capacity_policy` and
+    `layer_drain_hooks`. It also adds `capacity_drain_hooks` to the
+    controller, so a member that holds no replica is decommissioned only
+    after its own work drains. Running the controller on the membership
+    group's leader, and the Docker test, land with task 7, which is the
+    first task with front-end-only nodes to scale.
 
 - [ ] 13. Live migration operations
   - `evacuate` admin call over the placement operators; refuse to start
