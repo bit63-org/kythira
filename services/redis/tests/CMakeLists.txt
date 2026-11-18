@@ -31,6 +31,9 @@ endfunction()
 # backend: they only call folly::Init under Folly's.
 kythira_redis_test(resp_protocol_unit_test resp_protocol_unit_test.cpp)
 kythira_redis_test(redis_kv_commands_unit_test redis_kv_commands_unit_test.cpp)
+# redis-general-data-types task 1: seeded fuzzing of the format-0x03 records.
+kythira_redis_test(redis_kv_v3_codec_fuzz_test redis_kv_v3_codec_fuzz_test.cpp)
+set_tests_properties(redis_kv_v3_codec_fuzz_test PROPERTIES LABELS "unit;redis" TIMEOUT 300)
 kythira_redis_test(redis_kv_state_machine_unit_test redis_kv_state_machine_unit_test.cpp)
 # persistent-state-machine task 2: the same command set on a kv_engine,
 # checked against redis_kv_state_machine as the oracle.
