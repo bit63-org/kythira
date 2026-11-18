@@ -492,6 +492,44 @@ BOOST_AUTO_TEST_CASE(ecdh_agrees_and_checks_the_peer_point) {
                CKR_MECHANISM_PARAM_INVALID);
 }
 
+// A raw P-256 point whose X starts with 0x3F also parses as a DER OCTET
+// STRING of 63 bytes. Unwrapping by shape alone cut two bytes off one raw
+// peer point in 256, and the derive was refused; the curve settles which
+// form it is.
+BOOST_AUTO_TEST_CASE(a_raw_point_that_looks_like_der_is_not_unwrapped) {
+    const auto p256_curve = hsm::detail::curve_from_params(p256);
+    BOOST_REQUIRE(p256_curve.has_value());
+    hsm::bytes look_alike(65, 0x11U);
+    look_alike[0] = 0x04U;
+    look_alike[1] = 0x3FU;
+    BOOST_TEST(hsm::detail::strip_octet_string(look_alike).size() == 63U);  // the old reading
+    BOOST_TEST(hsm::detail::ec_point_contents(look_alike, *p256_curve).size() == 65U);
+    hsm::bytes wrapped{0x04U, 0x41U};
+    wrapped.insert(wrapped.end(), look_alike.begin(), look_alike.end());
+    BOOST_TEST(hsm::detail::ec_point_contents(wrapped, *p256_curve).size() == 65U);
+
+    // End to end: keep generating until a key's X starts with 0x3F (one in
+    // 256), then derive with its raw point.
+    auto a = ec_pair(p256);
+    for (int i = 0; i < 4096; ++i) {
+        auto b = ec_pair(p256);
+        auto pt = b.public_attributes.bytes(CKA_EC_POINT);
+        BOOST_REQUIRE(pt.has_value());
+        const auto inner = hsm::detail::strip_octet_string(*pt);  // keygen always wraps
+        if (inner[1] != 0x3FU) {
+            continue;
+        }
+        hsm::bytes raw(inner.begin(), inner.end());
+        CK_ECDH1_DERIVE_PARAMS ep{CKD_NULL, 0, nullptr, static_cast<CK_ULONG>(raw.size()),
+                                  raw.data()};
+        auto shared = hsm::derive(mech(CKM_ECDH1_DERIVE, ep), private_key(a), 0);
+        BOOST_REQUIRE(shared.has_value());
+        BOOST_TEST(shared->size() == 32U);
+        return;
+    }
+    BOOST_FAIL("no P-256 key with X[0] == 0x3F in 4096 tries");
+}
+
 BOOST_AUTO_TEST_CASE(hkdf_matches_rfc_5869_case_1) {
     auto ikm = secret_key(CKK_GENERIC_SECRET, hsm::bytes(22, 0x0b));
     auto salt = hex("000102030405060708090a0b0c");

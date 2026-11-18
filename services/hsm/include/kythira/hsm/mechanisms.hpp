@@ -435,6 +435,39 @@ inline constexpr std::array<std::uint8_t, 14> name_ed25519{0x13, 0x0C, 'e', 'd',
     return std::nullopt;
 }
 
+/// Bytes in one field element of `c`: a coordinate of a short-Weierstrass
+/// point, or the whole of an Ed25519 public key.
+[[nodiscard]] inline auto field_bytes(const curve& c) -> std::size_t {
+    const std::string_view g = c.group;
+    if (g == "P-384") {
+        return 48;
+    }
+    if (g == "P-521") {
+        return 66;
+    }
+    return 32;  // P-256, ED25519
+}
+
+/// The encoded point in a CKA_EC_POINT, or in ECDH public data, on curve `c`.
+/// PKCS#11 clients pass it either raw or wrapped in a DER OCTET STRING.
+///
+/// strip_octet_string() alone cannot tell the two apart: a raw P-256 point
+/// is 04 || X || Y, and when X happens to start with 0x3F the 65 bytes also
+/// parse as an OCTET STRING of 63, so one key in 256 lost its first two
+/// bytes and was refused (CI: hsm_object_import_test and hsm_mechanisms_test
+/// failing, then passing on retry). Knowing the curve settles it, because
+/// every raw size (1 + n compressed, 1 + 2n uncompressed, n for Ed25519)
+/// differs from every wrapped size on the same curve.
+[[nodiscard]] inline auto ec_point_contents(std::span<const std::uint8_t> in, const curve& c)
+    -> std::span<const std::uint8_t> {
+    const std::size_t n = field_bytes(c);
+    const bool raw = c.key_type == CKK_EC_EDWARDS
+                         ? in.size() == n
+                         : (in.size() == 1 + 2 * n && in[0] == 0x04) ||
+                               (in.size() == 1 + n && (in[0] == 0x02 || in[0] == 0x03));
+    return raw ? in : strip_octet_string(in);
+}
+
 [[nodiscard]] inline auto group_name(EVP_PKEY* key) -> std::string {
     std::array<char, 64> name{};
     std::size_t len = 0;
@@ -1398,8 +1431,9 @@ namespace detail {
     if (!key) {
         return unexpected(key.error());
     }
-    const auto point = strip_octet_string(*peer_point);
     const std::string group = group_name(key->get());
+    const auto c = curve_from_group(group);
+    const auto point = c ? ec_point_contents(*peer_point, *c) : strip_octet_string(*peer_point);
     std::unique_ptr<OSSL_PARAM_BLD, param_bld_free> bld(OSSL_PARAM_BLD_new());
     if (!bld ||
         OSSL_PARAM_BLD_push_utf8_string(bld.get(), OSSL_PKEY_PARAM_GROUP_NAME, group.c_str(), 0) !=

@@ -240,7 +240,7 @@ using bn_secret = std::unique_ptr<BIGNUM, bn_clear_free>;
             if (!c || c->key_type != type) {
                 return unexpected(CKR_CURVE_NOT_SUPPORTED);
             }
-            const auto raw = strip_octet_string(*point);
+            const auto raw = ec_point_contents(*point, *c);
             if (type == CKK_EC_EDWARDS) {
                 pkey_ptr key(
                     EVP_PKEY_new_raw_public_key(EVP_PKEY_ED25519, nullptr, raw.data(), raw.size()));
