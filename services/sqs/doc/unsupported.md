@@ -14,11 +14,9 @@ query-compatible code in `x-amzn-query-error`), and `InvalidAction` with HTTP
 status 400 on the query protocol. Task 13's recorded SQS responses pin the
 exact bodies.
 
-Every operation in the model is planned; none is left out of the spec.
+Every operation in the pinned model is implemented today, so the table is
+empty. A model upgrade that adds an operation adds its row here until a task
+builds it.
 
 | Operation | Planned | Reason | Error |
 |---|---|---|---|
-| `CancelMessageMoveTask` | task 6 | Not built yet (dead-letter queues and move tasks). | `UnknownOperationException` (JSON) or `InvalidAction` (query), HTTP 400 |
-| `ListDeadLetterSourceQueues` | task 6 | Not built yet (dead-letter queues and move tasks). | `UnknownOperationException` (JSON) or `InvalidAction` (query), HTTP 400 |
-| `ListMessageMoveTasks` | task 6 | Not built yet (dead-letter queues and move tasks). | `UnknownOperationException` (JSON) or `InvalidAction` (query), HTTP 400 |
-| `StartMessageMoveTask` | task 6 | Not built yet (dead-letter queues and move tasks). | `UnknownOperationException` (JSON) or `InvalidAction` (query), HTTP 400 |

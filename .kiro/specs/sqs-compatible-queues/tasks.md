@@ -112,7 +112,17 @@ PR unless noted.
     only: the notifications cross layers as a stream with task 12
   - _Requirements: 6.1-6.3_
 
-- [ ] 6. Dead-letter queues and move tasks
+- [x] 6. Dead-letter queues and move tasks
+  - Done: a receive carries its queue's redrive target, and a message
+    already received `maxReceiveCount` times moves to the dead-letter
+    queue in the same entry (one queue at every point; FIFO groups keep
+    their order); `DeadLetterQueueSourceArn`; redrive allow policies;
+    `ListDeadLetterSourceQueues`; move tasks (`StartMessageMoveTask`,
+    `ListMessageMoveTasks`, `CancelMessageMoveTask`) as catalog records,
+    run by `sqs_workers.hpp`'s move worker on the catalog leader at the
+    task's rate with one `move` entry per partition. Every operation of
+    the pinned model is now implemented. Moves stay within the one group
+    until task 12 makes cross-group moves transactions
   - _Requirements: 7.1-7.3_
 
 - [ ] 7. Encryption

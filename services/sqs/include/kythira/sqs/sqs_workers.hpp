@@ -22,6 +22,17 @@
 /// walk of the catalog it does then runs at most once per `idle` on an idle
 /// cluster. Passes are at least `min_gap` apart so a deadline housekeeping
 /// cannot clear yet cannot spin the worker.
+///
+/// `move_worker` runs the message move tasks (task 6, Requirement 7.3) on
+/// the node that leads the catalog entry of each task's source queue. Each
+/// pass takes up to the task's rate worth of visible messages from the
+/// source's partitions, proposes one `move` command per partition (each
+/// message leaves the source and enters its destination in the same
+/// entry), and records the progress with a catalog `move_update`. A task
+/// ends when the source has no visible message left, when a destination
+/// is gone (failed), or after a cancel (cancelled). The rate is a token
+/// bucket kept by the worker: a new leader starts it again, which can only
+/// make a pass smaller.
 
 #include <kythira/sqs/sqs_catalog.hpp>
 #include <kythira/sqs/sqs_cluster.hpp>
@@ -34,6 +45,7 @@
 #include <condition_variable>
 #include <cstdint>
 #include <exception>
+#include <map>
 #include <functional>
 #include <mutex>
 #include <optional>
@@ -165,6 +177,234 @@ private:
                 wait = std::min(wait, ahead);
             }
             _cv.wait_for(lock, wait, [this] { return !_running || _woken; });
+            _woken = false;
+            if (!_running) {
+                return;
+            }
+        }
+    }
+};
+
+template<queue_cluster Cluster> class move_worker {
+public:
+    using state_machine_type = typename Cluster::state_machine_type;
+    using leads_fn = std::function<bool(const std::string& key)>;
+    /// The parts of a queue ARN: account and name, or nullopt.
+    using arn_fn =
+        std::function<std::optional<std::pair<std::string, std::string>>(const std::string& arn)>;
+
+    struct options {
+        std::chrono::milliseconds _idle{1000};
+        /// Between passes while a task runs.
+        std::chrono::milliseconds _busy{50};
+        /// Messages per second when the task gives no rate.
+        std::uint32_t _default_rate = 500;
+        /// Moves in one proposed command.
+        std::size_t _batch = 32;
+    };
+
+    move_worker(Cluster& cluster, leads_fn leads, arn_fn parse_arn, options o = {})
+        : _cluster(cluster), _leads(std::move(leads)), _parse_arn(std::move(parse_arn)), _opt(o) {}
+    move_worker(const move_worker&) = delete;
+    auto operator=(const move_worker&) -> move_worker& = delete;
+    move_worker(move_worker&&) = delete;
+    auto operator=(move_worker&&) -> move_worker& = delete;
+    ~move_worker() { stop(); }
+
+    /// One pass over the active tasks this node leads. Returns whether any
+    /// is still active.
+    auto run_once() -> bool {
+        std::vector<move_task> tasks;
+        (void)_cluster.read(catalog_keys::moves_prefix(),
+                            [&](const state_machine_type& sm) { tasks = sm.active_move_tasks(); });
+        bool active = false;
+        std::map<std::string, std::uint64_t> seen;
+        for (auto& t : tasks) {
+            const auto key = catalog_keys::queue(t._account, t._name);
+            if (!_leads(key)) {
+                continue;
+            }
+            const auto id = catalog_keys::move(t._account, t._name, t._started_ms);
+            seen.emplace(id, 0);
+            if (step(t, id)) {
+                active = true;
+            }
+        }
+        // Buckets of tasks that ended or moved away.
+        std::erase_if(_buckets, [&](const auto& kv) { return !seen.contains(kv.first); });
+        return active;
+    }
+
+    void start() {
+        _running = true;
+        _thread = std::thread([this] { loop(); });
+    }
+
+    void stop() {
+        {
+            const std::scoped_lock lock(_mutex);
+            _running = false;
+        }
+        _cv.notify_all();
+        if (_thread.joinable()) {
+            _thread.join();
+        }
+    }
+
+    /// Something committed (a task may have started): look again.
+    void wake() {
+        {
+            const std::scoped_lock lock(_mutex);
+            _woken = true;
+        }
+        _cv.notify_all();
+    }
+
+    [[nodiscard]] auto moved() const -> std::uint64_t { return _moved; }
+
+private:
+    struct bucket {
+        std::uint64_t _last_ms = 0;
+        double _credit = 0;
+    };
+
+    Cluster& _cluster;
+    leads_fn _leads;
+    arn_fn _parse_arn;
+    options _opt;
+    std::map<std::string, bucket> _buckets;
+    std::thread _thread;
+    std::mutex _mutex;
+    std::condition_variable _cv;
+    bool _running = false;
+    bool _woken = false;
+    std::atomic<std::uint64_t> _moved{0};
+
+    [[nodiscard]] auto find(const std::string& account, const std::string& name)
+        -> std::optional<queue_record> {
+        std::optional<queue_record> out;
+        (void)_cluster.read(catalog_keys::queue(account, name), [&](const state_machine_type& sm) {
+            out = sm.find_queue(account, name);
+        });
+        return out;
+    }
+
+    auto update(const move_task& t, std::uint64_t moved, move_task::state s, std::string failure)
+        -> void {
+        catalog_command c;
+        c._op = catalog_command::kind::move_update;
+        c._account = t._account;
+        c._name = t._name;
+        c._now_ms = _cluster.now_ms();
+        c._move._started_ms = t._started_ms;
+        c._move._moved = moved;
+        c._move._status = s;
+        c._move._failure = std::move(failure);
+        (void)_cluster.propose(catalog_keys::queue(c._account, c._name),
+                               record_detail::to_bytes(encode_catalog_command(c)));
+    }
+
+    /// Advances one task; returns whether it is still running.
+    auto step(const move_task& t, const std::string& id) -> bool {
+        if (t._status == move_task::state::cancelling) {
+            update(t, 0, move_task::state::cancelled, {});
+            return false;
+        }
+        const auto source = find(t._account, t._name);
+        if (!source) {
+            update(t, 0, move_task::state::failed, "Source queue does not exist.");
+            return false;
+        }
+        const auto now = _cluster.now_ms();
+        const double rate = t._rate != 0 ? t._rate : _opt._default_rate;
+        auto& b = _buckets[id];
+        if (b._last_ms == 0) {
+            b._credit = std::min(rate, static_cast<double>(_opt._batch));
+        } else if (now > b._last_ms) {
+            b._credit =
+                std::min(rate, b._credit + rate * static_cast<double>(now - b._last_ms) / 1000.0);
+        }
+        b._last_ms = now;
+        auto allowance = static_cast<std::size_t>(b._credit);
+
+        std::map<std::string, std::optional<queue_record>> dests;
+        std::uint64_t moved = 0;
+        std::uint64_t left = 0;
+        for (std::uint16_t p = 0; p < std::max<std::uint16_t>(source->_partitions, 1); ++p) {
+            const auto src = source->target(p);
+            const auto key = queue_keys::partition_prefix(src);
+            std::vector<std::pair<std::uint64_t, stored_message>> msgs;
+            (void)_cluster.read(key, [&](const state_machine_type& sm) {
+                msgs = sm.visible_messages(src, std::min(allowance, _opt._batch));
+                left += sm.counts(src).visible;
+            });
+            if (msgs.empty()) {
+                continue;
+            }
+            queue_command c;
+            c.op = queue_command::kind::move;
+            c.target = src;
+            c.now_ms = now;
+            for (const auto& [seq, m] : msgs) {
+                const auto& arn =
+                    t._destination_arn.empty() ? m.dead_letter_source : t._destination_arn;
+                auto it = dests.find(arn);
+                if (it == dests.end()) {
+                    const auto parts = arn.empty() ? std::nullopt : _parse_arn(arn);
+                    it =
+                        dests.emplace(arn, parts ? find(parts->first, parts->second) : std::nullopt)
+                            .first;
+                }
+                if (!it->second) {
+                    if (moved > 0 || !c.moves.empty()) {
+                        break;  // record what moved first; fail on the next pass
+                    }
+                    update(t, 0, move_task::state::failed,
+                           arn.empty() ? "Message has no source queue to move back to."
+                                       : "Destination queue " + arn + " does not exist.");
+                    return false;
+                }
+                c.moves.push_back(move_entry{seq, it->second->target(0), it->second->_partitions});
+            }
+            if (c.moves.empty()) {
+                continue;
+            }
+            const auto out =
+                _cluster.propose(key, record_detail::to_bytes(encode_queue_command(c)));
+            const auto r = out ? decode_queue_result(record_detail::to_string(*out)) : std::nullopt;
+            if (!r) {
+                continue;
+            }
+            for (const auto& e : r->entries) {
+                if (e.outcome == entry_result::status::ok) {
+                    ++moved;
+                }
+            }
+            allowance -= std::min(allowance, c.moves.size());
+        }
+        b._credit -= std::min(b._credit, static_cast<double>(moved));
+        _moved += moved;
+        const bool done = left <= moved;
+        if (moved > 0 || done) {
+            update(t, moved, done ? move_task::state::completed : move_task::state::running, {});
+        }
+        return !done;
+    }
+
+    void loop() {
+        for (;;) {
+            bool active = false;
+            try {
+                active = run_once();
+            } catch (const std::exception&) {
+                active = false;  // a replica not ready yet; try again after idle
+            }
+            std::unique_lock lock(_mutex);
+            if (!_running) {
+                return;
+            }
+            _cv.wait_for(lock, active ? _opt._busy : _opt._idle,
+                         [this] { return !_running || _woken; });
             _woken = false;
             if (!_running) {
                 return;

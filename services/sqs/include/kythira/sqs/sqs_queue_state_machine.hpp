@@ -203,6 +203,8 @@ struct stored_message {
     std::uint64_t receive_sequence = 0;
     std::uint64_t first_receive_ms = 0;
     std::uint64_t last_receive_ms = 0;
+    /// The queue it was moved from, on a dead-letter queue (its ARN).
+    std::string dead_letter_source;
 
     friend auto operator==(const stored_message&, const stored_message&) -> bool = default;
 };
@@ -254,6 +256,7 @@ inline constexpr std::uint8_t k_dedup_format = 1;
     put_le(out, m.receive_sequence);
     put_le(out, m.first_receive_ms);
     put_le(out, m.last_receive_ms);
+    put_str(out, m.dead_letter_source);
     return out;
 }
 
@@ -280,6 +283,7 @@ inline constexpr std::uint8_t k_dedup_format = 1;
     r.le(m.receive_sequence);
     r.le(m.first_receive_ms);
     r.le(m.last_receive_ms);
+    r.str(m.dead_letter_source);
     if (!r.done()) {
         return std::nullopt;
     }
@@ -678,6 +682,53 @@ public:
         return out;
     }
 
+    /// Queue `name`'s move tasks, newest first.
+    [[nodiscard]] auto move_tasks(std::string_view account, std::string_view name) const
+        -> std::vector<move_task> {
+        std::vector<move_task> out;
+        scan_prefix(catalog_keys::moves_of(account, name),
+                    [&](std::string_view, std::string_view v) {
+                        if (auto m = decode_move_task(v)) {
+                            out.push_back(std::move(*m));
+                        }
+                        return true;
+                    });
+        std::reverse(out.begin(), out.end());
+        return out;
+    }
+
+    /// Every running or cancelling move task (the worker's list).
+    [[nodiscard]] auto active_move_tasks() const -> std::vector<move_task> {
+        std::vector<move_task> out;
+        scan_prefix(catalog_keys::moves_prefix(), [&](std::string_view, std::string_view v) {
+            if (auto m = decode_move_task(v); m && m->active()) {
+                out.push_back(std::move(*m));
+            }
+            return true;
+        });
+        return out;
+    }
+
+    /// Up to `max` visible messages of a partition, oldest first, with
+    /// what a move needs: sequence, group and dead-letter source.
+    [[nodiscard]] auto visible_messages(const queue_target& t, std::size_t max) const
+        -> std::vector<std::pair<std::uint64_t, stored_message>> {
+        std::vector<std::pair<std::uint64_t, stored_message>> out;
+        const auto p = queue_keys::partition_prefix(t);
+        scan_prefix(p + "m/", [&](std::string_view k, std::string_view) {
+            if (out.size() >= max) {
+                return false;
+            }
+            if (const auto seq = queue_keys::parse_hex(k.substr(p.size() + 2))) {
+                if (auto m = load_message(p, *seq); m && m->status == state::visible) {
+                    out.emplace_back(*seq, std::move(*m));
+                }
+            }
+            return true;
+        });
+        return out;
+    }
+
     /// Every queue of every account this replica's range holds, in key
     /// order, until `visit` returns false (the tick worker's walk).
     template<typename Visit> auto for_each_queue(Visit&& visit) const -> void {
@@ -1063,9 +1114,16 @@ private:
             out._record = std::move(q);
             return out;
         }
+        if (c->_op == catalog_command::kind::move_update ||
+            c->_op == catalog_command::kind::move_cancel) {
+            return run_move_change(*c);
+        }
         if (!rec) {
             out._outcome = status::does_not_exist;
             return out;
+        }
+        if (c->_op == catalog_command::kind::move_start) {
+            return run_move_start(*c);
         }
         auto& q = *rec;
         switch (c->_op) {
@@ -1102,6 +1160,7 @@ private:
                 break;
             case catalog_command::kind::delete_:
                 erase(key);
+                erase_prefix(catalog_keys::moves_of(c->_account, c->_name));
                 put_u64(catalog_keys::deleted(c->_account, c->_name), c->_now_ms);
                 out._record = std::move(rec);
                 return out;
@@ -1119,6 +1178,68 @@ private:
         ++q._version;
         put(key, encode_queue_record(q));
         out._record = std::move(rec);
+        return out;
+    }
+
+    auto run_move_start(const catalog_command& c) -> catalog_result {
+        catalog_result out;
+        std::vector<std::pair<std::string, move_task>> tasks;
+        scan_prefix(catalog_keys::moves_of(c._account, c._name),
+                    [&](std::string_view k, std::string_view v) {
+                        if (auto m = decode_move_task(v)) {
+                            tasks.emplace_back(std::string(k), std::move(*m));
+                        }
+                        return true;
+                    });
+        for (const auto& [k, m] : tasks) {
+            if (m.active()) {
+                out._outcome = catalog_result::status::move_in_progress;
+                out._move = m;
+                return out;
+            }
+        }
+        // Room for the new one: the oldest (all finished) go.
+        for (std::size_t i = 0; i + k_max_move_tasks <= tasks.size(); ++i) {
+            erase(tasks[i].first);
+        }
+        auto m = c._move;
+        m._account = c._account;
+        m._name = c._name;
+        m._started_ms = c._now_ms;
+        m._status = move_task::state::running;
+        m._moved = 0;
+        m._failure.clear();
+        put(catalog_keys::move(c._account, c._name, m._started_ms), encode_move_task(m));
+        out._move = std::move(m);
+        return out;
+    }
+
+    auto run_move_change(const catalog_command& c) -> catalog_result {
+        catalog_result out;
+        const auto key = catalog_keys::move(c._account, c._name, c._move._started_ms);
+        const auto v = read(key);
+        auto m = v ? decode_move_task(*v) : std::nullopt;
+        if (!m || !m->active() ||
+            (c._op == catalog_command::kind::move_cancel &&
+             m->_status != move_task::state::running)) {
+            out._outcome = catalog_result::status::does_not_exist;
+            out._move = std::move(m);
+            return out;
+        }
+        if (c._op == catalog_command::kind::move_cancel) {
+            m->_status = move_task::state::cancelling;
+        } else {
+            m->_moved += c._move._moved;
+            if (c._move._to_move > 0) {
+                m->_to_move = c._move._to_move;
+            }
+            if (c._move._status != move_task::state::running) {
+                m->_status = c._move._status;
+                m->_failure = c._move._failure;
+            }
+        }
+        put(key, encode_move_task(*m));
+        out._move = std::move(m);
         return out;
     }
 
@@ -1159,6 +1280,11 @@ private:
             case queue_command::kind::change_visibility:
                 for (const auto& r : c.receipts) {
                     out.entries.push_back(change_visibility(t, p, counters, c.now_ms, r));
+                }
+                break;
+            case queue_command::kind::move:
+                for (const auto& mv : c.moves) {
+                    out.entries.push_back(move_one(t, p, counters, mv, c.now_ms));
                 }
                 break;
             default:
@@ -1249,7 +1375,68 @@ private:
                                 m.dedup_id,
                                 m.sent_ms,
                                 m.first_receive_ms,
-                                m.receive_count};
+                                m.receive_count,
+                                m.dead_letter_source};
+    }
+
+    /// Whether `m`, about to be received, has been received as often as
+    /// the redrive policy allows, and its dead-letter partition is in this
+    /// group's range (one entry moves it; across groups it would take a
+    /// transaction, which task 12 brings, so until then it stays).
+    [[nodiscard]] auto dead_letter_due(const queue_command& cmd, const stored_message& m,
+                                       std::uint64_t seq) const -> bool {
+        if (!cmd.redrive || cmd.redrive->max_receive_count == 0 ||
+            m.receive_count < cmd.redrive->max_receive_count ||
+            cmd.redrive->dlq.queue_id == cmd.target.queue_id) {
+            return false;
+        }
+        auto d = cmd.redrive->dlq;
+        d.partition = dead_letter_partition(*cmd.redrive, m.group_id, seq);
+        return _range.contains(queue_keys::partition_prefix(d));
+    }
+
+    /// Moves `m` from this partition to its dead-letter partition, in the
+    /// entry being staged, so it is in exactly one queue at every point
+    /// (Requirement 7.1). It keeps its id, body, attributes, digests and
+    /// sent time; its receive count starts again, as on SQS.
+    auto move_to_dead_letter(const queue_target& t, const std::string& p, partition_counters& c,
+                             std::uint64_t seq, const stored_message& m, const redrive_target& r,
+                             std::uint64_t now) -> void {
+        auto d = r.dlq;
+        d.partition = dead_letter_partition(r, m.group_id, seq);
+        transfer(t, p, c, seq, m, d, r.source_arn, now);
+    }
+
+    /// Moves `m` from partition `p` to partition `d` (of another queue) in
+    /// the entry being staged, keeping its id, body, attributes, digests
+    /// and sent time, with `dead_letter_source` as its source.
+    auto transfer(const queue_target& t, const std::string& p, partition_counters& c,
+                  std::uint64_t seq, const stored_message& m, const queue_target& d,
+                  const std::string& dead_letter_source, std::uint64_t now) -> void {
+        const auto dp = queue_keys::partition_prefix(d);
+        remove(t, p, c, seq, m);
+        auto dc = load_counters(dp);
+        housekeeping(d, dp, dc, now);
+        send_entry e;
+        e.message_id = m.message_id;
+        e.body = m.body;
+        e.attributes = m.attributes;
+        e.system_attributes = m.system_attributes;
+        e.md5_of_body = m.md5_of_body;
+        e.md5_of_attributes = m.md5_of_attributes;
+        e.md5_of_system_attributes = m.md5_of_system_attributes;
+        e.group_id = m.group_id;
+        e.dedup_id = m.dedup_id;  // no dedup_key: a move is never a duplicate
+        const auto sent = send(d, dp, dc, now, e);
+        if (auto moved = load_message(dp, sent.sequence)) {
+            moved->sent_ms = m.sent_ms;
+            moved->dead_letter_source = dead_letter_source;
+            store(dp, sent.sequence, *moved);
+        }
+        put(dp + "c", record_detail::encode_counters(dc));
+        if (_listener) {
+            _events.emplace_back(d, dc.visible > 0);
+        }
     }
 
     auto receive(const queue_target& t, const std::string& p, partition_counters& c,
@@ -1269,6 +1456,10 @@ private:
             });
             for (const auto seq : picked) {
                 if (auto m = load_message(p, seq)) {
+                    if (dead_letter_due(cmd, *m, seq)) {
+                        move_to_dead_letter(t, p, c, seq, *m, *cmd.redrive, cmd.now_ms);
+                        continue;
+                    }
                     out.push_back(deliver(p, c, seq, *m, cmd.now_ms, deadline, t));
                 }
             }
@@ -1306,11 +1497,35 @@ private:
             });
             for (const auto seq : run) {
                 if (auto m = load_message(p, seq)) {
+                    if (dead_letter_due(cmd, *m, seq)) {
+                        move_to_dead_letter(t, p, c, seq, *m, *cmd.redrive, cmd.now_ms);
+                        continue;
+                    }
                     out.push_back(deliver(p, c, seq, *m, cmd.now_ms, deadline, t));
                 }
             }
         }
         return out;
+    }
+
+    auto move_one(const queue_target& t, const std::string& p, partition_counters& c,
+                  const move_entry& mv, std::uint64_t now) -> entry_result {
+        entry_result e{{}, entry_result::status::stale, {}, mv.sequence};
+        auto d = mv.dest;
+        const auto m = load_message(p, mv.sequence);
+        if (!m || m->status != state::visible || d.queue_id == t.queue_id) {
+            return e;
+        }
+        const auto n = std::max<std::uint16_t>(mv.dest_partitions, 1);
+        d.partition =
+            static_cast<std::uint16_t>((d.fifo ? group_hash(m->group_id) : mv.sequence) % n);
+        if (!_range.contains(queue_keys::partition_prefix(d))) {
+            return e;  // across groups: a transaction, with task 12
+        }
+        e.outcome = entry_result::status::ok;
+        e.message_id = m->message_id;
+        transfer(t, p, c, mv.sequence, *m, d, {}, now);
+        return e;
     }
 
     auto delete_message(const queue_target& t, const std::string& p, partition_counters& c,

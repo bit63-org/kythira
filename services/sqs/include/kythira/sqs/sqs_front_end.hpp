@@ -138,6 +138,17 @@ struct sqs_arn {
     return sqs_arn{parts[1], parts[3], parts[4], parts[5]};
 }
 
+/// The account and name of a queue ARN as owned strings (the move worker's
+/// `arn_fn`), or nullopt.
+[[nodiscard]] inline auto sqs_arn_queue(const std::string& arn)
+    -> std::optional<std::pair<std::string, std::string>> {
+    const auto p = parse_sqs_arn(arn);
+    if (!p) {
+        return std::nullopt;
+    }
+    return std::pair{std::string(p->_account), std::string(p->_name)};
+}
+
 /// The account and queue name of a queue URL (`<scheme>://<host>/<account>/
 /// <name>`), or nullopt. The host is not checked: SQS answers a URL on any
 /// of its endpoint names, and a client behind a proxy may rewrite it.
