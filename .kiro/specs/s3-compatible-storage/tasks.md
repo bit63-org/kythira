@@ -62,10 +62,25 @@ builds it to that design). Each task is one PR unless noted.
     layer identity adds role checks. `tests/chunk_service_test.cpp` runs
     the remote access against a real listener.
 
-- [ ] 3. REST-XML codec
+- [x] 3. REST-XML codec
   - `aws_rest_xml_protocol.hpp`: request routing by method, path, query
     and headers; XML bodies and errors; virtual-hosted and path style
   - _Requirements: 4.1, 4.4, 4.5_
+  - Done: core `include/raft/aws_rest_xml_protocol.hpp`: `parse_query`
+    (`?uploads` and `?uploads=` alike), `parse_resource` (virtual-hosted
+    under configured domains, path style otherwise; S3's bucket-name rules
+    and 1024-byte keys), a `router` over a service's route table (method,
+    path kind, literal query keys, required query parameters and headers;
+    most specific wins, deprecated twins lose, `x-id` ignored, an unused
+    sub-resource is MethodNotAllowed), a strict XML reader (no DTDs, only
+    predefined entities and character references, depth and element
+    bounds, UTF-8), S3's error document, namespaced response documents,
+    both timestamp formats and `encoding-type=url` keys. The generator now
+    emits each operation's required query parameters and headers, and
+    `services/s3/include/kythira/s3/s3_routes.hpp` turns the model table
+    into routes. `s3_routing_test` routes all 172 recorded client requests
+    to the recorded operation and addressing style. `Expect: 100-continue`
+    and the size limits stay with `https::server` (`limits` names S3's).
 
 ### Phase 2: the object store
 

@@ -43,12 +43,28 @@ add_test(NAME s3_wire_evidence
 # Task 1: s3_gateway_node links and runs.
 add_test(NAME s3_gateway_node_self_test COMMAND s3_gateway_node --self-test)
 
+# Task 3: S3's route table over the core REST-XML router. Every request the
+# recorded clients sent (tests/evidence/data/) must route to the operation
+# the recording names. The Boost.Test lookup is tests/CMakeLists.txt's.
+find_package(Boost REQUIRED COMPONENTS unit_test_framework)
+add_executable(s3_routing_test s3_routing_test.cpp)
+target_link_libraries(s3_routing_test PRIVATE kythira_s3 Boost::unit_test_framework)
+if(TARGET boost_json)
+    target_link_libraries(s3_routing_test PRIVATE boost_json)
+elseif(TARGET Boost::json)
+    target_link_libraries(s3_routing_test PRIVATE Boost::json)
+endif()
+target_compile_definitions(s3_routing_test PRIVATE
+    KYTHIRA_S3_EVIDENCE_DIR_DEFAULT="${_s3_dir}tests/evidence/data")
+add_test(NAME s3_routing_test COMMAND s3_routing_test)
+
 set_tests_properties(
     s3_model_coverage
     s3_model_coverage_checker
     s3_operations_up_to_date
     s3_wire_evidence
     s3_gateway_node_self_test
+    s3_routing_test
     PROPERTIES LABELS "unit;s3;s3-module" TIMEOUT 60)
 
 kythira_scale_test_timeouts()

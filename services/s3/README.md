@@ -27,7 +27,8 @@ module's consumers (Requirement 17.3).
 | `model/s3-2006-03-01.json` | the pinned botocore `s3` model (botocore 1.43.126, unchanged; Apache-2.0, `model/LICENSE` and `model/NOTICE` are botocore's); `model/README.md` records its SHA-256 and how to upgrade it | 1 |
 | `tools/gen_operations.py` | generates `include/kythira/s3/model/operations.hpp` from the model; `--check` fails when the header is stale | 1 |
 | `tools/fetch_model.sh` | downloads the model at a botocore tag and regenerates the header | 1 |
-| `include/kythira/s3/model/operations.hpp` | the generated operation table: name, HTTP method, request URI with its distinguishing query keys, success status, streaming body flags, checksum requirement, deprecation (checked in, so a model upgrade shows its diff) | 1 |
+| `include/kythira/s3/model/operations.hpp` | the generated operation table: name, HTTP method, request URI with its distinguishing query keys, success status, streaming body flags, checksum requirement, deprecation, required query parameters and headers (checked in, so a model upgrade shows its diff) | 1, 3 |
+| `include/kythira/s3/s3_routes.hpp` | the operation table as routes for core's REST-XML router, and `route_request` (addressing, query, operation); `s3_routing_test` routes every recorded client request | 3 |
 | `implemented-operations.txt` | operations the gateway implements | 1 onward |
 | `doc/unsupported.md` | every other operation, with its planned task, reason and the exact error it returns (`NotImplemented`, 501) | 1 onward |
 | `tools/check_coverage.py`, `tools/test_check_coverage.py` | the coverage check (Requirement 2.2) and its fixture tests | 1 |
@@ -45,8 +46,13 @@ package to export.
 | `OpenSSL::SSL`, `OpenSSL::Crypto` | SigV4, chunk digests and server-side encryption, through `kythira_s3` |
 | `Python3_EXECUTABLE` | the coverage and generated-header tests |
 | `kythira_test_pch` | the guard the tests are entered under |
+| `Boost::unit_test_framework`, `boost_json` (or `Boost::json`) | `s3_routing_test`, which reads the evidence files |
+| `include/raft/aws_rest_xml_protocol.hpp` (and `aws_query_protocol.hpp`, its XML writer) | routing, addressing, request XML and response documents |
+| `include/raft/chunk_store.hpp`, `chunk_service.hpp` | object bytes and chunk reads and writes between nodes (used from task 5) |
 | `cmake/kythira_test_helpers.cmake` | `kythira_scale_test_timeouts` |
 
 ## What a split would still need
 
-Nothing beyond the table above: the module includes no core header yet.
+The core headers in the table above: they are header-only and depend on
+OpenSSL and Boost.Beast, so a Kythira package exporting `kythira_core_headers`
+covers them.
