@@ -43,3 +43,8 @@ CONFIG_KMS=y
 # and clang-tidy cover it. Needs only OpenSSL and Boost, which every leg has.
 # configs/ci_no_sqs_defconfig is this file without it.
 CONFIG_SQS=y
+# The SNS module (services/sns/, .kiro/specs/sns-compatible-notifications/). Off by
+# default like every new module; on here so the build-and-test legs, coverage
+# and clang-tidy cover it. Needs only OpenSSL and Boost, which every leg has.
+# configs/ci_no_sns_defconfig is this file without it.
+CONFIG_SNS=y
