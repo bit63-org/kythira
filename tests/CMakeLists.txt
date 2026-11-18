@@ -1423,6 +1423,10 @@ add_raft_completion_test(mock_capacity_quorum_manager_test
 # quorum manager and a simulated host cluster. Deterministic.
 add_raft_completion_test(elastic_capacity_controller_test
                          elastic_capacity_controller_test.cpp)
+# kinesis-independent-layers task 12: scaling the stateless layers on the
+# load their members report, and draining a member through the layer
+# membership group before it is decommissioned.
+add_raft_completion_test(layer_capacity_test layer_capacity_test.cpp)
 # elastic-shard-capacity spec, task 13: the placement-driver decorator.
 add_raft_completion_test(elastic_shard_placement_driver_test
                          elastic_shard_placement_driver_test.cpp)

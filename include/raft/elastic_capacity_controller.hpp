@@ -279,6 +279,34 @@ struct null_capacity_logger {
 
 static_assert(diagnostic_logger<null_capacity_logger>);
 
+/// @brief Work a machine serves that is not a shard replica, for draining it.
+///
+/// A scale-in drain ends when the machine holds no replica. A gateway or a
+/// front end never holds one, so without these hooks it would count as
+/// drained at once and be decommissioned with clients still connected.
+/// With them, the drain also waits for the machine's own work to finish
+/// (kinesis-independent-layers Requirement 10.5: drain before
+/// `decommission_node`).
+///
+/// Every hook is optional. All three must be idempotent, because a
+/// controller that takes over the lease resumes a drain it did not start
+/// and calls them again.
+///
+/// - `begin` asks the machine to stop taking new work. It is called once
+///   per drain per controller, on the executor, never under the
+///   controller's lock.
+/// - `holds_work` answers whether the machine still serves work. It is
+///   called on every step of a drain, under the controller's lock, so it
+///   must be quick and must not call back into the controller. It should
+///   answer true until the machine has finished draining.
+/// - `cancel` returns the machine to service when a drain is abandoned,
+///   for example after its deadline. It runs on the executor.
+template<typename NodeId> struct capacity_drain_hooks {
+    std::function<void(const NodeId&)> begin;
+    std::function<bool(const NodeId&)> holds_work;
+    std::function<void(const NodeId&)> cancel;
+};
+
 namespace detail::capacity {
 
 template<typename T> auto to_text(const T& v) -> std::string {
@@ -624,6 +652,16 @@ public:
         return ops;
     }
 
+    /// @brief Hooks that drain work held outside shard replicas.
+    ///
+    /// See `capacity_drain_hooks`. Set before the first step. Replacing them
+    /// later is allowed, and takes effect on the next step.
+    auto set_drain_hooks(capacity_drain_hooks<node_id_type> hooks) -> void {
+        std::lock_guard lock(_mutex);
+        _drain_hooks = std::move(hooks);
+        _drain_begun.clear();
+    }
+
     /// @brief The kill switch (Requirement 12.4).
     auto set_kill_switch(bool on) -> void { _kill.store(on); }
     [[nodiscard]] auto kill_switch() const -> bool { return _kill.load(); }
@@ -804,6 +842,10 @@ private:
     std::atomic<bool> _kill;
 
     mutable std::mutex _mutex;
+
+    capacity_drain_hooks<node_id_type> _drain_hooks;
+    /// Machines whose `begin` hook this controller has queued.
+    std::set<node_id_type> _drain_begun;
 
     std::map<node_id_type, node_entry> _nodes;
     std::map<GroupId, shard_entry> _shards;
@@ -1820,6 +1862,32 @@ private:
         }
     }
 
+    // ── draining work held outside replicas ──────────────────────────────────
+
+    auto begin_work_drain(const node_id_type& node, std::vector<std::function<void()>>& work)
+        -> void {
+        if (!_drain_hooks.begin || _drain_begun.contains(node)) {
+            return;
+        }
+        _drain_begun.insert(node);
+        work.emplace_back([hook = _drain_hooks.begin, node] { hook(node); });
+    }
+
+    /// Called on every abandonment, begun here or not: a controller that took
+    /// over the lease never saw the `begin`, and must still return the machine
+    /// to service.
+    auto end_work_drain(const node_id_type& node, std::vector<std::function<void()>>& work)
+        -> void {
+        _drain_begun.erase(node);
+        if (_drain_hooks.cancel) {
+            work.emplace_back([hook = _drain_hooks.cancel, node] { hook(node); });
+        }
+    }
+
+    [[nodiscard]] auto holds_work(const node_id_type& node) const -> bool {
+        return _drain_hooks.holds_work && _drain_hooks.holds_work(node);
+    }
+
     auto advance_drain(const intent_type& i, bool expired, time_point now,
                        std::vector<std::function<void()>>& work) -> void {
         using S = capacity_intent_state;
@@ -1834,6 +1902,7 @@ private:
                 if (expired) {
                     // Requirement 11.5: back into service, never half-drained.
                     cancel_moves_for(i._key, "drain deadline");
+                    end_work_drain(node, work);
                     count("drain", {{"outcome", "abandoned"}});
                     transition(i, S::abandoned,
                                patch_type{._note = "drain deadline; returned to service"}, now,
@@ -1841,20 +1910,23 @@ private:
                     return;
                 }
                 if (i._state == S::draining) {
+                    begin_work_drain(node, work);
                     const bool moving =
                         std::any_of(_moves.begin(), _moves.end(),
                                     [&](const auto& kv) { return kv.second._intent == i._key; });
-                    if (!moving && !holds_replica(node)) {
+                    if (!moving && !holds_replica(node) && !holds_work(node)) {
                         transition(i, S::drained, patch_type{._note = "holds nothing"}, now, work);
                     }
                 } else if (!call_in_flight(i._key)) {
                     if (holds_replica(node)) {
                         // Someone placed a replica back: never decommission it.
+                        end_work_drain(node, work);
                         transition(i, S::abandoned,
                                    patch_type{._note = "replica reappeared; returned to service"},
                                    now, work);
                         return;
                     }
+                    _drain_begun.erase(node);
                     transition(i, S::decommissioning,
                                patch_type{._deadline = now + _cfg.provision_deadline}, now, work);
                     dispatch_decommission(i, node, call_op::decommission_scale_in, now, work);
