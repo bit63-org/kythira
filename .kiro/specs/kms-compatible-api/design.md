@@ -48,11 +48,19 @@ choice operators already have.
 
 Creating a key is two steps that must not leave orphans: the KMS commits
 the key as `Creating` with a fresh id, asks the HSM for a backing key
-labelled with it, then commits the object id and `Enabled`. A leader that
-fails between the steps leaves `Creating`; the next leader looks the label
-up on the HSM and either records the object or makes it. A label that
-exists on the HSM with no key in the catalog is destroyed by the same
+labelled with it, then commits the object id and `Enabled`. A node that
+fails between the steps leaves `Creating`; the job lease holder looks the
+label up on the HSM and either records the object or makes it. A label
+that exists on the HSM with no key in the catalog is destroyed by the same
 sweep after a grace period.
+
+The background jobs (the orphan sweep, scheduled rotation, deletion at the
+end of the waiting period) run on the job lease holder, not on the
+catalog leader (`.kiro/specs/kms-independent-layers/` Requirement 5): a
+catalog record naming one member, with an expiry and a fencing token that
+every job command carries and the catalog checks in `apply()`. Only a
+member that can reach the HSM token takes the lease, and a stopping
+member releases it. Co-located, the holder is simply one of the members.
 
 ### Ciphertext blob
 

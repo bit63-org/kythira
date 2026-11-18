@@ -74,6 +74,10 @@ namespace kythira::kms {
         case catalog_status::limit_exceeded:
             return kms_error("LimitExceededException",
                              "The request was rejected because a quota was exceeded");
+        case catalog_status::stale_lease:
+            // Only a background job's fenced command gets this; a request
+            // never should.
+            return internal_error();
         case catalog_status::rejected:
         case catalog_status::ok:
             break;

@@ -3,6 +3,7 @@
 
 #include "kms_config.hpp"
 
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
@@ -344,6 +345,11 @@ auto from_env(const env_fn& env) -> kms_options {
     o.job_interval = ms_opt(env, "KYTHIRA_KMS_JOB_INTERVAL_MS", o.job_interval);
     if (o.job_interval.count() == 0) {
         throw fail("KYTHIRA_KMS_JOB_INTERVAL_MS must be at least 1");
+    }
+    o.job_lease =
+        ms_opt(env, "KYTHIRA_KMS_JOB_LEASE_MS", std::max(o.job_lease, 3 * o.job_interval));
+    if (o.job_lease <= o.job_interval) {
+        throw fail("KYTHIRA_KMS_JOB_LEASE_MS must be longer than KYTHIRA_KMS_JOB_INTERVAL_MS");
     }
     o.grace = ms_opt(env, "KYTHIRA_KMS_GRACE_MS", o.grace);
 

@@ -48,6 +48,7 @@ void require_same(const reader_t& r, const catalog_t& sm, std::string_view accou
         }
         BOOST_TEST((r.counts(account) == sm.counts(account)));
         BOOST_TEST((r.limits(account) == sm.limits(account)));
+        BOOST_TEST((r.lease() == sm.lease()));
         BOOST_TEST((r.creating_keys() == sm.creating_keys()));
         BOOST_TEST((r.due_deletions(now) == sm.due_deletions(now)));
         BOOST_TEST((r.due_rotations(now) == sm.due_rotations(now)));
@@ -127,6 +128,10 @@ public:
     [[nodiscard]] auto limits(std::string_view a) const -> kms::account_limits override {
         check();
         return _inner->limits(a);
+    }
+    [[nodiscard]] auto lease() const -> kms::job_lease override {
+        check();
+        return _inner->lease();
     }
     [[nodiscard]] auto creating_keys() const -> std::vector<kms::key_record> override {
         check();
