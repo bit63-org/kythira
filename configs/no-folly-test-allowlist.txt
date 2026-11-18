@@ -28,18 +28,6 @@ ca_cluster_node_rpc_tls_test cmd/ca_cluster_node/CMakeLists.txt returns unless f
 ca_cluster_node_test cmd/ca_cluster_node/CMakeLists.txt returns unless folly_FOUND
 cache_http_front_end_test drives the front end over a multi_raft host with folly futures: gated on folly_FOUND in tests/CMakeLists.txt, like the gateway tests
 cbor_serializer_example_test examples/ is added only when folly_FOUND (root CMakeLists.txt): the examples' main() functions initialize Folly
-chaos_commit_recovery_test tests/chaos/ is added only inside tests/CMakeLists.txt's `if(TARGET Folly::folly)` block (beside future_backend_benchmark_test)
-chaos_ctl_unit_tests tests/docker_chaos/ is added only inside tests/CMakeLists.txt's `if(TARGET Folly::folly)` block (beside future_backend_benchmark_test)
-chaos_election_safety_test tests/chaos/ is added only inside tests/CMakeLists.txt's `if(TARGET Folly::folly)` block (beside future_backend_benchmark_test)
-chaos_leader_completeness_test tests/chaos/ is added only inside tests/CMakeLists.txt's `if(TARGET Folly::folly)` block (beside future_backend_benchmark_test)
-chaos_leader_election_recovery_test tests/chaos/ is added only inside tests/CMakeLists.txt's `if(TARGET Folly::folly)` block (beside future_backend_benchmark_test)
-chaos_log_matching_test tests/chaos/ is added only inside tests/CMakeLists.txt's `if(TARGET Folly::folly)` block (beside future_backend_benchmark_test)
-chaos_persistence_degradation_recovery_test tests/chaos/ is added only inside tests/CMakeLists.txt's `if(TARGET Folly::folly)` block (beside future_backend_benchmark_test)
-chaos_profiles_test tests/chaos/ is added only inside tests/CMakeLists.txt's `if(TARGET Folly::folly)` block (beside future_backend_benchmark_test)
-chaos_smoke_test tests/chaos/ is added only inside tests/CMakeLists.txt's `if(TARGET Folly::folly)` block (beside future_backend_benchmark_test)
-chaos_state_machine_recovery_test tests/chaos/ is added only inside tests/CMakeLists.txt's `if(TARGET Folly::folly)` block (beside future_backend_benchmark_test)
-chaos_state_machine_safety_test tests/chaos/ is added only inside tests/CMakeLists.txt's `if(TARGET Folly::folly)` block (beside future_backend_benchmark_test)
-chaos_workload_unit_tests tests/docker_chaos/ is added only inside tests/CMakeLists.txt's `if(TARGET Folly::folly)` block (beside future_backend_benchmark_test)
 coap_block_transfer_example_test examples/ is added only when folly_FOUND (root CMakeLists.txt): the examples' main() functions initialize Folly
 coap_cantcoap_raft_node_test uses Folly directly (`folly::Init`)
 coap_dtls_security_example_test examples/ is added only when folly_FOUND (root CMakeLists.txt): the examples' main() functions initialize Folly
@@ -57,14 +45,10 @@ connection_oriented_example_test examples/ is added only when folly_FOUND (root 
 continuation_example_test examples/ is added only when folly_FOUND (root CMakeLists.txt): the examples' main() functions initialize Folly
 cross_backend_concept_compliance_property_test uses Folly directly (`folly::exception_wrapper`), compares the Folly backend with the others
 custom_types_example_test examples/ is added only when folly_FOUND (root CMakeLists.txt): the examples' main() functions initialize Folly
-docker_chaos_checkers_unit_tests tests/docker_chaos/ is added only inside tests/CMakeLists.txt's `if(TARGET Folly::folly)` block (beside future_backend_benchmark_test)
-docker_chaos_fault_control_unit_tests tests/docker_chaos/ is added only inside tests/CMakeLists.txt's `if(TARGET Folly::folly)` block (beside future_backend_benchmark_test)
-docker_chaos_harness_unit_tests tests/docker_chaos/ is added only inside tests/CMakeLists.txt's `if(TARGET Folly::folly)` block (beside future_backend_benchmark_test)
 error_handling_example_test examples/ is added only when folly_FOUND (root CMakeLists.txt): the examples' main() functions initialize Folly
 executor_example_test examples/ is added only when folly_FOUND (root CMakeLists.txt): the examples' main() functions initialize Folly
 factory_example_test examples/ is added only when folly_FOUND (root CMakeLists.txt): the examples' main() functions initialize Folly
 failure_scenarios_test examples/ is added only when folly_FOUND (root CMakeLists.txt): the examples' main() functions initialize Folly
-fiu_remote_unit_test tests/chaos/ is added only inside tests/CMakeLists.txt's `if(TARGET Folly::folly)` block (beside future_backend_benchmark_test)
 folly_backend_concept_regenericization_property_test uses Folly directly (`folly::InlineExecutor`)
 folly_concept_wrappers_backward_compatibility_property_test uses Folly directly (`folly::CPUThreadPoolExecutor`)
 folly_concept_wrappers_comprehensive_compliance_property_test uses Folly directly (`folly::Unit`, `folly::CPUThreadPoolExecutor`, `folly::exception_wrapper`)

@@ -3732,10 +3732,10 @@ unverified completion claim.
   `include/raft/test_types.hpp` (now `future_default` / `promise_default`),
   and suites with no Folly use at all. Three the list called "no direct
   Folly" really test `kythira::Future` from raft/future.hpp, which includes
-  Folly unconditionally, and stay gated with that reason. Still gated on
-  Folly as a whole: `tests/chaos/`, `tests/docker_chaos/`, the Alibaba
-  component tests, `redis_gateway_integration_test` and its twins, and
-  `cmd/ca_cluster_node`. Un-gating one means building and running it on the
+  Folly unconditionally, and stay gated with that reason. `tests/chaos/`
+  and `tests/docker_chaos/` moved out of the Folly block too (16 suites).
+  Still gated on Folly as a whole: the Alibaba component tests,
+  `redis_gateway_integration_test` and its twins, and `cmd/ca_cluster_node`. Un-gating one means building and running it on the
   Boost backend, then deleting its allowlist line in the same change (the
   checker rejects stale lines).
 
