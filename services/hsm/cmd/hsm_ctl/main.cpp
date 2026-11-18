@@ -14,6 +14,10 @@
 //   hsm_ctl [options] unseal --reset
 //   hsm_ctl [options] seal
 //   hsm_ctl [options] rekey [--k K] [--n N] [--mode operator|node]
+//   hsm_ctl [options] crypto-members
+//   hsm_ctl [options] crypto-members seed
+//   hsm_ctl [options] crypto-members admit IDENTITY
+//   hsm_ctl [options] crypto-members remove IDENTITY [--rekey [--k K] [--n N]]
 //   hsm_ctl migrate --from URI --to URI [--transport-key URI] [--dry-run]
 //                   [--keep-extractable]
 //   hsm_ctl seal-secret --key-uri URI --out FILE [--in FILE] [--oaep sha1|sha256]
@@ -46,6 +50,7 @@
 #include <sys/types.h>
 #include <unistd.h>
 
+#include <cctype>
 #include <chrono>
 #include <cstdlib>
 #include <exception>
@@ -73,6 +78,17 @@ commands:
   rekey [--k K] [--n N] [--mode operator|node]
                                       a new master key and new shares; the
                                       old shares stop working
+  crypto-members                      the identities allowed to be unsealed
+                                      and to hold shares (independent layers)
+  crypto-members seed                 write the store members in as the
+                                      list, once, before splitting layers
+  crypto-members admit IDENTITY       admit one (a share from the next rekey
+                                      in node mode)
+  crypto-members remove IDENTITY [--rekey [--k K] [--n N]]
+                                      remove one; it keeps its old share
+                                      until a rekey, which --rekey runs in
+                                      the same step (n follows the list in
+                                      node mode)
   migrate --from URI --to URI [--transport-key URI] [--dry-run]
           [--keep-extractable]
                                       copy a token's extractable keys, their
@@ -157,7 +173,8 @@ auto parse(int argc, char** argv) -> invocation {
                    w == "--transport-key" || w == "--key-uri" || w == "--in" || w == "--out" ||
                    w == "--oaep") {
             inv.flags[w.substr(2)] = value();
-        } else if (w == "--reset" || w == "--dry-run" || w == "--keep-extractable") {
+        } else if (w == "--reset" || w == "--dry-run" || w == "--keep-extractable" ||
+                   w == "--rekey") {
             inv.flags[w.substr(2)] = "true";
         } else if (w.starts_with("--")) {
             throw usage_error("unknown option " + w);
@@ -214,6 +231,48 @@ struct call {
     std::string body;
 };
 
+/// `s` with everything but unreserved characters percent-encoded (a
+/// SPIFFE identity has slashes and a colon).
+auto percent_encode(std::string_view s) -> std::string {
+    static constexpr std::string_view hex = "0123456789ABCDEF";
+    std::string out;
+    for (const char ch : s) {
+        const auto c = static_cast<unsigned char>(ch);
+        if (std::isalnum(c) != 0 || c == '-' || c == '.' || c == '_' || c == '~') {
+            out.push_back(ch);
+        } else {
+            out.push_back('%');
+            out.push_back(hex[c >> 4U]);
+            out.push_back(hex[c & 0xFU]);
+        }
+    }
+    return out;
+}
+
+auto crypto_members_call(const invocation& inv) -> call {
+    const std::string base = "/v1/crypto-members";
+    if (inv.args.empty()) {
+        return {"GET", base, {}};
+    }
+    const auto& verb = inv.args[0];
+    if (verb == "seed" && inv.args.size() == 1) {
+        return {"POST", base + "/seed", {}};
+    }
+    if ((verb == "admit" || verb == "remove") && inv.args.size() == 2) {
+        const auto path = base + "/" + percent_encode(inv.args[1]);
+        if (verb == "admit") {
+            return {"PUT", path, {}};
+        }
+        if (!inv.flags.contains("rekey")) {
+            return {"DELETE", path, {}};
+        }
+        auto body = boost::json::parse(split_body(inv)).as_object();
+        body["rekey"] = true;
+        return {"DELETE", path, boost::json::serialize(body)};
+    }
+    throw usage_error("crypto-members [seed | admit IDENTITY | remove IDENTITY [--rekey]]");
+}
+
 auto call_of(const invocation& inv) -> call {
     const auto& c = inv.command;
     if (c == "status") {
@@ -237,6 +296,9 @@ auto call_of(const invocation& inv) -> call {
     }
     if (c == "rekey") {
         return {"POST", "/v1/rekey", split_body(inv)};
+    }
+    if (c == "crypto-members") {
+        return crypto_members_call(inv);
     }
     throw usage_error("unknown command " + c);
 }

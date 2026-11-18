@@ -362,17 +362,34 @@ private:
     share_store* _store;
 };
 
+/// Whether `caller` may deliver or ask for a share: with the catalog's
+/// crypto member list seeded, only an identity on it
+/// (.kiro/specs/hsm-independent-layers/ Requirement 5.2); before that, a
+/// member, as in every co-located cluster (Requirement 1.2).
+[[nodiscard]] inline auto may_hold_share(const peer_policy& policy,
+                                         const std::vector<std::string>& crypto_members,
+                                         const peer_caller& caller) -> bool {
+    if (crypto_members.empty()) {
+        return is_member(policy, caller);
+    }
+    auto listed = policy;
+    listed.identities = {crypto_members.begin(), crypto_members.end()};
+    return is_member(listed, caller);
+}
+
 /// The share routes for the module's listener; nothing for other targets.
-/// Only a member may deliver or ask (the same check as forwarding).
+/// Only a crypto member may deliver or ask (may_hold_share): the members,
+/// until `crypto_members` (the catalog's list) is seeded.
 [[nodiscard]] inline auto serve_share_peer(share_store& store, const peer_policy& policy,
                                            const peer_caller& caller, std::string_view method,
-                                           std::string_view target, std::string_view body)
+                                           std::string_view target, std::string_view body,
+                                           const std::vector<std::string>& crypto_members = {})
     -> std::optional<peer_answer> {
     const bool deliver = target == peer_share_route;
     if (!deliver && target != peer_share_request_route) {
         return std::nullopt;
     }
-    if (!is_member(policy, caller)) {
+    if (!may_hold_share(policy, crypto_members, caller)) {
         return peer_answer{403, "not a member"};
     }
     if (method != "POST") {

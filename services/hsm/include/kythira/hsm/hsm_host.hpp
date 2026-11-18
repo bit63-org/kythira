@@ -394,6 +394,12 @@ public:
         return s;
     }
 
+    /// The catalog replica's crypto member list (empty until seeded).
+    [[nodiscard]] auto crypto_members() const -> std::vector<std::string> {
+        const auto c = catalog_if_open();
+        return c ? c->crypto_members() : std::vector<std::string>{};
+    }
+
     /// Whether this node leads local group `local_group`.
     [[nodiscard]] auto leads(std::uint64_t local_group) const -> bool {
         const auto* node = _host->group_node(host_group(local_group));
