@@ -21,12 +21,29 @@ on:
     # a base is `edited`, so a retargeted PR keeps its empty result until
     # something is pushed.
     #
-    # The cost is real and accepted: a stacked PR now pays for the full matrix,
-    # which since the backend-matrix widening is ~55 minutes of cold build per
-    # compat leg. Adding `edited` to the activity types was the cheaper
-    # alternative and was not taken -- it would only re-run on a retarget,
-    # leaving a PR that is never retargeted still silently uncovered, and it
-    # would also fire on every title and description edit.
+    # Adding `edited` to the activity types was the cheaper alternative and
+    # was not taken -- it would only re-run on a retarget, leaving a PR that is
+    # never retargeted still silently uncovered, and it would also fire on
+    # every title and description edit. Worse, the skipped jobs of an edit-
+    # triggered run would land on the same head SHA and could mask a real
+    # failure on a required check.
+    #
+    # Stacked PRs run a reduced set, not the full matrix. Every Build & Test
+    # leg, docs, and the cheap policy checks still run, so a stacked PR always
+    # shows a real build result. The other jobs (coverage, the future-backend
+    # suites, the build variants and clang-tidy) carry
+    # `if: github.event_name != 'pull_request' || github.base_ref == 'main'`
+    # and report as skipped. The full matrix used to run on every stacked
+    # push, about 530 job-minutes and 31 runner slots each time, and then ran
+    # again once the PR was rebased onto main. The account's 20-job runner cap
+    # turned that duplicate into a queue hours long (November 18, 2026: 121
+    # runs queued, 20 of 42 open PRs stacked).
+    #
+    # The trade-off: a skipped required check counts as passing. This is only
+    # safe because this repo only merges PRs into main, and its merge
+    # procedure rebases a child onto main and pushes it before merging. That
+    # push runs the full matrix. Never merge a retargeted PR without pushing
+    # it first.
     branches: ['**']
 
 # Read-only by default. The three jobs that publish results widen this for
@@ -664,6 +681,8 @@ jobs:
   # gcp_privateca_certificate_provider) is actually compiled against the SDK;
   # the main build-and-test jobs only exercise the unconditional validators.
   gcp-sdk-build:
+    # Full matrix only: skipped on stacked PRs (see the note under `on:`).
+    if: github.event_name != 'pull_request' || github.base_ref == 'main'
     name: GCP SDK Build (clang++-18, x64)
     runs-on: ubuntu-24.04
     # 360, not 180: this job's vcpkg ports are clang-built for mold
@@ -861,6 +880,8 @@ jobs:
   # build-and-test leg and with nothing else, and the first run after either
   # changes is a cold build of the whole dependency set.
   ion-serializer-build:
+    # Full matrix only: skipped on stacked PRs (see the note under `on:`).
+    if: github.event_name != 'pull_request' || github.base_ref == 'main'
     name: Ion Serializer Build (g++-14, x64)
     runs-on: ubuntu-24.04
     timeout-minutes: 300
@@ -1103,6 +1124,8 @@ jobs:
   # never runs here. clang++-18 is the fastest compiler this workflow builds
   # with (see the Configure (Release) comment in build-and-test).
   config-variants:
+    # Full matrix only: skipped on stacked PRs (see the note under `on:`).
+    if: github.event_name != 'pull_request' || github.base_ref == 'main'
     name: Config Variants (clang++-18, x64)
     runs-on: ubuntu-24.04
     # Sized from build-and-test's 180-minute budget for one full cold build,
@@ -1405,6 +1428,8 @@ jobs:
   # arm64 leg is not (yet), so a new arm64-only failure reports without
   # blocking merges until it has a record on main.
   alt-coap-backends:
+    # Full matrix only: skipped on stacked PRs (see the note under `on:`).
+    if: github.event_name != 'pull_request' || github.base_ref == 'main'
     name: Alternate CoAP Backends (g++-13, ${{ matrix.arch_label }})
     runs-on: ${{ matrix.os }}
     strategy:
@@ -1688,6 +1713,8 @@ jobs:
   # port 53, which nothing here needs, and it loads an AppArmor profile that
   # stops /usr/sbin/named reading a config anywhere outside /etc/bind.
   dns-discovery-build:
+    # Full matrix only: skipped on stacked PRs (see the note under `on:`).
+    if: github.event_name != 'pull_request' || github.base_ref == 'main'
     name: DNS Discovery Build (g++-13, x64)
     runs-on: ubuntu-24.04
     timeout-minutes: 180
@@ -1892,6 +1919,8 @@ jobs:
   # never runs here. clang++-18 is the fastest compiler this workflow builds
   # with (see the Configure (Release) comment in build-and-test).
   no-folly:
+    # Full matrix only: skipped on stacked PRs (see the note under `on:`).
+    if: github.event_name != 'pull_request' || github.base_ref == 'main'
     name: No Folly (clang++-18, x64)
     runs-on: ubuntu-24.04
     # One full build and test run, the same work as a build-and-test leg.
@@ -2150,6 +2179,8 @@ jobs:
   # analysed by static-analysis-variants below instead; see
   # configs/tidy-variant-sources.txt.
   static-analysis:
+    # Full matrix only: skipped on stacked PRs (see the note under `on:`).
+    if: github.event_name != 'pull_request' || github.base_ref == 'main'
     name: clang-tidy (shard ${{ matrix.shard }} of 6)
     runs-on: ubuntu-24.04
     # Sized for a cold cache (or the cache off): the slowest cold shard took
@@ -2356,6 +2387,8 @@ jobs:
   # with the same compiler so the shared binary cache serves the packages,
   # but never saves, so it cannot write a tree under another job's key.
   static-analysis-variants:
+    # Full matrix only: skipped on stacked PRs (see the note under `on:`).
+    if: github.event_name != 'pull_request' || github.base_ref == 'main'
     name: clang-tidy (${{ matrix.variant }})
     runs-on: ubuntu-24.04
     # A warm leg is setup plus 1-8 files. 120 covers a vcpkg miss that has to
@@ -2548,6 +2581,8 @@ jobs:
   # ENABLE_COVERAGE uses LLVM source-based instrumentation and requires clang.
   # gcovr-based coverage with GCC is not supported by this project's CMakeLists.
   coverage:
+    # Full matrix only: skipped on stacked PRs (see the note under `on:`).
+    if: github.event_name != 'pull_request' || github.base_ref == 'main'
     permissions:
       contents: read
       checks: write         # dorny/test-reporter posts inline results
@@ -3003,6 +3038,8 @@ jobs:
   # reads under _reconnect_cv_mutex alone and a race on it changes no
   # result a plain test can see.
   tsan:
+    # Full matrix only: skipped on stacked PRs (see the note under `on:`).
+    if: github.event_name != 'pull_request' || github.base_ref == 'main'
     permissions:
       contents: read
       checks: write         # dorny/test-reporter posts inline results
@@ -3338,6 +3375,8 @@ jobs:
   # populate — no new vcpkg install, just a different
   # -DKYTHIRA_DEFAULT_FUTURE_BACKEND configure flag.
   future-backend-compat:
+    # Full matrix only: skipped on stacked PRs (see the note under `on:`).
+    if: github.event_name != 'pull_request' || github.base_ref == 'main'
     name: Full suite (${{ matrix.backend }} future backend)
     runs-on: ubuntu-24.04
     # Was 180 ("matches build-and-test's budget"), and that stopped being
@@ -3759,6 +3798,8 @@ jobs:
   # scripts/build.sh, after its own `aws sts get-caller-identity` check.
   # See .kiro/specs/ca-cluster-node-ami/.
   packer-ca-cluster-node:
+    # Full matrix only: skipped on stacked PRs (see the note under `on:`).
+    if: github.event_name != 'pull_request' || github.base_ref == 'main'
     name: Packer (ca_cluster_node AMI)
     runs-on: ubuntu-24.04
     timeout-minutes: 15
