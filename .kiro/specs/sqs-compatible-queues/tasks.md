@@ -48,7 +48,7 @@ PR unless noted.
     task: they need the per-group spreading of task 8, where standard-queue
     partitions are chosen, and are moved there.
 
-- [ ] 3. Gateway, protocols and authorization
+- [x] 3. Gateway, protocols and authorization
   - JSON 1.0 and query codecs, SigV4, `sqs` action table, queue policies,
     static keys, compatibility profile
   - _Requirements: 2.2, 2.3, 3.1-3.3_
@@ -64,13 +64,26 @@ PR unless noted.
     each operation's authorizing action and the static-key roles are
     generated from AWS's service reference; ReceiveMessage counts as a
     write (it is a committed entry) and is outside read-only. The
-    compatibility profile covers every switch of 2.3. Left for the gateway
-    half: the HTTP surface, SigV4, authorization with queue policies, and
-    static keys.
+    compatibility profile covers every switch of 2.3. The front end
+    (`sqs_front_end.hpp`) authenticates with SigV4 in the request's
+    protocol (JSON wording plus `x-amzn-query-error`, or query wording),
+    resolves the queue from `QueueUrl`, `QueueName` or `SourceArn`, and
+    authorizes the operation's primary action on the queue's ARN with its
+    tags and `Policy` from a queue lookup, so queue policies are evaluated
+    with identity policies, cross-account included. Static keys use core's
+    `static_key_authorizer` with the generated roles. `sqs_queue_policy.hpp`
+    holds the AddPermission/RemovePermission policy edits; their handlers
+    move to task 4 with the queue catalog they write to, and the HTTP
+    listener and daemon wiring come with task 4's handlers (nothing to
+    serve before then).
 
 - [ ] 4. Queue and message API
   - Queue operations; send, receive, delete, visibility and batches;
     attributes and MD5; receipt handles
+  - AddPermission and RemovePermission over `sqs_queue_policy.hpp`; the
+    HTTP listener on the shared Beast host and the `sqs_node` wiring
+    (static keys from core's `static_keys_file.hpp`), moved here from
+    task 3 so they arrive with handlers to serve
   - _Requirements: 4.1, 5.1, 5.3, 5.5_
 
 - [ ] 5. Long polling
