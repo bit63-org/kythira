@@ -144,6 +144,12 @@ struct index_command {
         /// Hand back and forget up to `max` chunks unreferenced for at
         /// least `grace_ms`.
         collect_chunks = 11,
+        /// Set (`document`) or erase (no `document`) one stored header,
+        /// `config_name`, of the version `version_id` names (the current
+        /// one without it): object tagging and object ACLs. A delete
+        /// marker has none (`405 MethodNotAllowed`), and nothing else about
+        /// the version changes.
+        set_object_metadata = 12,
     };
 
     kind op = kind::put_object;
@@ -155,7 +161,11 @@ struct index_command {
     std::string key;
     std::string region;        ///< create_bucket
     bool object_lock = false;  ///< create_bucket
-    std::string config_name;   ///< put_bucket_config
+    /// create_bucket: sub-resources the bucket starts with (its ACL,
+    /// ownership controls, public access block), so a new bucket is never
+    /// seen without them.
+    std::map<std::string, std::string> config;
+    std::string config_name;  ///< put_bucket_config
     std::optional<std::string> document;
     std::optional<std::string> version_id;  ///< delete_object, copy source
     object_content content;                 ///< put, copy (replacement metadata), create_upload
@@ -164,6 +174,11 @@ struct index_command {
     std::string source_key;
     source_conditions source_if;
     bool replace_metadata = false;  ///< copy_object: COPY or REPLACE
+    /// copy_object: stored headers taken from `content.system_metadata`
+    /// whatever `replace_metadata` says (erased when absent there): the
+    /// new object's ACL, which is never copied, and its tags under
+    /// `x-amz-tagging-directive: REPLACE`.
+    std::vector<std::string> override_metadata;
     std::string upload_id;
     part_record part;                   ///< upload_part
     std::vector<completed_part> parts;  ///< complete_upload
@@ -250,6 +265,11 @@ inline void write_opt_u64(detail::writer& w, const std::optional<std::uint64_t>&
         w.u32(p.number).str(p.etag);
     }
     w.u64(c.grace_ms).u32(c.max);
+    w.map(c.config);
+    w.u32(static_cast<std::uint32_t>(c.override_metadata.size()));
+    for (const auto& name : c.override_metadata) {
+        w.str(name);
+    }
     const auto s = w.take();
     std::vector<std::byte> out(s.size());
     std::memcpy(out.data(), s.data(), s.size());
@@ -262,7 +282,7 @@ inline void write_opt_u64(detail::writer& w, const std::optional<std::uint64_t>&
     r.expect_format(command_format, "command");
     index_command c;
     const auto op = r.u8();
-    if (op < 1 || op > 11) {
+    if (op < 1 || op > 12) {
         throw index_format_error("s3 index: unknown command");
     }
     c.op = static_cast<index_command::kind>(op);
@@ -299,6 +319,11 @@ inline void write_opt_u64(detail::writer& w, const std::optional<std::uint64_t>&
     }
     c.grace_ms = r.u64();
     c.max = r.u32();
+    c.config = r.map();
+    c.override_metadata.resize(r.u32());
+    for (auto& name : c.override_metadata) {
+        name = r.str();
+    }
     r.done("command");
     return c;
 }
@@ -778,6 +803,8 @@ private:
                 return abort_upload(t, c);
             case k::collect_chunks:
                 return collect_chunks(t, c);
+            case k::set_object_metadata:
+                return set_object_metadata(t, c);
         }
         return fail(400, "InvalidRequest", "Unknown index command");
     }
@@ -819,6 +846,7 @@ private:
         b.region = c.region;
         b.created_ms = c.now_ms;
         b.object_lock = c.object_lock;
+        b.config = c.config;
         // A bucket created with object lock is versioned from the start.
         b.versioning = c.object_lock ? versioning_state::enabled : versioning_state::unversioned;
         t.put(key, codec::encode(b));
@@ -1069,6 +1097,35 @@ private:
         return write_version(t, c.target, c.key, std::move(v), index, c.now_ms);
     }
 
+    auto set_object_metadata(txn& t, const index_command& c) -> index_result {
+        const auto& b = c.target;
+        if (c.version_id && *c.version_id != null_version_id && !parse_stamp_id(*c.version_id)) {
+            return fail(400, "InvalidArgument", "Invalid version id specified");
+        }
+        auto v = find_version(&t, b.id, c.key, c.version_id);
+        if (!v) {
+            return c.version_id
+                       ? fail(404, "NoSuchVersion", "The specified version does not exist.")
+                       : no_such_key();
+        }
+        if (v->delete_marker) {
+            return fail(405, "MethodNotAllowed",
+                        "The specified method is not allowed against this resource.");
+        }
+        if (c.document) {
+            v->content.system_metadata[c.config_name] = *c.document;
+        } else {
+            v->content.system_metadata.erase(c.config_name);
+        }
+        t.put(keys::versioned(keys::object_space, b.id, c.key, v->stamp), codec::encode(*v));
+        index_result r;
+        r.bucket_id = b.id;
+        r.version_id = v->version_id();
+        r.etag = v->content.etag;
+        r.last_modified_ms = v->last_modified_ms;
+        return r;
+    }
+
     auto delete_object(txn& t, const index_command& c, std::uint64_t index) -> index_result {
         const auto& b = c.target;
         if (c.version_id) {
@@ -1138,6 +1195,14 @@ private:
             v.content.user_metadata = c.content.user_metadata;
             v.content.system_metadata = c.content.system_metadata;
             v.content.storage_class = c.content.storage_class;
+        }
+        for (const auto& name : c.override_metadata) {
+            if (auto it = c.content.system_metadata.find(name);
+                it != c.content.system_metadata.end()) {
+                v.content.system_metadata[name] = it->second;
+            } else {
+                v.content.system_metadata.erase(name);
+            }
         }
         if (!c.content.etag.empty()) {
             v.content.etag = c.content.etag;

@@ -184,6 +184,8 @@ BOOST_AUTO_TEST_CASE(records_and_commands_round_trip) {
     c.conditions.if_match = "\"e\"";
     c.source_if.if_modified_since_ms = 77;
     c.document = "doc";
+    c.config = {{"acl", "<AccessControlPolicy/>"}, {"ownership-controls", "x"}};
+    c.override_metadata = {"x-amz-tagging", "x-kythira-acl"};
     BOOST_TEST((codec::decode_command(codec::encode(c)) == c));
 
     index_result r;
@@ -305,6 +307,59 @@ BOOST_AUTO_TEST_CASE(an_unversioned_bucket_keeps_one_null_version) {
     BOOST_TEST(r.count(2) == 0U);
     // Deleting what is not there succeeds, as on S3.
     BOOST_TEST(r.del("b1", "k").ok());
+}
+
+BOOST_AUTO_TEST_CASE(a_bucket_starts_with_the_configuration_its_create_carries) {
+    replica r;
+    index_command c;
+    c.op = kind::create_bucket;
+    c.bucket = "b1";
+    c.owner = "acct";
+    c.region = "us-west-2";
+    c.config = {{"public-access-block", "<x/>"}};
+    BOOST_TEST(r.apply(c).ok());
+    BOOST_TEST((r.sm.bucket("b1")->config == c.config));
+}
+
+BOOST_AUTO_TEST_CASE(object_metadata_is_set_and_erased_in_place) {
+    replica r;
+    r.create("b1");
+    r.config("b1", "versioning", "Enabled");
+    const auto first = r.put("b1", "k", content_of({1}, "e1"));
+    const auto second = r.put("b1", "k", content_of({2}, "e2"));
+    index_command c;
+    c.op = kind::set_object_metadata;
+    c.target = r.ref("b1");
+    c.key = "k";
+    c.config_name = "x-amz-tagging";
+    c.document = "a=1";
+    const auto set = r.apply(c);
+    BOOST_TEST_REQUIRE(set.ok());
+    BOOST_TEST(set.version_id == second.version_id);
+    const auto id = r.ref("b1").id;
+    BOOST_TEST(r.sm.version(id, "k")->content.system_metadata.at("x-amz-tagging") == "a=1");
+    BOOST_TEST(!r.sm.version(id, "k", first.version_id)
+                    ->content.system_metadata.contains("x-amz-tagging"));
+    BOOST_TEST(r.sm.version(id, "k")->content.etag == "e2");
+    BOOST_TEST(r.count(2) == 1U);  // references untouched
+
+    c.version_id = first.version_id;
+    BOOST_TEST(r.apply(c).ok());
+    BOOST_TEST(
+        r.sm.version(id, "k", first.version_id)->content.system_metadata.contains("x-amz-tagging"));
+    c.version_id.reset();
+    c.document.reset();
+    BOOST_TEST(r.apply(c).ok());
+    BOOST_TEST(!r.sm.version(id, "k")->content.system_metadata.contains("x-amz-tagging"));
+
+    c.version_id = stamp_id(12345);
+    BOOST_TEST(r.apply(c).error == "NoSuchVersion");
+    c.version_id.reset();
+    c.key = "missing";
+    BOOST_TEST(r.apply(c).error == "NoSuchKey");
+    c.key = "k";
+    r.del("b1", "k");  // a delete marker is now current
+    BOOST_TEST(r.apply(c).error == "MethodNotAllowed");
 }
 
 BOOST_AUTO_TEST_CASE(an_enabled_bucket_keeps_every_version_and_writes_delete_markers) {
@@ -458,6 +513,28 @@ BOOST_AUTO_TEST_CASE(a_copy_reuses_the_manifest_and_checks_source_conditions) {
     missing.key = "x";
     missing.source_key = "nope";
     BOOST_TEST(r.apply(missing).error == "NoSuchKey");
+}
+
+BOOST_AUTO_TEST_CASE(a_copy_takes_named_headers_from_the_request_even_when_copying_metadata) {
+    replica r;
+    r.create("b1");
+    auto src = content_of({1}, "e");
+    src.system_metadata = {
+        {"x-amz-tagging", "a=1"}, {"x-kythira-acl", "<acl/>"}, {"cache-control", "no-cache"}};
+    r.put("b1", "src", src);
+    index_command c;
+    c.op = kind::copy_object;
+    c.target = r.ref("b1");
+    c.source = r.ref("b1");
+    c.key = "dst";
+    c.source_key = "src";
+    c.override_metadata = {"x-amz-tagging", "x-kythira-acl"};
+    c.content.system_metadata = {{"x-amz-tagging", "b=2"}};
+    BOOST_TEST_REQUIRE(r.apply(c).ok());
+    const auto meta = r.sm.version(r.ref("b1").id, "dst")->content.system_metadata;
+    BOOST_TEST(meta.at("x-amz-tagging") == "b=2");
+    BOOST_TEST(!meta.contains("x-kythira-acl"));         // never copied
+    BOOST_TEST(meta.at("cache-control") == "no-cache");  // COPY keeps the rest
 }
 
 BOOST_AUTO_TEST_CASE(a_copy_of_a_delete_marker_version_is_refused) {
@@ -797,7 +874,7 @@ public:
         c.bucket = b.name;
         c.target = {b.id, b.versioning, b.object_lock};
         c.key = "key-" + std::to_string(pick(4));
-        switch (pick(12)) {
+        switch (pick(13)) {
             case 0:
                 c.op = kind::put_bucket_config;
                 c.config_name = "versioning";
@@ -859,6 +936,13 @@ public:
             }
             case 10:
                 c.op = kind::delete_bucket;
+                return c;
+            case 11:
+                c.op = kind::set_object_metadata;
+                c.config_name = "x-amz-tagging";
+                if (pick(3) != 0) {
+                    c.document = "k=" + std::to_string(pick(100));
+                }
                 return c;
             default:
                 c.op = kind::collect_chunks;
@@ -946,7 +1030,7 @@ BOOST_AUTO_TEST_CASE(replicas_agree_and_reference_counts_match_the_manifests) {
     }
     // The workload reaches every kind of entry, so the agreement above
     // covers them all.
-    for (int k = 1; k <= 11; ++k) {
+    for (int k = 1; k <= 12; ++k) {
         BOOST_TEST(succeeded[static_cast<kind>(k)] > 0, "kind " << k);
     }
     BOOST_TEST_MESSAGE("successful entries by kind: put " << succeeded[kind::put_object]
