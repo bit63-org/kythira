@@ -70,11 +70,14 @@
 #include <kythira/dynamodb/item_codec.hpp>
 #include <kythira/dynamodb/item_state_machine.hpp>
 #include <kythira/dynamodb/key_layout.hpp>
+#include <kythira/dynamodb/op_client.hpp>
+#include <kythira/dynamodb/op_wire.hpp>
 
 #include <raft/composite_node_id.hpp>
 #include <raft/future_default.hpp>
 #include <raft/group_storage.hpp>
 #include <raft/persistent_state_machine.hpp>
+#include <raft/route_cache.hpp>
 #include <raft/shard_exceptions.hpp>
 #include <raft/txn_coordinator.hpp>
 #include <raft/txn_envelope.hpp>
@@ -103,243 +106,32 @@
 
 namespace kythira::dynamodb {
 
-/// Timeouts and sizes of a `raft_backend`.
-struct raft_backend_options {
-    /// One attempt's wait for a commit or a read barrier.
-    std::chrono::milliseconds attempt_timeout{5000};
-    /// A whole call's budget, across leader changes and hops.
-    std::chrono::milliseconds deadline{15000};
-    /// The pause before retrying when no node knows the leader.
-    std::chrono::milliseconds retry_backoff{20};
-    /// How often the catalog leader looks for follow-on work.
-    std::chrono::milliseconds settle_interval{200};
-    /// The most item bytes one range-read page carries.
-    std::size_t page_bytes = std::size_t{1} << 20U;
-    /// Hops one call may take before it starts over from this node.
-    std::size_t max_hops = 4;
-    /// Items deleted per drop step.
-    std::uint32_t drop_step_keys = 1000;
-    /// How often an item group's leader looks for GSI changes to carry when
-    /// the last pass found none, and how many it takes from one group per
-    /// pass (task 11).
-    std::chrono::milliseconds gsi_interval{20};
-    std::size_t gsi_batch = 64;
-    /// How long a table looked up by id stays cached for the propagator.
-    std::chrono::milliseconds table_cache_ttl{1000};
-    /// How long a new GSI waits in CREATING before its backfill starts:
-    /// longer than a write can be in flight, so no write that read the
-    /// table before the index existed can land after the backfill passed
-    /// its item. The default is the call deadline.
-    std::chrono::milliseconds gsi_backfill_delay{15000};
-    /// Items read and marked per backfill round.
-    std::size_t gsi_backfill_batch = 256;
-    /// Each transaction's lock TTL and budget (read committed: DynamoDB's
-    /// transactions lock every item they touch).
-    kythira::txn_options txn{};
-    /// This node's part of every capacity limit (task 12, `capacity.hpp`):
-    /// 1 enforces each limit whole on every node; `dynamodb_gateway_node`
-    /// gives each of N voters 1/N.
-    double capacity_share = 1.0;
-    /// How often each item group's leader checks its change log for
-    /// records past retention (task 16).
-    std::chrono::milliseconds change_log_trim_interval{60000};
-};
-
-/// A transaction op's keys no longer share one group, or a page op's group
-/// no longer holds the range it was sent for; the caller re-resolves and
-/// sends again.
-class txn_stale_route : public std::runtime_error {
-public:
-    using std::runtime_error::runtime_error;
-};
-
-namespace raft_backend_detail {
-
-/// The op tags.
-enum class op_tag : std::uint8_t {
-    catalog = 1,
-    write = 2,
-    read = 3,
-    page = 4,
-    describe = 5,
-    list = 6,
-    drop = 7,
-    txn = 8,
-    /// An item's pending GSI change, read with the item (task 11).
-    pending = 9,
-    /// The bytes of a change log segment this node holds (task 15), for a
-    /// peer that installed a snapshot naming it.
-    segment = 10,
-    /// An item group's change log streams, as DynamoDB Streams shards
-    /// (task 16).
-    shards = 11,
-    /// A page of one change log stream's records (task 16).
-    changes = 12,
-    /// Split a group at a table's boundary (task 27.6).
-    isolate = 13,
-    /// Remove a group's voters outside a kept set (task 27.6).
-    shrink = 14,
-};
-
-/// The answer tags.
-enum class answer_tag : std::uint8_t {
-    ok = 0,
-    /// Not served here: retry on the hinted node, or after a pause.
-    not_leader = 1,
-    /// Failed; the text says why.
-    error = 2,
-    /// A txn op's keys span groups now (a split or merge): re-partition.
-    stale_route = 3,
-};
-
-inline void put_range(std::string& out, const kythira::key_range& r) {
-    detail::put_bytes(out, r.start);
-    out.push_back(r.end ? '\1' : '\0');
-    if (r.end) {
-        detail::put_bytes(out, *r.end);
-    }
-}
-
-[[nodiscard]] inline auto get_range(detail::reader& in) -> std::optional<kythira::key_range> {
-    auto start = in.bytes();
-    const auto has_end = in.byte();
-    if (!start || !has_end || *has_end > 1) {
-        return std::nullopt;
-    }
-    kythira::key_range r{.start = std::move(*start), .end = std::nullopt};
-    if (*has_end == 1) {
-        auto end = in.bytes();
-        if (!end) {
-            return std::nullopt;
-        }
-        r.end = std::move(*end);
-    }
-    return r;
-}
-
-/// `a ∩ b`.
-[[nodiscard]] inline auto intersect(const kythira::key_range& a, const kythira::key_range& b)
-    -> kythira::key_range {
-    kythira::key_range out{.start = std::max(a.start, b.start), .end = a.end};
-    if (b.end && (!out.end || *b.end < *out.end)) {
-        out.end = b.end;
-    }
-    return out;
-}
-
-/// One page of a range read.
-struct page {
-    std::vector<std::pair<std::string, item>> items;
-    /// More items remain in the group's part of the range after the last.
-    bool more = false;
-    /// The part of the asked range this group covers (it is all done when
-    /// `more` is false).
-    kythira::key_range covered;
-    /// Each item's stamp, when the op asked for them (task 22).
-    bool stamped = false;
-    std::vector<std::optional<replica_stamp>> stamps;
-};
-
-[[nodiscard]] inline auto encode_page(const page& p) -> std::string {
-    std::string out;
-    detail::put_varint(out, p.items.size());
-    for (const auto& [key, it] : p.items) {
-        detail::put_bytes(out, key);
-        detail::put_bytes(out, encode_item(it));
-    }
-    out.push_back(p.more ? '\1' : '\0');
-    put_range(out, p.covered);
-    // Stamps follow only when asked for, so a page without them reads as
-    // it always did.
-    if (p.stamped) {
-        for (std::size_t i = 0; i < p.items.size(); ++i) {
-            const auto& s = i < p.stamps.size() ? p.stamps[i] : std::nullopt;
-            out.push_back(s ? '\1' : '\0');
-            if (s) {
-                detail::put_varint(out, s->written_ms);
-                detail::put_bytes(out, s->region);
-            }
-        }
-    }
-    return out;
-}
-
-[[nodiscard]] inline auto decode_page(std::string_view bytes) -> std::optional<page> {
-    detail::reader in(bytes);
-    const auto n = in.count();
-    if (!n) {
-        return std::nullopt;
-    }
-    page p;
-    for (std::size_t i = 0; i < *n; ++i) {
-        auto key = in.bytes();
-        auto raw = in.bytes();
-        if (!key || !raw) {
-            return std::nullopt;
-        }
-        auto it = decode_item(*raw);
-        if (!it) {
-            return std::nullopt;
-        }
-        p.items.emplace_back(std::move(*key), std::move(*it));
-    }
-    const auto more = in.byte();
-    auto covered = get_range(in);
-    if (!more || *more > 1 || !covered) {
-        return std::nullopt;
-    }
-    p.more = *more == 1;
-    p.covered = std::move(*covered);
-    if (!in.done()) {
-        p.stamped = true;
-        for (std::size_t i = 0; i < p.items.size(); ++i) {
-            const auto has = in.byte();
-            if (!has || *has > 1) {
-                return std::nullopt;
-            }
-            if (*has == 0) {
-                p.stamps.emplace_back();
-                continue;
-            }
-            const auto ms = in.varint();
-            auto region = in.bytes();
-            if (!ms || !region) {
-                return std::nullopt;
-            }
-            p.stamps.emplace_back(replica_stamp{*ms, std::move(*region)});
-        }
-        if (!in.done()) {
-            return std::nullopt;
-        }
-    }
-    return p;
-}
-
-/// The smallest key after `key`.
-[[nodiscard]] inline auto just_after(std::string key) -> std::string {
-    key.push_back('\0');
-    return key;
-}
-
-[[nodiscard]] inline auto to_bytes(std::string_view s) -> std::vector<std::byte> {
-    std::vector<std::byte> out(s.size());
-    std::memcpy(out.data(), s.data(), s.size());
-    return out;
-}
-
-[[nodiscard]] inline auto view(const std::vector<std::byte>& b) -> std::string_view {
-    return {reinterpret_cast<const char*>(b.data()), b.size()};  // NOLINT
-}
-
-}  // namespace raft_backend_detail
-
 /// The backend over a `multi_raft` host whose state machine is a
 /// `dynamo_group_state_machine`.
-template<typename Host> class raft_backend {
+template<typename Host>
+class raft_backend : public op_client<raft_backend<Host>, typename Host::descriptor_type> {
     static_assert(kythira::is_transactional_state_machine_v<typename Host::state_machine_type>,
                   "raft_backend: the host's groups must run dynamo_txn_group_state_machine");
+    using client = op_client<raft_backend<Host>, typename Host::descriptor_type>;
+    friend client;
+    /// A data node in a mixed cluster runs ops here through these members
+    /// (remote_backend.hpp).
+    template<typename> friend class hybrid_backend;
 
 public:
+    // The calls (op_client.hpp): each an op, run by `run` below.
+    using client::catalog;
+    using client::change_shards;
+    using client::describe;
+    using client::list_tables;
+    using client::read;
+    using client::read_changes;
+    using client::read_range;
+    using client::read_stamped_range;
+    using client::settle_item;
+    using client::transact;
+    using client::write;
+
     using host_type = Host;
     using node_id_type = typename Host::node_id_type;
     using group_id_type = typename Host::group_id_type;
@@ -361,7 +153,7 @@ public:
         // The resolver's way to a primary this node does not lead.
         _host.set_txn_forwarder(
             [this](const std::vector<std::string>& keys, const std::vector<std::byte>& envelope,
-                   std::chrono::milliseconds) { return send_txn(keys, envelope); });
+                   std::chrono::milliseconds) { return this->send_txn(keys, envelope); });
     }
 
     ~raft_backend() {
@@ -414,212 +206,16 @@ public:
 
     // -- dynamo_backend -------------------------------------------------------
 
-    auto catalog(const catalog_command& c) -> catalog_result {
-        std::string op(1, static_cast<char>(raft_backend_detail::op_tag::catalog));
-        op += encode_catalog_command(c);
-        const auto out = run(op, std::nullopt);
-        auto r = decode_catalog_result(out);
-        if (!r) {
-            throw std::runtime_error("raft_backend: unreadable catalog result");
-        }
-        return *r;
-    }
-
-    auto write(const item_command& c) -> item_result {
-        std::string op(1, static_cast<char>(raft_backend_detail::op_tag::write));
-        op += encode_item_command(stamp_written(c, _clock()));
-        return item_answer(run(op, std::nullopt));
-    }
-
-    auto read(std::uint64_t table_id, const key_schema& schema, const item& key, bool consistent)
-        -> std::optional<item> {
-        if (!base_item_key(table_id, schema, key)) {
-            return std::nullopt;
-        }
-        item_command c;
-        c.table_id = table_id;
-        c.schema = schema;
-        c.payload = key;
-        std::string op(1, static_cast<char>(raft_backend_detail::op_tag::read));
-        op.push_back(consistent ? '\1' : '\0');
-        op += encode_item_command(c);
-        const auto out = run(op, std::nullopt);
-        if (out.empty()) {
-            return std::nullopt;
-        }
-        auto it = decode_item(out);
-        if (!it) {
-            throw std::runtime_error("raft_backend: unreadable item");
-        }
-        return it;
-    }
-
-    /// Carries the item's pending GSI change from this node before
-    /// returning, for tables with synchronous GSIs (`gsi-consistency=sync`):
-    /// a read of an index after the write sees it. The item group's
-    /// propagator may carry the same change at the same time, which the
-    /// entry versions make harmless.
-    auto settle_item(const table_descriptor& table, const item& key) -> void {
-        item_command c;
-        c.table_id = table.table_id;
-        c.schema = table.schema;
-        c.payload = key;
-        std::string op(1, static_cast<char>(raft_backend_detail::op_tag::pending));
-        op += encode_item_command(c);
-        const auto out = run(op, std::nullopt);
-        if (out.empty()) {
-            return;
-        }
-        detail::reader in(out);
-        auto pkey = in.bytes();
-        auto record = in.bytes();
-        const auto has_item = in.byte();
-        auto pending = record ? decode_gsi_pending(*record) : std::nullopt;
-        if (!pkey || !pending || !has_item) {
-            throw std::runtime_error("raft_backend: unreadable pending change");
-        }
-        gsi_work w;
-        w.pending_key = std::move(*pkey);
-        w.pending = std::move(*pending);
-        if (*has_item == 1) {
-            const auto bytes = in.bytes();
-            w.current = bytes ? decode_item(*bytes) : std::nullopt;
-            if (!w.current) {
-                throw std::runtime_error("raft_backend: unreadable pending change");
-            }
-        }
-        const auto plan = plan_propagation(table, w);
-        for (const auto& write_cmd : plan.index_writes) {
-            (void)write(write_cmd);
-        }
-        (void)write(plan.ack);
-    }
-
-    auto read_range(const kythira::key_range& range, kythira::scan_direction direction,
-                    bool consistent, const range_visitor& visit) -> void {
-        read_pages(range, direction, consistent, false,
-                   [&](std::string_view key, const item& it, const std::optional<replica_stamp>&) {
-                       return visit(key, it);
-                   });
-    }
-
-    /// `read_range` (consistent, forward) with each item's stamp (task 22).
-    auto read_stamped_range(const kythira::key_range& range, const stamped_visitor& visit) -> void {
-        read_pages(range, kythira::scan_direction::forward, true, true, visit);
-    }
-
-private:
-    void read_pages(const kythira::key_range& range, kythira::scan_direction direction,
-                    bool consistent, bool stamped, const stamped_visitor& visit) {
-        using raft_backend_detail::op_tag;
-        const bool forward = direction == kythira::scan_direction::forward;
-        auto remaining = range;
-        const auto deadline = std::chrono::steady_clock::now() + _options.deadline;
-        while (!remaining.empty()) {
-            const auto desc = edge_group(remaining, forward);
-            if (!desc) {
-                if (std::chrono::steady_clock::now() >= deadline) {
-                    throw std::runtime_error("raft_backend: no group owns part of the range");
-                }
-                std::this_thread::sleep_for(_options.retry_backoff);
-                continue;
-            }
-            std::string op(1, static_cast<char>(op_tag::page));
-            detail::put_varint(op, static_cast<std::uint64_t>(desc->_group_id));
-            raft_backend_detail::put_range(op, remaining);
-            op.push_back(forward ? '\1' : '\0');
-            op.push_back(consistent ? '\1' : '\0');
-            if (stamped) {
-                op.push_back('\1');
-            }
-            std::string answer;
-            try {
-                answer = run(op, desc);
-            } catch (const txn_stale_route&) {
-                // A split or merge moved the range off the group resolved
-                // above: resolve it again from the current map. Resending
-                // the same op would only hear the same answer until the
-                // deadline.
-                if (std::chrono::steady_clock::now() >= deadline) {
-                    throw std::runtime_error("raft_backend: the range kept moving");
-                }
-                std::this_thread::sleep_for(_options.retry_backoff);
-                continue;
-            }
-            const auto p = raft_backend_detail::decode_page(answer);
-            if (!p) {
-                throw std::runtime_error("raft_backend: unreadable page");
-            }
-            for (std::size_t i = 0; i < p->items.size(); ++i) {
-                const auto& [key, it] = p->items[i];
-                const std::optional<replica_stamp> none;
-                const auto& s = i < p->stamps.size() ? p->stamps[i] : none;
-                if (!visit(key, it, s)) {
-                    return;
-                }
-            }
-            if (p->more && !p->items.empty()) {
-                const auto& last = p->items.back().first;
-                if (forward) {
-                    remaining.start = last + '\0';
-                } else {
-                    remaining.end = last;
-                }
-                continue;
-            }
-            // This group's part is done; go past it.
-            if (forward) {
-                if (!p->covered.end) {
-                    return;
-                }
-                remaining.start = *p->covered.end;
-            } else {
-                if (p->covered.start <= remaining.start) {
-                    return;
-                }
-                remaining.end = p->covered.start;
-            }
-        }
-    }
-
-public:
-    auto describe(std::string_view name) -> std::optional<table_descriptor> {
-        std::string op(1, static_cast<char>(raft_backend_detail::op_tag::describe));
-        detail::put_bytes(op, name);
-        const auto out = run(op, std::nullopt);
-        if (out.empty()) {
-            return std::nullopt;
-        }
-        auto d = decode_table_descriptor(out);
-        if (!d) {
-            throw std::runtime_error("raft_backend: unreadable table descriptor");
-        }
-        return d;
-    }
-
-    auto list_tables(std::string_view exclusive_start, std::size_t limit)
-        -> std::vector<std::string> {
-        std::string op(1, static_cast<char>(raft_backend_detail::op_tag::list));
-        detail::put_bytes(op, exclusive_start);
-        detail::put_varint(op, limit);
-        const auto out = run(op, std::nullopt);
-        detail::reader in(out);
-        const auto n = in.count();
-        if (!n) {
-            throw std::runtime_error("raft_backend: unreadable table list");
-        }
-        std::vector<std::string> names;
-        for (std::size_t i = 0; i < *n; ++i) {
-            auto s = in.bytes();
-            if (!s) {
-                throw std::runtime_error("raft_backend: unreadable table list");
-            }
-            names.push_back(std::move(*s));
-        }
-        return names;
-    }
-
     auto now_ms() -> std::uint64_t { return _clock(); }
+
+    /// Where each node takes ops ("host:port"), for the `routes` answers
+    /// this node gives nodes outside Raft (.kiro/specs/
+    /// dynamodb-independent-layers/ task 3). Unset, answers carry no
+    /// addresses. Set before serving.
+    auto set_route_addresses(std::function<std::optional<std::string>(const node_id_type&)> f)
+        -> void {
+        _route_addresses = std::move(f);
+    }
 
     /// The node's change record store (task 15), whose segments this node
     /// serves to peers (the `segment` op). Set before `start()`.
@@ -669,60 +265,6 @@ public:
         }
     }
 
-    /// The change log streams of every item group overlapping `range`, as
-    /// DynamoDB Streams shards (task 16), each once: the closed streams a
-    /// split left are named by every child.
-    auto change_shards(const kythira::key_range& range) -> std::vector<change_shard> {
-        kythira::shard_range<std::string> sr;
-        sr._start = range.start;
-        sr._end = range.end;
-        std::map<std::string, change_shard> by_key;
-        for (const auto& desc : _host.shard_map_snapshot().range_scan(sr)) {
-            std::string op(1, static_cast<char>(raft_backend_detail::op_tag::shards));
-            detail::put_varint(op, static_cast<std::uint64_t>(desc._group_id));
-            auto got = decode_change_shards(run(op, desc));
-            if (!got) {
-                throw std::runtime_error("raft_backend: unreadable change shards");
-            }
-            for (auto& s : *got) {
-                auto [it, fresh] = by_key.try_emplace(s.stream.key, s);
-                // Two children may have trimmed a shared parent unevenly:
-                // keep the copy that still names the most.
-                if (!fresh && !it->second.open && !s.open &&
-                    s.stream.first_seq < it->second.stream.first_seq) {
-                    it->second = std::move(s);
-                }
-            }
-        }
-        std::vector<change_shard> out;
-        out.reserve(by_key.size());
-        for (auto& [key, s] : by_key) {
-            out.push_back(std::move(s));
-        }
-        return out;
-    }
-
-    /// Up to `max_records` records of change log stream `key` from
-    /// `from_seq`, from the group that continues it (the one holding its
-    /// range start), at that group's leader.
-    auto read_changes(const std::string& key, std::uint64_t from_seq, std::size_t max_records)
-        -> change_page {
-        const auto parsed = parse_change_stream_key(key);
-        if (!parsed) {
-            return {};
-        }
-        const auto desc = _host.resolve(parsed->first);
-        std::string op(1, static_cast<char>(raft_backend_detail::op_tag::changes));
-        detail::put_bytes(op, key);
-        detail::put_varint(op, from_seq);
-        detail::put_varint(op, max_records);
-        auto p = decode_change_page(run(op, desc));
-        if (!p) {
-            throw std::runtime_error("raft_backend: unreadable change page");
-        }
-        return std::move(*p);
-    }
-
     /// Whether merging the groups over `a` and `b` would join a stream
     /// shard to two parents (Requirement 14.3): either range overlaps a
     /// table with a DynamoDB stream, enabled or disabled but still listed.
@@ -758,87 +300,6 @@ public:
 
     /// This node's capacity buckets, holding `capacity_share` of each limit.
     auto throttler() -> capacity_throttler& { return _throttler; }
-
-    auto transact(const std::vector<item_command>& actions) -> txn_report {
-        kythira::transaction_coordinator<txn_client, std::string> coordinator(_txn, _options.txn);
-        std::vector<std::string> keys;
-        keys.reserve(actions.size());
-        coordinator.begin();
-        for (const auto& a : actions) {
-            auto key = base_item_key(a.table_id, a.schema, a.payload);
-            if (!key) {
-                throw std::invalid_argument("raft_backend: a transaction action without a key");
-            }
-            coordinator.put(*key, raft_backend_detail::to_bytes(
-                                      encode_item_command(stamp_written(a, _clock()))));
-            keys.push_back(std::move(*key));
-        }
-        const auto out = coordinator.commit();
-        txn_report r;
-        r.results.resize(actions.size());
-        r.conflicts.assign(actions.size(), false);
-        const auto index_of = [&](const std::string& key) -> std::optional<std::size_t> {
-            const auto it = std::find(keys.begin(), keys.end(), key);
-            if (it == keys.end()) {
-                return std::nullopt;
-            }
-            return static_cast<std::size_t>(it - keys.begin());
-        };
-        for (const auto& v : out._validations) {
-            const auto i = index_of(v._key);
-            if (!i || v._detail.empty()) {
-                continue;
-            }
-            auto decoded = decode_item_result(raft_backend_detail::view(v._detail));
-            if (!decoded) {
-                throw std::runtime_error("raft_backend: unreadable validation detail");
-            }
-            r.results[*i] = std::move(*decoded);
-        }
-        switch (out._kind) {
-            case kythira::txn_outcome_kind::committed:
-                for (std::size_t i = 0; i < actions.size(); ++i) {
-                    // A one-phase commit retried after a timeout is answered
-                    // from memory, without the reads: never pass that off as
-                    // items that are not there.
-                    if (actions[i].op == item_command::kind::read_lock && !r.results[i]) {
-                        throw std::runtime_error(
-                            "raft_backend: a transaction read lost its result");
-                    }
-                }
-                // commit() returns once the primary's group has committed;
-                // the other groups' commits are still in flight. DynamoDB
-                // promises every item is visible once TransactWriteItems
-                // returns, and a consistent read serves the leader's applied
-                // state without looking at intents, so wait for them here.
-                // Without this a GetItem straight after the call could still
-                // see the old value of an item in another group.
-                coordinator.drain();
-                return r;
-            case kythira::txn_outcome_kind::unknown:
-                throw std::runtime_error("raft_backend: transaction outcome unknown: " +
-                                         out._detail);
-            case kythira::txn_outcome_kind::aborted:
-                break;
-        }
-        switch (out._reason) {
-            case kythira::txn_abort_reason::validation_failed:
-                r.outcome = txn_report::status::cancelled;
-                return r;
-            case kythira::txn_abort_reason::write_conflict:
-                r.outcome = txn_report::status::cancelled;
-                if (out._conflict_key) {
-                    if (const auto i = index_of(*out._conflict_key)) {
-                        r.conflicts[*i] = true;
-                    }
-                }
-                return r;
-            default:
-                throw std::runtime_error("raft_backend: transaction aborted (" +
-                                         std::to_string(static_cast<int>(out._reason)) + ") " +
-                                         out._detail);
-        }
-    }
 
     // -- Membership (task 27.6) ---------------------------------------------
 
@@ -958,6 +419,10 @@ public:
                     return serve_isolate(body);
                 case op_tag::shrink:
                     return serve_shrink(body);
+                case op_tag::routes:
+                    return serve_routes(body);
+                case op_tag::routed:
+                    return serve_routed(body);
             }
             return error_answer("unknown op");
         } catch (const kythira::shard_not_leader_exception<group_id_type, node_id_type>& e) {
@@ -1138,117 +603,31 @@ public:
     }
 
 private:
-    // -- Transactions ---------------------------------------------------------
-
-    /// The coordinator's way to the groups: every envelope is a txn op.
-    class txn_client {
-    public:
-        using group_id_type = typename Host::group_id_type;
-        using send_future = kythira::future_default<std::vector<std::byte>>;
-
-        explicit txn_client(raft_backend& backend) : _backend(backend) {}
-        txn_client(const txn_client&) = delete;
-        auto operator=(const txn_client&) -> txn_client& = delete;
-        txn_client(txn_client&&) = delete;
-        auto operator=(txn_client&&) -> txn_client& = delete;
-
-        ~txn_client() {
-            const std::lock_guard lock(_mu);
-            for (auto& s : _senders) {
-                s.thread.join();
-            }
-        }
-
-        [[nodiscard]] auto resolve(const std::string& key) -> std::optional<group_id_type> {
-            const auto desc = _backend._host.resolve(key);
-            if (!desc) {
-                return std::nullopt;
-            }
-            return desc->_group_id;
-        }
-
-        /// Each send runs on a thread of its own, so the coordinator's
-        /// prepares to several groups are in flight together.
-        [[nodiscard]] auto send(const std::vector<std::string>& keys,
-                                const std::vector<std::byte>& envelope, std::chrono::milliseconds)
-            -> send_future {
-            kythira::promise_default<std::vector<std::byte>> promise;
-            auto result = promise.getFuture();
-            const std::lock_guard lock(_mu);
-            reap();
-            auto& s = _senders.emplace_back();
-            s.done = std::make_shared<std::atomic<bool>>(false);
-            s.thread = std::thread(
-                [this, keys, envelope, promise = std::move(promise), done = s.done]() mutable {
-                    try {
-                        promise.setValue(_backend.send_txn(keys, envelope));
-                    } catch (...) {
-                        promise.setException(std::current_exception());
-                    }
-                    done->store(true);
-                });
-            return result;
-        }
-
-        [[nodiscard]] auto refresh(std::exception_ptr error) -> bool {
-            try {
-                std::rethrow_exception(std::move(error));
-            } catch (const txn_stale_route&) {
-                // This node's routing map catches up as its replicas apply
-                // the split or merge.
-                std::this_thread::sleep_for(_backend._options.retry_backoff);
-                return true;
-            } catch (...) {
-                return false;
-            }
-        }
-
-        /// Transactions here read through `validate` (a `read_lock`), never
-        /// through the coordinator's `get`.
-        [[nodiscard]] auto read(const std::string&, std::chrono::milliseconds)
-            -> kythira::txn_read_result<std::string> {
-            throw std::logic_error("raft_backend: transaction reads go through read_lock");
-        }
-
-        [[nodiscard]] auto now_ms() const -> std::uint64_t { return _backend._host.txn_now_ms(); }
-
-    private:
-        struct sender {
-            std::thread thread;
-            std::shared_ptr<std::atomic<bool>> done;
-        };
-
-        auto reap() -> void {
-            for (auto it = _senders.begin(); it != _senders.end();) {
-                if (it->done->load()) {
-                    it->thread.join();
-                    it = _senders.erase(it);
-                } else {
-                    ++it;
-                }
-            }
-        }
-
-        raft_backend& _backend;
-        std::mutex _mu;
-        std::list<sender> _senders;
-    };
-    static_assert(kythira::txn_participant_client<txn_client, std::string>);
-
-    /// Runs one envelope on the group owning `keys` and returns the encoded
-    /// `txn_result`. Throws `txn_stale_route` when the keys span groups now.
-    auto send_txn(const std::vector<std::string>& keys, const std::vector<std::byte>& envelope)
-        -> std::vector<std::byte> {
-        std::string op(1, static_cast<char>(raft_backend_detail::op_tag::txn));
-        detail::put_varint(op, keys.size());
-        for (const auto& k : keys) {
-            detail::put_bytes(op, k);
-        }
-        detail::put_bytes(op, raft_backend_detail::view(envelope));
-        return raft_backend_detail::to_bytes(run(op, std::nullopt));
-    }
-
     // -- Calls ----------------------------------------------------------------
+
+    // What op_client needs (op_client.hpp's table).
+    [[nodiscard]] auto host() -> Host& { return _host; }
+    [[nodiscard]] auto options() const -> const raft_backend_options& { return _options; }
+    [[nodiscard]] auto txn() -> typename client::txn_client& { return _txn; }
+    [[nodiscard]] auto txn_now_ms() const -> std::uint64_t { return _host.txn_now_ms(); }
+    [[nodiscard]] auto group_of(const std::string& key) const -> std::optional<descriptor_type> {
+        return _host.resolve(key);
+    }
+    [[nodiscard]] auto groups_in(const kythira::key_range& range) const
+        -> std::vector<descriptor_type> {
+        kythira::shard_range<std::string> sr;
+        sr._start = range.start;
+        sr._end = range.end;
+        return _host.shard_map_snapshot().range_scan(sr);
+    }
+    using client::item_answer;
+
+    /// The route only matters to a node outside Raft (`remote_backend`):
+    /// here every op starts on this node, which finds its group itself.
+    auto run(const std::string& op, const std::optional<descriptor_type>& desc, const op_route&)
+        -> std::string {
+        return run(op, desc);
+    }
 
     /// Runs `op` here, then wherever the answers point, until it is served.
     /// `desc` names the group for an op that targets one (a page), so a node
@@ -1298,14 +677,6 @@ private:
             target.reset();
             hops = 0;
         }
-    }
-
-    [[nodiscard]] static auto item_answer(const std::string& out) -> item_result {
-        auto r = decode_item_result(out);
-        if (!r) {
-            throw std::runtime_error("raft_backend: unreadable item result");
-        }
-        return *r;
     }
 
     /// The group at the start (forward) or end (reverse) of `r`, from this
@@ -1369,6 +740,73 @@ private:
             throw std::runtime_error("timed out");
         }
         return std::forward<Future>(f).get();
+    }
+
+    /// `routes(range)`: every route overlapping the range, with the leader
+    /// this node knows for the groups it holds, and the nodes' addresses.
+    auto serve_routes(std::string_view body) -> std::string {
+        detail::reader in(body);
+        const auto range = raft_backend_detail::get_range(in);
+        if (!range || !in.done()) {
+            return error_answer("unreadable routes op");
+        }
+        raft_backend_detail::routes_payload<descriptor_type, node_id_type> out;
+        out.routes = groups_in(*range);
+        std::vector<node_id_type> named;
+        for (auto& d : out.routes) {
+            if (auto* n = _host.group_node(d._group_id); n != nullptr && n->is_leader()) {
+                d._leader_hint = _host.node_id();
+            }
+            for (const auto* nodes : {&d._voters, &d._learners}) {
+                for (const auto& v : *nodes) {
+                    if (std::find(named.begin(), named.end(), v) == named.end()) {
+                        named.push_back(v);
+                    }
+                }
+            }
+        }
+        if (_route_addresses) {
+            for (const auto& n : named) {
+                if (auto a = _route_addresses(n)) {
+                    out.addresses.emplace_back(n, std::move(*a));
+                }
+            }
+        }
+        return ok_answer(raft_backend_detail::encode_routes(out));
+    }
+
+    /// A routed op (task 3): served when its route is current here, else
+    /// answered with the current route (or unknown group) so the sender's
+    /// route cache corrects itself. A sender with a newer epoch than this
+    /// node's map is served: the map lags the groups.
+    auto serve_routed(std::string_view body) -> std::string {
+        detail::reader in(body);
+        const auto group = in.varint();
+        const auto version = in.varint();
+        const auto conf = in.varint();
+        const auto key = in.bytes();
+        const auto inner = in.bytes();
+        if (!group || !version || !conf || !key || !inner || !in.done() || inner->empty() ||
+            static_cast<raft_backend_detail::op_tag>((*inner)[0]) ==
+                raft_backend_detail::op_tag::routed) {
+            return error_answer("unreadable routed op");
+        }
+        const auto map = _host.shard_map_snapshot();
+        const auto check = kythira::check_route(
+            map, static_cast<group_id_type>(*group),
+            kythira::shard_epoch{._version = *version, ._conf_version = *conf}, *key);
+        switch (check.kind) {
+            case kythira::route_check_kind::current:
+                return serve(*inner);
+            case kythira::route_check_kind::stale: {
+                std::string out(1, static_cast<char>(raft_backend_detail::answer_tag::stale_epoch));
+                raft_backend_detail::put_descriptor(out, *check.route);
+                return out;
+            }
+            case kythira::route_check_kind::unknown_group:
+                break;
+        }
+        return std::string(1, static_cast<char>(raft_backend_detail::answer_tag::unknown_group));
     }
 
     auto serve_catalog(std::string_view body) -> std::string {
@@ -2062,6 +1500,7 @@ private:
     kythira::segment_store* _change_log = nullptr;
     raft_backend_options _options;
     clock_fn _clock;
+    std::function<std::optional<std::string>(const node_id_type&)> _route_addresses;
     capacity_throttler _throttler;
 
     std::mutex _worker_mu;
@@ -2077,7 +1516,7 @@ private:
     std::map<std::uint64_t, std::optional<table_descriptor>> _tables;
     std::chrono::steady_clock::time_point _tables_read{};
     /// Last, so its send threads are joined before anything they use goes.
-    txn_client _txn;
+    typename client::txn_client _txn;
 };
 
 }  // namespace kythira::dynamodb
