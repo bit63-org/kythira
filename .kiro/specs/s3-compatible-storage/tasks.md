@@ -40,10 +40,27 @@ builds it to that design). Each task is one PR unless noted.
 
 ### Phase 1: core pieces
 
-- [ ] 2. Chunk store in core
+- [x] 2. Chunk store in core
   - Move `cache_chunk_store` to `include/raft/chunk_store.hpp`, build cache
     unchanged; add chunk read/write over the internal transport
   - _Requirements: 10.5_
+  - Done: the store is `kythira::chunk_store` in core, its test
+    `tests/chunk_store_test.cpp`; `<kythira/redis/cache_chunk_store.hpp>`
+    keeps the build cache's names as aliases and its fault points keep
+    their names, so the cache is unchanged. New
+    `chunk_store::ensure_durable`: a `put` that finds the chunk already
+    held does not mean it is on disk (another writer's deferred put), and
+    a remote write is acknowledged as durable. `include/raft/chunk_service.hpp`:
+    the `chunk_access` concept with `local_chunk_access` (function calls)
+    and `remote_chunk_access` (one mTLS request through
+    `mtls_https_client.hpp`), and `chunk_service`, the
+    `/_kythira/chunks/v1/<sha>` PUT and GET routes for the internal
+    listener. Both ends hash-check (400 on a body that does not match,
+    500 for a corrupt copy here, which the client also reports for bytes
+    damaged on the way); 413 over the largest chunk; 503 on I/O failure.
+    Callers need a cluster certificate (`require_verified_client`) until
+    layer identity adds role checks. `tests/chunk_service_test.cpp` runs
+    the remote access against a real listener.
 
 - [ ] 3. REST-XML codec
   - `aws_rest_xml_protocol.hpp`: request routing by method, path, query

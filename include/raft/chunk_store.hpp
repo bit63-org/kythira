@@ -398,6 +398,32 @@ public:
         rethrow_sync_error_locked();
     }
 
+    /// Make a chunk that `put` reported as already present durable before
+    /// returning, as a `now` put that created it would have. `false` from
+    /// `put` does not say the existing copy is on disk: another writer may
+    /// have staged it with deferred durability, appended it to a pack not
+    /// yet flushed, or won the `link` race and not yet synced the
+    /// directory. A remote chunk write is acknowledged as durable
+    /// (`chunk_service.hpp`), so the service calls this after every `put`
+    /// that returns `false`. Returns `false` if the chunk is not stored.
+    auto ensure_durable(const chunk_sha& sha) -> bool {
+        wait_durable();
+        {
+            const std::lock_guard lock(_mu);
+            if (_packed.contains(sha)) {
+                flush_dirty_packs_locked();
+                return true;
+            }
+        }
+        const auto path = loose_path(sha);
+        std::error_code ec;
+        if (!std::filesystem::exists(path, ec)) {
+            return false;
+        }
+        fsync_dir(path.parent_path());
+        return true;
+    }
+
     /// Whether a chunk of this name is stored. It says nothing about whether
     /// its bytes are intact; `verify` and `read` check that.
     [[nodiscard]] auto contains(const chunk_sha& sha) const -> bool {
