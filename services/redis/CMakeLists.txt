@@ -24,10 +24,10 @@ target_link_libraries(kythira_redis INTERFACE kythira_core_headers kythira_build
 # their COPY lines name these paths from the source root.
 set(KYTHIRA_REDIS_DOCKER_DIR "${CMAKE_CURRENT_SOURCE_DIR}/docker")
 
-# The daemon. Same guard as when it lived at the top level: not a
-# coverage build, and folly plus a future backend (the subdirectory checks
-# folly, Boost and OpenSSL itself).
-if(NOT ENABLE_COVERAGE AND KYTHIRA_FUTURE_BACKEND_AVAILABLE AND folly_FOUND)
+# The daemon: not a coverage build, and a future backend (the subdirectory
+# checks Boost and OpenSSL itself). Folly is not needed: main() initialises
+# it through raft/process_init.hpp only where it is linked.
+if(NOT ENABLE_COVERAGE AND KYTHIRA_FUTURE_BACKEND_AVAILABLE)
     add_subdirectory(cmd/redis_gateway_node)
 endif()
 

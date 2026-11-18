@@ -9,8 +9,10 @@
 # keep it from being deployed is for `cmake --install` never to place it
 # anywhere.
 
-if(NOT folly_FOUND OR NOT Boost_FOUND OR NOT httplib_FOUND)
-    message(STATUS "multi_raft_node: skipped (needs folly, Boost and cpp-httplib)")
+# No folly_FOUND: main() initialises Folly through raft/process_init.hpp only
+# where it is linked, and the proxygen transport below has its own gate.
+if(NOT Boost_FOUND OR NOT httplib_FOUND)
+    message(STATUS "multi_raft_node: skipped (needs Boost and cpp-httplib)")
     return()
 endif()
 
@@ -54,7 +56,7 @@ target_include_directories(multi_raft_node PRIVATE
 )
 
 target_link_libraries(multi_raft_node PRIVATE
-    network_simulator   # Folly, boost_context, Boost::system/thread
+    network_simulator   # the future backend (and Folly where found), Boost::system/thread
     boost_json
     httplib::httplib
     kythira_host_node_id   # KYTHIRA_NODE_ID_KIND

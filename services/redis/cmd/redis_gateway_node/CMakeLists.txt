@@ -10,8 +10,8 @@
 # any install target: like multi_raft_node it is run from the build tree and
 # from the container images under services/redis/docker/.
 
-if(NOT folly_FOUND OR NOT Boost_FOUND OR NOT OpenSSL_FOUND)
-    message(STATUS "redis_gateway_node: skipped (needs folly, Boost and OpenSSL)")
+if(NOT Boost_FOUND OR NOT OpenSSL_FOUND)
+    message(STATUS "redis_gateway_node: skipped (needs Boost and OpenSSL)")
     return()
 endif()
 
@@ -55,7 +55,7 @@ function(_kythira_redis_gateway_settings target scope)
     )
     target_link_libraries(${target} ${scope}
         kythira_redis       # <kythira/redis/...> and the core headers
-        network_simulator   # Folly, boost_context, Boost::system/thread
+        network_simulator   # the future backend (and Folly where found), Boost::system/thread
         boost_json
         OpenSSL::SSL
         OpenSSL::Crypto

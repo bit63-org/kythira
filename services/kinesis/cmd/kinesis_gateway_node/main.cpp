@@ -20,7 +20,7 @@
 #include <kythira/kinesis/kinesis_actions.hpp>
 #include <kythira/kinesis/kinesis_operations.hpp>
 
-#include <folly/init/Init.h>
+#include <raft/process_init.hpp>
 
 #include <algorithm>
 #include <atomic>
@@ -127,7 +127,7 @@ auto main(int argc, char** argv) -> int {
         return 0;
     }
 
-    folly::Init init(&argc, &argv);
+    const kythira::process_init process_init(argv[0]);
     if (!kn::is_loopback_address(opt._bind_address)) {
         std::cerr << "kinesis_gateway_node: WARNING: Raft RPC is PLAINTEXT and UNAUTHENTICATED on "
                   << opt._bind_address << ":" << opt._raft_port
