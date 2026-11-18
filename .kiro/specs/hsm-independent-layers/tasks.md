@@ -25,9 +25,11 @@ builds it to that spec's design. Each task is one PR unless noted.
     destroy committed between two uses
   - _Requirements: 3.1-3.4, 4.1-4.4, 7.1_
 
-- [ ] 4. Endpoint relay
+- [x] 4. Endpoint relay
   - L4 relay role: pin to an unsealed, healthy crypto node, drain, close on
     crypto failure; `libkythira_pkcs11` reconnect test through it
+  - Relay core in `endpoint_relay.hpp`; starting it as the `endpoint` role
+    of `hsm_node` lands with task 1's roles wiring
   - _Requirements: 6.1-6.5_
 
 - [ ] 5. Consumers in split layouts

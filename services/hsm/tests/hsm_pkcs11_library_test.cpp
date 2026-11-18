@@ -11,8 +11,10 @@
 
 #define BOOST_TEST_MODULE hsm_pkcs11_library_test
 #include "hsm_test_node.hpp"
+#include "hsm_test_pki.hpp"
 #include "pkcs11_config.hpp"
 
+#include <kythira/hsm/endpoint_relay.hpp>
 #include <kythira/hsm/wire_server.hpp>
 
 #include <boost/test/unit_test.hpp>
@@ -99,12 +101,21 @@ struct loaded {
     std::string conf = temp_path(".conf");
 
     explicit loaded(const std::vector<std::string>& sockets) {
+        std::string text = "# test\ntimeout_s = 10\n";
+        for (const auto& s : sockets) {
+            text += "socket = " + s + "\n";
+        }
+        load(text);
+    }
+
+    /// A configuration given whole (TLS endpoints, certificates).
+    struct whole_text {};
+    loaded(whole_text /*tag*/, const std::string& text) { load(text); }
+
+    void load(const std::string& text) {
         {
             std::ofstream f(conf);
-            f << "# test\ntimeout_s = 10\n";
-            for (const auto& s : sockets) {
-                f << "socket = " << s << "\n";
-            }
+            f << text;
         }
         ::setenv("KYTHIRA_PKCS11_CONF", conf.c_str(), 1);  // NOLINT(concurrency-mt-unsafe)
         BOOST_REQUIRE(functions().C_Initialize(nullptr) == CKR_OK);
@@ -712,6 +723,55 @@ BOOST_AUTO_TEST_CASE(failover_restores_sessions_logins_and_unstarted_operations)
     std::filesystem::rename(c.cfg.socket_path, a.cfg.socket_path);
     BOOST_TEST(f().C_GetTokenInfo(k_token, &t) == CKR_OK);
     std::filesystem::rename(a.cfg.socket_path, c.cfg.socket_path);
+}
+
+// hsm-independent-layers task 4 (Requirement 6.3): the library's only
+// endpoint is an endpoint relay in front of two crypto nodes' TLS
+// listeners. When the crypto node its connection is pinned to goes away,
+// the library reconnects to the relay, which places it on the other one,
+// and the session is logged in again and keeps signing.
+BOOST_AUTO_TEST_CASE(a_relay_in_front_of_two_crypto_nodes_carries_a_failover) {
+    node n;
+    test_pki pki;
+    const auto server_files = pki.issue("crypto", "DNS:localhost,IP:127.0.0.1");
+    const auto app = pki.issue("app", "URI:app-a");
+    auto serve = [&] {
+        hsm::wire_server_config cfg;
+        cfg.tls_port = 0;
+        cfg.bind_address = "127.0.0.1";
+        cfg.cert_path = server_files.cert;
+        cfg.key_path = server_files.key;
+        cfg.ca_path = pki.ca_path();
+        auto s = std::make_unique<hsm::wire_server>(non_owning(n.layer), cfg);
+        s->start();
+        return s;
+    };
+    std::array<std::unique_ptr<hsm::wire_server>, 2> crypto{serve(), serve()};
+    hsm::endpoint_relay_config rc;
+    rc.bind_address = "127.0.0.1";
+    rc.port = 0;
+    rc.backends = {{"127.0.0.1", crypto[0]->tls_port()}, {"127.0.0.1", crypto[1]->tls_port()}};
+    hsm::endpoint_relay relay(rc);
+    relay.start();
+    loaded lib(loaded::whole_text{}, "timeout_s = 10\nendpoint = 127.0.0.1:" +
+                                         std::to_string(relay.port()) + "\ncert = " + app.cert +
+                                         "\nkey = " + app.key + "\nca = " + pki.ca_path() + "\n");
+
+    const auto s = open_rw();
+    login_user(s);
+    const auto [pub, priv] = ec_pair(s, true);
+    BOOST_TEST(verify(s, pub, "before", sign(s, priv, "before")) == CKR_OK);
+    const std::size_t pinned = crypto[0]->stats().accepted == 1U ? 0 : 1;
+    BOOST_REQUIRE(crypto[pinned]->stats().accepted == 1U);
+
+    crypto.at(pinned).reset();
+
+    BOOST_TEST(verify(s, pub, "after", sign(s, priv, "after")) == CKR_OK);
+    BOOST_TEST(crypto.at(1 - pinned)->stats().accepted == 1U);
+    CK_SESSION_INFO info{};
+    BOOST_REQUIRE(f().C_GetSessionInfo(s, &info) == CKR_OK);
+    BOOST_TEST(info.state == CKS_RW_USER_FUNCTIONS);
+    BOOST_TEST(relay.stats().accepted == 2U);
 }
 
 BOOST_AUTO_TEST_CASE(many_threads_share_the_connection) {
