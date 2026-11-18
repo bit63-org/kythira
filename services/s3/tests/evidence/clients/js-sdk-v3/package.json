@@ -1,0 +1,11 @@
+{
+  "name": "kythira-s3-evidence-js-sdk-v3",
+  "private": true,
+  "type": "module",
+  "description": "aws-sdk-js-v3 evidence client (.kiro/specs/s3-compatible-storage/ task 1)",
+  "dependencies": {
+    "@aws-sdk/client-s3": "3.1171.0",
+    "@aws-sdk/lib-storage": "3.1171.0",
+    "@aws-sdk/s3-request-presigner": "3.1171.0"
+  }
+}

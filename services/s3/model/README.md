@@ -24,3 +24,6 @@ An upgrade is a reviewed change (Requirement 2.3):
    request: it shows every added, removed or rebound operation.
 2. A new operation fails `s3_model_coverage` until it is implemented or
    listed in `doc/unsupported.md` (Requirement 2.2).
+3. Re-run `tests/evidence/check_evidence.py` (the ctest `s3_wire_evidence`);
+   an operation the recorded clients send that the new model dropped fails
+   it.

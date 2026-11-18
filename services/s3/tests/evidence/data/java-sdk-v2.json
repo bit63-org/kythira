@@ -1,0 +1,1069 @@
+{
+ "client": "aws-sdk-java-v2-2.59.3",
+ "requests": [
+  {
+   "operation": "CreateBucket",
+   "method": "PUT",
+   "target": "/",
+   "addressing": "virtual-hosted",
+   "http_version": "HTTP/1.1",
+   "expect_continue": false,
+   "content_sha256": "UNSIGNED-PAYLOAD",
+   "headers": [
+    [
+     "Host",
+     "evidence.s3.kythira.test:<port>"
+    ],
+    [
+     "amz-sdk-invocation-id",
+     "<uuid>"
+    ],
+    [
+     "amz-sdk-request",
+     "attempt=1; max=3"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/s3/aws4_request, SignedHeaders=amz-sdk-invocation-id;amz-sdk-request;host;x-amz-content-sha256;x-amz-date, Signature=<hex>"
+    ],
+    [
+     "User-Agent",
+     "aws-sdk-java/2.59.3 md/io#sync md/http#Apache5 ua/2.1 api/S3#2.59.x os/Linux#<kernel> lang/java#21.0.13.0.3 md/OpenJDK_64-Bit_Server_VM#21.0.13.0.3+1-1-24.04.1-Ubuntu md/vendor#Ubuntu md/en_US m/AJ,E,N,N,Z,b,g"
+    ],
+    [
+     "x-amz-content-sha256",
+     "UNSIGNED-PAYLOAD"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "Content-Length",
+     "0"
+    ],
+    [
+     "Connection",
+     "keep-alive"
+    ]
+   ],
+   "body": null,
+   "response_status": 200
+  },
+  {
+   "operation": "HeadBucket",
+   "method": "HEAD",
+   "target": "/",
+   "addressing": "virtual-hosted",
+   "http_version": "HTTP/1.1",
+   "expect_continue": false,
+   "content_sha256": "UNSIGNED-PAYLOAD",
+   "headers": [
+    [
+     "Host",
+     "evidence.s3.kythira.test:<port>"
+    ],
+    [
+     "amz-sdk-invocation-id",
+     "<uuid>"
+    ],
+    [
+     "amz-sdk-request",
+     "attempt=1; max=3"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/s3/aws4_request, SignedHeaders=amz-sdk-invocation-id;amz-sdk-request;host;x-amz-content-sha256;x-amz-date, Signature=<hex>"
+    ],
+    [
+     "User-Agent",
+     "aws-sdk-java/2.59.3 md/io#sync md/http#Apache5 ua/2.1 api/S3#2.59.x os/Linux#<kernel> lang/java#21.0.13.0.3 md/OpenJDK_64-Bit_Server_VM#21.0.13.0.3+1-1-24.04.1-Ubuntu md/vendor#Ubuntu md/en_US m/AJ,E,N,N,Z,b,g"
+    ],
+    [
+     "x-amz-content-sha256",
+     "UNSIGNED-PAYLOAD"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "Connection",
+     "keep-alive"
+    ]
+   ],
+   "body": null,
+   "response_status": 200
+  },
+  {
+   "operation": "PutObject",
+   "method": "PUT",
+   "target": "/hello.txt",
+   "addressing": "virtual-hosted",
+   "http_version": "HTTP/1.1",
+   "expect_continue": false,
+   "content_sha256": "STREAMING-UNSIGNED-PAYLOAD-TRAILER",
+   "headers": [
+    [
+     "Host",
+     "evidence.s3.kythira.test:<port>"
+    ],
+    [
+     "amz-sdk-invocation-id",
+     "<uuid>"
+    ],
+    [
+     "amz-sdk-request",
+     "attempt=1; max=3"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/s3/aws4_request, SignedHeaders=amz-sdk-invocation-id;amz-sdk-request;content-encoding;content-length;content-type;host;x-amz-content-sha256;x-amz-date;x-amz-decoded-content-length;x-amz-sdk-checksum-algorithm;x-amz-trailer, Signature=<hex>"
+    ],
+    [
+     "Content-Encoding",
+     "aws-chunked"
+    ],
+    [
+     "Content-Type",
+     "text/plain"
+    ],
+    [
+     "User-Agent",
+     "aws-sdk-java/2.59.3 md/io#sync md/http#Apache5 ua/2.1 api/S3#2.59.x os/Linux#<kernel> lang/java#21.0.13.0.3 md/OpenJDK_64-Bit_Server_VM#21.0.13.0.3+1-1-24.04.1-Ubuntu md/vendor#Ubuntu md/en_US md/rb#b m/AJ,E,N,N,U,Z,b,g"
+    ],
+    [
+     "x-amz-content-sha256",
+     "STREAMING-UNSIGNED-PAYLOAD-TRAILER"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "x-amz-decoded-content-length",
+     "41"
+    ],
+    [
+     "x-amz-sdk-checksum-algorithm",
+     "CRC32"
+    ],
+    [
+     "x-amz-trailer",
+     "x-amz-checksum-crc32"
+    ],
+    [
+     "Content-Length",
+     "83"
+    ],
+    [
+     "Connection",
+     "keep-alive"
+    ]
+   ],
+   "body": {
+    "transfer": "content-length",
+    "kind": "object",
+    "length": 41,
+    "sha256": "5731799fa50a404cb2a77e5722751784a724ca25c500908d148f5f1a274b4e05",
+    "aws_chunked": {
+     "chunk_sizes": [
+      {
+       "size": 41,
+       "count": 1
+      },
+      {
+       "size": 0,
+       "count": 1
+      }
+     ],
+     "chunks_signed": false,
+     "trailers": [
+      "x-amz-checksum-crc32"
+     ],
+     "trailer_signed": false
+    },
+    "encoded_length": 83
+   },
+   "response_status": 200
+  },
+  {
+   "operation": "HeadObject",
+   "method": "HEAD",
+   "target": "/hello.txt",
+   "addressing": "virtual-hosted",
+   "http_version": "HTTP/1.1",
+   "expect_continue": false,
+   "content_sha256": "UNSIGNED-PAYLOAD",
+   "headers": [
+    [
+     "Host",
+     "evidence.s3.kythira.test:<port>"
+    ],
+    [
+     "amz-sdk-invocation-id",
+     "<uuid>"
+    ],
+    [
+     "amz-sdk-request",
+     "attempt=1; max=3"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/s3/aws4_request, SignedHeaders=amz-sdk-invocation-id;amz-sdk-request;host;x-amz-content-sha256;x-amz-date, Signature=<hex>"
+    ],
+    [
+     "User-Agent",
+     "aws-sdk-java/2.59.3 md/io#sync md/http#Apache5 ua/2.1 api/S3#2.59.x os/Linux#<kernel> lang/java#21.0.13.0.3 md/OpenJDK_64-Bit_Server_VM#21.0.13.0.3+1-1-24.04.1-Ubuntu md/vendor#Ubuntu md/en_US m/AJ,E,N,N,Z,b,g"
+    ],
+    [
+     "x-amz-content-sha256",
+     "UNSIGNED-PAYLOAD"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "Connection",
+     "keep-alive"
+    ]
+   ],
+   "body": null,
+   "response_status": 200
+  },
+  {
+   "operation": "GetObject",
+   "method": "GET",
+   "target": "/hello.txt",
+   "addressing": "virtual-hosted",
+   "http_version": "HTTP/1.1",
+   "expect_continue": false,
+   "content_sha256": "UNSIGNED-PAYLOAD",
+   "headers": [
+    [
+     "Host",
+     "evidence.s3.kythira.test:<port>"
+    ],
+    [
+     "amz-sdk-invocation-id",
+     "<uuid>"
+    ],
+    [
+     "amz-sdk-request",
+     "attempt=1; max=3"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/s3/aws4_request, SignedHeaders=amz-sdk-invocation-id;amz-sdk-request;host;range;x-amz-checksum-crc32;x-amz-content-sha256;x-amz-date;x-amz-te, Signature=<hex>"
+    ],
+    [
+     "Range",
+     "bytes=0-4"
+    ],
+    [
+     "User-Agent",
+     "aws-sdk-java/2.59.3 md/io#sync md/http#Apache5 ua/2.1 api/S3#2.59.x os/Linux#<kernel> lang/java#21.0.13.0.3 md/OpenJDK_64-Bit_Server_VM#21.0.13.0.3+1-1-24.04.1-Ubuntu md/vendor#Ubuntu md/en_US md/rt#b m/AJ,E,N,N,U,Z,b,g"
+    ],
+    [
+     "x-amz-checksum-crc32",
+     "AAAAAA=="
+    ],
+    [
+     "x-amz-content-sha256",
+     "UNSIGNED-PAYLOAD"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "x-amz-te",
+     "append-md5"
+    ],
+    [
+     "Connection",
+     "keep-alive"
+    ]
+   ],
+   "body": null,
+   "response_status": 206
+  },
+  {
+   "operation": "CreateMultipartUpload",
+   "method": "POST",
+   "target": "/large.bin?uploads",
+   "addressing": "virtual-hosted",
+   "http_version": "HTTP/1.1",
+   "expect_continue": false,
+   "content_sha256": "UNSIGNED-PAYLOAD",
+   "headers": [
+    [
+     "Host",
+     "evidence.s3.kythira.test:<port>"
+    ],
+    [
+     "amz-sdk-invocation-id",
+     "<uuid>"
+    ],
+    [
+     "amz-sdk-request",
+     "attempt=1; max=3"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/s3/aws4_request, SignedHeaders=amz-sdk-invocation-id;amz-sdk-request;content-length;content-type;host;x-amz-content-sha256;x-amz-date, Signature=<hex>"
+    ],
+    [
+     "Content-Type",
+     "binary/octet-stream"
+    ],
+    [
+     "User-Agent",
+     "aws-sdk-java/2.59.3 md/io#sync md/http#Apache5 ua/2.1 api/S3#2.59.x os/Linux#<kernel> lang/java#21.0.13.0.3 md/OpenJDK_64-Bit_Server_VM#21.0.13.0.3+1-1-24.04.1-Ubuntu md/vendor#Ubuntu md/en_US m/AJ,E,N,N,Z,b,g"
+    ],
+    [
+     "x-amz-content-sha256",
+     "UNSIGNED-PAYLOAD"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "Content-Length",
+     "0"
+    ],
+    [
+     "Connection",
+     "keep-alive"
+    ]
+   ],
+   "body": null,
+   "response_status": 200
+  },
+  {
+   "operation": "UploadPart",
+   "method": "PUT",
+   "target": "/large.bin?partNumber=1&uploadId=evidence-upload-0001",
+   "addressing": "virtual-hosted",
+   "http_version": "HTTP/1.1",
+   "expect_continue": true,
+   "content_sha256": "STREAMING-UNSIGNED-PAYLOAD-TRAILER",
+   "headers": [
+    [
+     "Host",
+     "evidence.s3.kythira.test:<port>"
+    ],
+    [
+     "amz-sdk-invocation-id",
+     "<uuid>"
+    ],
+    [
+     "amz-sdk-request",
+     "attempt=1; max=3"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/s3/aws4_request, SignedHeaders=amz-sdk-invocation-id;amz-sdk-request;content-encoding;content-length;content-type;host;x-amz-content-sha256;x-amz-date;x-amz-decoded-content-length;x-amz-sdk-checksum-algorithm;x-amz-trailer, Signature=<hex>"
+    ],
+    [
+     "Content-Encoding",
+     "aws-chunked"
+    ],
+    [
+     "Content-Type",
+     "application/octet-stream"
+    ],
+    [
+     "Expect",
+     "100-continue"
+    ],
+    [
+     "User-Agent",
+     "aws-sdk-java/2.59.3 md/io#sync md/http#Apache5 ua/2.1 api/S3#2.59.x os/Linux#<kernel> lang/java#21.0.13.0.3 md/OpenJDK_64-Bit_Server_VM#21.0.13.0.3+1-1-24.04.1-Ubuntu md/vendor#Ubuntu md/en_US md/rb#b m/AJ,E,N,N,U,Z,b,g"
+    ],
+    [
+     "x-amz-content-sha256",
+     "STREAMING-UNSIGNED-PAYLOAD-TRAILER"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "x-amz-decoded-content-length",
+     "5242880"
+    ],
+    [
+     "x-amz-sdk-checksum-algorithm",
+     "CRC32"
+    ],
+    [
+     "x-amz-trailer",
+     "x-amz-checksum-crc32"
+    ],
+    [
+     "Content-Length",
+     "5243276"
+    ],
+    [
+     "Connection",
+     "keep-alive"
+    ]
+   ],
+   "body": {
+    "transfer": "content-length",
+    "kind": "object",
+    "length": 5242880,
+    "sha256": "2e7cab6314e9614b6f2da12630661c3038e5592025f6534ba5823c3b340a1cb6",
+    "aws_chunked": {
+     "chunk_sizes": [
+      {
+       "size": 131072,
+       "count": 40
+      },
+      {
+       "size": 0,
+       "count": 1
+      }
+     ],
+     "chunks_signed": false,
+     "trailers": [
+      "x-amz-checksum-crc32"
+     ],
+     "trailer_signed": false
+    },
+    "encoded_length": 5243276
+   },
+   "response_status": 200
+  },
+  {
+   "operation": "UploadPart",
+   "method": "PUT",
+   "target": "/large.bin?partNumber=2&uploadId=evidence-upload-0001",
+   "addressing": "virtual-hosted",
+   "http_version": "HTTP/1.1",
+   "expect_continue": true,
+   "content_sha256": "STREAMING-UNSIGNED-PAYLOAD-TRAILER",
+   "headers": [
+    [
+     "Host",
+     "evidence.s3.kythira.test:<port>"
+    ],
+    [
+     "amz-sdk-invocation-id",
+     "<uuid>"
+    ],
+    [
+     "amz-sdk-request",
+     "attempt=1; max=3"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/s3/aws4_request, SignedHeaders=amz-sdk-invocation-id;amz-sdk-request;content-encoding;content-length;content-type;host;x-amz-content-sha256;x-amz-date;x-amz-decoded-content-length;x-amz-sdk-checksum-algorithm;x-amz-trailer, Signature=<hex>"
+    ],
+    [
+     "Content-Encoding",
+     "aws-chunked"
+    ],
+    [
+     "Content-Type",
+     "application/octet-stream"
+    ],
+    [
+     "Expect",
+     "100-continue"
+    ],
+    [
+     "User-Agent",
+     "aws-sdk-java/2.59.3 md/io#sync md/http#Apache5 ua/2.1 api/S3#2.59.x os/Linux#<kernel> lang/java#21.0.13.0.3 md/OpenJDK_64-Bit_Server_VM#21.0.13.0.3+1-1-24.04.1-Ubuntu md/vendor#Ubuntu md/en_US md/rb#b m/AJ,E,N,N,U,Z,b,g"
+    ],
+    [
+     "x-amz-content-sha256",
+     "STREAMING-UNSIGNED-PAYLOAD-TRAILER"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "x-amz-decoded-content-length",
+     "1048576"
+    ],
+    [
+     "x-amz-sdk-checksum-algorithm",
+     "CRC32"
+    ],
+    [
+     "x-amz-trailer",
+     "x-amz-checksum-crc32"
+    ],
+    [
+     "Content-Length",
+     "1048684"
+    ],
+    [
+     "Connection",
+     "keep-alive"
+    ]
+   ],
+   "body": {
+    "transfer": "content-length",
+    "kind": "object",
+    "length": 1048576,
+    "sha256": "fbbab289f7f94b25736c58be46a994c441fd02552cc6022352e3d86d2fab7c83",
+    "aws_chunked": {
+     "chunk_sizes": [
+      {
+       "size": 131072,
+       "count": 8
+      },
+      {
+       "size": 0,
+       "count": 1
+      }
+     ],
+     "chunks_signed": false,
+     "trailers": [
+      "x-amz-checksum-crc32"
+     ],
+     "trailer_signed": false
+    },
+    "encoded_length": 1048684
+   },
+   "response_status": 200
+  },
+  {
+   "operation": "CompleteMultipartUpload",
+   "method": "POST",
+   "target": "/large.bin?uploadId=evidence-upload-0001",
+   "addressing": "virtual-hosted",
+   "http_version": "HTTP/1.1",
+   "expect_continue": false,
+   "content_sha256": "UNSIGNED-PAYLOAD",
+   "headers": [
+    [
+     "Host",
+     "evidence.s3.kythira.test:<port>"
+    ],
+    [
+     "amz-sdk-invocation-id",
+     "<uuid>"
+    ],
+    [
+     "amz-sdk-request",
+     "attempt=1; max=3"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/s3/aws4_request, SignedHeaders=amz-sdk-invocation-id;amz-sdk-request;content-length;content-type;host;x-amz-content-sha256;x-amz-date, Signature=<hex>"
+    ],
+    [
+     "Content-Type",
+     "application/xml"
+    ],
+    [
+     "User-Agent",
+     "aws-sdk-java/2.59.3 md/io#sync md/http#Apache5 ua/2.1 api/S3#2.59.x os/Linux#<kernel> lang/java#21.0.13.0.3 md/OpenJDK_64-Bit_Server_VM#21.0.13.0.3+1-1-24.04.1-Ubuntu md/vendor#Ubuntu md/en_US m/AJ,E,N,N,Z,b,g"
+    ],
+    [
+     "x-amz-content-sha256",
+     "UNSIGNED-PAYLOAD"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "Content-Length",
+     "329"
+    ],
+    [
+     "Connection",
+     "keep-alive"
+    ]
+   ],
+   "body": {
+    "transfer": "content-length",
+    "kind": "xml",
+    "text": "<?xml version=\"1.0\" encoding=\"UTF-8\"?><CompleteMultipartUpload xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"><Part><ETag>&quot;006a88ed7d5826af90d38dba4666fd89&quot;</ETag><PartNumber>1</PartNumber></Part><Part><ETag>&quot;c35cc7d8d91728a0cb052831bc4ef372&quot;</ETag><PartNumber>2</PartNumber></Part></CompleteMultipartUpload>"
+   },
+   "response_status": 200
+  },
+  {
+   "operation": "ListObjectsV2",
+   "method": "GET",
+   "target": "/?list-type=2&delimiter=%2F",
+   "addressing": "virtual-hosted",
+   "http_version": "HTTP/1.1",
+   "expect_continue": false,
+   "content_sha256": "UNSIGNED-PAYLOAD",
+   "headers": [
+    [
+     "Host",
+     "evidence.s3.kythira.test:<port>"
+    ],
+    [
+     "amz-sdk-invocation-id",
+     "<uuid>"
+    ],
+    [
+     "amz-sdk-request",
+     "attempt=1; max=3"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/s3/aws4_request, SignedHeaders=amz-sdk-invocation-id;amz-sdk-request;host;x-amz-content-sha256;x-amz-date, Signature=<hex>"
+    ],
+    [
+     "User-Agent",
+     "aws-sdk-java/2.59.3 md/io#sync md/http#Apache5 ua/2.1 api/S3#2.59.x os/Linux#<kernel> lang/java#21.0.13.0.3 md/OpenJDK_64-Bit_Server_VM#21.0.13.0.3+1-1-24.04.1-Ubuntu md/vendor#Ubuntu md/en_US m/AJ,E,N,N,Z,b,g"
+    ],
+    [
+     "x-amz-content-sha256",
+     "UNSIGNED-PAYLOAD"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "Connection",
+     "keep-alive"
+    ]
+   ],
+   "body": null,
+   "response_status": 200
+  },
+  {
+   "operation": "CopyObject",
+   "method": "PUT",
+   "target": "/copy.txt",
+   "addressing": "virtual-hosted",
+   "http_version": "HTTP/1.1",
+   "expect_continue": false,
+   "content_sha256": "UNSIGNED-PAYLOAD",
+   "headers": [
+    [
+     "Host",
+     "evidence.s3.kythira.test:<port>"
+    ],
+    [
+     "amz-sdk-invocation-id",
+     "<uuid>"
+    ],
+    [
+     "amz-sdk-request",
+     "attempt=1; max=3"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/s3/aws4_request, SignedHeaders=amz-sdk-invocation-id;amz-sdk-request;host;x-amz-content-sha256;x-amz-copy-source;x-amz-date, Signature=<hex>"
+    ],
+    [
+     "User-Agent",
+     "aws-sdk-java/2.59.3 md/io#sync md/http#Apache5 ua/2.1 api/S3#2.59.x os/Linux#<kernel> lang/java#21.0.13.0.3 md/OpenJDK_64-Bit_Server_VM#21.0.13.0.3+1-1-24.04.1-Ubuntu md/vendor#Ubuntu md/en_US m/AJ,E,N,N,Z,b,g"
+    ],
+    [
+     "x-amz-content-sha256",
+     "UNSIGNED-PAYLOAD"
+    ],
+    [
+     "x-amz-copy-source",
+     "evidence/hello.txt"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "Content-Length",
+     "0"
+    ],
+    [
+     "Connection",
+     "keep-alive"
+    ]
+   ],
+   "body": null,
+   "response_status": 200
+  },
+  {
+   "operation": "GetObject",
+   "method": "GET",
+   "target": "/copy.txt?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Date=<amz-date>&X-Amz-SignedHeaders=host&X-Amz-Credential=AKIDEXAMPLE%2F<yyyymmdd>%2Fus-east-1%2Fs3%2Faws4_request&X-Amz-Expires=3600&X-Amz-Signature=<hex>",
+   "addressing": "virtual-hosted",
+   "http_version": "HTTP/1.1",
+   "expect_continue": false,
+   "content_sha256": "absent",
+   "headers": [
+    [
+     "User-Agent",
+     "Java/21.0.13.0.3"
+    ],
+    [
+     "Host",
+     "evidence.s3.kythira.test:<port>"
+    ],
+    [
+     "Accept",
+     "*/*"
+    ],
+    [
+     "Connection",
+     "keep-alive"
+    ]
+   ],
+   "body": null,
+   "response_status": 200
+  },
+  {
+   "operation": "CreateMultipartUpload",
+   "method": "POST",
+   "target": "/aborted.bin?uploads",
+   "addressing": "virtual-hosted",
+   "http_version": "HTTP/1.1",
+   "expect_continue": false,
+   "content_sha256": "UNSIGNED-PAYLOAD",
+   "headers": [
+    [
+     "Host",
+     "evidence.s3.kythira.test:<port>"
+    ],
+    [
+     "amz-sdk-invocation-id",
+     "<uuid>"
+    ],
+    [
+     "amz-sdk-request",
+     "attempt=1; max=3"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/s3/aws4_request, SignedHeaders=amz-sdk-invocation-id;amz-sdk-request;content-length;content-type;host;x-amz-content-sha256;x-amz-date, Signature=<hex>"
+    ],
+    [
+     "Content-Type",
+     "binary/octet-stream"
+    ],
+    [
+     "User-Agent",
+     "aws-sdk-java/2.59.3 md/io#sync md/http#Apache5 ua/2.1 api/S3#2.59.x os/Linux#<kernel> lang/java#21.0.13.0.3 md/OpenJDK_64-Bit_Server_VM#21.0.13.0.3+1-1-24.04.1-Ubuntu md/vendor#Ubuntu md/en_US m/AJ,E,N,N,Z,b,g"
+    ],
+    [
+     "x-amz-content-sha256",
+     "UNSIGNED-PAYLOAD"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "Content-Length",
+     "0"
+    ],
+    [
+     "Connection",
+     "keep-alive"
+    ]
+   ],
+   "body": null,
+   "response_status": 200
+  },
+  {
+   "operation": "AbortMultipartUpload",
+   "method": "DELETE",
+   "target": "/aborted.bin?uploadId=evidence-upload-0002",
+   "addressing": "virtual-hosted",
+   "http_version": "HTTP/1.1",
+   "expect_continue": false,
+   "content_sha256": "UNSIGNED-PAYLOAD",
+   "headers": [
+    [
+     "Host",
+     "evidence.s3.kythira.test:<port>"
+    ],
+    [
+     "amz-sdk-invocation-id",
+     "<uuid>"
+    ],
+    [
+     "amz-sdk-request",
+     "attempt=1; max=3"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/s3/aws4_request, SignedHeaders=amz-sdk-invocation-id;amz-sdk-request;host;x-amz-content-sha256;x-amz-date, Signature=<hex>"
+    ],
+    [
+     "User-Agent",
+     "aws-sdk-java/2.59.3 md/io#sync md/http#Apache5 ua/2.1 api/S3#2.59.x os/Linux#<kernel> lang/java#21.0.13.0.3 md/OpenJDK_64-Bit_Server_VM#21.0.13.0.3+1-1-24.04.1-Ubuntu md/vendor#Ubuntu md/en_US m/AJ,E,N,N,Z,b,g"
+    ],
+    [
+     "x-amz-content-sha256",
+     "UNSIGNED-PAYLOAD"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "Connection",
+     "keep-alive"
+    ]
+   ],
+   "body": null,
+   "response_status": 204
+  },
+  {
+   "operation": "DeleteObjects",
+   "method": "POST",
+   "target": "/?delete",
+   "addressing": "virtual-hosted",
+   "http_version": "HTTP/1.1",
+   "expect_continue": false,
+   "content_sha256": "UNSIGNED-PAYLOAD",
+   "headers": [
+    [
+     "Host",
+     "evidence.s3.kythira.test:<port>"
+    ],
+    [
+     "amz-sdk-invocation-id",
+     "<uuid>"
+    ],
+    [
+     "amz-sdk-request",
+     "attempt=1; max=3"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/s3/aws4_request, SignedHeaders=amz-sdk-invocation-id;amz-sdk-request;content-length;content-type;host;x-amz-checksum-crc32;x-amz-content-sha256;x-amz-date;x-amz-sdk-checksum-algorithm, Signature=<hex>"
+    ],
+    [
+     "Content-Type",
+     "application/xml"
+    ],
+    [
+     "User-Agent",
+     "aws-sdk-java/2.59.3 md/io#sync md/http#Apache5 ua/2.1 api/S3#2.59.x os/Linux#<kernel> lang/java#21.0.13.0.3 md/OpenJDK_64-Bit_Server_VM#21.0.13.0.3+1-1-24.04.1-Ubuntu md/vendor#Ubuntu md/en_US m/AJ,E,N,N,U,Z,b,g"
+    ],
+    [
+     "x-amz-checksum-crc32",
+     "ohVZGw=="
+    ],
+    [
+     "x-amz-content-sha256",
+     "UNSIGNED-PAYLOAD"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "x-amz-sdk-checksum-algorithm",
+     "CRC32"
+    ],
+    [
+     "Content-Length",
+     "176"
+    ],
+    [
+     "Connection",
+     "keep-alive"
+    ]
+   ],
+   "body": {
+    "transfer": "content-length",
+    "kind": "xml",
+    "text": "<?xml version=\"1.0\" encoding=\"UTF-8\"?><Delete xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"><Object><Key>copy.txt</Key></Object><Object><Key>large.bin</Key></Object></Delete>"
+   },
+   "response_status": 200
+  },
+  {
+   "operation": "DeleteObject",
+   "method": "DELETE",
+   "target": "/hello.txt",
+   "addressing": "virtual-hosted",
+   "http_version": "HTTP/1.1",
+   "expect_continue": false,
+   "content_sha256": "UNSIGNED-PAYLOAD",
+   "headers": [
+    [
+     "Host",
+     "evidence.s3.kythira.test:<port>"
+    ],
+    [
+     "amz-sdk-invocation-id",
+     "<uuid>"
+    ],
+    [
+     "amz-sdk-request",
+     "attempt=1; max=3"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/s3/aws4_request, SignedHeaders=amz-sdk-invocation-id;amz-sdk-request;host;x-amz-content-sha256;x-amz-date, Signature=<hex>"
+    ],
+    [
+     "User-Agent",
+     "aws-sdk-java/2.59.3 md/io#sync md/http#Apache5 ua/2.1 api/S3#2.59.x os/Linux#<kernel> lang/java#21.0.13.0.3 md/OpenJDK_64-Bit_Server_VM#21.0.13.0.3+1-1-24.04.1-Ubuntu md/vendor#Ubuntu md/en_US m/AJ,E,N,N,Z,b,g"
+    ],
+    [
+     "x-amz-content-sha256",
+     "UNSIGNED-PAYLOAD"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "Connection",
+     "keep-alive"
+    ]
+   ],
+   "body": null,
+   "response_status": 204
+  },
+  {
+   "operation": "DeleteBucket",
+   "method": "DELETE",
+   "target": "/",
+   "addressing": "virtual-hosted",
+   "http_version": "HTTP/1.1",
+   "expect_continue": false,
+   "content_sha256": "UNSIGNED-PAYLOAD",
+   "headers": [
+    [
+     "Host",
+     "evidence.s3.kythira.test:<port>"
+    ],
+    [
+     "amz-sdk-invocation-id",
+     "<uuid>"
+    ],
+    [
+     "amz-sdk-request",
+     "attempt=1; max=3"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/s3/aws4_request, SignedHeaders=amz-sdk-invocation-id;amz-sdk-request;host;x-amz-content-sha256;x-amz-date, Signature=<hex>"
+    ],
+    [
+     "User-Agent",
+     "aws-sdk-java/2.59.3 md/io#sync md/http#Apache5 ua/2.1 api/S3#2.59.x os/Linux#<kernel> lang/java#21.0.13.0.3 md/OpenJDK_64-Bit_Server_VM#21.0.13.0.3+1-1-24.04.1-Ubuntu md/vendor#Ubuntu md/en_US m/AJ,E,N,N,Z,b,g"
+    ],
+    [
+     "x-amz-content-sha256",
+     "UNSIGNED-PAYLOAD"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "Connection",
+     "keep-alive"
+    ]
+   ],
+   "body": null,
+   "response_status": 204
+  },
+  {
+   "operation": "ListBuckets",
+   "method": "GET",
+   "target": "/",
+   "addressing": "service",
+   "http_version": "HTTP/1.1",
+   "expect_continue": false,
+   "content_sha256": "UNSIGNED-PAYLOAD",
+   "headers": [
+    [
+     "Host",
+     "s3.kythira.test:<port>"
+    ],
+    [
+     "amz-sdk-invocation-id",
+     "<uuid>"
+    ],
+    [
+     "amz-sdk-request",
+     "attempt=1; max=3"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/s3/aws4_request, SignedHeaders=amz-sdk-invocation-id;amz-sdk-request;host;x-amz-content-sha256;x-amz-date, Signature=<hex>"
+    ],
+    [
+     "User-Agent",
+     "aws-sdk-java/2.59.3 md/io#sync md/http#Apache5 ua/2.1 api/S3#2.59.x os/Linux#<kernel> lang/java#21.0.13.0.3 md/OpenJDK_64-Bit_Server_VM#21.0.13.0.3+1-1-24.04.1-Ubuntu md/vendor#Ubuntu md/en_US m/AJ,E,N,N,Z,b,g"
+    ],
+    [
+     "x-amz-content-sha256",
+     "UNSIGNED-PAYLOAD"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "Connection",
+     "keep-alive"
+    ]
+   ],
+   "body": null,
+   "response_status": 200
+  }
+ ],
+ "summary": {
+  "operations": [
+   "CreateBucket",
+   "HeadBucket",
+   "PutObject",
+   "HeadObject",
+   "GetObject",
+   "CreateMultipartUpload",
+   "UploadPart",
+   "UploadPart",
+   "CompleteMultipartUpload",
+   "ListObjectsV2",
+   "CopyObject",
+   "GetObject",
+   "CreateMultipartUpload",
+   "AbortMultipartUpload",
+   "DeleteObjects",
+   "DeleteObject",
+   "DeleteBucket",
+   "ListBuckets"
+  ],
+  "addressing": [
+   "virtual-hosted"
+  ],
+  "content_sha256": [
+   "STREAMING-UNSIGNED-PAYLOAD-TRAILER",
+   "UNSIGNED-PAYLOAD",
+   "absent"
+  ],
+  "http_versions": [
+   "HTTP/1.1"
+  ],
+  "expect_continue": [
+   "False",
+   "True"
+  ],
+  "object_uploads": [
+   {
+    "aws_chunked": true,
+    "chunks_signed": false,
+    "trailers": [
+     "x-amz-checksum-crc32"
+    ],
+    "transfer": "content-length",
+    "x-amz-content-sha256": "STREAMING-UNSIGNED-PAYLOAD-TRAILER",
+    "requests": 3
+   }
+  ]
+ }
+}

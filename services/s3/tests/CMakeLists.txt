@@ -32,6 +32,14 @@ add_test(NAME s3_operations_up_to_date
             "${_s3_dir}model/s3-2006-03-01.json"
             "${_s3_dir}include/kythira/s3/model/operations.hpp" --check)
 
+# Task 1: the checked-in wire evidence (tests/evidence/README.md) names only
+# model operations, shows every scenario finishing, and matches the
+# addressing and upload framing the README claims for each client.
+add_test(NAME s3_wire_evidence
+    COMMAND "${Python3_EXECUTABLE}" "${_s3_dir}tests/evidence/check_evidence.py"
+            "${_s3_dir}model/s3-2006-03-01.json"
+            "${_s3_dir}tests/evidence/data")
+
 # Task 1: s3_gateway_node links and runs.
 add_test(NAME s3_gateway_node_self_test COMMAND s3_gateway_node --self-test)
 
@@ -39,6 +47,7 @@ set_tests_properties(
     s3_model_coverage
     s3_model_coverage_checker
     s3_operations_up_to_date
+    s3_wire_evidence
     s3_gateway_node_self_test
     PROPERTIES LABELS "unit;s3;s3-module" TIMEOUT 60)
 
