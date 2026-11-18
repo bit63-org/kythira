@@ -221,6 +221,9 @@ struct served {
     kythira::memory_kv_engine engine;
     ddb::local_backend<> backend{engine};
     std::optional<ddb::gateway<ddb::local_backend<>>> gw;
+    /// Roles the next `restart` gives the gateway in place of the
+    /// configured ones, for sets the settings refuse.
+    std::optional<kythira::layers::role_set> roles;
 
     explicit served(const std::map<std::string, std::string>& extra = {},
                     std::optional<ddb::iam_hooks> iam = std::nullopt) {
@@ -249,6 +252,9 @@ struct served {
         BOOST_REQUIRE_MESSAGE(error == nullptr, (error != nullptr ? *error : std::string{}));
         auto& config = std::get<ddb::gateway_config>(c);
         config.iam = std::move(iam);
+        if (roles) {
+            config.roles = *roles;
+        }
         gw.emplace(config, backend);
         gw->start();
     }
@@ -1252,4 +1258,50 @@ BOOST_AUTO_TEST_CASE(a_data_node_serves_forwarded_ops_and_refuses_clients) {
     BOOST_TEST(client_call.body().find("no DynamoDB gateway") != std::string::npos);
     BOOST_TEST(std::string(client_call[ddb::k_roles_header]) == "data,segments");
     BOOST_TEST(f.post("abc", t, ddb::forward_mac(k_forward_secret, t, "abd")).result_int() == 403U);
+}
+
+// .kiro/specs/dynamodb-independent-layers/ task 2: the leader-side workers
+// run only with the data role. A front end without it (as task 4 will run
+// one) sweeps nothing; the same database under a node with the data role
+// is swept.
+BOOST_AUTO_TEST_CASE(only_a_node_with_the_data_role_runs_the_workers) {
+    served s;
+    BOOST_TEST(s.gw->runs_workers());
+    s.roles = kythira::layers::role_set::parse("gateway,front_end");
+    s.restart({});
+    BOOST_TEST(!s.gw->runs_workers());
+
+    auto r = s.call("CreateTable",
+                    R"({"TableName":"sessions","BillingMode":"PAY_PER_REQUEST",)"
+                    R"("AttributeDefinitions":[{"AttributeName":"pk","AttributeType":"S"}],)"
+                    R"("KeySchema":[{"AttributeName":"pk","KeyType":"HASH"}],)"
+                    R"("Tags":[{"Key":"kythira:compat:ttl-delay","Value":"prompt"}]})");
+    BOOST_REQUIRE_MESSAGE(r.result_int() == 200U, r.body());
+    r = s.call("UpdateTimeToLive",
+               R"({"TableName":"sessions","TimeToLiveSpecification":{"Enabled":true,)"
+               R"("AttributeName":"exp"}})");
+    BOOST_REQUIRE_MESSAGE(r.result_int() == 200U, r.body());
+    const auto now_s = std::chrono::duration_cast<std::chrono::seconds>(
+                           std::chrono::system_clock::now().time_since_epoch())
+                           .count();
+    r = s.call("PutItem", R"({"TableName":"sessions","Item":{"pk":{"S":"old"},"exp":{"N":")" +
+                              std::to_string(now_s - 60) + R"("}}})");
+    BOOST_REQUIRE_MESSAGE(r.result_int() == 200U, r.body());
+    const auto count = [&] {
+        const auto c = s.call("Scan", R"({"TableName":"sessions","Select":"COUNT"})");
+        BOOST_REQUIRE_MESSAGE(c.result_int() == 200U, c.body());
+        return body_of(c).at("Count").to_number<int>();
+    };
+    // Three of the workers' one-second passes would have swept it.
+    std::this_thread::sleep_for(std::chrono::seconds(3));
+    BOOST_TEST(count() == 1);
+
+    s.roles.reset();
+    s.restart({});
+    BOOST_TEST(s.gw->runs_workers());
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+    while (count() != 0 && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    }
+    BOOST_TEST(count() == 0);
 }

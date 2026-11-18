@@ -18,11 +18,20 @@ built by `.kiro/specs/kinesis-independent-layers/` tasks 1, 3, 5, 9 and
     refusal. A `data,segments` voter keeps the gateway's listener for
     forwarded ops and answers clients 404.
 
-- [ ] 2. Leader-side workers in the data role
+- [x] 2. Leader-side workers in the data role
   - Move the TTL sweeper out of the gateway composition; place catalog
     jobs, propagator, publisher, replicator, PITR, backups and exports in
     the data role; tests that a front-end-only node starts none
   - _Requirements: 6.1-6.4_
+  - Built as `data_workers.hpp`: the gateway's one-second worker loop
+    (TTL sweeper, backups, PITR, exports and imports, bulk puts, vector
+    indexes, strong tables, the replicator and the Kinesis publisher),
+    built only when the node has the data role. The GSI propagator and
+    the catalog jobs were already `raft_backend`'s own. The gateway
+    still constructs `data_workers` because the vector worker shares the
+    vector API's registry and the strong-table worker waits for the
+    gateway's settled table names; a node without a front end (a data
+    node) still has the gateway object for its forward listener.
 
 - [ ] 3. Op additions, epochs and `remote_backend`
   - Ops for `change_shards`, `read_changes` and `read_stamped_range`;

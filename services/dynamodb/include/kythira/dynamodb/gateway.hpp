@@ -124,6 +124,7 @@
 #include <kythira/dynamodb/pitr.hpp>
 #include <kythira/dynamodb/batch_api.hpp>
 #include <kythira/dynamodb/compat_profile.hpp>
+#include <kythira/dynamodb/data_workers.hpp>
 #include <kythira/dynamodb/disk_guard.hpp>
 #include <kythira/dynamodb/dynamodb_actions.hpp>
 #include <kythira/dynamodb/forward_link.hpp>
@@ -1259,21 +1260,13 @@ public:
           _streams(backend),
           _destinations(backend),
           _backups(backend, nullptr),
-          _sweeper(backend),
-          _publisher(backend, {}),
-          _backup_worker(backend, nullptr),
           _pitr(backend, nullptr),
-          _pitr_worker(backend, nullptr),
           _jobs(backend, nullptr, nullptr),
-          _job_worker(backend, nullptr, nullptr),
           _bulk(backend, nullptr, nullptr),
-          _bulk_worker(backend, nullptr, nullptr),
           _policies(backend),
           _insights(backend),
           _vectors(backend),
-          _vector_worker(backend, &_vectors.registry()),
           _receiver(backend),
-          _replicator(backend, nullptr),
           _log(std::move(log)) {
         _auth.register_service(dynamodb_static_roles());
         _auth.set_mode(_config.auth, _config.iam);
@@ -1331,7 +1324,6 @@ public:
         _batches.set_compat_profile(_config.compat);
         _transactions.set_compat_profile(_config.compat);
         _ttl.set_compat_profile(_config.compat);
-        _sweeper.set_compat_profile(_config.compat);
         _tables.register_with(*_front);
         _items.register_with(*_front);
         _queries.register_with(*_front);
@@ -1357,40 +1349,32 @@ public:
         _tables.set_peers([peers = _peers](std::string_view r) { return peers->has(r); });
         if constexpr (k_routes_strong) {
             // Multi-region strong consistency (task 27).
-            if (_backend.has_strong() && !_strong_tables) {
+            if (_backend.has_strong()) {
                 _tables.set_strong_regions(_config.strong.regions());
-                _strong_tables = std::make_unique<strong_table_worker<Backend>>(_backend);
-                _strong_tables->set_region(_config.front.region);
-                _strong_tables->set_region_voters(_config.strong.voters_in(_config.front.region));
-                _strong_tables->set_log([this](std::string_view line) {
-                    if (_log) {
-                        _log(true, line);
-                    }
-                });
             }
         }
         _receiver.set_table_keys(&_keys);
         _receiver.register_with(*_front);
-        _replicator.set_peers(_peers.get());
-        _replicator.set_log([this](std::string_view line) {
-            if (_log) {
-                _log(true, line);
-            }
-        });
         auto store = _config.backups;
         if (!store && !_config.backup_dir.empty()) {
             store = std::make_shared<directory_backup_store>(_config.backup_dir);
         }
         _backups.set_store(store);
         _backups.set_table_keys(&_keys);
-        _backups.on_created([this] { _backup_worker.poke(); });
+        _backups.on_created([this] {
+            if (_workers) {
+                _workers->backup_created();
+            }
+        });
         _backups.register_with(*_front);
-        _backup_worker.set_store(store);
         _pitr.set_store(store);
         _pitr.set_table_keys(&_keys);
-        _pitr.on_changed([this] { _pitr_worker.poke(); });
+        _pitr.on_changed([this] {
+            if (_workers) {
+                _workers->pitr_changed();
+            }
+        });
         _pitr.register_with(*_front);
-        _pitr_worker.set_store(store);
         auto buckets = _config.buckets;
         if (!buckets && !_config.bucket_dir.empty()) {
             buckets = directory_buckets(_config.bucket_dir);
@@ -1400,56 +1384,84 @@ public:
         _jobs.set_store(store);
         _jobs.set_table_keys(&_keys);
         _jobs.set_buckets(buckets);
-        _jobs.on_started([this] { _job_worker.poke(); });
+        _jobs.on_started([this] {
+            if (_workers) {
+                _workers->job_started();
+            }
+        });
         _jobs.register_with(*_front);
-        _job_worker.set_store(store);
-        _job_worker.set_buckets(buckets);
         _bulk.set_store(store);
         _bulk.set_buckets(buckets);
-        _bulk.on_started([this] { _bulk_worker.poke(); });
+        _bulk.on_started([this] {
+            if (_workers) {
+                _workers->bulk_started();
+            }
+        });
         _bulk.register_with(*_front);
-        _bulk_worker.set_store(store);
-        _bulk_worker.set_buckets(buckets);
-        _publisher.set_sink(_config.kinesis.configured() ? _config.kinesis
-                                                         : kinesis_sink_from_env());
-        _publisher.set_region(_config.front.region);
         _key_watch.inaccessible_after_ms = _config.kms_inaccessible_after_ms;
-        if (_keys.configured()) {
-            // Backups and point-in-time archives of encrypted tables are
-            // sealed under keys derived from their table keys (KMS task 17).
-            archive_key_source archive_keys = [this](const table_descriptor& d) {
-                auto key = _keys.open(d, _config.front.partition);
-                auto out = std::make_shared<const archive_key>(key);
-                OPENSSL_cleanse(key.data(), key.size());
-                return out;
-            };
-            _backup_worker.set_archive_keys(archive_keys);
-            _pitr_worker.set_archive_keys(archive_keys);
-            _job_worker.set_archive_keys(archive_keys);
-        }
-        // Exports with S3SseKmsKeyId, and imports of what they wrote
-        // (Requirement 12.9); an AWS S3 bucket needs no provider.
-        _job_worker.set_object_keys(
-            [this](const std::string& account, const std::string& partition) {
+        // The leader-side workers (data_workers.hpp) run only with the data
+        // role (.kiro/specs/dynamodb-independent-layers/ task 2): a front end
+        // without it runs none, and its hints above go nowhere, since the
+        // data node's next pass finds the work anyway.
+        if (_config.roles.has(kythira::layers::role::data) && !_workers) {
+            data_worker_settings<Backend> w;
+            w.compat = _config.compat;
+            w.region = _config.front.region;
+            w.store = store;
+            w.buckets = buckets;
+            w.kinesis = _config.kinesis.configured() ? _config.kinesis : kinesis_sink_from_env();
+            w.peers = _peers.get();
+            w.vectors = &_vectors.registry();
+            if constexpr (k_routes_strong) {
+                if (_backend.has_strong()) {
+                    w.strong_region_voters = _config.strong.voters_in(_config.front.region);
+                }
+            }
+            w.names_settled = [this] { return _ready.load() && settle_namespaces(); };
+            if (_keys.configured()) {
+                // Backups and point-in-time archives of encrypted tables are
+                // sealed under keys derived from their table keys (KMS task
+                // 17).
+                w.archive_keys = [this](const table_descriptor& d) {
+                    auto key = _keys.open(d, _config.front.partition);
+                    auto out = std::make_shared<const archive_key>(key);
+                    OPENSSL_cleanse(key.data(), key.size());
+                    return out;
+                };
+            }
+            // Exports with S3SseKmsKeyId, and imports of what they wrote
+            // (Requirement 12.9); an AWS S3 bucket needs no provider.
+            w.object_keys = [this](const std::string& account, const std::string& partition) {
                 return object_keys_of(_keys, account, partition);
-            });
+            };
+            // Sealed tables' keys checked, clear tables that gained a key
+            // re-sealed (KMS task 16).
+            w.table_keys = [this] { (void)_key_watch.pass(_backend.now_ms()); };
+            _workers = std::make_unique<data_workers<Backend>>(_backend, std::move(w), _log);
+        }
         _ready.store(true);
         _stopping = false;
-        _sweeper_thread = std::thread([this] { sweep_loop(); });
+        if (_workers) {
+            _workers->start();
+        }
         if (_config.key_ring && _keys.configured()) {
             _key_thread = std::thread([this] { key_loop(); });
         }
     }
 
+    /// Whether this gateway's node runs the leader-side workers: only with
+    /// the data role.
+    [[nodiscard]] auto runs_workers() const -> bool { return _workers && _workers->running(); }
+
     void stop() {
+        if (_workers) {
+            _workers->stop();
+        }
         {
             const std::lock_guard lock(_sweep_mu);
             _stopping = true;
         }
         _sweep_cv.notify_all();
-        if (_sweeper_thread.joinable()) {
-            _sweeper_thread.join();
-        }
         if (_key_thread.joinable()) {
             _key_thread.join();
         }
@@ -1610,128 +1622,6 @@ private:
         return true;
     }
 
-    /// The worker for the catalog leader's background jobs: the TTL
-    /// sweeper, backups and restores, the point-in-time archiver, exports,
-    /// imports and bulk puts, the vector index worker, the global table
-    /// replicator, and the Kinesis destination publisher (`ttl.hpp`,
-    /// `backup.hpp`, `pitr.hpp`, `export_import.hpp`, `bulk_put.hpp`,
-    /// `vector_search.hpp`, `global_tables.hpp`, `kinesis_destination.hpp`), a pass of each a
-    /// second, on the node that leads the catalog when the backend has one. A long backup or export
-    /// delays the others until it ends.
-    void sweep_loop() {
-        std::unique_lock lock(_sweep_mu);
-        while (!_stopping) {
-            lock.unlock();
-            try {
-                bool here = true;
-                if constexpr (requires(Backend& b) {
-                                  { b.leads_catalog() } -> std::same_as<bool>;
-                              }) {
-                    here = _backend.leads_catalog();
-                }
-                if (here) {
-                    try {
-                        (void)_sweeper.pass();
-                    } catch (const std::exception& e) {
-                        // A lost leader or a timeout: the next pass starts
-                        // over.
-                        if (_log) {
-                            _log(true, std::string("ttl sweeper: ") + e.what());
-                        }
-                    }
-                    try {
-                        // An unfinished backup or restore is taken up again
-                        // on the next pass, here or on a new leader.
-                        (void)_backup_worker.pass();
-                    } catch (const std::exception& e) {
-                        if (_log) {
-                            _log(true, std::string("backups: ") + e.what());
-                        }
-                    }
-                    try {
-                        // The archive resumes from the stored cursors; a
-                        // restore is loaded again from the start.
-                        (void)_pitr_worker.pass();
-                    } catch (const std::exception& e) {
-                        if (_log) {
-                            _log(true, std::string("point-in-time recovery: ") + e.what());
-                        }
-                    }
-                    try {
-                        // An unfinished export or import runs again from the
-                        // start on the next pass, here or on a new leader.
-                        (void)_job_worker.pass();
-                    } catch (const std::exception& e) {
-                        if (_log) {
-                            _log(true, std::string("exports and imports: ") + e.what());
-                        }
-                    }
-                    try {
-                        // A bulk put resumes at its first input object not
-                        // done, here or on a new leader.
-                        (void)_bulk_worker.pass();
-                    } catch (const std::exception& e) {
-                        if (_log) {
-                            _log(true, std::string("bulk operations: ") + e.what());
-                        }
-                    }
-                    try {
-                        // A new vector index turns ACTIVE once this node has
-                        // built its graphs; others build theirs on demand.
-                        (void)_vector_worker.pass();
-                    } catch (const std::exception& e) {
-                        if (_log) {
-                            _log(true, std::string("vector indexes: ") + e.what());
-                        }
-                    }
-                    if constexpr (k_routes_strong) {
-                        // Only once the names are settled: before, this
-                        // region and the strong catalog may name a table
-                        // differently, and the worker would adopt it again.
-                        if (_strong_tables && _ready.load() && settle_namespaces()) {
-                            try {
-                                // Replicas adopted, statuses copied, old key
-                                // spaces salvaged (task 27).
-                                (void)_strong_tables->pass();
-                            } catch (const std::exception& e) {
-                                if (_log) {
-                                    _log(true, std::string("strong tables: ") + e.what());
-                                }
-                            }
-                        }
-                    }
-                    try {
-                        // Each replica resumes from its stored cursors, here
-                        // or on a new leader.
-                        (void)_replicator.pass();
-                    } catch (const std::exception& e) {
-                        if (_log) {
-                            _log(true, std::string("global tables: ") + e.what());
-                        }
-                    }
-                    try {
-                        // Sealed tables' keys checked, clear tables that
-                        // gained a key re-sealed (KMS task 16).
-                        (void)_key_watch.pass(_backend.now_ms());
-                    } catch (const std::exception& e) {
-                        if (_log) {
-                            _log(true, std::string("table keys: ") + e.what());
-                        }
-                    }
-                    // Unpublished records stay in the change log; the next
-                    // pass resumes from the stored cursors.
-                    (void)_publisher.pass();
-                }
-            } catch (const std::exception& e) {
-                if (_log) {
-                    _log(true, std::string("kinesis destinations: ") + e.what());
-                }
-            }
-            lock.lock();
-            _sweep_cv.wait_for(lock, std::chrono::seconds{1}, [this] { return _stopping; });
-        }
-    }
-
     /// Keeps the node's table key ring filled (KMS task 16), on every node:
     /// what a replica asked for at once, every sealed table's key now and
     /// then. A slow key provider delays only this thread.
@@ -1809,27 +1699,18 @@ private:
     streams_api<Backend> _streams;
     kinesis_destination_api<Backend> _destinations;
     backup_api<Backend> _backups;
-    ttl_sweeper<Backend> _sweeper;
-    kinesis_publisher<Backend> _publisher;
-    backup_worker<Backend> _backup_worker;
     pitr_api<Backend> _pitr;
-    pitr_worker<Backend> _pitr_worker;
     export_import_api<Backend> _jobs;
-    export_import_worker<Backend> _job_worker;
     bulk_put_api<Backend> _bulk;
-    bulk_put_worker<Backend> _bulk_worker;
     resource_policy_api<Backend> _policies;
     insights_api<Backend> _insights;
     vector_search_api<Backend> _vectors;
-    vector_index_worker<Backend> _vector_worker;
     std::shared_ptr<peer_set> _peers;
     replication_receiver<Backend> _receiver;
-    global_table_replicator<Backend> _replicator;
     /// A backend with a strong host (`routed_backend`, task 27).
     static constexpr bool k_routes_strong = requires(Backend& b) {
         { b.has_strong() } -> std::same_as<bool>;
     };
-    std::unique_ptr<strong_table_worker<Backend>> _strong_tables;
     std::function<void(bool, std::string_view)> _log;
     std::unique_ptr<front_end<authorizer>> _front;
     std::unique_ptr<https::server> _server;
@@ -1838,11 +1719,13 @@ private:
     std::atomic<bool> _namespaces_settled{false};
     std::mutex _namespaces_mu;
     std::chrono::steady_clock::time_point _namespaces_next_try{};
+    /// The table key ring's refresher (`key_loop`).
     std::mutex _sweep_mu;
     std::condition_variable _sweep_cv;
     bool _stopping = false;
-    std::thread _sweeper_thread;
     std::thread _key_thread;
+    /// Destroyed first: its thread calls back into the members above.
+    std::unique_ptr<data_workers<Backend>> _workers;
 };
 
 }  // namespace kythira::dynamodb
