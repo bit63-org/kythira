@@ -194,7 +194,7 @@ PR unless noted.
     alone holds data. Tests: `sqs_layers_test` (TLS identities with the
     test CA), `sqs_listener_test`, `sqs_module_test`.
 
-- [ ] 11. Migration operations and path tests
+- [x] 11. Migration operations and path tests
   - `evacuate` for the data role
   - One test per path in both directions under standard and FIFO load:
     gateway role, front-end role with long polls in flight, data role,

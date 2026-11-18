@@ -14,6 +14,7 @@
 #include <kythira/sqs/sqs_availability.hpp>
 #include <kythira/sqs/sqs_cluster.hpp>
 #include <kythira/sqs/sqs_data_access.hpp>
+#include <kythira/sqs/sqs_evacuate.hpp>
 #include <kythira/sqs/sqs_forward.hpp>
 #include <kythira/sqs/sqs_front_end.hpp>
 #include <kythira/sqs/sqs_gateway.hpp>
@@ -38,6 +39,7 @@
 
 #include <chrono>
 #include <filesystem>
+#include <map>
 #include <fstream>
 #include <memory>
 #include <optional>
@@ -612,6 +614,144 @@ BOOST_AUTO_TEST_CASE(an_unreachable_front_end_is_a_retryable_error) {
 
 BOOST_AUTO_TEST_SUITE_END()
 
+namespace {
+
+/// A group's membership, changed by the steps as a leader would.
+struct fake_group {
+    int self = 1;
+    bool leading = true;
+    bool joint = false;
+    std::vector<int> voters{1, 2, 3};
+    std::vector<int> learners;
+    std::uint64_t last = 100;
+    std::map<int, std::uint64_t> match;
+    std::vector<std::string> calls;
+
+    auto ops() -> sqs::membership_ops<int> {
+        sqs::membership_ops<int> o;
+        o.is_leader = [this] { return leading; };
+        o.self = [this] { return self; };
+        o.changing = [this] { return joint; };
+        o.members = [this] { return std::pair{voters, learners}; };
+        o.match_index = [this](int n) -> std::optional<std::uint64_t> {
+            const auto it = match.find(n);
+            return it == match.end() ? std::nullopt : std::optional(it->second);
+        };
+        o.last_index = [this] { return last; };
+        o.add_learner = [this](int n) {
+            learners.push_back(n);
+            calls.push_back("learner " + std::to_string(n));
+        };
+        o.promote = [this](int n) {
+            std::erase(learners, n);
+            voters.push_back(n);
+            calls.push_back("promote " + std::to_string(n));
+        };
+        o.remove_voter = [this](int n) {
+            std::erase(voters, n);
+            calls.push_back("remove " + std::to_string(n));
+        };
+        o.remove_learner = [this](int n) {
+            std::erase(learners, n);
+            calls.push_back("remove learner " + std::to_string(n));
+        };
+        o.transfer_to = [this](int n) {
+            leading = false;
+            calls.push_back("transfer " + std::to_string(n));
+        };
+        return o;
+    }
+
+    auto step(int from, int to) -> sqs::step_result {
+        return sqs::evacuate_step<int>(ops(), from, to, 8,
+                                       [](int n) { return "node " + std::to_string(n); });
+    }
+};
+
+}  // namespace
+
+BOOST_AUTO_TEST_SUITE(evacuate)
+
+using sqs::step_kind;
+
+BOOST_AUTO_TEST_CASE(a_follower_moves_by_learner_promote_remove) {
+    fake_group g;
+    BOOST_TEST((g.step(2, 4)._kind == step_kind::progressed));
+    // Not caught up: wait, however often asked.
+    BOOST_TEST((g.step(2, 4)._kind == step_kind::waiting));
+    g.match[4] = 50;
+    BOOST_TEST((g.step(2, 4)._kind == step_kind::waiting));
+    g.match[4] = 95;  // within the lag of 8
+    BOOST_TEST((g.step(2, 4)._kind == step_kind::progressed));
+    g.joint = true;
+    BOOST_TEST((g.step(2, 4)._kind == step_kind::waiting));
+    g.joint = false;
+    BOOST_TEST((g.step(2, 4)._kind == step_kind::progressed));
+    BOOST_TEST((g.step(2, 4)._kind == step_kind::done));
+    BOOST_TEST((g.calls == std::vector<std::string>{"learner 4", "promote 4", "remove 2"}));
+    BOOST_TEST((g.voters == std::vector<int>{1, 3, 4}));
+}
+
+BOOST_AUTO_TEST_CASE(a_leader_hands_over_before_it_is_removed) {
+    fake_group g;
+    g.match[4] = 100;
+    BOOST_TEST((g.step(1, 4)._kind == step_kind::progressed));
+    BOOST_TEST((g.step(1, 4)._kind == step_kind::progressed));
+    const auto handed = g.step(1, 4);
+    BOOST_TEST((handed._kind == step_kind::progressed));
+    BOOST_TEST(handed._what.find("leadership") != std::string::npos);
+    // Node 1 no longer leads: the rest happens on the new leader.
+    BOOST_TEST((g.step(1, 4)._kind == step_kind::not_leader));
+    g.self = 4;
+    g.leading = true;
+    BOOST_TEST((g.step(1, 4)._kind == step_kind::progressed));
+    BOOST_TEST((g.step(1, 4)._kind == step_kind::done));
+    BOOST_TEST(
+        (g.calls == std::vector<std::string>{"learner 4", "promote 4", "transfer 4", "remove 1"}));
+}
+
+BOOST_AUTO_TEST_CASE(a_move_reverses_from_any_point) {
+    // Stopped with 4 a learner: reversing removes it.
+    fake_group g;
+    g.learners = {4};
+    BOOST_TEST((g.step(4, 2)._kind == step_kind::progressed));
+    BOOST_TEST((g.step(4, 2)._kind == step_kind::done));
+    BOOST_TEST(g.learners.empty());
+    // Stopped with both voting: reversing removes the newcomer.
+    fake_group h;
+    h.voters = {1, 2, 3, 4};
+    BOOST_TEST((h.step(4, 2)._kind == step_kind::progressed));
+    BOOST_TEST((h.voters == std::vector<int>{1, 2, 3}));
+    BOOST_TEST((h.step(4, 2)._kind == step_kind::done));
+}
+
+BOOST_AUTO_TEST_CASE(impossible_moves_are_refused) {
+    fake_group g;
+    BOOST_TEST((g.step(2, 2)._kind == step_kind::refused));
+    BOOST_TEST((g.step(7, 8)._kind == step_kind::refused));
+    g.leading = false;
+    BOOST_TEST((g.step(2, 4)._kind == step_kind::not_leader));
+    BOOST_TEST(g.calls.empty());
+}
+
+BOOST_AUTO_TEST_CASE(admin_calls_survive_the_wire) {
+    const auto e = sqs::decode_evacuate(sqs::encode_evacuate({"1", "4"}));
+    BOOST_TEST_REQUIRE(e.has_value());
+    BOOST_TEST(e->_from == "1");
+    BOOST_TEST(e->_to == "4");
+    BOOST_TEST(!sqs::decode_evacuate("{\"from\": \"1\"}").has_value());
+    const auto p = sqs::decode_peer(sqs::encode_peer({"4", "https://d4:17500", "https://d4:9324"}));
+    BOOST_TEST_REQUIRE(p.has_value());
+    BOOST_TEST(p->_raft_url == "https://d4:17500");
+    BOOST_TEST(!sqs::decode_peer("{\"id\": \"4\", \"raft\": \"d4\", \"sqs\": \"x\"}").has_value());
+    const auto s = sqs::decode_step(sqs::encode_step({step_kind::waiting, "catching up"}));
+    BOOST_TEST_REQUIRE(s.has_value());
+    BOOST_TEST((s->_kind == step_kind::waiting));
+    BOOST_TEST(!sqs::decode_step("{\"result\": \"maybe\"}").has_value());
+}
+
+BOOST_AUTO_TEST_SUITE_END()
+
 #if KYTHIRA_SQS_TEST_IDENTITIES
 
 namespace {
@@ -789,6 +929,9 @@ BOOST_AUTO_TEST_CASE(the_route_table_covers_every_internal_path) {
     const auto* c = guard.rule_for(sqs::k_call_path);
     BOOST_TEST_REQUIRE(c != nullptr);
     BOOST_TEST((c->allowed == layers::role_set{role::gateway}));
+    const auto* a = guard.rule_for(sqs::k_admin_evacuate_path);
+    BOOST_TEST_REQUIRE(a != nullptr);
+    BOOST_TEST((a->allowed == layers::role_set{role::data}));
     BOOST_TEST(guard.rule_for("/") == nullptr);
 }
 
