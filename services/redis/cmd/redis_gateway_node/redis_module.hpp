@@ -221,8 +221,18 @@ public:
         if (!_serving) {
             return {};
         }
-        return {{"groups", static_cast<double>(_serving->group_count()), {}},
-                {"raft_term_sum", _serving->raft_term_sum(), {}}};
+        std::vector<service_node::module_metric> out{
+            {"groups", static_cast<double>(_serving->group_count()), {}},
+            {"raft_term_sum", _serving->raft_term_sum(), {}}};
+        // kythira_redis_role{role="..."} (redis-general-data-types
+        // Requirement 16.7): 1 for each layer this node runs, 0 for the
+        // other two, so a query finds every node of a layer.
+        for (const auto r : {layers::role::gateway, layers::role::front_end, layers::role::data}) {
+            out.push_back({"role",
+                           _opt._gateway._layer_roles.has(r) ? 1.0 : 0.0,
+                           {{"role", std::string(layers::role_name(r))}}});
+        }
+        return out;
     }
 
     /// The RESP listener's port once started (tests pass port 0).

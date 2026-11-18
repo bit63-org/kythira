@@ -140,6 +140,9 @@ struct node_options {
 /// - KYTHIRA_ALLOW_PLAINTEXT_RAFT is true and KYTHIRA_WIRE_SERIALIZER is
 ///   cbor: Raft is the node's listener and wire.
 /// - Any other variable set in `env` is taken as it is.
+/// - KYTHIRA_REDIS_ROLES is never filled in: the role set is the module's
+///   own (redis-general-data-types Requirement 16.4), all three unless set,
+///   whatever roles other modules on the node run.
 /// - Otherwise the node's settings fill in: KYTHIRA_PEERS from
 ///   KYTHIRA_NODE_PEERS (`id=host:port`, with the scheme added),
 ///   KYTHIRA_RAFT_BIND and _PORT from the node's, and the RESP TLS

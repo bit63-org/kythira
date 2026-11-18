@@ -95,6 +95,7 @@ The Redis front end:
 
 | Variable | Default | Meaning |
 |---|---|---|
+| `KYTHIRA_REDIS_ROLES` | `gateway,front_end,data` | The layers this node runs (`.kiro/specs/redis-general-data-types/` Requirement 16), reported as `INFO`'s `kythira_roles:` and kythira_node's `kythira_redis_role{role=...}`. Only all three serve so far; any other set stops the node at start, naming the task that adds it. In kythira_node it is the Redis module's own, never another module's |
 | `KYTHIRA_REDIS_LISTEN` | `0.0.0.0:6379` | Plaintext RESP listener. The daemon warns at every start that secrets and values cross this unencrypted; set it empty to run TLS-only |
 | `KYTHIRA_REDIS_TLS_LISTEN` | none | TLS listener; needs `_TLS_CERT` and `_TLS_KEY` |
 | `KYTHIRA_REDIS_TLS_CERT` / `_TLS_KEY` / `_TLS_CA` | none | PEM server certificate, key and (for client certificates) the CA to verify them against |

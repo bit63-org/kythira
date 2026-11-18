@@ -86,6 +86,7 @@ struct gateway_env {
         "KYTHIRA_REDIS_TXN_LOCK_TTL_MS",
         "KYTHIRA_REDIS_TXN_MAX_RETRIES",
         "KYTHIRA_REDIS_COMPAT_VERSION",
+        "KYTHIRA_REDIS_ROLES",
     };
     gateway_env(const gateway_env&) = delete;
     auto operator=(const gateway_env&) -> gateway_env& = delete;
@@ -526,4 +527,91 @@ BOOST_AUTO_TEST_CASE(stand_alone_reads_through_a_lookup_as_from_the_process) {
     }));
     BOOST_TEST(o._raft_port == 7000);
     BOOST_TEST(!o._allow_plaintext_raft);
+}
+
+// ── layer roles (.kiro/specs/redis-general-data-types/ task 15) ─────────────
+
+BOOST_AUTO_TEST_CASE(a_node_that_sets_no_roles_runs_all_three) {
+    // Requirement 16.1: the default is today's node.
+    const gateway_env env;
+    ::setenv("KYTHIRA_RAFT_BIND", "127.0.0.1", 1);
+    const auto o = from_env();
+    BOOST_TEST(o._gateway._layer_roles.to_string() == "gateway,front_end,data");
+    BOOST_TEST((o._gateway._layer_roles == kythira::k_redis_all_roles));
+}
+
+BOOST_AUTO_TEST_CASE(all_three_roles_named_in_any_order_serve) {
+    const gateway_env env;
+    ::setenv("KYTHIRA_RAFT_BIND", "127.0.0.1", 1);
+    ::setenv("KYTHIRA_REDIS_ROLES", "data,gateway,front_end", 1);
+    const auto o = from_env();
+    BOOST_TEST((o._gateway._layer_roles == kythira::k_redis_all_roles));
+}
+
+namespace {
+// The message from_env() stops the node with for KYTHIRA_REDIS_ROLES=roles.
+auto refusal(const char* roles) -> std::string {
+    const gateway_env env;
+    ::setenv("KYTHIRA_REDIS_ROLES", roles, 1);
+    try {
+        (void)from_env();
+    } catch (const std::invalid_argument& e) {
+        return e.what();
+    }
+    return {};
+}
+}  // namespace
+
+BOOST_AUTO_TEST_CASE(a_malformed_role_set_names_the_variable_and_the_fault) {
+    for (const char* bad : {"", "gateway,,data", "gateway,gateway", "Gateway", "front-end",
+                            "gateway,front_end,data,segments", "segments"}) {
+        const auto why = refusal(bad);
+        BOOST_TEST_INFO("KYTHIRA_REDIS_ROLES=" << bad);
+        BOOST_TEST(why.find("KYTHIRA_REDIS_ROLES") != std::string::npos);
+    }
+    BOOST_TEST(refusal("").find("empty") != std::string::npos);
+    BOOST_TEST(refusal("gateway,gateway").find("twice") != std::string::npos);
+    BOOST_TEST(refusal("segments").find("no segments layer") != std::string::npos);
+}
+
+BOOST_AUTO_TEST_CASE(a_role_set_this_build_cannot_serve_stops_the_node_naming_the_task) {
+    // Requirement 16.3: stop at start, naming what is missing, before any
+    // other variable is checked (so the message is the roles', not
+    // KYTHIRA_PEERS').
+    const std::map<std::string, std::string> want{
+        {"gateway", "task 17"},           {"front_end", "task 17"},
+        {"gateway,data", "task 17"},      {"front_end,data", "task 17"},
+        {"gateway,front_end", "task 16"}, {"data", "task 16"},
+    };
+    for (const auto& [roles, task] : want) {
+        const auto why = refusal(roles.c_str());
+        BOOST_TEST_INFO("KYTHIRA_REDIS_ROLES=" << roles << ": " << why);
+        BOOST_TEST(why.find("KYTHIRA_REDIS_ROLES=" + roles) != std::string::npos);
+        BOOST_TEST(why.find(task) != std::string::npos);
+    }
+    {
+        const gateway_env env;
+        ::setenv("KYTHIRA_REDIS_ROLES", "data", 1);
+        ::unsetenv("KYTHIRA_NODE_ID");
+        try {
+            (void)from_env();
+            BOOST_FAIL("a data-only node started");
+        } catch (const std::invalid_argument& e) {
+            BOOST_TEST(std::string(e.what()).find("KYTHIRA_REDIS_ROLES") != std::string::npos);
+        }
+    }
+}
+
+BOOST_AUTO_TEST_CASE(kythira_node_never_fills_in_the_role_set) {
+    // Requirement 16.4: roles are per module. A node-wide setting, or
+    // another module's, does not reach the Redis module; its own does.
+    auto vars = node_vars();
+    vars["KYTHIRA_DYNAMODB_ROLES"] = "data,segments";
+    vars["KINESIS_ROLES"] = "gateway";
+    const auto o = composite(vars);
+    BOOST_TEST((o._gateway._layer_roles == kythira::k_redis_all_roles));
+    const auto env = kythira::redis_node::composite_env(lookup(node_vars()));
+    BOOST_TEST(!env("KYTHIRA_REDIS_ROLES").has_value());
+    vars["KYTHIRA_REDIS_ROLES"] = "gateway";
+    BOOST_CHECK_THROW(composite(vars), std::invalid_argument);
 }
