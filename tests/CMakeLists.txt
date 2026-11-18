@@ -1973,8 +1973,8 @@ add_network_test(memory_pool_leak_detection_debug memory_pool_leak_detection_deb
 # CONFIG_COAP_TRANSPORT=n means no CoAP target exists, so these are gated on the
 # feature symbol rather than on Folly. They were gated on `TARGET Folly::folly`
 # alone until August 10, 2026, which is why setting that symbol n produced a
-# byte-identical build. The Folly conditions inside are untouched -- they are a
-# separate requirement and still apply.
+# byte-identical build. The Folly conditions inside are a separate requirement,
+# kept only on the tests whose source needs Folly.
 if(KYTHIRA_BUILD_COAP_TRANSPORT)
     add_executable(coap_libcoap_integration_test coap_libcoap_integration_test.cpp)
     target_link_libraries(coap_libcoap_integration_test PRIVATE
@@ -1993,19 +1993,14 @@ if(KYTHIRA_BUILD_COAP_TRANSPORT)
     )
 
     # CoAP event logging property test needs Boost.JSON
-    if(TARGET Folly::folly)
-        add_executable(coap_event_logging_property_test coap_event_logging_property_test.cpp)
-        target_link_libraries(coap_event_logging_property_test PRIVATE
-            network_simulator
-            Boost::unit_test_framework
-            boost_json
-        )
-        target_compile_features(coap_event_logging_property_test PRIVATE cxx_std_23)
-        add_test(NAME coap_event_logging_property_test COMMAND coap_event_logging_property_test)
-
-    else()
-        message(STATUS "coap_event_logging_property_test: skipped (requires Folly)")
-    endif()
+    add_executable(coap_event_logging_property_test coap_event_logging_property_test.cpp)
+    target_link_libraries(coap_event_logging_property_test PRIVATE
+        network_simulator
+        Boost::unit_test_framework
+        boost_json
+    )
+    target_compile_features(coap_event_logging_property_test PRIVATE cxx_std_23)
+    add_test(NAME coap_event_logging_property_test COMMAND coap_event_logging_property_test)
     # CoAP configuration test
     add_executable(coap_config_test coap_config_test.cpp)
     target_link_libraries(coap_config_test PRIVATE
@@ -2251,26 +2246,21 @@ if(KYTHIRA_BUILD_COAP_TRANSPORT)
     set_tests_properties(coap_leave_multicast_group_test PROPERTIES TIMEOUT 30 LABELS "coap;unit;multicast")
 
     # CoAP get joined multicast groups test
+    add_executable(coap_get_joined_multicast_groups_test coap_get_joined_multicast_groups_test.cpp)
+    target_link_libraries(coap_get_joined_multicast_groups_test PRIVATE
+        network_simulator
+        Boost::unit_test_framework
+        boost_json
+    )
     if(TARGET Folly::folly)
-        add_executable(coap_get_joined_multicast_groups_test coap_get_joined_multicast_groups_test.cpp)
-        target_link_libraries(coap_get_joined_multicast_groups_test PRIVATE
-            network_simulator
-            Boost::unit_test_framework
-            boost_json
-        )
-        if(TARGET Folly::folly)
-            target_link_libraries(coap_get_joined_multicast_groups_test PRIVATE Folly::folly)
-        endif()
-        target_compile_features(coap_get_joined_multicast_groups_test PRIVATE cxx_std_23)
-        add_test(NAME coap_get_joined_multicast_groups_test COMMAND coap_get_joined_multicast_groups_test)
-        # TIMEOUT must be >= the sum of this file's 4 test cases' own raised
-        # boost::unit_test::timeout(60) each (240s worst case) -- a smaller
-        # CTest TIMEOUT would silently override them.
-        set_tests_properties(coap_get_joined_multicast_groups_test PROPERTIES TIMEOUT 250 LABELS "coap;unit;multicast")
-
-    else()
-        message(STATUS "coap_get_joined_multicast_groups_test: skipped (requires Folly)")
+        target_link_libraries(coap_get_joined_multicast_groups_test PRIVATE Folly::folly)
     endif()
+    target_compile_features(coap_get_joined_multicast_groups_test PRIVATE cxx_std_23)
+    add_test(NAME coap_get_joined_multicast_groups_test COMMAND coap_get_joined_multicast_groups_test)
+    # TIMEOUT must be >= the sum of this file's 4 test cases' own raised
+    # boost::unit_test::timeout(60) each (240s worst case) -- a smaller
+    # CTest TIMEOUT would silently override them.
+    set_tests_properties(coap_get_joined_multicast_groups_test PROPERTIES TIMEOUT 250 LABELS "coap;unit;multicast")
     # CoAP concept conformance test
     add_executable(coap_concept_conformance_test coap_concept_conformance_test.cpp)
     target_link_libraries(coap_concept_conformance_test PRIVATE
@@ -2296,36 +2286,26 @@ if(KYTHIRA_BUILD_COAP_TRANSPORT)
     add_test(NAME coap_message_serialization_property_test COMMAND coap_message_serialization_property_test)
 
     # CoAP POST method property test needs Boost.JSON
-    if(TARGET Folly::folly)
-        add_executable(coap_post_method_property_test coap_post_method_property_test.cpp)
-        target_link_libraries(coap_post_method_property_test PRIVATE
-            network_simulator
-            Boost::unit_test_framework
-            boost_json
-        )
-        target_compile_features(coap_post_method_property_test PRIVATE cxx_std_23)
-        add_test(NAME coap_post_method_property_test COMMAND coap_post_method_property_test)
-
-    else()
-        message(STATUS "coap_post_method_property_test: skipped (requires Folly)")
-    endif()
+    add_executable(coap_post_method_property_test coap_post_method_property_test.cpp)
+    target_link_libraries(coap_post_method_property_test PRIVATE
+        network_simulator
+        Boost::unit_test_framework
+        boost_json
+    )
+    target_compile_features(coap_post_method_property_test PRIVATE cxx_std_23)
+    add_test(NAME coap_post_method_property_test COMMAND coap_post_method_property_test)
     # CoAP future resolution property test needs Boost.JSON
+    add_executable(coap_future_resolution_property_test coap_future_resolution_property_test.cpp)
+    target_link_libraries(coap_future_resolution_property_test PRIVATE
+        network_simulator
+        Boost::unit_test_framework
+        boost_json
+    )
     if(TARGET Folly::folly)
-        add_executable(coap_future_resolution_property_test coap_future_resolution_property_test.cpp)
-        target_link_libraries(coap_future_resolution_property_test PRIVATE
-            network_simulator
-            Boost::unit_test_framework
-            boost_json
-        )
-        if(TARGET Folly::folly)
-            target_link_libraries(coap_future_resolution_property_test PRIVATE Folly::folly)
-        endif()
-        target_compile_features(coap_future_resolution_property_test PRIVATE cxx_std_23)
-        add_test(NAME coap_future_resolution_property_test COMMAND coap_future_resolution_property_test)
-
-    else()
-        message(STATUS "coap_future_resolution_property_test: skipped (requires Folly)")
+        target_link_libraries(coap_future_resolution_property_test PRIVATE Folly::folly)
     endif()
+    target_compile_features(coap_future_resolution_property_test PRIVATE cxx_std_23)
+    add_test(NAME coap_future_resolution_property_test COMMAND coap_future_resolution_property_test)
     # CoAP content-negotiation unit test: registry <-> Content-Format mapping and
     # the CoAP varint option encoding. Protocol-independent, so unlike the rest of
     # the CoAP suite it needs neither Folly nor a libcoap client/server -- the one
@@ -2340,57 +2320,42 @@ if(KYTHIRA_BUILD_COAP_TRANSPORT)
     add_test(NAME coap_content_negotiation_unit_test COMMAND coap_content_negotiation_unit_test)
 
     # CoAP Content-Format property test needs Boost.JSON
-    if(TARGET Folly::folly)
-        add_executable(coap_content_format_property_test coap_content_format_property_test.cpp)
-        target_link_libraries(coap_content_format_property_test PRIVATE
-            network_simulator
-            Boost::unit_test_framework
-            boost_json
-        )
-        target_compile_features(coap_content_format_property_test PRIVATE cxx_std_23)
-        add_test(NAME coap_content_format_property_test COMMAND coap_content_format_property_test)
-
-    else()
-        message(STATUS "coap_content_format_property_test: skipped (requires Folly)")
-    endif()
+    add_executable(coap_content_format_property_test coap_content_format_property_test.cpp)
+    target_link_libraries(coap_content_format_property_test PRIVATE
+        network_simulator
+        Boost::unit_test_framework
+        boost_json
+    )
+    target_compile_features(coap_content_format_property_test PRIVATE cxx_std_23)
+    add_test(NAME coap_content_format_property_test COMMAND coap_content_format_property_test)
     # CoAP confirmable message property test needs Boost.JSON
-    if(TARGET Folly::folly)
-        add_executable(coap_confirmable_message_property_test coap_confirmable_message_property_test.cpp)
-        target_link_libraries(coap_confirmable_message_property_test PRIVATE
-            network_simulator
-            Boost::unit_test_framework
-            boost_json
-        )
-        target_compile_features(coap_confirmable_message_property_test PRIVATE cxx_std_23)
-        add_test(NAME coap_confirmable_message_property_test COMMAND coap_confirmable_message_property_test)
-        # TIMEOUT must be >= the test case's own boost::unit_test::timeout(180)
-        # (see coap_confirmable_message_property_test.cpp) -- CTest kills the
-        # process at this value regardless of the internal decorator, so a
-        # smaller CTest TIMEOUT would silently override it.
-        set_tests_properties(coap_confirmable_message_property_test PROPERTIES TIMEOUT 210 LABELS "coap;property")
-
-    else()
-        message(STATUS "coap_confirmable_message_property_test: skipped (requires Folly)")
-    endif()
+    add_executable(coap_confirmable_message_property_test coap_confirmable_message_property_test.cpp)
+    target_link_libraries(coap_confirmable_message_property_test PRIVATE
+        network_simulator
+        Boost::unit_test_framework
+        boost_json
+    )
+    target_compile_features(coap_confirmable_message_property_test PRIVATE cxx_std_23)
+    add_test(NAME coap_confirmable_message_property_test COMMAND coap_confirmable_message_property_test)
+    # TIMEOUT must be >= the test case's own boost::unit_test::timeout(180)
+    # (see coap_confirmable_message_property_test.cpp) -- CTest kills the
+    # process at this value regardless of the internal decorator, so a
+    # smaller CTest TIMEOUT would silently override it.
+    set_tests_properties(coap_confirmable_message_property_test PROPERTIES TIMEOUT 210 LABELS "coap;property")
     # CoAP duplicate detection property test needs Boost.JSON
-    if(TARGET Folly::folly)
-        add_executable(coap_duplicate_detection_property_test coap_duplicate_detection_property_test.cpp)
-        target_link_libraries(coap_duplicate_detection_property_test PRIVATE
-            network_simulator
-            Boost::unit_test_framework
-            boost_json
-        )
-        target_compile_features(coap_duplicate_detection_property_test PRIVATE cxx_std_23)
-        add_test(NAME coap_duplicate_detection_property_test COMMAND coap_duplicate_detection_property_test)
-        # TIMEOUT must be >= the test case's own boost::unit_test::timeout(180)
-        # (see coap_duplicate_detection_property_test.cpp) -- CTest kills the
-        # process at this value regardless of the internal decorator, so a
-        # smaller CTest TIMEOUT would silently override it.
-        set_tests_properties(coap_duplicate_detection_property_test PROPERTIES TIMEOUT 210 LABELS "coap;property")
-
-    else()
-        message(STATUS "coap_duplicate_detection_property_test: skipped (requires Folly)")
-    endif()
+    add_executable(coap_duplicate_detection_property_test coap_duplicate_detection_property_test.cpp)
+    target_link_libraries(coap_duplicate_detection_property_test PRIVATE
+        network_simulator
+        Boost::unit_test_framework
+        boost_json
+    )
+    target_compile_features(coap_duplicate_detection_property_test PRIVATE cxx_std_23)
+    add_test(NAME coap_duplicate_detection_property_test COMMAND coap_duplicate_detection_property_test)
+    # TIMEOUT must be >= the test case's own boost::unit_test::timeout(180)
+    # (see coap_duplicate_detection_property_test.cpp) -- CTest kills the
+    # process at this value regardless of the internal decorator, so a
+    # smaller CTest TIMEOUT would silently override it.
+    set_tests_properties(coap_duplicate_detection_property_test PROPERTIES TIMEOUT 210 LABELS "coap;property")
     # Duplicate detection keyed by (peer, Message ID, token) --
     # .kiro/specs/coap-transport-multi-raft/ tasks 3-4. The table test drives
     # coap_exchange_table with an injected clock and needs nothing else; the
@@ -2402,19 +2367,15 @@ if(KYTHIRA_BUILD_COAP_TRANSPORT)
     target_compile_features(coap_exchange_table_test PRIVATE cxx_std_23)
     add_test(NAME coap_exchange_table_test COMMAND coap_exchange_table_test)
     set_tests_properties(coap_exchange_table_test PROPERTIES TIMEOUT 270 LABELS "coap;unit")
-    if(TARGET Folly::folly)
-        add_executable(coap_duplicate_detection_peer_test coap_duplicate_detection_peer_test.cpp)
-        target_link_libraries(coap_duplicate_detection_peer_test PRIVATE
-            network_simulator
-            Boost::unit_test_framework
-            boost_json
-        )
-        target_compile_features(coap_duplicate_detection_peer_test PRIVATE cxx_std_23)
-        add_test(NAME coap_duplicate_detection_peer_test COMMAND coap_duplicate_detection_peer_test)
-        set_tests_properties(coap_duplicate_detection_peer_test PROPERTIES TIMEOUT 100 LABELS "coap;integration")
-    else()
-        message(STATUS "coap_duplicate_detection_peer_test: skipped (requires Folly)")
-    endif()
+    add_executable(coap_duplicate_detection_peer_test coap_duplicate_detection_peer_test.cpp)
+    target_link_libraries(coap_duplicate_detection_peer_test PRIVATE
+        network_simulator
+        Boost::unit_test_framework
+        boost_json
+    )
+    target_compile_features(coap_duplicate_detection_peer_test PRIVATE cxx_std_23)
+    add_test(NAME coap_duplicate_detection_peer_test COMMAND coap_duplicate_detection_peer_test)
+    set_tests_properties(coap_duplicate_detection_peer_test PROPERTIES TIMEOUT 100 LABELS "coap;integration")
     # node<Types> over a real CoAP transport: election, replication, leader
     # failover and TimeoutNow leadership transfer on three loopback nodes --
     # .kiro/specs/coap-transport-multi-raft/ tasks 5-6. The first test in the
@@ -2459,67 +2420,55 @@ if(KYTHIRA_BUILD_COAP_TRANSPORT)
     # serializer this build has, CON regardless of use_confirmable_messages,
     # and 5.01 without a handler -- coap-transport-multi-raft task 6. TIMEOUT
     # covers up to four serializer instantiations plus two cases at 30s each.
-    if(TARGET Folly::folly)
-        add_executable(coap_timeout_now_test coap_timeout_now_test.cpp)
-        target_link_libraries(coap_timeout_now_test PRIVATE
-            network_simulator
-            Boost::unit_test_framework
-            boost_json
-        )
-        if(PROTOBUF_SERIALIZER_FOUND)
-            target_compile_definitions(coap_timeout_now_test PRIVATE KYTHIRA_COAP_TEST_HAS_PROTOBUF)
-            target_link_libraries(coap_timeout_now_test PRIVATE raft_protobuf_serializer)
-        endif()
-        if(TARGET raft_ion_serializer)
-            target_link_libraries(coap_timeout_now_test PRIVATE raft_ion_serializer)
-        endif()
-        target_compile_features(coap_timeout_now_test PRIVATE cxx_std_23)
-        add_test(NAME coap_timeout_now_test COMMAND coap_timeout_now_test)
-        set_tests_properties(coap_timeout_now_test PROPERTIES TIMEOUT 190 LABELS "coap;integration")
-    else()
-        message(STATUS "coap_timeout_now_test: skipped (requires Folly)")
+    add_executable(coap_timeout_now_test coap_timeout_now_test.cpp)
+    target_link_libraries(coap_timeout_now_test PRIVATE
+        network_simulator
+        Boost::unit_test_framework
+        boost_json
+    )
+    if(PROTOBUF_SERIALIZER_FOUND)
+        target_compile_definitions(coap_timeout_now_test PRIVATE KYTHIRA_COAP_TEST_HAS_PROTOBUF)
+        target_link_libraries(coap_timeout_now_test PRIVATE raft_protobuf_serializer)
     endif()
+    if(TARGET raft_ion_serializer)
+        target_link_libraries(coap_timeout_now_test PRIVATE raft_ion_serializer)
+    endif()
+    target_compile_features(coap_timeout_now_test PRIVATE cxx_std_23)
+    add_test(NAME coap_timeout_now_test COMMAND coap_timeout_now_test)
+    set_tests_properties(coap_timeout_now_test PROPERTIES TIMEOUT 190 LABELS "coap;integration")
     # FetchLogEntries on the libcoap backend's wire: a block-wise round trip
     # through every serializer this build has, and 5.01 without a handler --
     # peer2peer-log-replication Req 4.1/4.2. TIMEOUT as coap_timeout_now_test.
-    if(TARGET Folly::folly)
-        add_executable(coap_fetch_log_entries_test coap_fetch_log_entries_test.cpp)
-        target_link_libraries(coap_fetch_log_entries_test PRIVATE
-            network_simulator
-            Boost::unit_test_framework
-            boost_json
-        )
-        if(PROTOBUF_SERIALIZER_FOUND)
-            target_compile_definitions(coap_fetch_log_entries_test PRIVATE
-                KYTHIRA_COAP_TEST_HAS_PROTOBUF)
-            target_link_libraries(coap_fetch_log_entries_test PRIVATE raft_protobuf_serializer)
-        endif()
-        if(TARGET raft_ion_serializer)
-            target_link_libraries(coap_fetch_log_entries_test PRIVATE raft_ion_serializer)
-        endif()
-        target_compile_features(coap_fetch_log_entries_test PRIVATE cxx_std_23)
-        add_test(NAME coap_fetch_log_entries_test COMMAND coap_fetch_log_entries_test)
-        set_tests_properties(coap_fetch_log_entries_test PROPERTIES TIMEOUT 190
-            LABELS "coap;integration")
-    else()
-        message(STATUS "coap_fetch_log_entries_test: skipped (requires Folly)")
+    add_executable(coap_fetch_log_entries_test coap_fetch_log_entries_test.cpp)
+    target_link_libraries(coap_fetch_log_entries_test PRIVATE
+        network_simulator
+        Boost::unit_test_framework
+        boost_json
+    )
+    if(PROTOBUF_SERIALIZER_FOUND)
+        target_compile_definitions(coap_fetch_log_entries_test PRIVATE
+            KYTHIRA_COAP_TEST_HAS_PROTOBUF)
+        target_link_libraries(coap_fetch_log_entries_test PRIVATE raft_protobuf_serializer)
     endif()
+    if(TARGET raft_ion_serializer)
+        target_link_libraries(coap_fetch_log_entries_test PRIVATE raft_ion_serializer)
+    endif()
+    target_compile_features(coap_fetch_log_entries_test PRIVATE cxx_std_23)
+    add_test(NAME coap_fetch_log_entries_test COMMAND coap_fetch_log_entries_test)
+    set_tests_properties(coap_fetch_log_entries_test PROPERTIES TIMEOUT 190
+        LABELS "coap;integration")
     # The opt-in Raft-rate timer profile: RFC 7252 defaults pinned field by
     # field, the profile's shorter timers, and InstallSnapshot read off the
     # wire as CON under it -- coap-transport-multi-raft task 12.
-    if(TARGET Folly::folly)
-        add_executable(coap_raft_rate_profile_test coap_raft_rate_profile_test.cpp)
-        target_link_libraries(coap_raft_rate_profile_test PRIVATE
-            network_simulator
-            Boost::unit_test_framework
-            boost_json
-        )
-        target_compile_features(coap_raft_rate_profile_test PRIVATE cxx_std_23)
-        add_test(NAME coap_raft_rate_profile_test COMMAND coap_raft_rate_profile_test)
-        set_tests_properties(coap_raft_rate_profile_test PROPERTIES TIMEOUT 60 LABELS "coap;unit")
-    else()
-        message(STATUS "coap_raft_rate_profile_test: skipped (requires Folly)")
-    endif()
+    add_executable(coap_raft_rate_profile_test coap_raft_rate_profile_test.cpp)
+    target_link_libraries(coap_raft_rate_profile_test PRIVATE
+        network_simulator
+        Boost::unit_test_framework
+        boost_json
+    )
+    target_compile_features(coap_raft_rate_profile_test PRIVATE cxx_std_23)
+    add_test(NAME coap_raft_rate_profile_test COMMAND coap_raft_rate_profile_test)
+    set_tests_properties(coap_raft_rate_profile_test PROPERTIES TIMEOUT 60 LABELS "coap;unit")
     # The libcoap client's I/O thread in readiness and paced modes: burst
     # drain, wake on readiness and on send, retransmission and multicast
     # deadlines under a long wait cap, idle wake rate, prompt shutdown, and
@@ -2552,19 +2501,15 @@ if(KYTHIRA_BUILD_COAP_TRANSPORT)
     # oscore_credentials::id_context over the libcoap backend: matched pair
     # talks, mismatched does not, absent changes nothing --
     # coap-transport-multi-raft task 8.
-    if(TARGET Folly::folly)
-        add_executable(coap_oscore_id_context_test coap_oscore_id_context_test.cpp)
-        target_link_libraries(coap_oscore_id_context_test PRIVATE
-            network_simulator
-            Boost::unit_test_framework
-            boost_json
-        )
-        target_compile_features(coap_oscore_id_context_test PRIVATE cxx_std_23)
-        add_test(NAME coap_oscore_id_context_test COMMAND coap_oscore_id_context_test)
-        set_tests_properties(coap_oscore_id_context_test PROPERTIES TIMEOUT 100 LABELS "coap;oscore;integration")
-    else()
-        message(STATUS "coap_oscore_id_context_test: skipped (requires Folly)")
-    endif()
+    add_executable(coap_oscore_id_context_test coap_oscore_id_context_test.cpp)
+    target_link_libraries(coap_oscore_id_context_test PRIVATE
+        network_simulator
+        Boost::unit_test_framework
+        boost_json
+    )
+    target_compile_features(coap_oscore_id_context_test PRIVATE cxx_std_23)
+    add_test(NAME coap_oscore_id_context_test COMMAND coap_oscore_id_context_test)
+    set_tests_properties(coap_oscore_id_context_test PROPERTIES TIMEOUT 100 LABELS "coap;oscore;integration")
     # Per-Raft-group OSCORE contexts over the libcoap backend: one context per
     # group from one bootstrap, unhosted groups refused without derivation,
     # forgotten groups wiped -- coap-transport-multi-raft tasks 9-11.
@@ -2583,341 +2528,278 @@ if(KYTHIRA_BUILD_COAP_TRANSPORT)
         message(STATUS "coap_oscore_group_libcoap_test: skipped (requires libcoap)")
     endif()
     # CoAP DTLS connection establishment property test needs Boost.JSON
-    if(TARGET Folly::folly)
-        add_executable(coap_dtls_connection_establishment_property_test coap_dtls_connection_establishment_property_test.cpp)
-        target_link_libraries(coap_dtls_connection_establishment_property_test PRIVATE
-            network_simulator
-            Boost::unit_test_framework
-            boost_json
-        )
-        target_compile_features(coap_dtls_connection_establishment_property_test PRIVATE cxx_std_23)
-        add_test(NAME coap_dtls_connection_establishment_property_test COMMAND coap_dtls_connection_establishment_property_test)
-
-    else()
-        message(STATUS "coap_dtls_connection_establishment_property_test: skipped (requires Folly)")
-    endif()
+    add_executable(coap_dtls_connection_establishment_property_test coap_dtls_connection_establishment_property_test.cpp)
+    target_link_libraries(coap_dtls_connection_establishment_property_test PRIVATE
+        network_simulator
+        Boost::unit_test_framework
+        boost_json
+    )
+    target_compile_features(coap_dtls_connection_establishment_property_test PRIVATE cxx_std_23)
+    add_test(NAME coap_dtls_connection_establishment_property_test COMMAND coap_dtls_connection_establishment_property_test)
     # CoAP certificate validation failure property test needs Boost.JSON
-    if(TARGET Folly::folly)
-        add_executable(coap_certificate_validation_failure_property_test coap_certificate_validation_failure_property_test.cpp)
-        target_link_libraries(coap_certificate_validation_failure_property_test PRIVATE
-            network_simulator
-            Boost::unit_test_framework
-            boost_json
-        )
-        if(TARGET certificate_authority)
-            target_link_libraries(coap_certificate_validation_failure_property_test PRIVATE certificate_authority)
-        endif()
-        target_compile_features(coap_certificate_validation_failure_property_test PRIVATE cxx_std_23)
-        add_test(NAME coap_certificate_validation_failure_property_test COMMAND coap_certificate_validation_failure_property_test)
-
-    else()
-        message(STATUS "coap_certificate_validation_failure_property_test: skipped (requires Folly)")
+    add_executable(coap_certificate_validation_failure_property_test coap_certificate_validation_failure_property_test.cpp)
+    target_link_libraries(coap_certificate_validation_failure_property_test PRIVATE
+        network_simulator
+        Boost::unit_test_framework
+        boost_json
+    )
+    if(TARGET certificate_authority)
+        target_link_libraries(coap_certificate_validation_failure_property_test PRIVATE certificate_authority)
     endif()
+    target_compile_features(coap_certificate_validation_failure_property_test PRIVATE cxx_std_23)
+    add_test(NAME coap_certificate_validation_failure_property_test COMMAND coap_certificate_validation_failure_property_test)
     # HTTP server tests need Boost.JSON
 endif()  # KYTHIRA_BUILD_COAP_TRANSPORT
+add_executable(http_server_test http_server_test.cpp)
+target_link_libraries(http_server_test PRIVATE
+    network_simulator
+    Boost::unit_test_framework
+    boost_json
+)
 if(TARGET Folly::folly)
-    add_executable(http_server_test http_server_test.cpp)
-    target_link_libraries(http_server_test PRIVATE
-        network_simulator
-        Boost::unit_test_framework
-        boost_json
-    )
-    if(TARGET Folly::folly)
-        target_link_libraries(http_server_test PRIVATE Folly::folly)
-    endif()
-    target_compile_features(http_server_test PRIVATE cxx_std_23)
-    add_test(NAME http_server_test COMMAND http_server_test)
-
-else()
-    message(STATUS "http_server_test: skipped (requires Folly)")
+    target_link_libraries(http_server_test PRIVATE Folly::folly)
 endif()
+target_compile_features(http_server_test PRIVATE cxx_std_23)
+add_test(NAME http_server_test COMMAND http_server_test)
 # HTTP server property tests need Boost.JSON
+add_executable(http_server_property_tests http_server_property_tests.cpp)
+target_link_libraries(http_server_property_tests PRIVATE
+    network_simulator
+    Boost::unit_test_framework
+    boost_json
+)
 if(TARGET Folly::folly)
-    add_executable(http_server_property_tests http_server_property_tests.cpp)
-    target_link_libraries(http_server_property_tests PRIVATE
-        network_simulator
-        Boost::unit_test_framework
-        boost_json
-    )
-    if(TARGET Folly::folly)
-        target_link_libraries(http_server_property_tests PRIVATE Folly::folly)
-    endif()
-    target_compile_features(http_server_property_tests PRIVATE cxx_std_23)
-    add_test(NAME http_server_property_tests COMMAND http_server_property_tests)
-
-else()
-    message(STATUS "http_server_property_tests: skipped (requires Folly)")
+    target_link_libraries(http_server_property_tests PRIVATE Folly::folly)
 endif()
+target_compile_features(http_server_property_tests PRIVATE cxx_std_23)
+add_test(NAME http_server_property_tests COMMAND http_server_property_tests)
 # HTTP integration tests need Boost.JSON
+add_executable(http_integration_test http_integration_test.cpp)
+target_link_libraries(http_integration_test PRIVATE
+    network_simulator
+    Boost::unit_test_framework
+    boost_json
+    OpenSSL::Crypto
+)
 if(TARGET Folly::folly)
-    add_executable(http_integration_test http_integration_test.cpp)
-    target_link_libraries(http_integration_test PRIVATE
-        network_simulator
-        Boost::unit_test_framework
-        boost_json
-        OpenSSL::Crypto
-    )
-    if(TARGET Folly::folly)
-        target_link_libraries(http_integration_test PRIVATE Folly::folly)
-    endif()
-    target_compile_features(http_integration_test PRIVATE cxx_std_23)
-    add_test(NAME http_integration_test COMMAND http_integration_test)
-
-else()
-    message(STATUS "http_integration_test: skipped (requires Folly)")
+    target_link_libraries(http_integration_test PRIVATE Folly::folly)
 endif()
+target_compile_features(http_integration_test PRIVATE cxx_std_23)
+add_test(NAME http_integration_test COMMAND http_integration_test)
 # End-to-end content negotiation (415/406/wildcards) against a live server.
 # Drives it with a raw httplib::Client so it can send headers cpp_httplib_client
 # would never produce.
+add_executable(http_negotiation_integration_test http_negotiation_integration_test.cpp)
+target_link_libraries(http_negotiation_integration_test PRIVATE
+    network_simulator
+    Boost::unit_test_framework
+    boost_json
+)
 if(TARGET Folly::folly)
-    add_executable(http_negotiation_integration_test http_negotiation_integration_test.cpp)
-    target_link_libraries(http_negotiation_integration_test PRIVATE
-        network_simulator
-        Boost::unit_test_framework
-        boost_json
-        Folly::folly
-    )
-    target_compile_features(http_negotiation_integration_test PRIVATE cxx_std_23)
-    add_test(NAME http_negotiation_integration_test COMMAND http_negotiation_integration_test)
-    set_tests_properties(http_negotiation_integration_test PROPERTIES TIMEOUT 120 LABELS "http;integration")
-else()
-    message(STATUS "http_negotiation_integration_test: skipped (requires Folly)")
+    target_link_libraries(http_negotiation_integration_test PRIVATE Folly::folly)
 endif()
+target_compile_features(http_negotiation_integration_test PRIVATE cxx_std_23)
+add_test(NAME http_negotiation_integration_test COMMAND http_negotiation_integration_test)
+set_tests_properties(http_negotiation_integration_test PROPERTIES TIMEOUT 120 LABELS "http;integration")
 
 # Two-serializer negotiation over a live HTTP transport (spec Task 14). The only
 # suite that runs a multi_serializer_registry through a socket: every shipped
 # Types bundle hardcodes single_serializer_registry, so the multi path is
 # reachable only from a test-local bundle like this one's.
+add_executable(multi_serializer_negotiation_property_test
+    multi_serializer_negotiation_property_test.cpp)
+target_link_libraries(multi_serializer_negotiation_property_test PRIVATE
+    network_simulator
+    Boost::unit_test_framework
+    boost_json
+)
 if(TARGET Folly::folly)
-    add_executable(multi_serializer_negotiation_property_test
-        multi_serializer_negotiation_property_test.cpp)
-    target_link_libraries(multi_serializer_negotiation_property_test PRIVATE
-        network_simulator
-        Boost::unit_test_framework
-        boost_json
-        Folly::folly
-    )
-    target_compile_features(multi_serializer_negotiation_property_test PRIVATE cxx_std_23)
-    add_test(NAME multi_serializer_negotiation_property_test
-        COMMAND multi_serializer_negotiation_property_test)
-    set_tests_properties(multi_serializer_negotiation_property_test
-        PROPERTIES TIMEOUT 180 LABELS "http;integration")
-else()
-    message(STATUS "multi_serializer_negotiation_property_test: skipped (requires Folly)")
+    target_link_libraries(multi_serializer_negotiation_property_test PRIVATE Folly::folly)
 endif()
+target_compile_features(multi_serializer_negotiation_property_test PRIVATE cxx_std_23)
+add_test(NAME multi_serializer_negotiation_property_test
+    COMMAND multi_serializer_negotiation_property_test)
+set_tests_properties(multi_serializer_negotiation_property_test
+    PROPERTIES TIMEOUT 180 LABELS "http;integration")
 
 # Multi- <-> single-serializer interoperability, both directions (spec Task 15).
+add_executable(multi_serializer_interop_test multi_serializer_interop_test.cpp)
+target_link_libraries(multi_serializer_interop_test PRIVATE
+    network_simulator
+    Boost::unit_test_framework
+    boost_json
+)
 if(TARGET Folly::folly)
-    add_executable(multi_serializer_interop_test multi_serializer_interop_test.cpp)
-    target_link_libraries(multi_serializer_interop_test PRIVATE
-        network_simulator
-        Boost::unit_test_framework
-        boost_json
-        Folly::folly
-    )
-    target_compile_features(multi_serializer_interop_test PRIVATE cxx_std_23)
-    add_test(NAME multi_serializer_interop_test COMMAND multi_serializer_interop_test)
-    set_tests_properties(multi_serializer_interop_test
-        PROPERTIES TIMEOUT 180 LABELS "http;integration")
-else()
-    message(STATUS "multi_serializer_interop_test: skipped (requires Folly)")
+    target_link_libraries(multi_serializer_interop_test PRIVATE Folly::folly)
 endif()
+target_compile_features(multi_serializer_interop_test PRIVATE cxx_std_23)
+add_test(NAME multi_serializer_interop_test COMMAND multi_serializer_interop_test)
+set_tests_properties(multi_serializer_interop_test
+    PROPERTIES TIMEOUT 180 LABELS "http;integration")
 
 # `Accept-Post` layered on top of the 415 retry (W3C LDP 1.0 7.1). Same
 # dependency set and same rig as the interop suite above -- it observes the
 # retry through the `media_type_retry` metric, which is the only place the
 # distinction between an informed jump and a blind walk is visible from outside
 # the transport.
+add_executable(accept_post_negotiation_test accept_post_negotiation_test.cpp)
+target_link_libraries(accept_post_negotiation_test PRIVATE
+    network_simulator
+    Boost::unit_test_framework
+    boost_json
+)
 if(TARGET Folly::folly)
-    add_executable(accept_post_negotiation_test accept_post_negotiation_test.cpp)
-    target_link_libraries(accept_post_negotiation_test PRIVATE
-        network_simulator
-        Boost::unit_test_framework
-        boost_json
-        Folly::folly
-    )
-    target_compile_features(accept_post_negotiation_test PRIVATE cxx_std_23)
-    add_test(NAME accept_post_negotiation_test COMMAND accept_post_negotiation_test)
-    set_tests_properties(accept_post_negotiation_test
-        PROPERTIES TIMEOUT 180 LABELS "http;integration")
-else()
-    message(STATUS "accept_post_negotiation_test: skipped (requires Folly)")
+    target_link_libraries(accept_post_negotiation_test PRIVATE Folly::folly)
 endif()
+target_compile_features(accept_post_negotiation_test PRIVATE cxx_std_23)
+add_test(NAME accept_post_negotiation_test COMMAND accept_post_negotiation_test)
+set_tests_properties(accept_post_negotiation_test
+    PROPERTIES TIMEOUT 180 LABELS "http;integration")
 
 # Client-side negotiation failure paths (spec Task 16). Uses a raw httplib::Server
 # as a deliberately non-conforming peer: cpp_httplib_server can never emit an
 # unregistered response label, so these client branches are otherwise unreachable.
+add_executable(negotiation_failure_test negotiation_failure_test.cpp)
+target_link_libraries(negotiation_failure_test PRIVATE
+    network_simulator
+    Boost::unit_test_framework
+    boost_json
+)
 if(TARGET Folly::folly)
-    add_executable(negotiation_failure_test negotiation_failure_test.cpp)
-    target_link_libraries(negotiation_failure_test PRIVATE
-        network_simulator
-        Boost::unit_test_framework
-        boost_json
-        Folly::folly
-    )
-    target_compile_features(negotiation_failure_test PRIVATE cxx_std_23)
-    add_test(NAME negotiation_failure_test COMMAND negotiation_failure_test)
-    set_tests_properties(negotiation_failure_test
-        PROPERTIES TIMEOUT 180 LABELS "http;integration")
-else()
-    message(STATUS "negotiation_failure_test: skipped (requires Folly)")
+    target_link_libraries(negotiation_failure_test PRIVATE Folly::folly)
 endif()
+target_compile_features(negotiation_failure_test PRIVATE cxx_std_23)
+add_test(NAME negotiation_failure_test COMMAND negotiation_failure_test)
+set_tests_properties(negotiation_failure_test
+    PROPERTIES TIMEOUT 180 LABELS "http;integration")
 
 # cpp_httplib_client sends on per-peer lanes, so a slow peer never holds up a
 # send to another one (the leader's tick thread replicating to followers in
 # turn). Raw httplib::Servers stand in for the followers: the delay has to be
 # in the handler, and cpp_httplib_server has no hook for one.
+add_executable(http_client_send_lanes_test http_client_send_lanes_test.cpp)
+target_link_libraries(http_client_send_lanes_test PRIVATE
+    network_simulator
+    Boost::unit_test_framework
+    boost_json
+)
 if(TARGET Folly::folly)
-    add_executable(http_client_send_lanes_test http_client_send_lanes_test.cpp)
-    target_link_libraries(http_client_send_lanes_test PRIVATE
-        network_simulator
-        Boost::unit_test_framework
-        boost_json
-        Folly::folly
-    )
-    target_compile_features(http_client_send_lanes_test PRIVATE cxx_std_23)
-    add_test(NAME http_client_send_lanes_test COMMAND http_client_send_lanes_test)
-    set_tests_properties(http_client_send_lanes_test
-        PROPERTIES TIMEOUT 120 LABELS "http;integration")
-else()
-    message(STATUS "http_client_send_lanes_test: skipped (requires Folly)")
+    target_link_libraries(http_client_send_lanes_test PRIVATE Folly::folly)
 endif()
+target_compile_features(http_client_send_lanes_test PRIVATE cxx_std_23)
+add_test(NAME http_client_send_lanes_test COMMAND http_client_send_lanes_test)
+set_tests_properties(http_client_send_lanes_test
+    PROPERTIES TIMEOUT 120 LABELS "http;integration")
 
 # Single-serializer wire behaviour is unchanged by registries (spec Task 13).
+add_executable(single_serializer_regression_test single_serializer_regression_test.cpp)
+target_link_libraries(single_serializer_regression_test PRIVATE
+    network_simulator
+    Boost::unit_test_framework
+    boost_json
+)
 if(TARGET Folly::folly)
-    add_executable(single_serializer_regression_test single_serializer_regression_test.cpp)
-    target_link_libraries(single_serializer_regression_test PRIVATE
-        network_simulator
-        Boost::unit_test_framework
-        boost_json
-        Folly::folly
-    )
-    target_compile_features(single_serializer_regression_test PRIVATE cxx_std_23)
-    add_test(NAME single_serializer_regression_test COMMAND single_serializer_regression_test)
-    set_tests_properties(single_serializer_regression_test
-        PROPERTIES TIMEOUT 180 LABELS "http;integration")
-else()
-    message(STATUS "single_serializer_regression_test: skipped (requires Folly)")
+    target_link_libraries(single_serializer_regression_test PRIVATE Folly::folly)
 endif()
+target_compile_features(single_serializer_regression_test PRIVATE cxx_std_23)
+add_test(NAME single_serializer_regression_test COMMAND single_serializer_regression_test)
+set_tests_properties(single_serializer_regression_test
+    PROPERTIES TIMEOUT 180 LABELS "http;integration")
 
 # HTTP client test
+add_executable(http_client_test http_client_test.cpp)
+target_link_libraries(http_client_test PRIVATE
+    network_simulator
+    Boost::unit_test_framework
+    boost_json
+)
 if(TARGET Folly::folly)
-    add_executable(http_client_test http_client_test.cpp)
-    target_link_libraries(http_client_test PRIVATE
-        network_simulator
-        Boost::unit_test_framework
-        boost_json
-    )
-    if(TARGET Folly::folly)
-        target_link_libraries(http_client_test PRIVATE Folly::folly)
-    endif()
-    target_compile_features(http_client_test PRIVATE cxx_std_23)
-    add_test(NAME http_client_test COMMAND http_client_test)
-
-else()
-    message(STATUS "http_client_test: skipped (requires Folly)")
+    target_link_libraries(http_client_test PRIVATE Folly::folly)
 endif()
+target_compile_features(http_client_test PRIVATE cxx_std_23)
+add_test(NAME http_client_test COMMAND http_client_test)
 # HTTP client property tests need Boost.JSON
+add_executable(http_client_property_tests http_client_property_tests.cpp)
+target_link_libraries(http_client_property_tests PRIVATE
+    network_simulator
+    Boost::unit_test_framework
+    boost_json
+)
 if(TARGET Folly::folly)
-    add_executable(http_client_property_tests http_client_property_tests.cpp)
-    target_link_libraries(http_client_property_tests PRIVATE
+    target_link_libraries(http_client_property_tests PRIVATE Folly::folly)
+endif()
+target_compile_features(http_client_property_tests PRIVATE cxx_std_23)
+add_test(NAME http_client_property_tests COMMAND http_client_property_tests)
+
+# HTTP transport return types property test
+if(TARGET httplib::httplib)
+    add_executable(http_transport_return_types_property_test http_transport_return_types_property_test.cpp)
+    target_link_libraries(http_transport_return_types_property_test PRIVATE
+        httplib::httplib
         network_simulator
         Boost::unit_test_framework
         boost_json
     )
     if(TARGET Folly::folly)
-        target_link_libraries(http_client_property_tests PRIVATE Folly::folly)
+        target_link_libraries(http_transport_return_types_property_test PRIVATE Folly::folly)
     endif()
-    target_compile_features(http_client_property_tests PRIVATE cxx_std_23)
-    add_test(NAME http_client_property_tests COMMAND http_client_property_tests)
-
-    # HTTP transport return types property test
-    if(TARGET httplib::httplib)
-        add_executable(http_transport_return_types_property_test http_transport_return_types_property_test.cpp)
-        target_link_libraries(http_transport_return_types_property_test PRIVATE
-            httplib::httplib
-            network_simulator
-            Boost::unit_test_framework
-            boost_json
-        )
-        if(TARGET Folly::folly)
-            target_link_libraries(http_transport_return_types_property_test PRIVATE Folly::folly)
-        endif()
-        target_compile_features(http_transport_return_types_property_test PRIVATE cxx_std_23)
-        add_test(NAME http_transport_return_types_property_test COMMAND http_transport_return_types_property_test)
-    endif()
-
-else()
-    message(STATUS "http_client_property_tests: skipped (requires Folly)")
+    target_compile_features(http_transport_return_types_property_test PRIVATE cxx_std_23)
+    add_test(NAME http_transport_return_types_property_test COMMAND http_transport_return_types_property_test)
 endif()
 # HTTP client comprehensive test needs Boost.JSON
+add_executable(http_client_comprehensive_test http_client_comprehensive_test.cpp)
+target_link_libraries(http_client_comprehensive_test PRIVATE
+    network_simulator
+    Boost::unit_test_framework
+    boost_json
+)
 if(TARGET Folly::folly)
-    add_executable(http_client_comprehensive_test http_client_comprehensive_test.cpp)
-    target_link_libraries(http_client_comprehensive_test PRIVATE
-        network_simulator
-        Boost::unit_test_framework
-        boost_json
-    )
-    if(TARGET Folly::folly)
-        target_link_libraries(http_client_comprehensive_test PRIVATE Folly::folly)
-    endif()
-    target_compile_features(http_client_comprehensive_test PRIVATE cxx_std_23)
-    add_test(NAME http_client_comprehensive_test COMMAND http_client_comprehensive_test)
-
-else()
-    message(STATUS "http_client_comprehensive_test: skipped (requires Folly)")
+    target_link_libraries(http_client_comprehensive_test PRIVATE Folly::folly)
 endif()
+target_compile_features(http_client_comprehensive_test PRIVATE cxx_std_23)
+add_test(NAME http_client_comprehensive_test COMMAND http_client_comprehensive_test)
 # HTTP client connection test needs Boost.JSON
+add_executable(http_client_connection_test http_client_connection_test.cpp)
+target_link_libraries(http_client_connection_test PRIVATE
+    network_simulator
+    Boost::unit_test_framework
+    boost_json
+)
 if(TARGET Folly::folly)
-    add_executable(http_client_connection_test http_client_connection_test.cpp)
-    target_link_libraries(http_client_connection_test PRIVATE
-        network_simulator
-        Boost::unit_test_framework
-        boost_json
-    )
-    if(TARGET Folly::folly)
-        target_link_libraries(http_client_connection_test PRIVATE Folly::folly)
-    endif()
-    target_compile_features(http_client_connection_test PRIVATE cxx_std_23)
-    add_test(NAME http_client_connection_test COMMAND http_client_connection_test)
-
-else()
-    message(STATUS "http_client_connection_test: skipped (requires Folly)")
+    target_link_libraries(http_client_connection_test PRIVATE Folly::folly)
 endif()
+target_compile_features(http_client_connection_test PRIVATE cxx_std_23)
+add_test(NAME http_client_connection_test COMMAND http_client_connection_test)
 # cpp_httplib_client enforces each RPC's own timeout, not only the configured
 # request_timeout (http-transport Requirement 12). Loopback only.
+add_executable(http_client_per_call_timeout_test http_client_per_call_timeout_test.cpp)
+target_link_libraries(http_client_per_call_timeout_test PRIVATE
+    network_simulator
+    Boost::unit_test_framework
+    boost_json
+)
 if(TARGET Folly::folly)
-    add_executable(http_client_per_call_timeout_test http_client_per_call_timeout_test.cpp)
-    target_link_libraries(http_client_per_call_timeout_test PRIVATE
-        network_simulator
-        Boost::unit_test_framework
-        boost_json
-        Folly::folly
-    )
-    target_compile_features(http_client_per_call_timeout_test PRIVATE cxx_std_23)
-    add_test(NAME http_client_per_call_timeout_test COMMAND http_client_per_call_timeout_test)
-    set_tests_properties(http_client_per_call_timeout_test
-        PROPERTIES TIMEOUT 120 LABELS "http;integration")
-else()
-    message(STATUS "http_client_per_call_timeout_test: skipped (requires Folly)")
+    target_link_libraries(http_client_per_call_timeout_test PRIVATE Folly::folly)
 endif()
+target_compile_features(http_client_per_call_timeout_test PRIVATE cxx_std_23)
+add_test(NAME http_client_per_call_timeout_test COMMAND http_client_per_call_timeout_test)
+set_tests_properties(http_client_per_call_timeout_test
+    PROPERTIES TIMEOUT 120 LABELS "http;integration")
 # cpp_httplib_client honours connection_pool_size and keep_alive_timeout
 # (http-transport Requirements 11.4, 11.5). Loopback only.
+add_executable(http_client_connection_pool_test http_client_connection_pool_test.cpp)
+target_link_libraries(http_client_connection_pool_test PRIVATE
+    network_simulator
+    Boost::unit_test_framework
+    boost_json
+)
 if(TARGET Folly::folly)
-    add_executable(http_client_connection_pool_test http_client_connection_pool_test.cpp)
-    target_link_libraries(http_client_connection_pool_test PRIVATE
-        network_simulator
-        Boost::unit_test_framework
-        boost_json
-        Folly::folly
-    )
-    target_compile_features(http_client_connection_pool_test PRIVATE cxx_std_23)
-    add_test(NAME http_client_connection_pool_test COMMAND http_client_connection_pool_test)
-    set_tests_properties(http_client_connection_pool_test
-        PROPERTIES TIMEOUT 120 LABELS "http;integration")
-else()
-    message(STATUS "http_client_connection_pool_test: skipped (requires Folly)")
+    target_link_libraries(http_client_connection_pool_test PRIVATE Folly::folly)
 endif()
+target_compile_features(http_client_connection_pool_test PRIVATE cxx_std_23)
+add_test(NAME http_client_connection_pool_test COMMAND http_client_connection_pool_test)
+set_tests_properties(http_client_connection_pool_test
+    PROPERTIES TIMEOUT 120 LABELS "http;integration")
 # HTTPLib server validation test
 add_executable(httplib_server_validation_test httplib_server_validation_test.cpp)
 target_link_libraries(httplib_server_validation_test PRIVATE
@@ -3680,26 +3562,21 @@ set_tests_properties(raft_complete_append_entries_handler_property_test PROPERTI
 )
 
 # Submit command with timeout property test
+add_executable(raft_submit_command_timeout_property_test raft_submit_command_timeout_property_test.cpp)
+target_link_libraries(raft_submit_command_timeout_property_test PRIVATE
+    network_simulator
+    Boost::unit_test_framework
+    boost_json
+)
 if(TARGET Folly::folly)
-    add_executable(raft_submit_command_timeout_property_test raft_submit_command_timeout_property_test.cpp)
-    target_link_libraries(raft_submit_command_timeout_property_test PRIVATE
-        network_simulator
-        Boost::unit_test_framework
-        boost_json
-    )
-    if(TARGET Folly::folly)
-        target_link_libraries(raft_submit_command_timeout_property_test PRIVATE Folly::folly)
-    endif()
-    target_compile_features(raft_submit_command_timeout_property_test PRIVATE cxx_std_23)
-    add_test(NAME raft_submit_command_timeout_property_test COMMAND raft_submit_command_timeout_property_test)
-    set_tests_properties(raft_submit_command_timeout_property_test PROPERTIES
-        TIMEOUT 120
-        LABELS "property;raft;submit_command;timeout;commit_waiter"
-    )
-
-else()
-    message(STATUS "raft_submit_command_timeout_property_test: skipped (requires Folly)")
+    target_link_libraries(raft_submit_command_timeout_property_test PRIVATE Folly::folly)
 endif()
+target_compile_features(raft_submit_command_timeout_property_test PRIVATE cxx_std_23)
+add_test(NAME raft_submit_command_timeout_property_test COMMAND raft_submit_command_timeout_property_test)
+set_tests_properties(raft_submit_command_timeout_property_test PROPERTIES
+    TIMEOUT 120
+    LABELS "property;raft;submit_command;timeout;commit_waiter"
+)
 # InstallSnapshot handler unit test
 add_executable(raft_install_snapshot_handler_test raft_install_snapshot_handler_test.cpp)
 target_link_libraries(raft_install_snapshot_handler_test PRIVATE
@@ -4133,8 +4010,8 @@ set_tests_properties(raft_retry_logic_exponential_backoff_integration_test PROPE
 # CONFIG_COAP_TRANSPORT=n means no CoAP target exists, so these are gated on the
 # feature symbol rather than on Folly. They were gated on `TARGET Folly::folly`
 # alone until August 10, 2026, which is why setting that symbol n produced a
-# byte-identical build. The Folly conditions inside are untouched -- they are a
-# separate requirement and still apply.
+# byte-identical build. The Folly conditions inside are a separate requirement,
+# kept only on the tests whose source needs Folly.
 if(KYTHIRA_BUILD_COAP_TRANSPORT)
     add_executable(coap_integration_test coap_integration_test.cpp)
     target_link_libraries(coap_integration_test PRIVATE
@@ -4162,56 +4039,41 @@ if(KYTHIRA_BUILD_COAP_TRANSPORT)
     add_test(NAME coap_integration_test COMMAND coap_integration_test)
 
     # CoAP concurrent processing property test needs Boost.JSON
+    add_executable(coap_concurrent_processing_property_test coap_concurrent_processing_property_test.cpp)
+    target_link_libraries(coap_concurrent_processing_property_test PRIVATE
+        network_simulator
+        Boost::unit_test_framework
+        boost_json
+    )
     if(TARGET Folly::folly)
-        add_executable(coap_concurrent_processing_property_test coap_concurrent_processing_property_test.cpp)
-        target_link_libraries(coap_concurrent_processing_property_test PRIVATE
-            network_simulator
-            Boost::unit_test_framework
-            boost_json
-        )
-        if(TARGET Folly::folly)
-            target_link_libraries(coap_concurrent_processing_property_test PRIVATE Folly::folly)
-        endif()
-        target_compile_features(coap_concurrent_processing_property_test PRIVATE cxx_std_23)
-        add_test(NAME coap_concurrent_processing_property_test COMMAND coap_concurrent_processing_property_test)
-
-    else()
-        message(STATUS "coap_concurrent_processing_property_test: skipped (requires Folly)")
+        target_link_libraries(coap_concurrent_processing_property_test PRIVATE Folly::folly)
     endif()
+    target_compile_features(coap_concurrent_processing_property_test PRIVATE cxx_std_23)
+    add_test(NAME coap_concurrent_processing_property_test COMMAND coap_concurrent_processing_property_test)
     # CoAP connection reuse property test needs Boost.JSON
+    add_executable(coap_connection_reuse_property_test coap_connection_reuse_property_test.cpp)
+    target_link_libraries(coap_connection_reuse_property_test PRIVATE
+        network_simulator
+        Boost::unit_test_framework
+        boost_json
+    )
     if(TARGET Folly::folly)
-        add_executable(coap_connection_reuse_property_test coap_connection_reuse_property_test.cpp)
-        target_link_libraries(coap_connection_reuse_property_test PRIVATE
-            network_simulator
-            Boost::unit_test_framework
-            boost_json
-        )
-        if(TARGET Folly::folly)
-            target_link_libraries(coap_connection_reuse_property_test PRIVATE Folly::folly)
-        endif()
-        target_compile_features(coap_connection_reuse_property_test PRIVATE cxx_std_23)
-        add_test(NAME coap_connection_reuse_property_test COMMAND coap_connection_reuse_property_test)
-
-    else()
-        message(STATUS "coap_connection_reuse_property_test: skipped (requires Folly)")
+        target_link_libraries(coap_connection_reuse_property_test PRIVATE Folly::folly)
     endif()
+    target_compile_features(coap_connection_reuse_property_test PRIVATE cxx_std_23)
+    add_test(NAME coap_connection_reuse_property_test COMMAND coap_connection_reuse_property_test)
     # CoAP multicast delivery property test needs Boost.JSON
+    add_executable(coap_multicast_delivery_property_test coap_multicast_delivery_property_test.cpp)
+    target_link_libraries(coap_multicast_delivery_property_test PRIVATE
+        network_simulator
+        Boost::unit_test_framework
+        boost_json
+    )
     if(TARGET Folly::folly)
-        add_executable(coap_multicast_delivery_property_test coap_multicast_delivery_property_test.cpp)
-        target_link_libraries(coap_multicast_delivery_property_test PRIVATE
-            network_simulator
-            Boost::unit_test_framework
-            boost_json
-        )
-        if(TARGET Folly::folly)
-            target_link_libraries(coap_multicast_delivery_property_test PRIVATE Folly::folly)
-        endif()
-        target_compile_features(coap_multicast_delivery_property_test PRIVATE cxx_std_23)
-        add_test(NAME coap_multicast_delivery_property_test COMMAND coap_multicast_delivery_property_test)
-
-    else()
-        message(STATUS "coap_multicast_delivery_property_test: skipped (requires Folly)")
+        target_link_libraries(coap_multicast_delivery_property_test PRIVATE Folly::folly)
     endif()
+    target_compile_features(coap_multicast_delivery_property_test PRIVATE cxx_std_23)
+    add_test(NAME coap_multicast_delivery_property_test COMMAND coap_multicast_delivery_property_test)
     # CoAP real block transfer property test needs Boost.JSON
     add_executable(coap_real_block_transfer_property_test coap_real_block_transfer_property_test.cpp)
     target_link_libraries(coap_real_block_transfer_property_test PRIVATE
@@ -4244,7 +4106,7 @@ if(KYTHIRA_BUILD_COAP_TRANSPORT)
 
     # HTTP SSL Configuration Property Tests
 endif()  # KYTHIRA_BUILD_COAP_TRANSPORT
-if(TARGET Folly::folly AND KYTHIRA_HTTP_TLS)
+if(KYTHIRA_HTTP_TLS)
     add_executable(http_ssl_configuration_property_test http_ssl_configuration_property_test.cpp)
     target_link_libraries(http_ssl_configuration_property_test PRIVATE
         network_simulator
@@ -4271,39 +4133,33 @@ if(TARGET Folly::folly AND KYTHIRA_HTTP_TLS)
         TIMEOUT 60
         LABELS "property;ssl;http;transport"
     )
-
 else()
-    message(STATUS "http_ssl_configuration_property_test: skipped (requires Folly and CONFIG_HTTP_TRANSPORT_TLS)")
+    message(STATUS "http_ssl_configuration_property_test: skipped (requires CONFIG_HTTP_TRANSPORT_TLS)")
 endif()
 # HTTP SSL Certificate Loading Unit Tests
+add_executable(http_ssl_certificate_loading_unit_test http_ssl_certificate_loading_unit_test.cpp)
+target_link_libraries(http_ssl_certificate_loading_unit_test PRIVATE
+    network_simulator
+    Boost::unit_test_framework
+)
 if(TARGET Folly::folly)
-    add_executable(http_ssl_certificate_loading_unit_test http_ssl_certificate_loading_unit_test.cpp)
-    target_link_libraries(http_ssl_certificate_loading_unit_test PRIVATE
-        network_simulator
-        Boost::unit_test_framework
-    )
-    if(TARGET Folly::folly)
-        target_link_libraries(http_ssl_certificate_loading_unit_test PRIVATE Folly::folly)
-    endif()
-    if(TARGET httplib::httplib)
-        target_link_libraries(http_ssl_certificate_loading_unit_test PRIVATE httplib::httplib)
-    endif()
-    if(TARGET OpenSSL::SSL)
-        target_link_libraries(http_ssl_certificate_loading_unit_test PRIVATE OpenSSL::SSL OpenSSL::Crypto)
-    endif()
-    if(TARGET certificate_authority)
-        target_link_libraries(http_ssl_certificate_loading_unit_test PRIVATE certificate_authority)
-    endif()
-    target_compile_features(http_ssl_certificate_loading_unit_test PRIVATE cxx_std_23)
-    add_test(NAME http_ssl_certificate_loading_unit_test COMMAND http_ssl_certificate_loading_unit_test)
-    set_tests_properties(http_ssl_certificate_loading_unit_test PROPERTIES
-        TIMEOUT 30
-        LABELS "unit;ssl;certificate;http;transport"
-    )
-
-else()
-    message(STATUS "http_ssl_certificate_loading_unit_test: skipped (requires Folly)")
+    target_link_libraries(http_ssl_certificate_loading_unit_test PRIVATE Folly::folly)
 endif()
+if(TARGET httplib::httplib)
+    target_link_libraries(http_ssl_certificate_loading_unit_test PRIVATE httplib::httplib)
+endif()
+if(TARGET OpenSSL::SSL)
+    target_link_libraries(http_ssl_certificate_loading_unit_test PRIVATE OpenSSL::SSL OpenSSL::Crypto)
+endif()
+if(TARGET certificate_authority)
+    target_link_libraries(http_ssl_certificate_loading_unit_test PRIVATE certificate_authority)
+endif()
+target_compile_features(http_ssl_certificate_loading_unit_test PRIVATE cxx_std_23)
+add_test(NAME http_ssl_certificate_loading_unit_test COMMAND http_ssl_certificate_loading_unit_test)
+set_tests_properties(http_ssl_certificate_loading_unit_test PROPERTIES
+    TIMEOUT 30
+    LABELS "unit;ssl;certificate;http;transport"
+)
 
 # OCI Request Signing Version 1 unit tests
 #
@@ -4778,31 +4634,26 @@ else()
 endif()
 
 # HTTP SSL Context Configuration Unit Tests
+add_executable(http_ssl_context_configuration_unit_test http_ssl_context_configuration_unit_test.cpp)
+target_link_libraries(http_ssl_context_configuration_unit_test PRIVATE
+    network_simulator
+    Boost::unit_test_framework
+)
 if(TARGET Folly::folly)
-    add_executable(http_ssl_context_configuration_unit_test http_ssl_context_configuration_unit_test.cpp)
-    target_link_libraries(http_ssl_context_configuration_unit_test PRIVATE
-        network_simulator
-        Boost::unit_test_framework
-    )
-    if(TARGET Folly::folly)
-        target_link_libraries(http_ssl_context_configuration_unit_test PRIVATE Folly::folly)
-    endif()
-    if(TARGET httplib::httplib)
-        target_link_libraries(http_ssl_context_configuration_unit_test PRIVATE httplib::httplib)
-    endif()
-    if(TARGET OpenSSL::SSL)
-        target_link_libraries(http_ssl_context_configuration_unit_test PRIVATE OpenSSL::SSL OpenSSL::Crypto)
-    endif()
-    target_compile_features(http_ssl_context_configuration_unit_test PRIVATE cxx_std_23)
-    add_test(NAME http_ssl_context_configuration_unit_test COMMAND http_ssl_context_configuration_unit_test)
-    set_tests_properties(http_ssl_context_configuration_unit_test PROPERTIES
-        TIMEOUT 30
-        LABELS "unit;ssl;context;http;transport"
-    )
-
-else()
-    message(STATUS "http_ssl_context_configuration_unit_test: skipped (requires Folly)")
+    target_link_libraries(http_ssl_context_configuration_unit_test PRIVATE Folly::folly)
 endif()
+if(TARGET httplib::httplib)
+    target_link_libraries(http_ssl_context_configuration_unit_test PRIVATE httplib::httplib)
+endif()
+if(TARGET OpenSSL::SSL)
+    target_link_libraries(http_ssl_context_configuration_unit_test PRIVATE OpenSSL::SSL OpenSSL::Crypto)
+endif()
+target_compile_features(http_ssl_context_configuration_unit_test PRIVATE cxx_std_23)
+add_test(NAME http_ssl_context_configuration_unit_test COMMAND http_ssl_context_configuration_unit_test)
+set_tests_properties(http_ssl_context_configuration_unit_test PROPERTIES
+    TIMEOUT 30
+    LABELS "unit;ssl;context;http;transport"
+)
 # cpp-httplib with textual and composite node ids
 # (.kiro/specs/cloud-composite-node-ids/ tasks 6.2, 6.5): every RPC to a
 # std::string and an aws_ec2_node_id target, and the HTTPS host binding with a
@@ -4829,7 +4680,7 @@ else()
     message(STATUS "http_textual_node_id_test: skipped (requires httplib, CONFIG_HTTP_TRANSPORT_TLS and certificate_authority)")
 endif()
 # HTTP SSL Mutual TLS Integration Tests
-if(TARGET Folly::folly AND KYTHIRA_HTTP_TLS)
+if(KYTHIRA_HTTP_TLS)
     add_executable(http_ssl_mutual_tls_integration_test http_ssl_mutual_tls_integration_test.cpp)
     target_link_libraries(http_ssl_mutual_tls_integration_test PRIVATE
         network_simulator
@@ -4856,20 +4707,21 @@ if(TARGET Folly::folly AND KYTHIRA_HTTP_TLS)
         TIMEOUT 120
         LABELS "integration;ssl;mutual_tls;http;transport"
     )
-
 else()
-    message(STATUS "http_ssl_mutual_tls_integration_test: skipped (requires Folly and CONFIG_HTTP_TRANSPORT_TLS)")
+    message(STATUS "http_ssl_mutual_tls_integration_test: skipped (requires CONFIG_HTTP_TRANSPORT_TLS)")
 endif()
 # cpp_httplib_client applies cipher_suites and the TLS version bounds to its
 # live SSL_CTX (vulnerability audit 2026-10-02, M18). Real handshakes against
 # a cpp_httplib_server pinned to each setting.
-if(TARGET Folly::folly AND KYTHIRA_HTTP_TLS)
+if(KYTHIRA_HTTP_TLS)
     add_executable(http_client_tls_settings_integration_test http_client_tls_settings_integration_test.cpp)
     target_link_libraries(http_client_tls_settings_integration_test PRIVATE
         network_simulator
         Boost::unit_test_framework
-        Folly::folly
     )
+    if(TARGET Folly::folly)
+        target_link_libraries(http_client_tls_settings_integration_test PRIVATE Folly::folly)
+    endif()
     if(TARGET httplib::httplib)
         target_link_libraries(http_client_tls_settings_integration_test PRIVATE httplib::httplib)
     endif()
@@ -4889,64 +4741,54 @@ if(TARGET Folly::folly AND KYTHIRA_HTTP_TLS)
         LABELS "integration;ssl;http;transport"
     )
 else()
-    message(STATUS "http_client_tls_settings_integration_test: skipped (requires Folly and CONFIG_HTTP_TRANSPORT_TLS)")
+    message(STATUS "http_client_tls_settings_integration_test: skipped (requires CONFIG_HTTP_TRANSPORT_TLS)")
 endif()
 # Additional CoAP tests that were missing
 # CONFIG_COAP_TRANSPORT=n means no CoAP target exists, so these are gated on the
 # feature symbol rather than on Folly. They were gated on `TARGET Folly::folly`
 # alone until August 10, 2026, which is why setting that symbol n produced a
-# byte-identical build. The Folly conditions inside are untouched -- they are a
-# separate requirement and still apply.
+# byte-identical build. The Folly conditions inside are a separate requirement,
+# kept only on the tests whose source needs Folly.
 if(KYTHIRA_BUILD_COAP_TRANSPORT)
+    add_executable(coap_cipher_suite_property_test coap_cipher_suite_property_test.cpp)
+    target_link_libraries(coap_cipher_suite_property_test PRIVATE
+        network_simulator
+        Boost::unit_test_framework
+        boost_json
+    )
     if(TARGET Folly::folly)
-        add_executable(coap_cipher_suite_property_test coap_cipher_suite_property_test.cpp)
-        target_link_libraries(coap_cipher_suite_property_test PRIVATE
-            network_simulator
-            Boost::unit_test_framework
-            boost_json
-        )
-        if(TARGET Folly::folly)
-            target_link_libraries(coap_cipher_suite_property_test PRIVATE Folly::folly)
-        endif()
-        target_compile_features(coap_cipher_suite_property_test PRIVATE cxx_std_23)
-        add_test(NAME coap_cipher_suite_property_test COMMAND coap_cipher_suite_property_test)
-        set_tests_properties(coap_cipher_suite_property_test PROPERTIES
-            TIMEOUT 120
-            LABELS "property;coap;dtls;cipher_suite"
-        )
-    else()
-        message(STATUS "coap_cipher_suite_property_test: skipped (requires Folly)")
+        target_link_libraries(coap_cipher_suite_property_test PRIVATE Folly::folly)
     endif()
+    target_compile_features(coap_cipher_suite_property_test PRIVATE cxx_std_23)
+    add_test(NAME coap_cipher_suite_property_test COMMAND coap_cipher_suite_property_test)
+    set_tests_properties(coap_cipher_suite_property_test PROPERTIES
+        TIMEOUT 120
+        LABELS "property;coap;dtls;cipher_suite"
+    )
 
+    add_executable(coap_dtls_handshake_property_test coap_dtls_handshake_property_test.cpp)
+    target_link_libraries(coap_dtls_handshake_property_test PRIVATE
+        network_simulator
+        Boost::unit_test_framework
+        boost_json
+    )
     if(TARGET Folly::folly)
-        add_executable(coap_dtls_handshake_property_test coap_dtls_handshake_property_test.cpp)
-        target_link_libraries(coap_dtls_handshake_property_test PRIVATE
-            network_simulator
-            Boost::unit_test_framework
-            boost_json
-        )
-        if(TARGET Folly::folly)
-            target_link_libraries(coap_dtls_handshake_property_test PRIVATE Folly::folly)
-        endif()
-        if(TARGET certificate_authority)
-            target_link_libraries(coap_dtls_handshake_property_test PRIVATE certificate_authority)
-        endif()
-        if(TARGET httplib::httplib)
-            target_link_libraries(coap_dtls_handshake_property_test PRIVATE httplib::httplib)
-        endif()
-        target_compile_features(coap_dtls_handshake_property_test PRIVATE cxx_std_23)
-        add_test(NAME coap_dtls_handshake_property_test COMMAND coap_dtls_handshake_property_test)
-        set_tests_properties(coap_dtls_handshake_property_test PROPERTIES
-            TIMEOUT 120
-            LABELS "property;coap;dtls;handshake"
-        )
-
-        if(TARGET certificate_authority)
-    else()
-        message(STATUS "coap_dtls_handshake_property_test: skipped (requires Folly)")
+        target_link_libraries(coap_dtls_handshake_property_test PRIVATE Folly::folly)
     endif()
+    if(TARGET certificate_authority)
+        target_link_libraries(coap_dtls_handshake_property_test PRIVATE certificate_authority)
+    endif()
+    if(TARGET httplib::httplib)
+        target_link_libraries(coap_dtls_handshake_property_test PRIVATE httplib::httplib)
+    endif()
+    target_compile_features(coap_dtls_handshake_property_test PRIVATE cxx_std_23)
+    add_test(NAME coap_dtls_handshake_property_test COMMAND coap_dtls_handshake_property_test)
+    set_tests_properties(coap_dtls_handshake_property_test PROPERTIES
+        TIMEOUT 120
+        LABELS "property;coap;dtls;handshake"
+    )
 
-    if(TARGET Folly::folly)
+    if(TARGET certificate_authority)
         add_executable(coap_transport_reload_property_test coap_transport_reload_property_test.cpp)
         target_link_libraries(coap_transport_reload_property_test PRIVATE
             network_simulator
@@ -4966,12 +4808,8 @@ if(KYTHIRA_BUILD_COAP_TRANSPORT)
             TIMEOUT 60
             LABELS "property;coap;dtls;reload;ca"
         )
-
-        else()
-            message(STATUS "certificate_authority not available — coap_transport_reload_property_test will not be built")
-        endif()
     else()
-        message(STATUS "coap_transport_reload_property_test: skipped (requires Folly)")
+        message(STATUS "certificate_authority not available — coap_transport_reload_property_test will not be built")
     endif()
 
     add_executable(coap_thread_safety_property_test coap_thread_safety_property_test.cpp)
@@ -5837,7 +5675,7 @@ set_tests_properties(ca_test_fixture_unit_test PROPERTIES
 )
 endif()  # KYTHIRA_HTTP_TLS
 
-if(TARGET Folly::folly AND KYTHIRA_HTTP_TLS)
+if(KYTHIRA_HTTP_TLS)
     add_executable(http_transport_reload_property_test http_transport_reload_property_test.cpp)
     target_link_libraries(http_transport_reload_property_test PRIVATE
         network_simulator
@@ -5856,7 +5694,7 @@ if(TARGET Folly::folly AND KYTHIRA_HTTP_TLS)
         LABELS "property;ssl;http;transport;reload;ca"
     )
 else()
-    message(STATUS "http_transport_reload_property_test: skipped (requires Folly and CONFIG_HTTP_TRANSPORT_TLS)")
+    message(STATUS "http_transport_reload_property_test: skipped (requires CONFIG_HTTP_TRANSPORT_TLS)")
 endif()
 
 # Needs CONFIG_HTTP_TRANSPORT_TLS: it talks to ca_service over HTTPS.
@@ -7212,8 +7050,8 @@ endif()
 # CONFIG_COAP_TRANSPORT=n means no CoAP target exists, so these are gated on the
 # feature symbol rather than on Folly. They were gated on `TARGET Folly::folly`
 # alone until August 10, 2026, which is why setting that symbol n produced a
-# byte-identical build. The Folly conditions inside are untouched -- they are a
-# separate requirement and still apply.
+# byte-identical build. The Folly conditions inside are a separate requirement,
+# kept only on the tests whose source needs Folly.
 #
 # libnyoci itself is linked here, first, rather than through
 # network_simulator: libnyoci.a and libcoap-3.a both define

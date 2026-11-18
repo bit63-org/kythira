@@ -12,7 +12,6 @@
 # never-invoked executor_type tag) marks an un-gating candidate, tracked in
 # doc/TODO.md; un-gating one means deleting its line here in the same change.
 
-accept_post_negotiation_test gated on `TARGET Folly::folly` in tests/CMakeLists.txt; its source uses no Folly directly
 accept_post_retry_benchmark_test examples/ is added only when folly_FOUND (root CMakeLists.txt): the examples' main() functions initialize Folly
 alibaba_oss_persistence_mock_test Alibaba component tests are gated on folly_FOUND in tests/CMakeLists.txt
 alibaba_oss_persistence_unit_test Alibaba component tests are gated on folly_FOUND in tests/CMakeLists.txt
@@ -43,33 +42,13 @@ chaos_state_machine_safety_test tests/chaos/ is added only inside tests/CMakeLis
 chaos_workload_unit_tests tests/docker_chaos/ is added only inside tests/CMakeLists.txt's `if(TARGET Folly::folly)` block (beside future_backend_benchmark_test)
 coap_block_transfer_example_test examples/ is added only when folly_FOUND (root CMakeLists.txt): the examples' main() functions initialize Folly
 coap_cantcoap_raft_node_test uses Folly directly (`folly::Init`)
-coap_certificate_validation_failure_property_test its transport Types bundle names `folly::Executor` as executor_type
-coap_cipher_suite_property_test gated on `TARGET Folly::folly` in tests/CMakeLists.txt; its source uses no Folly directly
-coap_concurrent_processing_property_test its transport Types bundle names `folly::Executor` as executor_type
-coap_confirmable_message_property_test its transport Types bundle names `folly::Executor` as executor_type
-coap_connection_reuse_property_test its transport Types bundle names `folly::Executor` as executor_type
-coap_content_format_property_test its transport Types bundle names `folly::Executor` as executor_type
-coap_dtls_connection_establishment_property_test its transport Types bundle names `folly::Executor` as executor_type
-coap_dtls_handshake_property_test gated on `TARGET Folly::folly` in tests/CMakeLists.txt; its source uses no Folly directly
 coap_dtls_security_example_test examples/ is added only when folly_FOUND (root CMakeLists.txt): the examples' main() functions initialize Folly
-coap_duplicate_detection_peer_test gated on `TARGET Folly::folly` in tests/CMakeLists.txt; its source uses no Folly directly
-coap_duplicate_detection_property_test its transport Types bundle names `folly::Executor` as executor_type
-coap_event_logging_property_test its transport Types bundle names `folly::Executor` as executor_type
-coap_fetch_log_entries_test gated on `TARGET Folly::folly` in tests/CMakeLists.txt; its source uses no Folly directly
 coap_final_integration_validation_test examples/ is added only when folly_FOUND (root CMakeLists.txt): the examples' main() functions initialize Folly
-coap_future_resolution_property_test its transport Types bundle names `folly::Executor` as executor_type
-coap_get_joined_multicast_groups_test its transport Types bundle names `folly::Executor` as executor_type
 coap_libnyoci_raft_node_test uses Folly directly (`folly::Init`)
-coap_multicast_delivery_property_test its transport Types bundle names `folly::Executor` as executor_type
 coap_multicast_example_test examples/ is added only when folly_FOUND (root CMakeLists.txt): the examples' main() functions initialize Folly
-coap_oscore_id_context_test gated on `TARGET Folly::folly` in tests/CMakeLists.txt; its source uses no Folly directly
 coap_performance_validation_example_test examples/ is added only when folly_FOUND (root CMakeLists.txt): the examples' main() functions initialize Folly
-coap_post_method_property_test its transport Types bundle names `folly::Executor` as executor_type
 coap_raft_node_integration_test uses Folly directly (`folly::Init`)
-coap_raft_rate_profile_test gated on `TARGET Folly::folly` in tests/CMakeLists.txt; its source uses no Folly directly
-coap_timeout_now_test gated on `TARGET Folly::folly` in tests/CMakeLists.txt; its source uses no Folly directly
 coap_transport_basic_example_test examples/ is added only when folly_FOUND (root CMakeLists.txt): the examples' main() functions initialize Folly
-coap_transport_reload_property_test gated on `TARGET Folly::folly` in tests/CMakeLists.txt; its source uses no Folly directly
 collector_example_test examples/ is added only when folly_FOUND (root CMakeLists.txt): the examples' main() functions initialize Folly
 commit_waiting_example_test examples/ is added only when folly_FOUND (root CMakeLists.txt): the examples' main() functions initialize Folly
 concepts_usage_examples_test examples/ is added only when folly_FOUND (root CMakeLists.txt): the examples' main() functions initialize Folly
@@ -101,7 +80,7 @@ folly_semi_promise_concept_compliance_test uses Folly directly (`folly::Promise`
 future_backend_benchmark_report_test examples/ is added only when folly_FOUND (root CMakeLists.txt): the examples' main() functions initialize Folly
 future_backend_benchmark_test benchmarks the Folly backend against the others
 future_concept_compliance_property_test uses Folly directly (`folly::exception_wrapper`)
-future_concept_requirements_property_test gated on `TARGET Folly::folly` in tests/CMakeLists.txt; its source uses no Folly directly
+future_concept_requirements_property_test tests the Folly backend itself: `kythira::Future` from raft/future.hpp, which includes Folly unconditionally
 future_test uses Folly directly (`folly::exception_wrapper`, `folly::Try`, `folly::Promise`)
 future_then_error_future_returning_callback_property_test uses Folly directly (`folly::Init`, `folly::CPUThreadPoolExecutor`, `folly::exception_wrapper`)
 future_then_try_future_returning_callback_property_test uses Folly directly (`folly::Init`, `folly::CPUThreadPoolExecutor`, `folly::exception_wrapper`)
@@ -114,26 +93,8 @@ grpc_tls_reload_integration_test raft_grpc_transport is gated on `TARGET Folly::
 grpc_transport_conversion_property_test raft_grpc_transport is gated on `TARGET Folly::folly` (root CMakeLists.txt): grpc_transport.hpp hardcodes kythira::Future
 grpc_transport_example_test examples/ is added only when folly_FOUND (root CMakeLists.txt): the examples' main() functions initialize Folly
 grpc_transport_integration_test raft_grpc_transport is gated on `TARGET Folly::folly` (root CMakeLists.txt): grpc_transport.hpp hardcodes kythira::Future
-http_client_comprehensive_test uses Folly directly (`folly::CPUThreadPoolExecutor`)
-http_client_connection_pool_test uses Folly directly (`folly::CPUThreadPoolExecutor`)
-http_client_connection_test uses Folly directly (`folly::CPUThreadPoolExecutor`)
-http_client_per_call_timeout_test uses Folly directly (`folly::CPUThreadPoolExecutor`)
-http_client_property_tests uses Folly directly (`folly::CPUThreadPoolExecutor`)
-http_client_send_lanes_test gated on `TARGET Folly::folly` in tests/CMakeLists.txt; its transport bundle names folly::CPUThreadPoolExecutor as the executor, as the negotiation suites' does
-http_client_test uses Folly directly (`folly::CPUThreadPoolExecutor`)
-http_client_tls_settings_integration_test uses Folly directly (`folly::CPUThreadPoolExecutor`)
-http_integration_test uses Folly directly (`folly::CPUThreadPoolExecutor`)
-http_negotiation_integration_test uses Folly directly (`folly::CPUThreadPoolExecutor`)
-http_server_property_tests uses Folly directly (`folly::CPUThreadPoolExecutor`)
-http_server_test uses Folly directly (`folly::CPUThreadPoolExecutor`)
-http_ssl_certificate_loading_unit_test uses Folly directly (`folly::CPUThreadPoolExecutor`)
-http_ssl_configuration_property_test uses Folly directly (`folly::CPUThreadPoolExecutor`)
-http_ssl_context_configuration_unit_test uses Folly directly (`folly::CPUThreadPoolExecutor`)
-http_ssl_mutual_tls_integration_test uses Folly directly (`folly::CPUThreadPoolExecutor`)
 http_transport_comparison_benchmark_test examples/ is added only when folly_FOUND (root CMakeLists.txt): the examples' main() functions initialize Folly
 http_transport_example_test examples/ is added only when folly_FOUND (root CMakeLists.txt): the examples' main() functions initialize Folly
-http_transport_reload_property_test uses Folly directly (`folly::CPUThreadPoolExecutor`)
-http_transport_return_types_property_test gated on `TARGET Folly::folly` in tests/CMakeLists.txt; its source uses no Folly directly
 iam_kythira_issuer_test runs ca_cluster_node as the Kythira issuer, and cmd/ca_cluster_node/CMakeLists.txt returns unless folly_FOUND
 kinesis_gateway_node_config the daemon is built only when folly_FOUND (services/kinesis/cmd/CMakeLists.txt), like redis_gateway_node
 kinesis_gateway_node_config_auth_both_needs_keys the daemon is built only when folly_FOUND (services/kinesis/cmd/CMakeLists.txt), like redis_gateway_node
@@ -148,12 +109,12 @@ kinesis_node_config_test the Kinesis daemon's settings, registered only where th
 kythira_executor_concept_compliance_property_test uses Folly directly (`folly::CPUThreadPoolExecutor`, `folly::InlineExecutor`, `folly::ManualExecutor`)
 kythira_executor_work_submission_property_test uses Folly directly (`folly::CPUThreadPoolExecutor`, `folly::InlineExecutor`, `folly::ManualExecutor`)
 kythira_future_collector_collection_operations_property_test uses Folly directly (`folly::init`)
-kythira_future_collector_concept_compliance_property_test its transport Types bundle names `folly::Executor` as executor_type
+kythira_future_collector_concept_compliance_property_test tests the Folly backend itself: `kythira::Future` from raft/future.hpp, which includes Folly unconditionally
 kythira_future_concept_compliance_property_test uses Folly directly (`folly::exception_wrapper`)
 kythira_future_concept_compliance_test uses Folly directly (`folly::exception_wrapper`)
 kythira_future_continuation_operations_property_test uses Folly directly (`folly::Init`, `folly::CPUThreadPoolExecutor`, `folly::getKeepAliveToken`)
 kythira_future_factory_concept_compliance_property_test uses Folly directly (`folly::exception_wrapper`, `folly::Unit`)
-kythira_future_transformation_operations_property_test gated on `TARGET Folly::folly` in tests/CMakeLists.txt; its source uses no Folly directly
+kythira_future_transformation_operations_property_test tests the Folly backend itself: `kythira::Future` from raft/future.hpp, which includes Folly unconditionally
 kythira_keep_alive_concept_compliance_property_test uses Folly directly (`folly::CPUThreadPoolExecutor`, `folly::InlineExecutor`)
 kythira_keep_alive_pointer_access_property_test uses Folly directly (`folly::init`, `folly::CPUThreadPoolExecutor`, `folly::InlineExecutor`)
 kythira_node_iam_test needs the Kinesis module beside IAM, and that links the Kinesis daemon's common library, built only when folly_FOUND (services/kinesis/cmd/CMakeLists.txt)
@@ -168,9 +129,6 @@ missing_wrapper_functionality_unit_test uses Folly directly (`folly::init`, `fol
 multi_raft_coap_test uses Folly directly (`folly::Init`)
 multi_raft_node_s3_process_test registered by cmd/multi_raft_node, which its CMakeLists.txt skips without folly_FOUND; it runs the multi_raft_node binary
 multi_raft_node_s3_store_test registered by cmd/multi_raft_node, which its CMakeLists.txt skips without folly_FOUND; it compiles that directory's s3_store.cpp
-multi_serializer_interop_test gated on `TARGET Folly::folly` in tests/CMakeLists.txt; its source uses no Folly directly
-multi_serializer_negotiation_property_test gated on `TARGET Folly::folly` in tests/CMakeLists.txt; its source uses no Folly directly
-negotiation_failure_test gated on `TARGET Folly::folly` in tests/CMakeLists.txt; its source uses no Folly directly
 network_topology_example_test examples/ is added only when folly_FOUND (root CMakeLists.txt): the examples' main() functions initialize Folly
 oidc_federation_real_test inside tests/CMakeLists.txt's `if(TARGET ca_cluster_node)` block, and cmd/ca_cluster_node/CMakeLists.txt returns unless folly_FOUND
 performance_benchmark_report_test examples/ is added only when folly_FOUND (root CMakeLists.txt): the examples' main() functions initialize Folly
@@ -182,7 +140,6 @@ proxygen_negotiation_integration_test the proxygen transport depends on Folly (K
 proxygen_textual_node_id_test the proxygen transport depends on Folly (Kconfig: PROXYGEN_TRANSPORT depends on FOLLY)
 proxygen_transport_example_test examples/ is added only when folly_FOUND (root CMakeLists.txt): the examples' main() functions initialize Folly
 proxygen_transport_test the proxygen transport depends on Folly (Kconfig: PROXYGEN_TRANSPORT depends on FOLLY)
-raft_submit_command_timeout_property_test gated on `TARGET Folly::folly` in tests/CMakeLists.txt; its source uses no Folly directly
 redis_gateway_disk_store_integration_test the disk-store twin of `redis_gateway_integration_test`: gated on folly_FOUND in tests/CMakeLists.txt
 redis_gateway_engine_store_integration_test the persistent-engine twin of `redis_gateway_integration_test`: gated on folly_FOUND in services/redis/tests/CMakeLists.txt, with redis_gateway_integration_test
 redis_differential_replay_test gated on folly_FOUND in services/redis/tests/CMakeLists.txt beside redis_gateway_snapshot_test, whose in-process cluster it reuses
@@ -191,7 +148,6 @@ redis_gateway_node_iam_switch checks redis_gateway_node --help, and the daemon i
 redis_gateway_snapshot_test the snapshot-isolation twin of `redis_gateway_txn_test`: gated on folly_FOUND in tests/CMakeLists.txt, with redis_gateway_integration_test
 redis_gateway_txn_test gated on folly_FOUND in tests/CMakeLists.txt, with redis_gateway_integration_test
 semi_promise_concept_requirements_property_test uses Folly directly (`folly::Unit`, `folly::exception_wrapper`)
-single_serializer_regression_test gated on `TARGET Folly::folly` in tests/CMakeLists.txt; its source uses no Folly directly
 snapshot_example_test examples/ is added only when folly_FOUND (root CMakeLists.txt): the examples' main() functions initialize Folly
 state_machine_example_test examples/ is added only when folly_FOUND (root CMakeLists.txt): the examples' main() functions initialize Folly
 state_machine_migration_example_test examples/ is added only when folly_FOUND (root CMakeLists.txt): the examples' main() functions initialize Folly

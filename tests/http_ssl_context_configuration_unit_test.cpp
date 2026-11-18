@@ -7,7 +7,7 @@
 #include <raft/http_transport.hpp>
 #include <raft/http_transport_impl.hpp>
 #include <raft/json_serializer.hpp>
-#include <folly/executors/CPUThreadPoolExecutor.h>
+#include <raft/executor_default.hpp>
 
 namespace {
 constexpr const char* test_bind_address = "127.0.0.1";
@@ -39,7 +39,7 @@ BOOST_AUTO_TEST_SUITE(http_ssl_context_configuration_unit_tests)
 BOOST_AUTO_TEST_CASE(test_cipher_suite_restriction_enforcement, *boost::unit_test::timeout(30)) {
     using test_types =
         kythira::http_transport_types<kythira::json_rpc_serializer<std::vector<std::byte>>,
-                                      kythira::noop_metrics, folly::CPUThreadPoolExecutor>;
+                                      kythira::noop_metrics, kythira::executor_default>;
 
     kythira::cpp_httplib_client_config client_config;
     client_config.cipher_suites = valid_cipher_suites;
@@ -55,7 +55,7 @@ BOOST_AUTO_TEST_CASE(test_cipher_suite_restriction_enforcement, *boost::unit_tes
 BOOST_AUTO_TEST_CASE(test_invalid_cipher_suite_rejection, *boost::unit_test::timeout(30)) {
     using test_types =
         kythira::http_transport_types<kythira::json_rpc_serializer<std::vector<std::byte>>,
-                                      kythira::noop_metrics, folly::CPUThreadPoolExecutor>;
+                                      kythira::noop_metrics, kythira::executor_default>;
 
     kythira::cpp_httplib_client_config client_config;
     client_config.cipher_suites = invalid_cipher_suites;
@@ -72,7 +72,7 @@ BOOST_AUTO_TEST_CASE(test_invalid_cipher_suite_rejection, *boost::unit_test::tim
 BOOST_AUTO_TEST_CASE(test_tls_version_constraint_enforcement, *boost::unit_test::timeout(30)) {
     using test_types =
         kythira::http_transport_types<kythira::json_rpc_serializer<std::vector<std::byte>>,
-                                      kythira::noop_metrics, folly::CPUThreadPoolExecutor>;
+                                      kythira::noop_metrics, kythira::executor_default>;
 
     kythira::cpp_httplib_client_config client_config;
     client_config.min_tls_version = tls_v12;
@@ -89,7 +89,7 @@ BOOST_AUTO_TEST_CASE(test_tls_version_constraint_enforcement, *boost::unit_test:
 BOOST_AUTO_TEST_CASE(test_invalid_tls_version_range_rejection, *boost::unit_test::timeout(30)) {
     using test_types =
         kythira::http_transport_types<kythira::json_rpc_serializer<std::vector<std::byte>>,
-                                      kythira::noop_metrics, folly::CPUThreadPoolExecutor>;
+                                      kythira::noop_metrics, kythira::executor_default>;
 
     // min > max is invalid.
     kythira::cpp_httplib_client_config client_config;
@@ -108,7 +108,7 @@ BOOST_AUTO_TEST_CASE(test_invalid_tls_version_range_rejection, *boost::unit_test
 BOOST_AUTO_TEST_CASE(test_minimum_security_standards_enforcement, *boost::unit_test::timeout(30)) {
     using test_types =
         kythira::http_transport_types<kythira::json_rpc_serializer<std::vector<std::byte>>,
-                                      kythira::noop_metrics, folly::CPUThreadPoolExecutor>;
+                                      kythira::noop_metrics, kythira::executor_default>;
 
     // TLS 1.0 is below the project's minimum security standard.
     kythira::cpp_httplib_client_config client_config;
@@ -127,7 +127,7 @@ BOOST_AUTO_TEST_CASE(test_minimum_security_standards_enforcement, *boost::unit_t
 BOOST_AUTO_TEST_CASE(test_invalid_tls_version_string_rejection, *boost::unit_test::timeout(30)) {
     using test_types =
         kythira::http_transport_types<kythira::json_rpc_serializer<std::vector<std::byte>>,
-                                      kythira::noop_metrics, folly::CPUThreadPoolExecutor>;
+                                      kythira::noop_metrics, kythira::executor_default>;
 
     kythira::cpp_httplib_client_config client_config;
     client_config.min_tls_version = invalid_tls_version;
@@ -145,7 +145,7 @@ BOOST_AUTO_TEST_CASE(test_invalid_tls_version_string_rejection, *boost::unit_tes
 BOOST_AUTO_TEST_CASE(test_ssl_context_creation_and_configuration, *boost::unit_test::timeout(30)) {
     using test_types =
         kythira::http_transport_types<kythira::json_rpc_serializer<std::vector<std::byte>>,
-                                      kythira::noop_metrics, folly::CPUThreadPoolExecutor>;
+                                      kythira::noop_metrics, kythira::executor_default>;
 
     kythira::cpp_httplib_client_config client_config;
     client_config.cipher_suites = valid_cipher_suites;
@@ -164,7 +164,7 @@ BOOST_AUTO_TEST_CASE(test_ssl_context_creation_and_configuration, *boost::unit_t
 BOOST_AUTO_TEST_CASE(test_ssl_context_error_handling, *boost::unit_test::timeout(30)) {
     using test_types =
         kythira::http_transport_types<kythira::json_rpc_serializer<std::vector<std::byte>>,
-                                      kythira::noop_metrics, folly::CPUThreadPoolExecutor>;
+                                      kythira::noop_metrics, kythira::executor_default>;
 
     // Multiple invalid parameters at once.
     kythira::cpp_httplib_client_config client_config;
@@ -184,7 +184,7 @@ BOOST_AUTO_TEST_CASE(test_ssl_context_error_handling, *boost::unit_test::timeout
 BOOST_AUTO_TEST_CASE(test_server_ssl_context_configuration, *boost::unit_test::timeout(30)) {
     using test_types =
         kythira::http_transport_types<kythira::json_rpc_serializer<std::vector<std::byte>>,
-                                      kythira::noop_metrics, folly::CPUThreadPoolExecutor>;
+                                      kythira::noop_metrics, kythira::executor_default>;
 
     // Certificate files that don't exist — a genuine configuration failure,
     // independent of the certificate-authority framework.
@@ -205,7 +205,7 @@ BOOST_AUTO_TEST_CASE(test_server_ssl_context_configuration, *boost::unit_test::t
 BOOST_AUTO_TEST_CASE(test_empty_cipher_suites_allowed, *boost::unit_test::timeout(30)) {
     using test_types =
         kythira::http_transport_types<kythira::json_rpc_serializer<std::vector<std::byte>>,
-                                      kythira::noop_metrics, folly::CPUThreadPoolExecutor>;
+                                      kythira::noop_metrics, kythira::executor_default>;
 
     // Empty cipher suites means "use defaults" and must be accepted.
     kythira::cpp_httplib_client_config client_config;
@@ -224,7 +224,7 @@ BOOST_AUTO_TEST_CASE(test_empty_cipher_suites_allowed, *boost::unit_test::timeou
 BOOST_AUTO_TEST_CASE(test_empty_tls_versions_allowed, *boost::unit_test::timeout(30)) {
     using test_types =
         kythira::http_transport_types<kythira::json_rpc_serializer<std::vector<std::byte>>,
-                                      kythira::noop_metrics, folly::CPUThreadPoolExecutor>;
+                                      kythira::noop_metrics, kythira::executor_default>;
 
     // Empty TLS version bounds means "use defaults" and must be accepted.
     kythira::cpp_httplib_client_config client_config;

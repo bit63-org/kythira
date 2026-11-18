@@ -7,7 +7,7 @@
 #include <raft/http_transport.hpp>
 #include <raft/http_transport_impl.hpp>
 #include <raft/json_serializer.hpp>
-#include <folly/executors/CPUThreadPoolExecutor.h>
+#include <raft/executor_default.hpp>
 
 namespace {
 constexpr const char* test_server_url = "http://httpbin.org";  // Public test server
@@ -17,7 +17,7 @@ constexpr auto test_timeout = std::chrono::milliseconds{5000};
 // Define transport types for testing
 using test_transport_types =
     kythira::http_transport_types<kythira::json_rpc_serializer<std::vector<std::byte>>,
-                                  kythira::noop_metrics, folly::CPUThreadPoolExecutor>;
+                                  kythira::noop_metrics, kythira::executor_default>;
 }
 
 BOOST_AUTO_TEST_SUITE(http_client_connection_tests)

@@ -8,7 +8,7 @@
 #include <raft/http_transport_impl.hpp>
 #include <raft/json_serializer.hpp>
 #include "ca_test_fixture.hpp"
-#include <folly/executors/CPUThreadPoolExecutor.h>
+#include <raft/executor_default.hpp>
 #include <filesystem>
 #include <fstream>
 
@@ -65,7 +65,7 @@ BOOST_AUTO_TEST_SUITE(http_ssl_configuration_property_tests)
 BOOST_AUTO_TEST_CASE(test_ssl_certificate_loading_validation, *boost::unit_test::timeout(60)) {
     using test_types =
         kythira::http_transport_types<kythira::json_rpc_serializer<std::vector<std::byte>>,
-                                      kythira::noop_metrics, folly::CPUThreadPoolExecutor>;
+                                      kythira::noop_metrics, kythira::executor_default>;
 
     // Test client with valid, real SSL certificate paths. ca_cert_path is
     // required here: validate_certificate_files() validates the presented
@@ -91,7 +91,7 @@ BOOST_AUTO_TEST_CASE(test_ssl_certificate_loading_validation, *boost::unit_test:
 BOOST_AUTO_TEST_CASE(test_ssl_certificate_loading_failure_cases, *boost::unit_test::timeout(60)) {
     using test_types =
         kythira::http_transport_types<kythira::json_rpc_serializer<std::vector<std::byte>>,
-                                      kythira::noop_metrics, folly::CPUThreadPoolExecutor>;
+                                      kythira::noop_metrics, kythira::executor_default>;
 
     // Test invalid certificate file path
     kythira::cpp_httplib_client_config client_config;
@@ -112,7 +112,7 @@ BOOST_AUTO_TEST_CASE(test_ssl_certificate_loading_failure_cases, *boost::unit_te
 BOOST_AUTO_TEST_CASE(test_ssl_certificate_mismatch, *boost::unit_test::timeout(60)) {
     using test_types =
         kythira::http_transport_types<kythira::json_rpc_serializer<std::vector<std::byte>>,
-                                      kythira::noop_metrics, folly::CPUThreadPoolExecutor>;
+                                      kythira::noop_metrics, kythira::executor_default>;
 
     // A real, valid certificate paired with a real, valid — but different —
     // private key: a genuine mismatch, not merely unparseable content.
@@ -138,7 +138,7 @@ BOOST_AUTO_TEST_CASE(test_ssl_certificate_mismatch, *boost::unit_test::timeout(6
 BOOST_AUTO_TEST_CASE(test_certificate_chain_verification, *boost::unit_test::timeout(60)) {
     using test_types =
         kythira::http_transport_types<kythira::json_rpc_serializer<std::vector<std::byte>>,
-                                      kythira::noop_metrics, folly::CPUThreadPoolExecutor>;
+                                      kythira::noop_metrics, kythira::executor_default>;
 
     cert_material material;
     const auto& files = material.leaf();
@@ -165,7 +165,7 @@ BOOST_AUTO_TEST_CASE(test_certificate_chain_verification, *boost::unit_test::tim
 BOOST_AUTO_TEST_CASE(test_cipher_suite_restriction_enforcement, *boost::unit_test::timeout(60)) {
     using test_types =
         kythira::http_transport_types<kythira::json_rpc_serializer<std::vector<std::byte>>,
-                                      kythira::noop_metrics, folly::CPUThreadPoolExecutor>;
+                                      kythira::noop_metrics, kythira::executor_default>;
 
     // Test valid cipher suites
     kythira::cpp_httplib_client_config client_config;
@@ -184,7 +184,7 @@ BOOST_AUTO_TEST_CASE(test_cipher_suite_restriction_enforcement, *boost::unit_tes
 BOOST_AUTO_TEST_CASE(test_invalid_cipher_suites, *boost::unit_test::timeout(60)) {
     using test_types =
         kythira::http_transport_types<kythira::json_rpc_serializer<std::vector<std::byte>>,
-                                      kythira::noop_metrics, folly::CPUThreadPoolExecutor>;
+                                      kythira::noop_metrics, kythira::executor_default>;
 
     // Test invalid cipher suites
     kythira::cpp_httplib_client_config client_config;
@@ -202,7 +202,7 @@ BOOST_AUTO_TEST_CASE(test_invalid_cipher_suites, *boost::unit_test::timeout(60))
 BOOST_AUTO_TEST_CASE(test_tls_version_constraints, *boost::unit_test::timeout(60)) {
     using test_types =
         kythira::http_transport_types<kythira::json_rpc_serializer<std::vector<std::byte>>,
-                                      kythira::noop_metrics, folly::CPUThreadPoolExecutor>;
+                                      kythira::noop_metrics, kythira::executor_default>;
 
     // Test invalid TLS version range (min > max)
     kythira::cpp_httplib_client_config client_config;
@@ -223,7 +223,7 @@ BOOST_AUTO_TEST_CASE(test_tls_version_constraints, *boost::unit_test::timeout(60
 BOOST_AUTO_TEST_CASE(test_client_certificate_authentication, *boost::unit_test::timeout(60)) {
     using test_types =
         kythira::http_transport_types<kythira::json_rpc_serializer<std::vector<std::byte>>,
-                                      kythira::noop_metrics, folly::CPUThreadPoolExecutor>;
+                                      kythira::noop_metrics, kythira::executor_default>;
 
     cert_material material;
     const auto& files = material.leaf();
@@ -248,7 +248,7 @@ BOOST_AUTO_TEST_CASE(test_client_certificate_authentication, *boost::unit_test::
 BOOST_AUTO_TEST_CASE(test_client_cert_auth_without_ca, *boost::unit_test::timeout(60)) {
     using test_types =
         kythira::http_transport_types<kythira::json_rpc_serializer<std::vector<std::byte>>,
-                                      kythira::noop_metrics, folly::CPUThreadPoolExecutor>;
+                                      kythira::noop_metrics, kythira::executor_default>;
 
     cert_material material;
     const auto& files = material.leaf();
@@ -270,7 +270,7 @@ BOOST_AUTO_TEST_CASE(test_client_cert_auth_without_ca, *boost::unit_test::timeou
 BOOST_AUTO_TEST_CASE(test_ssl_disabled_with_ssl_config, *boost::unit_test::timeout(60)) {
     using test_types =
         kythira::http_transport_types<kythira::json_rpc_serializer<std::vector<std::byte>>,
-                                      kythira::noop_metrics, folly::CPUThreadPoolExecutor>;
+                                      kythira::noop_metrics, kythira::executor_default>;
 
     cert_material material;
     const auto& files = material.leaf();

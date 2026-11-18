@@ -24,7 +24,7 @@
 #include <raft/http_transport_impl.hpp>
 #include <raft/json_serializer.hpp>
 
-#include <folly/executors/CPUThreadPoolExecutor.h>
+#include <raft/executor_default.hpp>
 #include <httplib.h>
 
 #include <atomic>
@@ -44,7 +44,7 @@ constexpr const char* endpoint_request_vote = "/v1/raft/request_vote";
 using data_type = std::vector<std::byte>;
 using serializer_type = kythira::json_rpc_serializer<data_type>;
 using test_types = kythira::http_transport_types<serializer_type, kythira::noop_metrics,
-                                                 folly::CPUThreadPoolExecutor>;
+                                                 kythira::executor_default>;
 
 /// A well-formed request body in the server's own default media type, so any
 /// rejection observed below is attributable to the *headers* rather than to the

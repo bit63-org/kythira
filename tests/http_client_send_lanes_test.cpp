@@ -50,8 +50,8 @@ using single_json = kythira::single_serializer_registry<json_serializer>;
 /// a `kythira::future_default`, which is also the future the lanes complete
 /// from a worker. (The folly-less `http_transport_types` default is
 /// `SimpleFuture`, which has no promise, so it keeps the blocking send.)
-struct client_types : kythira::http_transport_types<json_serializer, recording_metrics,
-                                                    folly::CPUThreadPoolExecutor> {
+struct client_types
+    : kythira::http_transport_types<json_serializer, recording_metrics, kythira::executor_default> {
     template<typename T> using future_template = kythira::future_default<T>;
     using serializer_registry_type = single_json;
 };

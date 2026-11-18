@@ -21,7 +21,7 @@
 #include <raft/http_transport_impl.hpp>
 #include <raft/json_serializer.hpp>
 
-#include <folly/executors/CPUThreadPoolExecutor.h>
+#include <raft/executor_default.hpp>
 
 #include <chrono>
 #include <cstdint>
@@ -36,7 +36,7 @@ namespace {
 
 using test_types =
     kythira::http_transport_types<kythira::json_rpc_serializer<std::vector<std::byte>>,
-                                  kythira::noop_metrics, folly::CPUThreadPoolExecutor>;
+                                  kythira::noop_metrics, kythira::executor_default>;
 
 constexpr const char* bind_address = "127.0.0.1";
 constexpr std::uint64_t peer_id = 1;

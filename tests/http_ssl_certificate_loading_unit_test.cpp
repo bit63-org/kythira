@@ -8,7 +8,7 @@
 #include <raft/http_transport_impl.hpp>
 #include <raft/json_serializer.hpp>
 #include <raft/certificate_authority.hpp>
-#include <folly/executors/CPUThreadPoolExecutor.h>
+#include <raft/executor_default.hpp>
 #include <filesystem>
 #include <fstream>
 
@@ -89,7 +89,7 @@ BOOST_AUTO_TEST_SUITE(http_ssl_certificate_loading_unit_tests)
 BOOST_AUTO_TEST_CASE(test_successful_certificate_and_key_loading, *boost::unit_test::timeout(30)) {
     using test_types =
         kythira::http_transport_types<kythira::json_rpc_serializer<std::vector<std::byte>>,
-                                      kythira::noop_metrics, folly::CPUThreadPoolExecutor>;
+                                      kythira::noop_metrics, kythira::executor_default>;
 
     auto cert_path = create_temp_cert_file(valid_cert_pem);
     auto key_path = create_temp_cert_file(valid_key_pem);
@@ -125,7 +125,7 @@ BOOST_AUTO_TEST_CASE(test_certificate_loading_failure_nonexistent_file,
                      *boost::unit_test::timeout(30)) {
     using test_types =
         kythira::http_transport_types<kythira::json_rpc_serializer<std::vector<std::byte>>,
-                                      kythira::noop_metrics, folly::CPUThreadPoolExecutor>;
+                                      kythira::noop_metrics, kythira::executor_default>;
 
     // Test with nonexistent certificate file
     kythira::cpp_httplib_client_config client_config;
@@ -147,7 +147,7 @@ BOOST_AUTO_TEST_CASE(test_certificate_loading_failure_invalid_format,
                      *boost::unit_test::timeout(30)) {
     using test_types =
         kythira::http_transport_types<kythira::json_rpc_serializer<std::vector<std::byte>>,
-                                      kythira::noop_metrics, folly::CPUThreadPoolExecutor>;
+                                      kythira::noop_metrics, kythira::executor_default>;
 
     auto invalid_cert_path = create_temp_cert_file(invalid_cert_pem);
     auto key_path = create_temp_cert_file(valid_key_pem);
@@ -181,7 +181,7 @@ BOOST_AUTO_TEST_CASE(test_certificate_loading_failure_invalid_format,
 BOOST_AUTO_TEST_CASE(test_certificate_chain_validation_success, *boost::unit_test::timeout(30)) {
     using test_types =
         kythira::http_transport_types<kythira::json_rpc_serializer<std::vector<std::byte>>,
-                                      kythira::noop_metrics, folly::CPUThreadPoolExecutor>;
+                                      kythira::noop_metrics, kythira::executor_default>;
 
     auto cert_path = create_temp_cert_file(valid_cert_pem);
     auto key_path = create_temp_cert_file(valid_key_pem);
@@ -224,7 +224,7 @@ BOOST_AUTO_TEST_CASE(test_certificate_chain_validation_success, *boost::unit_tes
 BOOST_AUTO_TEST_CASE(test_certificate_format_support_pem, *boost::unit_test::timeout(30)) {
     using test_types =
         kythira::http_transport_types<kythira::json_rpc_serializer<std::vector<std::byte>>,
-                                      kythira::noop_metrics, folly::CPUThreadPoolExecutor>;
+                                      kythira::noop_metrics, kythira::executor_default>;
 
     auto cert_path = create_temp_cert_file(valid_cert_pem);
     auto key_path = create_temp_cert_file(valid_key_pem);
@@ -259,7 +259,7 @@ BOOST_AUTO_TEST_CASE(test_certificate_format_support_pem, *boost::unit_test::tim
 BOOST_AUTO_TEST_CASE(test_certificate_without_key_failure, *boost::unit_test::timeout(30)) {
     using test_types =
         kythira::http_transport_types<kythira::json_rpc_serializer<std::vector<std::byte>>,
-                                      kythira::noop_metrics, folly::CPUThreadPoolExecutor>;
+                                      kythira::noop_metrics, kythira::executor_default>;
 
     auto cert_path = create_temp_cert_file(valid_cert_pem);
 
@@ -291,7 +291,7 @@ BOOST_AUTO_TEST_CASE(test_certificate_without_key_failure, *boost::unit_test::ti
 BOOST_AUTO_TEST_CASE(test_key_without_certificate_failure, *boost::unit_test::timeout(30)) {
     using test_types =
         kythira::http_transport_types<kythira::json_rpc_serializer<std::vector<std::byte>>,
-                                      kythira::noop_metrics, folly::CPUThreadPoolExecutor>;
+                                      kythira::noop_metrics, kythira::executor_default>;
 
     auto key_path = create_temp_cert_file(valid_key_pem);
 
@@ -323,7 +323,7 @@ BOOST_AUTO_TEST_CASE(test_key_without_certificate_failure, *boost::unit_test::ti
 BOOST_AUTO_TEST_CASE(test_expired_certificate_detection, *boost::unit_test::timeout(30)) {
     using test_types =
         kythira::http_transport_types<kythira::json_rpc_serializer<std::vector<std::byte>>,
-                                      kythira::noop_metrics, folly::CPUThreadPoolExecutor>;
+                                      kythira::noop_metrics, kythira::executor_default>;
 
     raft::testing::certificate_authority ca;
     raft::testing::leaf_certificate_options leaf_opts;
@@ -369,7 +369,7 @@ BOOST_AUTO_TEST_CASE(test_expired_certificate_detection, *boost::unit_test::time
 BOOST_AUTO_TEST_CASE(test_ssl_config_without_openssl_support, *boost::unit_test::timeout(30)) {
     using test_types =
         kythira::http_transport_types<kythira::json_rpc_serializer<std::vector<std::byte>>,
-                                      kythira::noop_metrics, folly::CPUThreadPoolExecutor>;
+                                      kythira::noop_metrics, kythira::executor_default>;
 
     // Test SSL configuration when OpenSSL support is not available
     kythira::cpp_httplib_client_config client_config;

@@ -11,7 +11,7 @@
 #include "format1_snapshot_transfer.hpp"
 #include "test_ports.hpp"
 
-#include <folly/executors/CPUThreadPoolExecutor.h>
+#include <raft/executor_default.hpp>
 
 #include <thread>
 #include <chrono>
@@ -26,7 +26,7 @@ constexpr std::uint64_t test_node_id = 1;
 // Define transport types for testing using the provided template
 using test_transport_types =
     kythira::http_transport_types<kythira::json_serializer, kythira::noop_metrics,
-                                  folly::CPUThreadPoolExecutor>;
+                                  kythira::executor_default>;
 }
 
 BOOST_AUTO_TEST_SUITE(http_integration_tests)
