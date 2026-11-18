@@ -17,17 +17,21 @@
 /// Key layout, all in the `data` column family, under a partition's
 /// routing key `q/<queue id, 16 hex>/<partition, 4 hex>/`:
 ///
+// clang-format off
 /// | Suffix | Value | What |
 /// |---|---|---|
 /// | `c` | counters | next sequence, next receive sequence, visible / in-flight / delayed counts |
 /// | `m/<seq>` | message | the message and its delivery state |
-/// | `a/<seq>` | empty | standard queues: visible messages, oldest first |
+/// | `f/<group>\0<seq>` | empty | standard queues: visible messages by message group (ungrouped: group ""), oldest first |
+/// | `n/<group>` | count | standard queues: how many visible messages a group holds |
+/// | `c/` | group | standard queues: the fair receive's rotating cursor |
 /// | `p/<at>/<seq>` | empty | delayed and in-flight messages, by when they become visible |
 /// | `r/<at>/<seq>` | empty | every message, by when retention deletes it |
 /// | `g/<group>\0<seq>` | empty | FIFO queues: each group's messages in order |
-/// | `h/<seq>/<group>` | empty | FIFO queues: groups whose first message is visible, by that
-/// message | | `d/<key>` | dedup | FIFO queues: deduplication records | | `e/<at>/<key>` | empty |
-/// deduplication records, by expiry |
+/// | `h/<seq>/<group>` | empty | FIFO queues: groups whose first message is visible, by that message |
+/// | `d/<key>` | dedup | FIFO queues: deduplication records |
+/// | `e/<at>/<key>` | empty | deduplication records, by expiry |
+// clang-format on
 ///
 /// Sequences and times are 16 hex digits, so keys sort numerically.
 ///

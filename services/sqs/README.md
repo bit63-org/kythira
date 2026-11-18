@@ -23,6 +23,8 @@ Built when `CONFIG_SQS=y` (`services/sqs/Kconfig`, off by default).
 | `include/kythira/sqs/sqs_operations.hpp` | the generated operation table: names, which are batch forms, the error shapes each may return (checked in, so a model upgrade shows its diff) | 1 |
 | `implemented-operations.txt` | operations the gateway implements | 1 onward |
 | `doc/unsupported.md` | every other operation, with its planned task, reason and the exact error it returns | 1 onward |
+| `doc/configuration.md`, `doc/delivery.md`, `doc/encryption.md`, `doc/sns-bridge.md` | operator documentation: every setting and compatibility switch; delivery guarantees and where time comes from; SSE-SQS and SSE-KMS; the SNS bridge | 14 |
+| `doc/measurements.md`, `tools/sqs_load.py` | the measurement rows (Requirement 13.5) and the load tool that takes them | 14 |
 | `tools/check_coverage.py`, `tools/test_check_coverage.py` | the coverage check (Requirement 2.1) and its fixture tests | 1 |
 | `tests/evidence/` | the recording stub, the clients and the checked-in wire evidence (AWS CLI v2, boto3 on JSON and query, Java SDK v2, JMS, Kombu); `sqs_wire_evidence` checks it | 1 |
 | `include/kythira/sqs/sqs_queue_commands.hpp` | the queue state machine's Raft entries and replies (send, receive, delete, change visibility, purge, drop, tick), versioned binary forms | 2 |
