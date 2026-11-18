@@ -97,18 +97,9 @@ target_sources(redis_gateway_node_config_unit_test PRIVATE
                "${CMAKE_CURRENT_SOURCE_DIR}/../cmd/redis_gateway_node/config.cpp")
 target_include_directories(redis_gateway_node_config_unit_test PRIVATE
                            "${CMAKE_CURRENT_SOURCE_DIR}/../cmd/redis_gateway_node")
-# .kiro/specs/disk-backed-build-cache/ task 2: the per-node chunk store and
-# its pack files. The crash and write-failure cases need libfiu's control
-# API; without it they compile away and the rest still run.
-kythira_redis_test(cache_chunk_store_unit_test cache_chunk_store_unit_test.cpp)
-target_link_libraries(cache_chunk_store_unit_test PRIVATE OpenSSL::Crypto)
-set_tests_properties(cache_chunk_store_unit_test PROPERTIES
-    LABELS "unit;redis;cache" TIMEOUT 600)
-if(FIU_FOUND)
-    target_compile_definitions(cache_chunk_store_unit_test PRIVATE FIU_ENABLE)
-    target_link_libraries(cache_chunk_store_unit_test PRIVATE ${FIU_LDFLAGS})
-    target_include_directories(cache_chunk_store_unit_test PRIVATE ${FIU_INCLUDE_DIRS})
-endif()
+# .kiro/specs/disk-backed-build-cache/ task 2: the per-node chunk store
+# is core now (include/raft/chunk_store.hpp); its test is
+# tests/chunk_store_test.cpp.
 # Task 3: the disk-backed state machine over the chunk store, with the
 # design's correctness properties 1-4 as randomized trials and the
 # Requirement 2.2 index-memory bound.

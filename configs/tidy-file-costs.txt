@@ -81,7 +81,6 @@
 123.13 services/redis/tests/bench_rows/txn_fabric.cpp
 121.71 services/redis/tests/bench_rows/txn_snapshot_fabric.cpp
 71.74 services/redis/tests/cache_chunk_fetcher_unit_test.cpp
-69.99 services/redis/tests/cache_chunk_store_unit_test.cpp
 35.56 services/redis/tests/cache_disk_guard_unit_test.cpp
 234.12 services/redis/tests/cache_http_front_end_test.cpp
 92.98 services/redis/tests/cache_kv_state_machine_unit_test.cpp
@@ -206,6 +205,7 @@
 17.27 tests/chaos/fiu_remote_unit_test.cpp
 98.86 tests/chaos_node_config_unit_test.cpp
 99.20 tests/chaos_node_control_test.cpp
+69.99 tests/chunk_store_test.cpp
 49.41 tests/cloud_config_env_unit_test.cpp
 109.93 tests/coap_ace_oauth_test.cpp
 17.12 tests/coap_block1_assembly_test.cpp
