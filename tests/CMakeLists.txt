@@ -1390,6 +1390,10 @@ add_raft_completion_test(capacity_ledger_unit_test capacity_ledger_unit_test.cpp
 # elastic-shard-capacity spec, task 6: the leadership lease, over hooks and
 # over a real replicated coordination group.
 add_raft_completion_test(capacity_coordination_test capacity_coordination_test.cpp)
+# kinesis-independent-layers task 11: the stateless layers' member list, its
+# state machine and configuration directory, and the layer membership group
+# as one Raft group with three voters and a learner.
+add_raft_completion_test(layer_membership_test layer_membership_test.cpp)
 # elastic-shard-capacity spec, task 7: the deterministic mock quorum manager
 # every later capacity suite builds on.
 add_raft_completion_test(mock_capacity_quorum_manager_test

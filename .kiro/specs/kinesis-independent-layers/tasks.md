@@ -110,6 +110,11 @@ every role (7, 8, 10).
     load reports, shared settings version
   - Affinity and data-node discovery from it, or from configuration and
     DNS discovery when it is off
+  - Status: the core is on `main` (`include/raft/layer_membership.hpp`:
+    the state machine, `member_directory` with its configuration and
+    replicated forms, and a three-voter-plus-learner group test); running
+    the group inside the gateway and front-end processes lands with tasks 7
+    and 8, which consume the directory
   - _Requirements: 10.1-10.3_
 
 - [ ] 12. Stateless-layer scaling through `quorum_manager`
