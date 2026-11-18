@@ -52,6 +52,21 @@ PR unless noted.
   - JSON 1.0 and query codecs, SigV4, `sqs` action table, queue policies,
     static keys, compatibility profile
   - _Requirements: 2.2, 2.3, 3.1-3.3_
+  - Progress: the protocol half is done. `sqs_codec.hpp` reads both
+    protocols into one JSON object in the model's names and answers in the
+    request's protocol; query names and error codes come from the pinned
+    query-era model (`model/query/`). `sqs_codec_test` replays every
+    recorded request: JSON ones validate, query ones decode to exactly the
+    JSON body botocore built them from. The replay showed that clients put
+    message system attribute names in ReceiveMessage's `AttributeNames`,
+    whose model enum lists queue attributes only, so that member is
+    checked as a string list and left to the handler. The action table,
+    each operation's authorizing action and the static-key roles are
+    generated from AWS's service reference; ReceiveMessage counts as a
+    write (it is a committed entry) and is outside read-only. The
+    compatibility profile covers every switch of 2.3. Left for the gateway
+    half: the HTTP surface, SigV4, authorization with queue policies, and
+    static keys.
 
 - [ ] 4. Queue and message API
   - Queue operations; send, receive, delete, visibility and batches;
