@@ -236,11 +236,18 @@ DynamoDB's Raft logs. It reports the Raft log files that hold values.
 - **Quotas.** AWS's per-account quotas, counted on each member at the
   account's rate divided by the members, so a client bursting to every
   member at once can briefly exceed a quota by up to the member count.
-- **Rotation and deletion.** The catalog's leader runs the jobs every
-  `KYTHIRA_KMS_JOB_INTERVAL_MS`: scheduled rotation, deletion at the end of
-  the waiting period (destroying every backing key), settling keys a dead
-  leader left `Creating`, and sweeping backing keys no key accounts for
-  after `KYTHIRA_KMS_GRACE_MS`.
+- **Rotation and deletion.** One member, the holder of the job lease (a
+  catalog record), runs the jobs every `KYTHIRA_KMS_JOB_INTERVAL_MS`:
+  scheduled rotation, deletion at the end of the waiting period
+  (destroying every backing key), settling keys a failed creation left
+  `Creating`, and sweeping backing keys no key accounts for after
+  `KYTHIRA_KMS_GRACE_MS`. Only a member that reaches its HSM token takes
+  the lease; each pass renews it, and it lasts `KYTHIRA_KMS_JOB_LEASE_MS`
+  (default 30 s, or three job intervals if longer), which is how long the
+  jobs pause when the holder dies. A member that stops releases it, so
+  another takes over at its next pass. Every job write carries the lease's
+  fencing token, so a holder that stalled past its lease cannot commit a
+  step after another took over. `kythira_kms_job_lease_holder` is 1 on the holder.
 - **Losing members.** The catalog needs a majority to change keys.
   Cryptographic calls write nothing, but each first passes a read barrier
   through the catalog's leader (so a disabled key is never used from a

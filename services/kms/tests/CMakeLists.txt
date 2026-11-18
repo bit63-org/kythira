@@ -99,6 +99,13 @@ kythira_kms_test(kms_catalog_access_test kms_catalog_access_test.cpp)
 set_tests_properties(kms_catalog_access_test PROPERTIES
     LABELS "unit;kms;kms-module" TIMEOUT 120)
 
+# kms-independent-layers task 2, Requirements 5.1-5.3: the job lease in
+# the catalog (one holder, tokens, release) and fenced job commands,
+# including a stalled holder's jobs refused after a takeover.
+kythira_kms_test(kms_job_lease_test kms_job_lease_test.cpp)
+set_tests_properties(kms_job_lease_test PROPERTIES
+    LABELS "unit;kms;kms-module" TIMEOUT 120)
+
 # Task 5, Requirements 3.4, 4.1, 4.4, 4.5 and 9.2-9.4: two-step key
 # creation and the leader's jobs over an in-memory PKCS#11 backend, with
 # the scan of the catalog's log, engine and checkpoint for generated

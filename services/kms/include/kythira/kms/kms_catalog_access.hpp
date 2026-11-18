@@ -98,6 +98,9 @@ public:
 
     // -- What the jobs work from -------------------------------------------------
 
+    /// The job lease record (independent-layers task 2).
+    [[nodiscard]] virtual auto lease() const -> job_lease = 0;
+
     [[nodiscard]] virtual auto creating_keys() const -> std::vector<key_record> = 0;
     [[nodiscard]] virtual auto due_deletions(std::uint64_t now_ms) const
         -> std::vector<key_record> = 0;
@@ -225,6 +228,7 @@ public:
     [[nodiscard]] auto limits(std::string_view account) const -> account_limits override {
         return _replica->limits(account);
     }
+    [[nodiscard]] auto lease() const -> job_lease override { return _replica->lease(); }
     [[nodiscard]] auto creating_keys() const -> std::vector<key_record> override {
         return _replica->creating_keys();
     }

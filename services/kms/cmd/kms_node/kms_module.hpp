@@ -288,6 +288,7 @@ public:
                 std::this_thread::sleep_for(_opt.tick_interval);
             }
         });
+        _jobs_running = true;
         _jobs_thread = std::thread([this] { jobs_loop(); });
 
         https::server_config hc;
@@ -329,12 +330,17 @@ public:
         drain();
         {
             const std::scoped_lock lock(_jobs_mutex);
-            _driving.store(false, std::memory_order_release);
+            _jobs_running.store(false, std::memory_order_release);
         }
         _jobs_wake.notify_all();
         if (_jobs_thread.joinable()) {
             _jobs_thread.join();
         }
+        // While Raft still ticks: a proposal's commit timeout is checked on
+        // the tick, so with the driver stopped a release that cannot
+        // commit (the last member stopping) would wait forever.
+        release_lease();
+        _driving.store(false, std::memory_order_release);
         if (_driver.joinable()) {
             _driver.join();
         }
@@ -397,6 +403,7 @@ public:
         const std::scoped_lock lock(_report_mutex);
         std::vector<service_node::module_metric> mine{
             {"leader", _host->leads() ? 1.0 : 0.0, {}},
+            {"job_lease_holder", _lease_token.load() != 0 ? 1.0 : 0.0, {}},
             {"hsm_available", _hsm.load() == hsm_state::available ? 1.0 : 0.0, {}},
             {"job_passes", static_cast<double>(_passes), {}},
             {"keys_completed", static_cast<double>(_total.completed), {}},
@@ -634,11 +641,11 @@ private:
         return cfg;
     }
 
-    /// One pass every job_interval, on the leader only, once its replica
-    /// has applied everything committed (a new leader may lag).
+    /// One pass every job_interval; run_jobs_once decides whether this
+    /// member runs the jobs (the job lease).
     void jobs_loop() {
         std::unique_lock lock(_jobs_mutex);
-        while (_driving.load(std::memory_order_acquire)) {
+        while (_jobs_running.load(std::memory_order_acquire)) {
             lock.unlock();
             try {
                 run_jobs_once();
@@ -647,18 +654,25 @@ private:
             }
             lock.lock();
             _jobs_wake.wait_for(lock, _opt.job_interval,
-                                [this] { return !_driving.load(std::memory_order_acquire); });
+                                [this] { return !_jobs_running.load(std::memory_order_acquire); });
         }
     }
 
+    /// One pass of the background jobs, on the job lease's holder only
+    /// (kms-independent-layers task 2, Requirement 5.1): whichever member
+    /// that is, never by virtue of leading the catalog. Only a member that
+    /// can reach the HSM token asks for the lease, so a member with a
+    /// sealed or missing token never sits on it; one that loses the token
+    /// gives it up. Every job command is fenced with the lease's token.
     void run_jobs_once() {
-        if (!_host->leads() || !_access->barrier()) {
+        if (!bind_token()) {
+            release_lease();
+            return;
+        }
+        if (!take_lease()) {
             return;
         }
         apply_account_limits();
-        if (!bind_token()) {
-            return;
-        }
         if (!_jobs) {
             _catalog = _access->reader();
             if (!_catalog) {
@@ -670,7 +684,7 @@ private:
             }
             _jobs = std::make_unique<jobs_type>(
                 *_catalog, *_jobs_store,
-                [this](const std::vector<std::byte>& c) { return _access->propose(c); },
+                [this](const std::vector<std::byte>& c) { return propose_fenced(c); },
                 [] {
                     return static_cast<std::uint64_t>(
                         std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -696,8 +710,97 @@ private:
         _total.failures += r.failures;
     }
 
+    /// This member's name as a lease holder.
+    [[nodiscard]] auto lease_holder() const -> std::string {
+        return kythira::host_node_id_text(_opt.node_id);
+    }
+
+    /// Takes or renews the job lease (kms_catalog.hpp). True when this
+    /// member holds it, as read back from the catalog after the proposal.
+    /// A new tenure starts the jobs afresh: what they remembered between
+    /// passes (orphans seen once) belongs to the previous one.
+    [[nodiscard]] auto take_lease() -> bool {
+        const auto holder = lease_holder();
+        const auto now = now_ms();
+        // Another member's live lease in this replica: no proposal, so
+        // members that do not hold it write nothing every pass. The
+        // replica may lag, which only delays a takeover by a pass.
+        if (const auto mine = _access->reader()) {
+            if (const auto l = mine->lease();
+                !l.holder.empty() && l.holder != holder && now < l.expiry_ms) {
+                lose_lease();
+                return false;
+            }
+        }
+        kythira::kms::catalog_status s{};
+        try {
+            s = _access->propose(kythira::kms::make_acquire_lease_command(
+                holder, now, static_cast<std::uint64_t>(_opt.job_lease.count())));
+        } catch (const std::exception&) {
+            return false;  // no leader, or unknown: try at the next pass
+        }
+        if (s != kythira::kms::catalog_status::ok) {
+            lose_lease();  // another member holds it
+            return false;
+        }
+        const auto c = _access->consistent();
+        if (!c) {
+            return false;
+        }
+        const auto l = c->lease();
+        if (!l.held_by(holder, now)) {
+            lose_lease();
+            return false;
+        }
+        if (_lease_token.exchange(l.token) != l.token) {
+            _jobs.reset();
+            log(kythira::log_level::info,
+                "kms: holding the job lease, token " + std::to_string(l.token));
+        }
+        return true;
+    }
+
+    /// Forgets a lease another member now holds.
+    void lose_lease() {
+        if (_lease_token.exchange(0) != 0) {
+            _jobs.reset();
+            log(kythira::log_level::info, "kms: the job lease moved to another member");
+        }
+    }
+
+    /// Gives the lease up, best effort, so another member takes it now
+    /// rather than at expiry (a drain or stop, Requirement 10.2, or a lost
+    /// HSM token).
+    void release_lease() {
+        const auto token = _lease_token.exchange(0);
+        if (token == 0 || !_access) {
+            return;
+        }
+        _jobs.reset();
+        try {
+            (void)_access->propose(kythira::kms::make_release_lease_command(lease_holder(), token));
+            log(kythira::log_level::info, "kms: released the job lease");
+        } catch (const std::exception&) {
+            // It expires on its own.
+        }
+    }
+
+    /// A job's command, applied only while this member's lease token is
+    /// current; stale_lease otherwise, which the jobs count as a failure.
+    auto propose_fenced(const std::vector<std::byte>& command) -> kythira::kms::catalog_status {
+        const auto token = _lease_token.load();
+        if (token == 0) {
+            return kythira::kms::catalog_status::stale_lease;
+        }
+        const auto s = _access->propose(kythira::kms::make_fenced_command(token, command));
+        if (s == kythira::kms::catalog_status::stale_lease) {
+            _lease_token.store(0);  // the next pass asks again
+        }
+        return s;
+    }
+
     /// Writes the operator's key and alias limits (KYTHIRA_KMS_ACCOUNT_
-    /// LIMITS) where the catalog differs: every leader does, so a change
+    /// LIMITS) where the catalog differs: every lease holder does, so a change
     /// to the setting takes effect at the next pass after a restart.
     void apply_account_limits() {
         if (_opt.account_limits.empty()) {
@@ -712,8 +815,8 @@ private:
                 continue;
             }
             try {
-                const auto s = _access->propose(
-                    kythira::kms::make_set_account_limits_command(account, limits));
+                const auto s =
+                    propose_fenced(kythira::kms::make_set_account_limits_command(account, limits));
                 if (s != kythira::kms::catalog_status::ok) {
                     log(kythira::log_level::warning,
                         "kms: account limits for " + account + " were not written");
@@ -810,6 +913,8 @@ private:
     std::shared_ptr<kythira::kms::backing_store> _jobs_store;
     std::shared_ptr<const catalog_type> _catalog;
     std::unique_ptr<jobs_type> _jobs;
+    // The job lease's token while this member holds it, else 0.
+    std::atomic<std::uint64_t> _lease_token{0};
     // Who may call, the API and its listener.
     std::unique_ptr<authorizer_type> _authorizer;
     std::shared_ptr<service_node::iam_evaluator> _iam;
@@ -831,6 +936,7 @@ private:
     std::uint64_t _passes = 0;
     kythira::kms::job_report _total;
     std::atomic<bool> _driving{false};
+    std::atomic<bool> _jobs_running{false};
     std::thread _driver;
     std::mutex _jobs_mutex;
     std::condition_variable _jobs_wake;

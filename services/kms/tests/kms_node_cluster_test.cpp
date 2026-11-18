@@ -46,6 +46,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <optional>
 #include <random>
 #include <sstream>
 #include <string>
@@ -235,6 +236,55 @@ public:
     }
 
     void stop(std::size_t i) { stop(_members[i]); }
+
+    /// Member i's /metrics, served over TLS with the node's certificate
+    /// like the rest of its endpoint; nullopt when it does not answer.
+    [[nodiscard]] auto metrics_text(std::size_t i) const -> std::optional<std::string> {
+        httplib::SSLClient c("localhost", _members[i].metrics);
+        c.set_ca_cert_path(pki.ca_path());
+        c.enable_server_certificate_verification(true);
+        c.set_connection_timeout(2s);
+        c.set_read_timeout(5s);
+        const auto r = c.Get("/metrics");
+        if (!r || r->status != 200) {
+            return std::nullopt;
+        }
+        return r->body;
+    }
+
+    /// The running members whose /metrics say they hold the job lease.
+    [[nodiscard]] auto lease_holders() const -> std::vector<std::size_t> {
+        std::vector<std::size_t> out;
+        for (std::size_t i = 0; i < _members.size(); ++i) {
+            if (_members[i].pid <= 0) {
+                continue;
+            }
+            const auto text = metrics_text(i);
+            if (!text) {
+                continue;
+            }
+            std::istringstream in(*text);
+            for (std::string line; std::getline(in, line);) {
+                if (line == "kythira_kms_job_lease_holder 1") {
+                    out.push_back(i);
+                }
+            }
+        }
+        return out;
+    }
+
+    /// Waits until exactly one running member holds the job lease, and
+    /// answers which; nullopt after 30 s.
+    [[nodiscard]] auto await_one_lease_holder() const -> std::optional<std::size_t> {
+        const auto deadline = std::chrono::steady_clock::now() + 30s;
+        while (std::chrono::steady_clock::now() < deadline) {
+            if (const auto h = lease_holders(); h.size() == 1) {
+                return h[0];
+            }
+            std::this_thread::sleep_for(100ms);
+        }
+        return std::nullopt;
+    }
 
     /// Member i's log so far.
     [[nodiscard]] auto log_of(std::size_t i) const -> std::string {
@@ -546,6 +596,30 @@ BOOST_FIXTURE_TEST_CASE(two_members_carry_on_without_the_third, process_cluster)
     BOOST_REQUIRE_MESSAGE(d.status == 200, d.status << " " << d.str("__type"));
     BOOST_TEST(d.body.at("KeyMetadata").as_object().at("Description").as_string() ==
                "while 3 was away");
+}
+
+// kms-independent-layers task 2 (Requirements 5.1, 5.2 and 10.2): one
+// member holds the job lease, whichever leads the catalog; a member that
+// stops releases it and another takes it at its next pass, well before the
+// lease would have expired.
+BOOST_FIXTURE_TEST_CASE(one_member_runs_the_jobs_and_hands_them_over_on_stop, process_cluster) {
+    const auto first = await_one_lease_holder();
+    BOOST_REQUIRE_MESSAGE(first.has_value(), "no single job lease holder");
+    BOOST_TEST_MESSAGE("job lease holder: member " << *first + 1);
+    stop(*first);
+    const auto t0 = std::chrono::steady_clock::now();
+    const auto second = await_one_lease_holder();
+    BOOST_REQUIRE_MESSAGE(second.has_value(), "the job lease was not taken over");
+    BOOST_TEST(*second != *first);
+    // Released, not expired: the default lease is 30 s.
+    BOOST_TEST((std::chrono::steady_clock::now() - t0 < 20s));
+    start(*first);
+    wait_serving(*first);
+    // The member that came back does not take the lease from the holder.
+    std::this_thread::sleep_for(1s);
+    const auto now = lease_holders();
+    BOOST_TEST(now.size() == 1U);
+    BOOST_TEST((now.size() == 1U && now[0] == *second));
 }
 
 // Task 14: the operator's key and alias limits reach every member's

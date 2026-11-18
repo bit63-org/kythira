@@ -81,7 +81,7 @@ auto random_command(std::mt19937_64& rng, std::uint64_t& now) -> std::vector<std
     const auto acct = std::string(accounts[pick(2)]);
     const std::string alias = "alias/a" + std::to_string(pick(4));
     now += pick(10) * kms::k_ms_per_day;
-    switch (pick(16)) {
+    switch (pick(19)) {
         case 0:
         case 1: {
             kms::key_record k;
@@ -137,6 +137,17 @@ auto random_command(std::mt19937_64& rng, std::uint64_t& now) -> std::vector<std
             return pick(2) == 0 ? kms::make_create_grant_command(g)
                                 : kms::make_remove_grant_command(id, g.grant_id);
         }
+        // The job lease (kms-independent-layers task 2): holders race,
+        // release with right and wrong tokens, and fence other commands
+        // with tokens that are sometimes current.
+        case 16:
+            return kms::make_acquire_lease_command("m" + std::to_string(pick(3)), now,
+                                                   1 + (pick(3) * kms::k_ms_per_day));
+        case 17:
+            return kms::make_release_lease_command("m" + std::to_string(pick(3)), pick(4));
+        case 18:
+            return kms::make_fenced_command(pick(4),
+                                            kms::make_set_enabled_command(id, pick(2) == 0));
         default:
             return kms::make_set_account_limits_command(
                 acct, {static_cast<std::uint32_t>(pick(5)), static_cast<std::uint32_t>(pick(5))});
@@ -152,7 +163,7 @@ BOOST_AUTO_TEST_CASE(replicas_and_restored_snapshots_agree) {
         replica a;
         replica b;
         std::unique_ptr<replica> restored;
-        std::vector<int> statuses(6, 0);
+        std::vector<int> statuses(7, 0);
         for (std::uint64_t i = 1; i <= 400; ++i) {
             const auto c = random_command(rng, now);
             const auto ra = a.sm.apply(c, i);

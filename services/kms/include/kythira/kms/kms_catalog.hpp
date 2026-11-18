@@ -35,9 +35,26 @@
 //   data  ns "x" key-id                     tombstone (the account)
 //   data  ns "n" account                    the account's counts
 //   data  ns "l" account                    the account's limit overrides
+//   data  ns "J"                            the job lease
 //   meta  ns                                applied index
 //
 // A reply is one catalog_status byte.
+//
+// The job lease (.kiro/specs/kms-independent-layers/ task 2,
+// Requirements 5.1-5.3): rotation, deletion and the orphan sweep call the
+// HSM, so they run on one front end, the lease holder, not on the
+// catalog leader (a data node holds no HSM credentials). The lease is a
+// record with a holder, an expiry on the proposer's clock and a fencing
+// token. acquire_lease grants it when it is free, expired at the
+// command's now_ms, or already the proposer's (a renewal, same token); a
+// new holder gets the next token. A job command is sent fenced
+// (make_fenced_command): the token, then the command itself, and apply
+// refuses it with stale_lease unless the token is the current one and
+// the lease is held (not released). Commands carry no clock check: a
+// holder past its expiry with nobody taking over may still act, which is
+// safe because nobody else does. So a
+// holder that stalled past its expiry while another took over cannot
+// commit a stale step.
 
 #include <kythira/kms/kms_codec.hpp>
 #include <kythira/kms/kms_group.hpp>
@@ -140,6 +157,10 @@ enum class catalog_status : std::uint8_t {
     /// The request names something this catalog cannot do: a tombstoned
     /// id, a version out of order, an alias of another account's key.
     rejected = 5,
+    /// A fenced job command whose lease token is not the current one, or
+    /// a lease request while another holder's lease is live: the proposer
+    /// does not hold the job lease (independent-layers Requirement 5.2).
+    stale_lease = 6,
 };
 
 struct key_spec_info {
@@ -487,6 +508,25 @@ enum class catalog_command : std::uint8_t {
     create_grant = 16,
     remove_grant = 17,
     set_account_limits = 18,
+    acquire_lease = 19,
+    release_lease = 20,
+    /// A token, then a whole command after its format byte.
+    fenced = 21,
+};
+
+/// The job lease (independent-layers task 2). Token 0 means no holder ever.
+struct job_lease {
+    std::string holder;  ///< empty when released or never held
+    std::uint64_t token = 0;
+    std::uint64_t expiry_ms = 0;
+
+    auto operator==(const job_lease&) const -> bool = default;
+
+    /// Whether `who` holds it at `now_ms` by the record (the holder's own
+    /// view should keep a margin before expiry_ms).
+    [[nodiscard]] auto held_by(std::string_view who, std::uint64_t now_ms) const -> bool {
+        return !holder.empty() && holder == who && now_ms < expiry_ms;
+    }
 };
 
 namespace detail {
@@ -666,12 +706,53 @@ inline auto start(catalog_command c) -> byte_writer {
     return w.take();
 }
 
+/// Takes the job lease for `holder` until now_ms + duration_ms, or renews
+/// it; stale_lease while another holder's lease is live.
+[[nodiscard]] inline auto make_acquire_lease_command(std::string_view holder, std::uint64_t now_ms,
+                                                     std::uint64_t duration_ms)
+    -> std::vector<std::byte> {
+    auto w = detail::start(catalog_command::acquire_lease);
+    w.str(holder).u64(now_ms).u64(duration_ms);
+    return w.take();
+}
+
+/// Gives the lease up (a draining holder, Requirement 10.2), so another
+/// takes it at once rather than at expiry; stale_lease when `holder` with
+/// `token` no longer holds it.
+[[nodiscard]] inline auto make_release_lease_command(std::string_view holder, std::uint64_t token)
+    -> std::vector<std::byte> {
+    auto w = detail::start(catalog_command::release_lease);
+    w.str(holder).u64(token);
+    return w.take();
+}
+
+/// `command` applied only while `token` is the job lease's current token.
+/// The command follows the token as it is, without a length, so the
+/// format still has no byte field. A lease command cannot be fenced.
+[[nodiscard]] inline auto make_fenced_command(std::uint64_t token,
+                                              const std::vector<std::byte>& command)
+    -> std::vector<std::byte> {
+    if (command.size() < 2 || std::to_integer<std::uint8_t>(command[0]) != k_command_format) {
+        throw std::invalid_argument("make_fenced_command: not a catalog command");
+    }
+    const auto tag = static_cast<catalog_command>(std::to_integer<std::uint8_t>(command[1]));
+    if (tag == catalog_command::fenced || tag == catalog_command::acquire_lease ||
+        tag == catalog_command::release_lease) {
+        throw std::invalid_argument("make_fenced_command: a lease command is not fenced");
+    }
+    auto w = detail::start(catalog_command::fenced);
+    w.u64(token);
+    auto out = w.take();
+    out.insert(out.end(), command.begin() + 1, command.end());
+    return out;
+}
+
 [[nodiscard]] inline auto catalog_reply_status(const std::vector<std::byte>& reply)
     -> catalog_status {
     byte_reader r(reply);
     const auto v = r.u8();
     r.finish();
-    return detail::enum_in(v, catalog_status::ok, catalog_status::rejected);
+    return detail::enum_in(v, catalog_status::ok, catalog_status::stale_lease);
 }
 
 template<kythira::kv_engine Engine = kythira::memory_kv_engine, typename LogIndex = std::uint64_t>
@@ -692,7 +773,21 @@ public:
         if (r.u8() != k_command_format) {
             throw std::invalid_argument("kms_catalog_state_machine: unknown command format");
         }
-        const auto tag = static_cast<catalog_command>(r.u8());
+        auto tag = static_cast<catalog_command>(r.u8());
+        if (tag == catalog_command::fenced) {
+            const auto token = r.u64();
+            tag = static_cast<catalog_command>(r.u8());
+            if (tag == catalog_command::fenced || tag == catalog_command::acquire_lease ||
+                tag == catalog_command::release_lease) {
+                throw std::invalid_argument("kms_catalog_state_machine: a fenced lease command");
+            }
+            if (const auto l = lease(); token == 0 || token != l.token || l.holder.empty()) {
+                // The rest is not read: a stale holder's step changes
+                // nothing, whatever it was.
+                this->commit(batch, index);
+                return status_reply(catalog_status::stale_lease);
+            }
+        }
         catalog_status s = catalog_status::ok;
         switch (tag) {
             case catalog_command::create_key:
@@ -749,14 +844,18 @@ public:
             case catalog_command::set_account_limits:
                 s = apply_set_account_limits(r, batch);
                 break;
+            case catalog_command::acquire_lease:
+                s = apply_acquire_lease(r, batch);
+                break;
+            case catalog_command::release_lease:
+                s = apply_release_lease(r, batch);
+                break;
             default:
                 throw std::invalid_argument("kms_catalog_state_machine: unknown command");
         }
         r.finish();
         this->commit(batch, index);
-        byte_writer w;
-        w.u8(static_cast<std::uint8_t>(s));
-        return w.take();
+        return status_reply(s);
     }
 
     // -- Reads ---------------------------------------------------------------
@@ -894,7 +993,22 @@ public:
         return l;
     }
 
-    // -- What the leader's jobs work from (Requirement 3.4, 9.3, 9.4) ---------
+    /// The job lease as last written (independent-layers task 2).
+    [[nodiscard]] auto lease() const -> job_lease {
+        auto v = this->get("J");
+        if (!v) {
+            return {};
+        }
+        byte_reader r(*v);
+        job_lease l;
+        l.holder = r.str();
+        l.token = r.u64();
+        l.expiry_ms = r.u64();
+        r.finish();
+        return l;
+    }
+
+    // -- What the jobs work from (Requirement 3.4, 9.3, 9.4) ---------------------
 
     /// Keys still Creating: the orphan sweep finishes or destroys them.
     [[nodiscard]] auto creating_keys() const -> std::vector<key_record> {
@@ -1434,6 +1548,51 @@ private:
             return catalog_status::not_found;
         }
         erase(batch, grant_key(id, grant_id));
+        return catalog_status::ok;
+    }
+
+    [[nodiscard]] static auto status_reply(catalog_status s) -> std::vector<std::byte> {
+        byte_writer w;
+        w.u8(static_cast<std::uint8_t>(s));
+        return w.take();
+    }
+
+    auto put_lease(kythira::write_batch& batch, const job_lease& l) -> void {
+        byte_writer w;
+        w.str(l.holder).u64(l.token).u64(l.expiry_ms);
+        put(batch, "J", w.take_string());
+    }
+
+    auto apply_acquire_lease(byte_reader& r, kythira::write_batch& batch) -> catalog_status {
+        const auto holder = r.str();
+        const auto now_ms = r.u64();
+        const auto duration_ms = r.u64();
+        require(!holder.empty() && holder.size() <= 256, "lease holder");
+        require(duration_ms > 0 && now_ms <= UINT64_MAX - duration_ms, "lease duration");
+        auto l = lease();
+        if (l.holder != holder) {
+            if (!l.holder.empty() && now_ms < l.expiry_ms) {
+                return catalog_status::stale_lease;  // another holder's live lease
+            }
+            l.holder = holder;
+            ++l.token;
+        }
+        l.expiry_ms = now_ms + duration_ms;
+        put_lease(batch, l);
+        return catalog_status::ok;
+    }
+
+    auto apply_release_lease(byte_reader& r, kythira::write_batch& batch) -> catalog_status {
+        const auto holder = r.str();
+        const auto token = r.u64();
+        auto l = lease();
+        if (l.holder.empty() || l.holder != holder || l.token != token) {
+            return catalog_status::stale_lease;
+        }
+        // The token stays, so the next holder's is new.
+        l.holder.clear();
+        l.expiry_ms = 0;
+        put_lease(batch, l);
         return catalog_status::ok;
     }
 

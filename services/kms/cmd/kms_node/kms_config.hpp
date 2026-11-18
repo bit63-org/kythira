@@ -93,8 +93,12 @@ struct kms_options {
     /// may read.
     std::filesystem::path pin_file;
 
-    // -- The leader's key jobs --------------------------------------------------
+    // -- The key jobs, on the job lease's holder --------------------------------------------------
     std::chrono::milliseconds job_interval{10000};
+    /// How long the job lease lasts without renewal (every pass renews it):
+    /// how long jobs wait when its holder dies without releasing it.
+    /// Longer than job_interval.
+    std::chrono::milliseconds job_lease{30000};
     /// How long a Creating key or an unaccounted backing key is left alone
     /// before the jobs settle it.
     std::chrono::milliseconds grace{std::chrono::minutes(5)};
