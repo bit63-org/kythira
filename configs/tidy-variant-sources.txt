@@ -96,6 +96,7 @@ rocksdb services/kms/cmd/kms_node/kms_config.cpp
 rocksdb services/kms/cmd/kms_node/kms_module_registrar.cpp
 rocksdb services/kms/cmd/kms_node/main.cpp
 rocksdb services/kms/tests/kms_node_cluster_test.cpp
+rocksdb services/kms/tests/kms_node_config_test.cpp
 rocksdb services/kms/tests/kythira_node_kms_test.cpp
 rocksdb services/kms/tests/kms_backing_softhsm_test.cpp
 rocksdb services/iam/tests/kythira_node_kms_kinesis_test.cpp

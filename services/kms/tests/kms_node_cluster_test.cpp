@@ -19,6 +19,10 @@
 //   * boto3, the AWS CLI v2 and the AWS Encryption SDK work against the
 //     cluster, their calls spread over its members (task 18,
 //     clients/kms_clients.py).
+//   * independent layers (.kiro/specs/kms-independent-layers/ task 3):
+//     three data nodes and two front ends with gateways, where only the
+//     front ends serve the API, hold the HSM PIN and run the jobs, and
+//     only the data nodes serve the catalog.
 
 #define BOOST_TEST_MODULE kms_node_cluster_test
 
@@ -97,6 +101,8 @@ auto identity(std::size_t i) -> std::string {
 }
 
 struct member {
+    /// KYTHIRA_KMS_ROLES; empty for the default (every layer).
+    std::string roles;
     std::uint16_t raft = 0;
     std::uint16_t api = 0;
     std::uint16_t metrics = 0;
@@ -115,10 +121,20 @@ struct answer {
     }
 };
 
-/// Three kms_node processes on loopback.
+/// Whether a member with KYTHIRA_KMS_ROLES `roles` runs `role`.
+auto runs(const std::string& roles, std::string_view role) -> bool {
+    if (roles.empty()) {
+        return true;
+    }
+    std::string padded = "," + roles + ",";
+    return padded.find("," + std::string(role) + ",") != std::string::npos;
+}
+
+/// kms_node processes on loopback: three co-located members unless
+/// `roles` says otherwise (one entry per member).
 class process_cluster {
 public:
-    process_cluster() {
+    explicit process_cluster(std::vector<std::string> roles = {"", "", ""}) {
         std::random_device rd;
         _dir = fs::temp_directory_path() / ("kythira-kms-cluster-" + std::to_string(rd()));
         fs::create_directories(_dir / "tokens");
@@ -135,9 +151,10 @@ public:
                           " --init-token --free --label kms --so-pin 1234 --pin 5678 >/dev/null";
         BOOST_REQUIRE_EQUAL(std::system(init.c_str()), 0);  // NOLINT(concurrency-mt-unsafe)
 
-        const auto base = kythira::testing::free_port_block(9);
-        for (std::size_t i = 0; i < 3; ++i) {
+        const auto base = kythira::testing::free_port_block(3 * roles.size());
+        for (std::size_t i = 0; i < roles.size(); ++i) {
             member m;
+            m.roles = roles[i];
             const auto b = static_cast<std::uint16_t>(base + 3 * i);
             m.raft = b;
             m.api = b + 1;
@@ -181,12 +198,17 @@ public:
             const auto* const sep = q == 0 ? "" : ",";
             const auto id = std::to_string(q + 1);
             peers += sep + id + "=127.0.0.1:" + std::to_string(_members[q].raft);
-            urls += sep + id + "=https://localhost:" + std::to_string(_members[q].api);
+            // The catalog's members: the data nodes. Every node's identity
+            // is admitted, so data nodes serve the front ends.
+            if (runs(_members[q].roles, "data")) {
+                urls += std::string(urls.empty() ? "" : ",") + id +
+                        "=https://localhost:" + std::to_string(_members[q].api);
+            }
             identities += sep + identity(q);
         }
         const auto dir = _dir / ("node-" + std::to_string(i + 1));
         fs::create_directories(dir);
-        const std::vector<std::string> env{
+        std::vector<std::string> env{
             "KYTHIRA_NODE_ID=" + std::to_string(i + 1),
             "KYTHIRA_NODE_DATA_DIR=" + (dir / "data").string(),
             "KYTHIRA_NODE_PEERS=" + peers,
@@ -204,13 +226,18 @@ public:
             "KYTHIRA_KMS_AUTH=static",
             "KYTHIRA_KMS_STATIC_KEYS_FILE=" + (_dir / "keys").string(),
             std::string("KYTHIRA_KMS_PKCS11=") + KYTHIRA_SOFTHSM2_LIBRARY,
-            "KYTHIRA_KMS_PIN_FILE=" + (_dir / "pin").string(),
             // Task 14: an operator's alias limit, written by the leader.
             "KYTHIRA_KMS_ACCOUNT_LIMITS=" + std::string(k_account) + "=100:3",
             "KYTHIRA_KMS_JOB_INTERVAL_MS=200",
             "SOFTHSM2_CONF=" + (_dir / "softhsm2.conf").string(),
             "PATH=/usr/bin:/bin",
         };
+        if (!m.roles.empty()) {
+            env.push_back("KYTHIRA_KMS_ROLES=" + m.roles);
+        }
+        if (runs(m.roles, "front_end")) {  // the only layer holding the PIN
+            env.push_back("KYTHIRA_KMS_PIN_FILE=" + (_dir / "pin").string());
+        }
         const auto log = (dir / "node.log").string();
         const pid_t pid = ::fork();
         BOOST_REQUIRE(pid >= 0);
@@ -328,10 +355,27 @@ public:
     }
 
     /// A peer request on member i presenting `cert` (none when null).
-    auto peer(std::size_t i, const kythira::kms::test::test_pki::files* cert) -> int {
+    auto peer(std::size_t i, const kythira::kms::test::test_pki::files* cert,
+              const std::string& path = "/v1/kms/peer/read-index", const std::string& body = {})
+        -> int {
         auto cli = client(i, cert);
-        const auto res = cli->Post("/v1/kms/peer/read-index", "", "application/octet-stream");
+        const auto res = cli->Post(path, body, "application/octet-stream");
         return res ? res->status : -1;
+    }
+
+    /// Member i's metric `name` from /metrics; nullopt when the member
+    /// does not report it (an endpoint that does not answer fails the test).
+    [[nodiscard]] auto metric(std::size_t i, std::string_view name) const -> std::optional<double> {
+        const auto text = metrics_text(i);
+        BOOST_REQUIRE_MESSAGE(text.has_value(), "member " << i + 1 << ": no /metrics");
+        std::istringstream in(*text);
+        const auto prefix = "kythira_kms_" + std::string(name) + " ";
+        for (std::string line; std::getline(in, line);) {
+            if (line.starts_with(prefix)) {
+                return std::stod(line.substr(prefix.size()));
+            }
+        }
+        return std::nullopt;
     }
 
     [[nodiscard]] auto stranger() const -> const kythira::kms::test::test_pki::files& {
@@ -658,4 +702,74 @@ BOOST_FIXTURE_TEST_CASE(account_limits_and_quotas_apply, process_cluster) {
     }
     BOOST_TEST(throttled > 0U);
     BOOST_TEST(call(1, "DescribeKey", R"({"KeyId":")" + id + R"("})").status == 200);
+}
+
+namespace {
+
+/// kms-independent-layers task 3: three data nodes and two front ends
+/// with gateways (members 4 and 5), none of them co-located.
+struct split_cluster : process_cluster {
+    split_cluster()
+        : process_cluster({"data", "data", "data", "gateway,front_end", "gateway,front_end"}) {}
+};
+
+constexpr std::size_t k_front_end_a = 3;
+constexpr std::size_t k_front_end_b = 4;
+
+}  // namespace
+
+// Requirements 2.1-2.3 and 3.3: front ends without a replica answer as
+// co-located members do; only data nodes hold the catalog, and only front
+// ends serve clients, hold the PIN and run the jobs.
+BOOST_FIXTURE_TEST_CASE(front_ends_without_a_replica_serve_the_api, split_cluster) {
+    const auto r = call(k_front_end_a, "CreateKey", R"({"Description":"split"})");
+    BOOST_REQUIRE_MESSAGE(r.status == 200, r.status << " " << r.str("__type"));
+    const auto id = std::string(r.body.at("KeyMetadata").as_object().at("KeyId").as_string());
+    const auto d = call(k_front_end_b, "DescribeKey", R"({"KeyId":")" + id + R"("})");
+    BOOST_REQUIRE_MESSAGE(d.status == 200, d.status << " " << d.str("__type"));
+    BOOST_TEST(d.body.at("KeyMetadata").as_object().at("Description").as_string() == "split");
+    const auto e =
+        call(k_front_end_a, "Encrypt", R"({"KeyId":")" + id + R"(","Plaintext":"c2VjcmV0"})");
+    BOOST_REQUIRE_MESSAGE(e.status == 200, e.status << " " << e.str("__type"));
+    const auto p = call(k_front_end_b, "Decrypt",
+                        R"({"CiphertextBlob":")" + e.str("CiphertextBlob") + R"("})");
+    BOOST_REQUIRE_MESSAGE(p.status == 200, p.status << " " << p.str("__type"));
+    BOOST_TEST(p.str("Plaintext") == "c2VjcmV0");
+
+    // Data nodes run no gateway; front ends hold no catalog.
+    const std::string read_index(1, '\x01');  // catalog API version 1
+    for (std::size_t i = 0; i < 3; ++i) {
+        BOOST_TEST(call(i, "ListKeys", "{}").status == 404, "data node " << i + 1);
+        BOOST_TEST(peer(i, &tls(k_front_end_a), "/v1/kms/catalog/read-index", read_index) == 200,
+                   "data node " << i + 1 << ", a front end");
+        BOOST_TEST(peer(i, &stranger(), "/v1/kms/catalog/read-index", read_index) == 403,
+                   "data node " << i + 1 << ", a stranger");
+    }
+    for (const auto f : {k_front_end_a, k_front_end_b}) {
+        BOOST_TEST(peer(f, &tls(0), "/v1/kms/catalog/read-index", read_index) == 404);
+        BOOST_TEST(peer(f, &tls(0)) == 404);
+        BOOST_TEST(log_of(f).find("roles=gateway,front_end data_nodes=3") != std::string::npos);
+    }
+
+    // The job lease goes to a front end; data nodes report no jobs, and
+    // front ends no catalog leadership.
+    const auto holder = await_one_lease_holder();
+    BOOST_REQUIRE_MESSAGE(holder.has_value(), "no single job lease holder");
+    BOOST_TEST(*holder >= k_front_end_a);
+    for (std::size_t i = 0; i < 3; ++i) {
+        BOOST_TEST(!metric(i, "job_lease_holder").has_value(), "data node " << i + 1);
+        BOOST_TEST(metric(i, "leader").has_value(), "data node " << i + 1);
+        BOOST_TEST(log_of(i).find("roles=data members=3") != std::string::npos);
+        BOOST_TEST(log_of(i).find("pkcs11=") == std::string::npos);
+    }
+    BOOST_TEST(!metric(k_front_end_a, "leader").has_value());
+
+    // A data node away: the front ends reach the other two.
+    stop(0);
+    const auto k = call(k_front_end_b, "CreateKey", R"({"Description":"while 1 was away"})");
+    BOOST_REQUIRE_MESSAGE(k.status == 200, k.status << " " << k.str("__type"));
+    const auto kid = std::string(k.body.at("KeyMetadata").as_object().at("KeyId").as_string());
+    BOOST_TEST(call(k_front_end_a, "DescribeKey", R"({"KeyId":")" + kid + R"("})").status == 200);
+    start(0);
+    wait_serving(0);
 }

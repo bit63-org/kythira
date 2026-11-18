@@ -13,6 +13,7 @@
 #include "kms_api_fixture.hpp"
 
 #include <atomic>
+#include <chrono>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -347,4 +348,109 @@ BOOST_AUTO_TEST_CASE(an_unreachable_catalog_answers_internal_error_not_not_found
 
     flaky.down = false;
     BOOST_TEST(call("DescribeKey", kid(id)).status == 200U);
+}
+
+namespace {
+
+/// Counts the barriers that reach the catalog; `fail` makes them fail.
+class counting_access final : public kms::kms_catalog_access {
+public:
+    explicit counting_access(kms::kms_catalog_access& inner) : _inner(&inner) {}
+    int barriers = 0;
+    bool fail = false;
+
+    auto barrier() -> bool override {
+        ++barriers;
+        return !fail && _inner->barrier();
+    }
+    [[nodiscard]] auto reader() const -> std::shared_ptr<const reader_t> override {
+        return _inner->reader();
+    }
+    auto propose(const std::vector<std::byte>& c) -> kms::catalog_status override {
+        return _inner->propose(c);
+    }
+
+private:
+    kms::kms_catalog_access* _inner;
+};
+
+}  // namespace
+
+// independent-layers Requirement 4.2: KYTHIRA_KMS_BOUNDED_STALENESS_MS.
+// Off, every barrier is a read-index round; on, a round at most the bound
+// old serves, a failed round is never covered beyond the bound
+// (Requirement 4.3), and a proposal forces the next round.
+BOOST_AUTO_TEST_CASE(bounded_staleness_reuses_a_recent_read_index_point_only) {
+    using namespace std::chrono_literals;
+    fixture f;
+    counting_access counted(f.access);
+    auto now = std::chrono::steady_clock::time_point{} + 1h;
+    const auto clock = [&now] { return now; };
+
+    kms::bounded_staleness_access off(counted, 0ms, clock);
+    BOOST_TEST(off.barrier());
+    BOOST_TEST(off.barrier());
+    BOOST_TEST(counted.barriers == 2);
+
+    counted.barriers = 0;
+    kms::bounded_staleness_access on(counted, 100ms, clock);
+    BOOST_TEST(on.bound().count() == 100);
+    BOOST_TEST(on.barrier());
+    now += 50ms;
+    BOOST_TEST(on.barrier());
+    BOOST_TEST(on.consistent() != nullptr);
+    BOOST_TEST(counted.barriers == 1);
+    now += 50ms;  // the bound has passed
+    BOOST_TEST(on.barrier());
+    BOOST_TEST(counted.barriers == 2);
+
+    // The catalog unreachable: answered from the last point only within
+    // the bound, then refused every time until a round succeeds.
+    counted.fail = true;
+    now += 99ms;
+    BOOST_TEST(on.barrier());
+    BOOST_TEST(counted.barriers == 2);
+    now += 1ms;
+    BOOST_TEST(!on.barrier());
+    BOOST_TEST(!on.barrier());
+    BOOST_TEST(on.consistent() == nullptr);
+    BOOST_TEST(counted.barriers == 5);
+    counted.fail = false;
+    BOOST_TEST(on.barrier());
+    BOOST_TEST(counted.barriers == 6);
+
+    // A proposal through it forgets the point: this front end reads its
+    // own writes.
+    const auto id = f.create();
+    BOOST_TEST((on.propose(kms::make_set_enabled_command(id, false)) == kms::catalog_status::ok));
+    BOOST_TEST(on.barrier());
+    BOOST_TEST(counted.barriers == 7);
+    BOOST_TEST((on.reader()->key(id)->state == kms::key_state::disabled));
+
+    BOOST_CHECK_THROW(kms::bounded_staleness_access(counted, -1ms, clock), std::invalid_argument);
+    BOOST_CHECK_THROW(kms::bounded_staleness_access(counted, 1ms, {}), std::invalid_argument);
+}
+
+// The handlers over the switch: a key disabled through this front end
+// refuses Encrypt at once, however large the bound.
+BOOST_AUTO_TEST_CASE(a_front_end_with_bounded_staleness_sees_its_own_writes) {
+    fixture f;
+    const auto id = f.create();
+    kms::bounded_staleness_access stale(f.access, std::chrono::hours(1));
+    kms::front_end<test_authorizer> fe{fixture::config(), f.auth};
+    auto deps = kms::api_deps<reader_t>{.clock_ms = [&f] { return f.now; }};
+    kms::fill_catalog_deps(deps, stale);
+    kms::key_management_api<reader_t> api{deps};
+    kms::crypto_deps<reader_t> cdeps{.hsm = [&f] { return f.hsm; }};
+    kms::fill_catalog_deps(cdeps, stale);
+    kms::crypto_api<reader_t> crypto{cdeps};
+    api.register_on(fe);
+    crypto.register_on(fe);
+    const auto call = [&](std::string_view op, const std::string& body) {
+        return fixture::answer(fe.handle(sign(request(op, body), "AKIDADMIN")));
+    };
+    const auto encrypt = R"({"KeyId":")" + id + R"(","Plaintext":"aGVsbG8="})";
+    BOOST_TEST(call("Encrypt", encrypt).status == 200U);
+    BOOST_TEST(call("DisableKey", kid(id)).status == 200U);
+    BOOST_TEST(call("Encrypt", encrypt).type() == "DisabledException");
 }

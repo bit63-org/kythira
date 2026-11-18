@@ -154,6 +154,7 @@ public:
     /// (kms_catalog_access.hpp), whatever the node's layout.
     using catalog_type = kythira::kms::kms_catalog_reader;
     using access_type = kythira::kms::local_catalog_access<replica_type>;
+    using role = kythira::layers::role;
     using jobs_type = kythira::kms::key_jobs<catalog_type>;
     using authorizer_type = kythira::aws_auth::static_or_iam_authorizer;
     using front_end_type = kythira::kms::front_end<authorizer_type>;
@@ -180,6 +181,9 @@ public:
         -> std::optional<std::string> override {
         try {
             _opt = from_env(composite_env(service_node::module_tuning(env, "KYTHIRA_KMS_")));
+            if (!runs(role::front_end)) {
+                return std::nullopt;  // no handlers: no HSM client, no authorizer
+            }
             if (_opt.pkcs11 == co_located_hsm && !service_node::co_located(env, "hsm")) {
                 return std::string(
                     "KYTHIRA_KMS_PKCS11=hsm needs the HSM co-located (KYTHIRA_SERVICES naming "
@@ -207,92 +211,53 @@ public:
     }
 
     void register_groups(Host& host, const service_node::group_space& space) override {
-        for (const auto* sub : {"engine", "raft", "snapshots"}) {
-            std::filesystem::create_directories(_opt.data_dir / sub);
+        if (runs(role::data)) {
+            open_catalog(host, space);
+            _access = _local.get();
+        } else {
+            open_remote_catalog();
+            _access = _remote.get();
         }
-        _ctx = kms_host::make_context();
-        _raft = std::make_unique<raft_host>(make_raft_config(host, space));
-        typename kms_host::options hopts;
-        for (const auto& [id, url] : _opt.api_urls) {
-            hopts.members.push_back(id);
+        if (runs(role::front_end)) {
+            _handler_access = std::make_unique<kythira::kms::bounded_staleness_access>(
+                *_access, _opt.bounded_staleness);
+            build_api();
         }
-        hopts.group = space.to_host(0);
-        hopts.propose_timeout = _opt.propose_timeout;
-        if (_opt.api_urls.size() > 1) {
-            kythira::mtls::client_config pc;
-            pc.cert_path = _opt.tls_cert;
-            pc.key_path = _opt.tls_key;
-            pc.ca_path = _opt.client_ca;
-            pc.plaintext = _opt.insecure_plaintext;
-            // A forwarded proposal waits for its commit.
-            pc.timeout = _opt.propose_timeout + std::chrono::seconds(2);
-            _peers = std::make_shared<const kythira::kms::peer_client>(pc);
-            hopts.forward.propose = [this](const kythira::host_node_id& leader,
-                                           const std::vector<std::byte>& cmd) {
-                return from_peer(_peers->propose(url_of(leader), cmd));
-            };
-            hopts.forward.read_index = [this](const kythira::host_node_id& leader) {
-                return from_peer(_peers->read_index(url_of(leader)));
-            };
-        }
-        _peer_policy.identities = _opt.peer_identities;
-        _peer_policy.allow_plaintext = _opt.insecure_plaintext;
-        _host = std::make_unique<kms_host>(*_raft, _ctx, hopts);
-        _host->bootstrap();
-        _access = std::make_unique<access_type>(access_type::over_host(*_host));
-        _catalog_server = kythira::kms::catalog_server_over(*_host, *_access);
-        build_api();
     }
 
     /// kms.client: co-located consumers' calls for their callers, through
-    /// the same front end as the listener (kms_in_process.hpp).
+    /// the same front end as the listener (kms_in_process.hpp). Front ends
+    /// only (Requirement 8.1).
     void publish(service_node::module_registry& registry) override {
-        registry.publish<service_node::kms_endpoint>(
-            std::string(service_node::interface_names::kms_client), _client);
+        if (_client) {
+            registry.publish<service_node::kms_endpoint>(
+                std::string(service_node::interface_names::kms_client), _client);
+        }
     }
 
     void start(service_node::module_registry& registry) override {
-        if (_opt.auth != kythira::aws_auth::auth_mode::static_keys) {
-            // IAM starts first (starts_after), so its evaluator answers
-            // before the listener opens.
-            _iam = registry.lookup<service_node::iam_evaluator>(
-                std::string(service_node::interface_names::iam_evaluator));
-            if (!_iam) {
-                throw std::invalid_argument(
-                    "KYTHIRA_KMS_AUTH=iam or both: the IAM module publishes no evaluator");
-            }
-            _iam->add_actions(kythira::kms::kms_actions());
-            _authorizer->set_mode(_opt.auth, _iam->hooks());
-            if (const auto clash = _authorizer->conflicting_keys(); !clash.empty()) {
-                throw std::invalid_argument(
-                    "KYTHIRA_KMS_AUTH=both: IAM also has the static access key " + clash.front());
-            }
+        if (runs(role::front_end)) {
+            bind_front_end(registry);
         }
-        if (_opt.pkcs11 == co_located_hsm) {
-            auto provider = registry.lookup<service_node::pkcs11_provider>(
-                std::string(service_node::interface_names::hsm_pkcs11));
-            if (!provider) {
-                throw std::invalid_argument(
-                    "KYTHIRA_KMS_PKCS11=hsm: the HSM module publishes no hsm.pkcs11");
-            }
-            _backend = provider->backend_for(_opt.pkcs11_identity);
-        } else {
-            _backend = std::make_shared<kythira::pkcs11::function_list_backend>(_opt.pkcs11);
-        }
-        _raft->start();
         _driving = true;
-        _driver = std::thread([this] {
-            while (_driving.load(std::memory_order_acquire)) {
-                try {
-                    (void)_raft->tick();
-                } catch (const std::exception& e) {
-                    log(kythira::log_level::error, std::string("kms: tick failed: ") + e.what());
+        if (_raft) {
+            _raft->start();
+            _driver = std::thread([this] {
+                while (_driving.load(std::memory_order_acquire)) {
+                    try {
+                        (void)_raft->tick();
+                    } catch (const std::exception& e) {
+                        log(kythira::log_level::error,
+                            std::string("kms: tick failed: ") + e.what());
+                    }
+                    std::this_thread::sleep_for(_opt.tick_interval);
                 }
-                std::this_thread::sleep_for(_opt.tick_interval);
-            }
-        });
-        _jobs_running = true;
-        _jobs_thread = std::thread([this] { jobs_loop(); });
+            });
+        }
+        if (runs(role::front_end)) {
+            _jobs_running = true;
+            _jobs_thread = std::thread([this] { jobs_loop(); });
+        }
 
         https::server_config hc;
         hc.bind_address = _opt.api_bind;
@@ -315,11 +280,17 @@ public:
         _server->start();
         _started = true;
         std::cout << "kms " << kythira::host_node_id_text(_opt.node_id)
-                  << " ready: members=" << _opt.api_urls.size() << " api=" << _server->port()
-                  << (_opt.insecure_plaintext ? " (http)" : " (https)")
-                  << " auth=" << auth_name(_opt.auth) << " pkcs11="
-                  << (_opt.pkcs11 == co_located_hsm ? std::string("hsm (co-located)") : _opt.pkcs11)
-                  << " token=" << _opt.token_label << std::endl;
+                  << " ready: roles=" << _opt.roles.to_string()
+                  << (runs(role::data) ? " members=" : " data_nodes=") << _opt.api_urls.size()
+                  << " api=" << _server->port()
+                  << (_opt.insecure_plaintext ? " (http)" : " (https)");
+        if (runs(role::front_end)) {
+            std::cout << " auth=" << auth_name(_opt.auth) << " pkcs11="
+                      << (_opt.pkcs11 == co_located_hsm ? std::string("hsm (co-located)")
+                                                        : _opt.pkcs11)
+                      << " token=" << _opt.token_label;
+        }
+        std::cout << std::endl;
     }
 
     /// No request in flight once the listener has stopped.
@@ -369,7 +340,11 @@ public:
         }
         _backend.reset();
         _catalog_server = {};
-        _access.reset();
+        _handler_access.reset();
+        _access = nullptr;
+        _remote.reset();
+        _catalog_client.reset();
+        _local.reset();
         _host.reset();
         _raft.reset();
         _started = false;
@@ -395,39 +370,144 @@ public:
     }
 
     [[nodiscard]] auto metrics() const -> std::vector<service_node::module_metric> override {
-        if (!_host || !_raft) {
+        if (!_started) {
             return {};
         }
-        const auto s = _host->stats();
         auto out = _audit ? _audit->metrics() : std::vector<service_node::module_metric>{};
         if (_quotas) {
             const auto q = _quotas->metrics();
             out.insert(out.end(), q.begin(), q.end());
         }
-        const std::scoped_lock lock(_report_mutex);
         std::vector<service_node::module_metric> mine{
-            {"leader", _host->leads() ? 1.0 : 0.0, {}},
-            {"job_lease_holder", _lease_token.load() != 0 ? 1.0 : 0.0, {}},
-            {"hsm_available", _hsm.load() == hsm_state::available ? 1.0 : 0.0, {}},
-            {"job_passes", static_cast<double>(_passes), {}},
-            {"keys_completed", static_cast<double>(_total.completed), {}},
-            {"keys_abandoned", static_cast<double>(_total.abandoned), {}},
-            {"keys_rotated", static_cast<double>(_total.rotated), {}},
-            {"keys_deleted", static_cast<double>(_total.deleted), {}},
-            {"orphans_destroyed", static_cast<double>(_total.orphans_destroyed), {}},
-            {"job_failures", static_cast<double>(_total.failures), {}},
-            {"proposals_forwarded", static_cast<double>(s.proposals_forwarded), {}},
-            {"proposals_served", static_cast<double>(s.proposals_served), {}},
-            {"split_merge_vetoes", static_cast<double>(s.split_merge_vetoes), {}},
-            {"raft_term_sum", service_node::raft_term_sum(*_raft), {}},
             {"requests", static_cast<double>(_requests.load()), {}},
             {"peer_requests", static_cast<double>(_peer_requests.load()), {}},
         };
+        if (_host && _raft) {  // data
+            const auto s = _host->stats();
+            const std::vector<service_node::module_metric> data{
+                {"leader", _host->leads() ? 1.0 : 0.0, {}},
+                {"proposals_forwarded", static_cast<double>(s.proposals_forwarded), {}},
+                {"proposals_served", static_cast<double>(s.proposals_served), {}},
+                {"split_merge_vetoes", static_cast<double>(s.split_merge_vetoes), {}},
+                {"raft_term_sum", service_node::raft_term_sum(*_raft), {}},
+            };
+            mine.insert(mine.end(), data.begin(), data.end());
+        }
+        if (runs(role::front_end)) {
+            const std::scoped_lock lock(_report_mutex);
+            const std::vector<service_node::module_metric> front_end{
+                {"job_lease_holder", _lease_token.load() != 0 ? 1.0 : 0.0, {}},
+                {"hsm_available", _hsm.load() == hsm_state::available ? 1.0 : 0.0, {}},
+                {"job_passes", static_cast<double>(_passes), {}},
+                {"keys_completed", static_cast<double>(_total.completed), {}},
+                {"keys_abandoned", static_cast<double>(_total.abandoned), {}},
+                {"keys_rotated", static_cast<double>(_total.rotated), {}},
+                {"keys_deleted", static_cast<double>(_total.deleted), {}},
+                {"orphans_destroyed", static_cast<double>(_total.orphans_destroyed), {}},
+                {"job_failures", static_cast<double>(_total.failures), {}},
+            };
+            mine.insert(mine.end(), front_end.begin(), front_end.end());
+        }
         out.insert(out.end(), mine.begin(), mine.end());
         return out;
     }
 
 private:
+    [[nodiscard]] auto runs(role r) const -> bool { return _opt.roles.has(r); }
+
+    /// The client settings for calls to other nodes' listeners: the
+    /// listener's own certificate, presented as a client.
+    [[nodiscard]] auto node_client_config() const -> kythira::mtls::client_config {
+        kythira::mtls::client_config pc;
+        pc.cert_path = _opt.tls_cert;
+        pc.key_path = _opt.tls_key;
+        pc.ca_path = _opt.client_ca;
+        pc.plaintext = _opt.insecure_plaintext;
+        // A forwarded proposal waits for its commit.
+        pc.timeout = _opt.propose_timeout + std::chrono::seconds(2);
+        return pc;
+    }
+
+    /// The data role: this node's catalog replica and vote.
+    void open_catalog(Host& host, const service_node::group_space& space) {
+        for (const auto* sub : {"engine", "raft", "snapshots"}) {
+            std::filesystem::create_directories(_opt.data_dir / sub);
+        }
+        _ctx = kms_host::make_context();
+        _raft = std::make_unique<raft_host>(make_raft_config(host, space));
+        typename kms_host::options hopts;
+        for (const auto& [id, url] : _opt.api_urls) {
+            hopts.members.push_back(id);
+        }
+        hopts.group = space.to_host(0);
+        hopts.propose_timeout = _opt.propose_timeout;
+        if (_opt.api_urls.size() > 1) {
+            _peers = std::make_shared<const kythira::kms::peer_client>(node_client_config());
+            hopts.forward.propose = [this](const kythira::host_node_id& leader,
+                                           const std::vector<std::byte>& cmd) {
+                return from_peer(_peers->propose(url_of(leader), cmd));
+            };
+            hopts.forward.read_index = [this](const kythira::host_node_id& leader) {
+                return from_peer(_peers->read_index(url_of(leader)));
+            };
+        }
+        _peer_policy.identities = _opt.peer_identities;
+        _peer_policy.allow_plaintext = _opt.insecure_plaintext;
+        _host = std::make_unique<kms_host>(*_raft, _ctx, hopts);
+        _host->bootstrap();
+        _local = std::make_unique<access_type>(access_type::over_host(*_host));
+        _catalog_server = kythira::kms::catalog_server_over(*_host, *_local);
+    }
+
+    /// A front end without the data role: the catalog through the data
+    /// nodes' catalog API, nothing on disk.
+    void open_remote_catalog() {
+        std::vector<std::string> urls;
+        urls.reserve(_opt.api_urls.size());
+        for (const auto& [id, url] : _opt.api_urls) {
+            urls.push_back(url);
+        }
+        _catalog_client = std::make_shared<const kythira::mtls::client>(node_client_config());
+        _remote = std::make_unique<kythira::kms::remote_catalog_access>(
+            std::move(urls), [client = _catalog_client](std::string_view base_url,
+                                                        std::string_view target, std::string body) {
+                return client->request("POST", base_url, std::string(target), std::move(body),
+                                       "application/octet-stream", "kythira-kms-front-end");
+            });
+    }
+
+    /// The front end's dependencies on other modules: IAM's evaluator and
+    /// the PKCS#11 backend. Nothing else in the node holds an HSM client.
+    void bind_front_end(service_node::module_registry& registry) {
+        if (_opt.auth != kythira::aws_auth::auth_mode::static_keys) {
+            // IAM starts first (starts_after), so its evaluator answers
+            // before the listener opens.
+            _iam = registry.lookup<service_node::iam_evaluator>(
+                std::string(service_node::interface_names::iam_evaluator));
+            if (!_iam) {
+                throw std::invalid_argument(
+                    "KYTHIRA_KMS_AUTH=iam or both: the IAM module publishes no evaluator");
+            }
+            _iam->add_actions(kythira::kms::kms_actions());
+            _authorizer->set_mode(_opt.auth, _iam->hooks());
+            if (const auto clash = _authorizer->conflicting_keys(); !clash.empty()) {
+                throw std::invalid_argument(
+                    "KYTHIRA_KMS_AUTH=both: IAM also has the static access key " + clash.front());
+            }
+        }
+        if (_opt.pkcs11 == co_located_hsm) {
+            auto provider = registry.lookup<service_node::pkcs11_provider>(
+                std::string(service_node::interface_names::hsm_pkcs11));
+            if (!provider) {
+                throw std::invalid_argument(
+                    "KYTHIRA_KMS_PKCS11=hsm: the HSM module publishes no hsm.pkcs11");
+            }
+            _backend = provider->backend_for(_opt.pkcs11_identity);
+        } else {
+            _backend = std::make_shared<kythira::pkcs11::function_list_backend>(_opt.pkcs11);
+        }
+    }
+
     [[nodiscard]] static auto auth_name(kythira::aws_auth::auth_mode m) -> std::string_view {
         switch (m) {
             case kythira::aws_auth::auth_mode::static_keys:
@@ -500,6 +580,9 @@ private:
         _audit = std::make_unique<kythira::kms::request_audit>(_opt.audit, _opt.region);
         if (_opt.throttling) {
             auto q = _opt.quotas;
+            // Each member's share of the quotas. Front ends without a
+            // replica count the data nodes for now; the share over live
+            // front ends comes with the gateway apart (task 4).
             q.members = std::max<std::size_t>(_opt.api_urls.size(), 1);
             _quotas = std::make_shared<kythira::kms::request_quotas>(std::move(q));
             _front_end->set_quotas(_quotas);
@@ -508,13 +591,13 @@ private:
             [audit = _audit.get()](const kythira::kms::request_record& r) { audit->record(r); });
         _client = std::make_shared<client_type>(*_front_end);
         const auto propose = [this](const std::vector<std::byte>& c) {
-            return _access->propose(c);
+            return _handler_access->propose(c);
         };
         kythira::kms::api_deps<catalog_type> deps{
             .create_key = [this, propose](
                               kythira::kms::key_record k,
                               const kythira::kms::tag_map& tags) -> kythira::kms::key_result {
-                auto c = _access->reader();
+                auto c = _handler_access->reader();
                 auto hsm = store();
                 if (!c || !hsm) {
                     return {kythira::kms::key_outcome::unavailable,
@@ -527,7 +610,7 @@ private:
             .new_key_id = kythira::kms::random_key_id,
             .rotate = [this, propose](std::string_view id,
                                       kythira::kms::rotation_type t) -> kythira::kms::key_result {
-                auto c = _access->reader();
+                auto c = _handler_access->reader();
                 auto hsm = store();
                 if (!c || !hsm) {
                     return {kythira::kms::key_outcome::unavailable,
@@ -538,7 +621,7 @@ private:
             },
             .ensure_managed = {},
         };
-        kythira::kms::fill_catalog_deps(deps, *_access);
+        kythira::kms::fill_catalog_deps(deps, *_handler_access);
         // AWS managed keys on first use (kms_managed.hpp), through the same
         // CreateKey steps.
         kythira::kms::managed_deps<catalog_type> mdeps{
@@ -547,7 +630,7 @@ private:
             .partition = _opt.partition,
             .region = _opt.region,
         };
-        kythira::kms::fill_catalog_deps(mdeps, *_access);
+        kythira::kms::fill_catalog_deps(mdeps, *_handler_access);
         deps.ensure_managed = [mdeps](std::string_view account,
                                       const kythira::kms::managed_service& s) {
             return kythira::kms::ensure_managed_key(mdeps, account, s);
@@ -564,7 +647,7 @@ private:
             .ensure_managed = deps.ensure_managed,
             .ensure_owned = deps.ensure_owned,
         };
-        kythira::kms::fill_catalog_deps(cdeps, *_access);
+        kythira::kms::fill_catalog_deps(cdeps, *_handler_access);
         _crypto = std::make_unique<kythira::kms::crypto_api<catalog_type>>(cdeps);
         _signing = std::make_unique<kythira::kms::signing_api<catalog_type>>(cdeps);
         _api->register_on(*_front_end);
@@ -581,6 +664,10 @@ private:
         res.version(req.version());
         res.keep_alive(req.keep_alive());
         const std::string_view target(req.target().data(), req.target().size());
+        if (!_host &&
+            (kythira::kms::is_catalog_path(target) || kythira::kms::is_peer_path(target))) {
+            return refuse(res, http::status::not_found, "this node runs no KMS data layer");
+        }
         if (kythira::kms::is_catalog_path(target)) {
             // The data layer's catalog API (kms-independent-layers task 3)
             // for front ends without a replica. Until layer identities
@@ -611,6 +698,9 @@ private:
             res.prepare_payload();
             return res;
         }
+        if (!runs(role::gateway)) {
+            return refuse(res, http::status::not_found, "this node runs no KMS gateway");
+        }
         ++_requests;
         kythira::kms::front_end_request in;
         in.method = std::string(req.method_string());
@@ -631,6 +721,15 @@ private:
         res.body() = out.body;
         res.prepare_payload();
         return res;
+    }
+
+    [[nodiscard]] static auto refuse(https::response& res, boost::beast::http::status status,
+                                     std::string_view why) -> https::response {
+        res.result(status);
+        res.set(boost::beast::http::field::content_type, "text/plain");
+        res.body() = std::string(why);
+        res.prepare_payload();
+        return std::move(res);
     }
 
     auto make_raft_config(Host& host, const service_node::group_space& space) -> raft_config {
@@ -863,6 +962,9 @@ private:
         if (_store) {
             return true;
         }
+        if (!_backend) {
+            return false;  // not a front end, or not started
+        }
         std::optional<CK_SLOT_ID> slot;
         try {
             for (const auto& t : _backend->tokens()) {
@@ -927,7 +1029,15 @@ private:
     std::shared_ptr<typename group_sm::context> _ctx;
     std::unique_ptr<raft_host> _raft;
     std::unique_ptr<kms_host> _host;
-    std::unique_ptr<access_type> _access;
+    // The catalog: this node's replica (data), or the data nodes' catalog
+    // API (a front end without data). `_access` is whichever it is; the
+    // jobs and the lease use it directly, the handlers through
+    // `_handler_access` (KYTHIRA_KMS_BOUNDED_STALENESS_MS).
+    std::unique_ptr<access_type> _local;
+    std::shared_ptr<const kythira::mtls::client> _catalog_client;
+    std::unique_ptr<kythira::kms::remote_catalog_access> _remote;
+    kythira::kms::kms_catalog_access* _access = nullptr;
+    std::unique_ptr<kythira::kms::bounded_staleness_access> _handler_access;
     kythira::kms::catalog_server_deps _catalog_server;
     std::shared_ptr<kythira::pkcs11::backend> _backend;
     // The backing store, shared by the jobs and the API once bound.

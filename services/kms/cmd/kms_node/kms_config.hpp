@@ -12,6 +12,7 @@
 
 #include <raft/console_logger.hpp>
 #include <raft/host_node_id.hpp>
+#include <raft/layer_roles.hpp>
 #include <raft/static_or_iam_authorizer.hpp>
 
 #include <chrono>
@@ -29,11 +30,22 @@ namespace kythira::kms_node {
 /// The co-located virtual HSM (`hsm.pkcs11`), as KYTHIRA_KMS_PKCS11 names it.
 inline constexpr std::string_view co_located_hsm = "hsm";
 
+/// The layers a KMS node can run (.kiro/specs/kms-independent-layers/,
+/// Requirement 2.1): `segments` is Kinesis's.
+inline constexpr kythira::layers::role_set kms_roles{
+    kythira::layers::role::gateway, kythira::layers::role::front_end, kythira::layers::role::data};
+
 struct kms_options {
     kythira::host_node_id node_id{kythira::host_node_id_from_number(1)};
 
-    /// Every member's KMS API URL, this node included: the catalog's
-    /// voters, and where a follower forwards.
+    /// The layers this node runs (KYTHIRA_KMS_ROLES): all three unless
+    /// asked otherwise, which is the KMS spec's co-located node.
+    kythira::layers::role_set roles{kms_roles};
+
+    /// Every catalog member's (data node's) KMS API URL: the catalog's
+    /// voters, where a follower forwards, and where a front end without
+    /// the data role reads and proposes. This node is listed exactly when
+    /// it runs `data`.
     std::map<kythira::host_node_id, std::string> api_urls;
     std::filesystem::path data_dir;
 
@@ -48,7 +60,8 @@ struct kms_options {
     /// Plaintext listener and forwarding (tests only).
     bool insecure_plaintext{false};
     /// The members' certificate identities (URI or DNS SANs): who may
-    /// forward a proposal.
+    /// forward a proposal and, on a data node, which front ends without a
+    /// replica may use the catalog API.
     std::set<std::string> peer_identities;
     std::uint64_t max_body_bytes{std::uint64_t{1} << 20U};
     std::uint64_t max_connections{256};
@@ -103,6 +116,12 @@ struct kms_options {
     /// before the jobs settle it.
     std::chrono::milliseconds grace{std::chrono::minutes(5)};
 
+    // -- Metadata freshness (Requirement 4.2) -----------------------------------------
+    /// 0 (default): every operation reads the catalog at a read-index
+    /// point. Otherwise a read-index point at most this old may serve, as
+    /// AWS's eventually consistent KMS would.
+    std::chrono::milliseconds bounded_staleness{0};
+
     // -- Raft, timing and logs -------------------------------------------------
     std::chrono::milliseconds tick_interval{5};
     std::chrono::milliseconds election_timeout_min{300};
@@ -123,7 +142,8 @@ using env_fn = std::function<std::optional<std::string>(std::string_view)>;
 [[nodiscard]] auto composite_env(env_fn env) -> env_fn;
 
 /// The options from `env`. Throws std::invalid_argument naming the
-/// variable at fault.
+/// variable at fault, or the role set the node cannot serve
+/// (Requirement 2.4).
 [[nodiscard]] auto from_env(const env_fn& env) -> kms_options;
 
 /// The PIN in `path`, without a trailing newline. Throws
