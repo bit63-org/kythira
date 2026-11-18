@@ -17,8 +17,8 @@
 /// request costs one condition-variable wait.
 ///
 /// Co-located, the listener calls `notify` in-process. Across layers
-/// (task 12) the same notifications arrive on a stream from the data
-/// nodes.
+/// (task 10) the same notifications arrive on a stream from the data
+/// nodes (`sqs_availability.hpp`).
 ///
 /// `close()` is the drain (Requirement 12.1): every parked request wakes
 /// as closed and is answered with what it has, which for a long poll is an
@@ -131,6 +131,19 @@ public:
             w->_cv.notify_one();
         }
         ++_notified;
+    }
+
+    /// Wakes every subscription as ready: a front end whose availability
+    /// stream from the data layer broke or restarted may have missed
+    /// notifications, and a spurious wake costs one receive.
+    auto notify_all() -> void {
+        const std::scoped_lock lock(_mutex);
+        for (auto& [key, set] : _waiters) {
+            for (const auto& w : set) {
+                w->_ready = true;
+                w->_cv.notify_one();
+            }
+        }
     }
 
     /// Wakes every subscription as closed, now and from now on.
