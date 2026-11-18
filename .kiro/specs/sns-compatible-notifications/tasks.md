@@ -11,6 +11,17 @@ first builds it to that design). Each task is one PR unless noted.
     list, `sns-module.yml`; pinned model and coverage test; recorded wire
     evidence from the CLI and SDKs; recorded SNS HTTP deliveries
   - _Requirements: 1.1-1.3, 2.1_
+  - Part done (November 18, 2026): the module skeleton (`SNS`, CMake,
+    empty boundary allow list, `sns_node` placeholder with `--self-test`),
+    `module_numbers::sns = 10` in core, `ci_full` and its verbatim copies
+    turning it on, `configs/ci_no_sns_defconfig` and `sns-module.yml`
+    (boundary, module-on tests, module-off assertion), the pinned model
+    (botocore 1.43.126, 42 operations, 34 error shapes), the generated
+    operation table (with each error's query code and HTTP status) and its
+    `--check` test, and the coverage test: 21 operations planned in task 4,
+    21 SMS and mobile push operations listed as out of scope, all answered
+    with `InvalidAction` until implemented. Still open: the recording stub,
+    wire evidence from the CLI and SDKs, and recorded HTTP deliveries.
 
 - [ ] 2. Topic state machine and publish log
   - Topics, subscriptions, FIFO dedup, publish into the record segment

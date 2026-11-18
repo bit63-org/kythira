@@ -930,6 +930,20 @@ else()
     message(STATUS "KMS module disabled (CONFIG_KMS=n, or the HSM or IAM module is off)")
 endif()
 kythira_kconfig_require(KMS KYTHIRA_BUILD_KMS "the HSM or IAM module")
+# sns-compatible-notifications spec: the services/sns/ module (an Amazon
+# SNS-compatible publish/subscribe service). Off unless CONFIG_SNS=y, like
+# every new module; needs OpenSSL (SigV4, message signatures) and Boost (the
+# Beast front end). Entered with add_subdirectory(services/sns)
+# below, after tests/.
+kythira_kconfig_gate(SNS)
+set(KYTHIRA_BUILD_SNS FALSE)
+if(_KYTHIRA_GATE_SNS AND DEFINED KCONFIG_SNS AND OpenSSL_FOUND AND Boost_FOUND)
+    set(KYTHIRA_BUILD_SNS TRUE)
+    message(STATUS "SNS module enabled (services/sns/, .kiro/specs/sns-compatible-notifications/)")
+else()
+    message(STATUS "SNS module disabled (CONFIG_SNS=n, or OpenSSL/Boost not found)")
+endif()
+kythira_kconfig_require(SNS KYTHIRA_BUILD_SNS "OpenSSL and Boost")
 
 # sqs-compatible-queues spec: the services/sqs/ module (an Amazon
 # SQS-compatible message queue service). Off unless CONFIG_SQS=y, like every
@@ -2383,6 +2397,12 @@ endif()
 # entered likewise.
 if(KYTHIRA_BUILD_SQS)
     add_subdirectory(services/sqs)
+endif()
+
+# The SNS module (services/README.md, .kiro/specs/sns-compatible-notifications/),
+# entered likewise.
+if(KYTHIRA_BUILD_SNS)
+    add_subdirectory(services/sns)
 endif()
 
 # kythira_node, the composite daemon (.kiro/specs/service-colocation/),

@@ -1,0 +1,25 @@
+# Copyright (c) 2026 Clark Rawlins
+# SPDX-License-Identifier: Apache-2.0
+
+# The Amazon SNS-compatible publish/subscribe service (services/sns/,
+# .kiro/specs/sns-compatible-notifications/). Sourced from the top-level
+# Kconfig's "Service Modules" menu.
+
+config SNS
+	bool "Amazon SNS-compatible publish/subscribe service"
+	default n
+	depends on OPENSSL
+	help
+	  Builds the services/sns/ module: an Amazon SNS-compatible
+	  publish/subscribe service that unmodified AWS SDKs and the AWS CLI
+	  can point at to create topics, subscribe SQS queues, HTTP/HTTPS
+	  endpoints and email addresses, and publish. Each topic's messages
+	  commit through Kythira's Raft groups into a publish log in the
+	  record segment store, which delivery workers read. So far the
+	  module holds the pinned botocore model, the generated operation
+	  table, the coverage check and the sns_node placeholder (task 1);
+	  the gateway, front end, topic state machine and delivery follow.
+	  It needs IAM's core SigV4 and authorizer headers, not the IAM
+	  module. OpenSSL is needed for SigV4 and message signatures. Off by
+	  default like every new module (services/README.md). See
+	  .kiro/specs/sns-compatible-notifications/.

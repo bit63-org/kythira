@@ -649,6 +649,7 @@ source "services/dynamodb/Kconfig"
 source "services/hsm/Kconfig"
 source "services/kms/Kconfig"
 source "services/sqs/Kconfig"
+source "services/sns/Kconfig"
 
 endmenu # Service Modules
 
