@@ -35,8 +35,8 @@
 /// this the heaviest translation unit in the tree at 10,974 MiB of compiler RSS
 /// and broke CI's 16 GiB runner; `host_stacks.hpp` records the measurement.
 /// What is left in this file is the part that is cheap to compile and has to
-/// happen exactly once: the command line, discovery, `folly::Init`, and the
-/// signal handlers.
+/// happen exactly once: the command line, discovery, the process init
+/// (`folly::Init` where Folly is linked), and the signal handlers.
 
 #include "config.hpp"
 #include "host_runners.hpp"
@@ -45,13 +45,7 @@
 
 #include <raft/net_bind.hpp>
 
-// Present in every CMake build, which links folly whatever the future
-// backend; absent only in a folly-free build of the Boost backend, where
-// there is no folly state to initialise.
-#if __has_include(<folly/init/Init.h>)
-#include <folly/init/Init.h>
-#define KYTHIRA_NODE_HAS_FOLLY_INIT 1
-#endif
+#include <raft/process_init.hpp>
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -349,12 +343,7 @@ auto main(int argc, char** argv) -> int {
         return 3;
     }
 
-#if defined(KYTHIRA_NODE_HAS_FOLLY_INIT)
-    int folly_argc = 1;
-    char* folly_argv_storage[] = {argv[0], nullptr};
-    char** folly_argv = folly_argv_storage;
-    folly::Init init(&folly_argc, &folly_argv);
-#endif
+    const kythira::process_init process_init(argv[0]);
 
     std::signal(SIGINT, kythira::bench::host::on_signal);
     std::signal(SIGTERM, kythira::bench::host::on_signal);

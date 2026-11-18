@@ -9,8 +9,10 @@ if(NOT TARGET httplib::httplib OR NOT TARGET boost_json)
     message(STATUS "ca_cluster_node: skipped (requires httplib and boost_json)")
     return()
 endif()
-if(NOT folly_FOUND OR NOT Boost_FOUND)
-    message(STATUS "ca_cluster_node: skipped (requires Folly and Boost)")
+# No folly_FOUND: main() initialises Folly through raft/process_init.hpp only
+# where it is linked; the parent CMakeLists.txt requires a future backend.
+if(NOT Boost_FOUND)
+    message(STATUS "ca_cluster_node: skipped (requires Boost)")
     return()
 endif()
 
@@ -22,7 +24,7 @@ target_include_directories(ca_cluster_node PRIVATE
 )
 
 target_link_libraries(ca_cluster_node PRIVATE
-    certificate_authority   # brings in network_simulator -> Folly::folly + boost_context
+    certificate_authority   # brings in network_simulator (the future backend)
     network_simulator
     boost_json
     httplib::httplib

@@ -23,7 +23,7 @@
 #include "iam_auth.hpp"
 #endif
 
-#include <folly/init/Init.h>
+#include <raft/process_init.hpp>
 
 #include <atomic>
 #include <condition_variable>
@@ -103,7 +103,7 @@ auto main(int argc, char** argv) -> int {
         return 2;
     }
 
-    folly::Init init(&argc, &argv);
+    const kythira::process_init process_init(argv[0]);
 
     // Read here first so a bad setting exits 2 before a port is bound;
     // the module reads the same variables again.

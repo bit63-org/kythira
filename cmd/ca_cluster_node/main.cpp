@@ -119,7 +119,7 @@
 #include <openssl/ssl.h>
 #endif
 
-#include <folly/init/Init.h>
+#include <raft/process_init.hpp>
 
 #include <algorithm>
 #include <array>
@@ -2320,16 +2320,12 @@ auto run_ca_cluster_node(ca_cluster_node::ca_cluster_node_config cfg, std::strin
 }
 
 int main(int argc, char** argv) {
-    // folly::Init registers process-wide singletons (Timekeeper, used by
-    // tcp_rpc_client's retry/backoff logic under real network conditions —
-    // without it, a failed RPC's retry path aborts the process outright).
-    // Called with just the program name so gflags' command-line parser never
-    // sees this binary's own --node-id/--peers/etc. flags, which it doesn't
-    // recognize (ca_cluster_node parses those itself, below).
-    int folly_argc = 1;
-    char* folly_argv_storage[] = {argv[0]};
-    char** folly_argv = folly_argv_storage;
-    folly::Init folly_init(&folly_argc, &folly_argv, false);
+    // With Folly linked this is folly::Init, which registers the Timekeeper
+    // tcp_rpc_client's retry/backoff logic uses (without it, a failed RPC's
+    // retry path aborts the process outright). It sees only the program
+    // name, so gflags never meets this binary's own --node-id/--peers/etc.
+    // flags, which ca_cluster_node parses itself, below.
+    const kythira::process_init process_init(argv[0]);
 
     ca_cluster_node::ca_cluster_node_config cfg;
     try {

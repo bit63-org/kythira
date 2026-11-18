@@ -9,14 +9,15 @@
 # *_impl.hpp includes are listed in ../boundary-allow.txt.
 #
 # It hosts a multi-raft cluster over Boost.Beast, so it needs what
-# redis_gateway_node needs: folly plus a future backend (through
-# network_simulator), Boost and OpenSSL. Not built for coverage, like
+# redis_gateway_node needs: a future backend (through network_simulator),
+# Boost and OpenSSL. Not Folly: main() initialises it through
+# raft/process_init.hpp only where it is linked. Not built for coverage, like
 # redis_gateway_node: the instantiation is heavy and its logic is covered by
 # the module's tests through the in-process cluster.
 
-if(ENABLE_COVERAGE OR NOT KYTHIRA_FUTURE_BACKEND_AVAILABLE OR NOT folly_FOUND
+if(ENABLE_COVERAGE OR NOT KYTHIRA_FUTURE_BACKEND_AVAILABLE
    OR NOT Boost_FOUND OR NOT OpenSSL_FOUND)
-    message(STATUS "kinesis_gateway_node: skipped (needs folly, a future backend, Boost and "
+    message(STATUS "kinesis_gateway_node: skipped (needs a future backend, Boost and "
                    "OpenSSL, and a non-coverage build)")
     return()
 endif()
@@ -29,7 +30,7 @@ target_include_directories(kythira_kinesis_node_common PUBLIC
     "${CMAKE_CURRENT_SOURCE_DIR}/kinesis_gateway_node")
 target_link_libraries(kythira_kinesis_node_common PUBLIC
     kythira_kinesis        # <kythira/kinesis/...> and the core headers
-    network_simulator      # Folly, boost_context, Boost::system/thread
+    network_simulator      # the future backend (and Folly where found), Boost::system/thread
     boost_json
     OpenSSL::SSL
     OpenSSL::Crypto

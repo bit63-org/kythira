@@ -3725,10 +3725,12 @@ unverified completion claim.
   Folly unconditionally, and stay gated with that reason. `tests/chaos/`
   and `tests/docker_chaos/` moved out of the Folly block too (16 suites),
   as did the Alibaba component tests (4) and the in-process Redis gateway
-  suites (6). What remains are daemons whose `main()` calls `folly::Init`
+  suites (6). Then the daemons whose `main()` called `folly::Init`
   (`cmd/ca_cluster_node`, `redis_gateway_node`, the Kinesis daemon,
-  `cmd/multi_raft_node`) and the suites that run them, plus the suites that
-  use Folly by name. Un-gating one means building and running it on the
+  `cmd/multi_raft_node`) switched to `kythira::process_init`
+  (`include/raft/process_init.hpp`), which runs `folly::Init` only where
+  Folly is linked, and they and the 21 suites that run them left the gate.
+  What remains are the examples and the suites that use Folly by name. Un-gating one means building and running it on the
   Boost backend, then deleting its allowlist line in the same change (the
   checker rejects stale lines).
 
