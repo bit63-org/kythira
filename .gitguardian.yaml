@@ -38,6 +38,12 @@ secret:
     # #744 (commit 17eff6b).
     - services/iam/tests/iam_redis_verifier_test.cpp
 
+    # Real Amazon SNS HTTPS deliveries recorded once and checked in byte for
+    # byte, so their signatures still verify. They hold subscription
+    # confirmation tokens for subscriptions deleted right after the recording
+    # and SNS's public signing certificate; editing either breaks the check.
+    - services/sns/tests/evidence/deliveries/deliveries.json
+
     # Wire recordings of real SDK clients talking to a local recording stub
     # (services/dynamodb/tools/evidence/recording_stub.py), never to AWS. The
     # stub masks signatures, dates and payload hashes and the clients sign with

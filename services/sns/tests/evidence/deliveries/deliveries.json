@@ -1,0 +1,272 @@
+{
+ "recorded": "2026-11-18T17:53:34Z",
+ "region": "us-east-1",
+ "topics": {
+  "a": {
+   "SignatureVersion": "1"
+  },
+  "b": {
+   "SignatureVersion": "2"
+  }
+ },
+ "unsubscribe_confirmation_received": false,
+ "deliveries": [
+  {
+   "path": "/a/raw",
+   "label": "SubscriptionConfirmation",
+   "method": "POST",
+   "query": "",
+   "headers": {
+    "accept-encoding": "gzip,deflate",
+    "content-length": "1708",
+    "content-type": "text/plain; charset=UTF-8",
+    "host": "capture.example",
+    "user-agent": "Amazon Simple Notification Service Agent",
+    "x-amz-sns-message-id": "8085adb4-47ec-4fcc-92f5-520ee6e76ccf",
+    "x-amz-sns-message-type": "SubscriptionConfirmation",
+    "x-amz-sns-topic-arn": "arn:aws:sns:us-east-1:827617851594:kythira-sns-evidence-610a718c-a"
+   },
+   "body": "{\n  \"Type\" : \"SubscriptionConfirmation\",\n  \"MessageId\" : \"8085adb4-47ec-4fcc-92f5-520ee6e76ccf\",\n  \"Token\" : \"2336412f37fb687f5d51e6e2425929f4483a14c7b3a3738a53de2d927859380683cf539d98c2ac9908e3b4f3391198c03deda89186b993a819cc648fc7660edcd53ba00b66508e6f627ae6f6d263e2e7050b5a824e7ee9f185ae1db1c31663d1cb7e8758d483f31972e0a2593ab035f57c12e86909819a6473352e4e9ee994c3a7137cc8149730bb6dec5ed0c0b6ed89\",\n  \"TopicArn\" : \"arn:aws:sns:us-east-1:827617851594:kythira-sns-evidence-610a718c-a\",\n  \"Message\" : \"You have chosen to subscribe to the topic arn:aws:sns:us-east-1:827617851594:kythira-sns-evidence-610a718c-a.\\nTo confirm the subscription, visit the SubscribeURL included in this message.\",\n  \"SubscribeURL\" : \"https://sns.us-east-1.amazonaws.com/?Action=ConfirmSubscription&TopicArn=arn:aws:sns:us-east-1:827617851594:kythira-sns-evidence-610a718c-a&Token=2336412f37fb687f5d51e6e2425929f4483a14c7b3a3738a53de2d927859380683cf539d98c2ac9908e3b4f3391198c03deda89186b993a819cc648fc7660edcd53ba00b66508e6f627ae6f6d263e2e7050b5a824e7ee9f185ae1db1c31663d1cb7e8758d483f31972e0a2593ab035f57c12e86909819a6473352e4e9ee994c3a7137cc8149730bb6dec5ed0c0b6ed89\",\n  \"Timestamp\" : \"2026-11-18T17:52:45.785Z\",\n  \"SignatureVersion\" : \"1\",\n  \"Signature\" : \"VHAMx87b5KQwO5caMli/scWXbh83ivUeLYCmxruU3XbX3svdakGEZlfB/1MV0KkC13HkfJoBenCy8alW3HRPb8eTdLYTnmxr3t1fV8vZxq6FYgfQ3Qs+4zeVLiWV50q6SxsUrDnrgyO8IGD3vDTUl1e5MMQf6SKbpE3Hh3wrQagP+9ODdox+aYas0luUFCVIkUblSQXHyBp+tnohAGmvq6baC/DmZasqdz0Usnle1wD9yJionAMRDker1K3Hk22w4HoiNShqc7PHGp8nIUTy8QFGOVOOCW+IXJCcdPbL0nhOlFQaPbBE8K1cbtAPA2RymMi7zdFyz2RQKtfcClkB8A==\",\n  \"SigningCertURL\" : \"https://sns.us-east-1.amazonaws.com/SimpleNotificationService-1e59c4574facfe41babdb2d652f8ebef.pem\"\n}"
+  },
+  {
+   "path": "/a/raw",
+   "label": "plain",
+   "method": "POST",
+   "query": "",
+   "headers": {
+    "accept-encoding": "gzip,deflate",
+    "content-length": "36",
+    "content-type": "text/plain; charset=UTF-8",
+    "host": "capture.example",
+    "user-agent": "Amazon Simple Notification Service Agent",
+    "x-amz-sns-message-id": "06f89b0f-be46-5eaa-a335-f878567e6908",
+    "x-amz-sns-message-type": "Notification",
+    "x-amz-sns-rawdelivery": "true",
+    "x-amz-sns-subscription-arn": "arn:aws:sns:us-east-1:827617851594:kythira-sns-evidence-610a718c-a:ebe62765-d711-4bff-840a-64e59f4e6e67",
+    "x-amz-sns-topic-arn": "arn:aws:sns:us-east-1:827617851594:kythira-sns-evidence-610a718c-a"
+   },
+   "body": "Hello from the Kythira evidence run."
+  },
+  {
+   "path": "/a/raw",
+   "label": "attributes",
+   "method": "POST",
+   "query": "",
+   "headers": {
+    "accept-encoding": "gzip,deflate",
+    "content-length": "52",
+    "content-type": "text/plain; charset=UTF-8",
+    "host": "capture.example",
+    "user-agent": "Amazon Simple Notification Service Agent",
+    "x-amz-sns-message-id": "50300aa8-3822-572b-a261-69dfd01a5089",
+    "x-amz-sns-message-type": "Notification",
+    "x-amz-sns-rawdelivery": "true",
+    "x-amz-sns-subscription-arn": "arn:aws:sns:us-east-1:827617851594:kythira-sns-evidence-610a718c-a:ebe62765-d711-4bff-840a-64e59f4e6e67",
+    "x-amz-sns-topic-arn": "arn:aws:sns:us-east-1:827617851594:kythira-sns-evidence-610a718c-a"
+   },
+   "body": "With attributes: <xml> & \"quotes\" and unicode é中."
+  },
+  {
+   "path": "/a/raw",
+   "label": "structure-json",
+   "method": "POST",
+   "query": "",
+   "headers": {
+    "accept-encoding": "gzip,deflate",
+    "content-length": "10",
+    "content-type": "text/plain; charset=UTF-8",
+    "host": "capture.example",
+    "user-agent": "Amazon Simple Notification Service Agent",
+    "x-amz-sns-message-id": "6496fcb8-2986-5e78-8b12-9fcfc1beb9da",
+    "x-amz-sns-message-type": "Notification",
+    "x-amz-sns-rawdelivery": "true",
+    "x-amz-sns-subscription-arn": "arn:aws:sns:us-east-1:827617851594:kythira-sns-evidence-610a718c-a:ebe62765-d711-4bff-840a-64e59f4e6e67",
+    "x-amz-sns-topic-arn": "arn:aws:sns:us-east-1:827617851594:kythira-sns-evidence-610a718c-a"
+   },
+   "body": "https body"
+  },
+  {
+   "path": "/a/raw",
+   "label": "batch-first",
+   "method": "POST",
+   "query": "",
+   "headers": {
+    "accept-encoding": "gzip,deflate",
+    "content-length": "15",
+    "content-type": "text/plain; charset=UTF-8",
+    "host": "capture.example",
+    "user-agent": "Amazon Simple Notification Service Agent",
+    "x-amz-sns-message-id": "49c313a8-9100-53c2-965f-70df7938e460",
+    "x-amz-sns-message-type": "Notification",
+    "x-amz-sns-rawdelivery": "true",
+    "x-amz-sns-subscription-arn": "arn:aws:sns:us-east-1:827617851594:kythira-sns-evidence-610a718c-a:ebe62765-d711-4bff-840a-64e59f4e6e67",
+    "x-amz-sns-topic-arn": "arn:aws:sns:us-east-1:827617851594:kythira-sns-evidence-610a718c-a"
+   },
+   "body": "batch entry one"
+  },
+  {
+   "path": "/a/raw",
+   "label": "batch-second",
+   "method": "POST",
+   "query": "",
+   "headers": {
+    "accept-encoding": "gzip,deflate",
+    "content-length": "15",
+    "content-type": "text/plain; charset=UTF-8",
+    "host": "capture.example",
+    "user-agent": "Amazon Simple Notification Service Agent",
+    "x-amz-sns-message-id": "ea5506e9-676c-5cde-bfc3-659e8f54fb7c",
+    "x-amz-sns-message-type": "Notification",
+    "x-amz-sns-rawdelivery": "true",
+    "x-amz-sns-subscription-arn": "arn:aws:sns:us-east-1:827617851594:kythira-sns-evidence-610a718c-a:ebe62765-d711-4bff-840a-64e59f4e6e67",
+    "x-amz-sns-topic-arn": "arn:aws:sns:us-east-1:827617851594:kythira-sns-evidence-610a718c-a"
+   },
+   "body": "batch entry two"
+  },
+  {
+   "path": "/a/wrapped",
+   "label": "SubscriptionConfirmation",
+   "method": "POST",
+   "query": "",
+   "headers": {
+    "accept-encoding": "gzip,deflate",
+    "content-length": "1708",
+    "content-type": "text/plain; charset=UTF-8",
+    "host": "capture.example",
+    "user-agent": "Amazon Simple Notification Service Agent",
+    "x-amz-sns-message-id": "7db5dd9e-c775-43a7-bf62-4f8fe7655112",
+    "x-amz-sns-message-type": "SubscriptionConfirmation",
+    "x-amz-sns-topic-arn": "arn:aws:sns:us-east-1:827617851594:kythira-sns-evidence-610a718c-a"
+   },
+   "body": "{\n  \"Type\" : \"SubscriptionConfirmation\",\n  \"MessageId\" : \"7db5dd9e-c775-43a7-bf62-4f8fe7655112\",\n  \"Token\" : \"2336412f37fb687f5d51e6e2425929f4483a14c7b3a3738a53de2d9278593b6e7d623fca08f5cefbdf0196ad0c13b94b874a877d5179beb1e02e85663abcbfce44390c7c50d398be5ddda1844907b1fa8a62778136f5ae3e4545393411ed59716a9ceabd2011583e613100e79c5a2f273c210df67c53be9bb545686151cc023bfaa293a9595da47f78088ae6a3ee4be0\",\n  \"TopicArn\" : \"arn:aws:sns:us-east-1:827617851594:kythira-sns-evidence-610a718c-a\",\n  \"Message\" : \"You have chosen to subscribe to the topic arn:aws:sns:us-east-1:827617851594:kythira-sns-evidence-610a718c-a.\\nTo confirm the subscription, visit the SubscribeURL included in this message.\",\n  \"SubscribeURL\" : \"https://sns.us-east-1.amazonaws.com/?Action=ConfirmSubscription&TopicArn=arn:aws:sns:us-east-1:827617851594:kythira-sns-evidence-610a718c-a&Token=2336412f37fb687f5d51e6e2425929f4483a14c7b3a3738a53de2d9278593b6e7d623fca08f5cefbdf0196ad0c13b94b874a877d5179beb1e02e85663abcbfce44390c7c50d398be5ddda1844907b1fa8a62778136f5ae3e4545393411ed59716a9ceabd2011583e613100e79c5a2f273c210df67c53be9bb545686151cc023bfaa293a9595da47f78088ae6a3ee4be0\",\n  \"Timestamp\" : \"2026-11-18T17:52:45.458Z\",\n  \"SignatureVersion\" : \"1\",\n  \"Signature\" : \"ZS2T3tTIOsMOi8dwFMaSx/XhvRq6d9spWxnw2ugdQ4rxr8ANKReuWVCVPEZJvBFY8shbhyv8hg1kZbkg61RFAuSHA0Ryiu7qvvr/b37kMo1hmlhgrQRWzus2IEVoToIUTVhun0OTuTWnu3jqzqBTEvJwzK/dMNJpDR1iW5IW07sprs/NS627QQ4qXbi0NdCrkO2NniWw6n8x/N7DOchXvMxj/piX8ltFFxdQPUgBbHh/D36pVFoGhH/3MlPWjNX19at3DGDgDIbOEnfQdJLu2pnOpczn7j4ObM8tYFuUNYQEa3IV+bqbxh0YbbtxOCIEbFx1Ck63WjNGJHoIz2cTZw==\",\n  \"SigningCertURL\" : \"https://sns.us-east-1.amazonaws.com/SimpleNotificationService-1e59c4574facfe41babdb2d652f8ebef.pem\"\n}"
+  },
+  {
+   "path": "/a/wrapped",
+   "label": "plain",
+   "method": "POST",
+   "query": "",
+   "headers": {
+    "accept-encoding": "gzip,deflate",
+    "content-length": "983",
+    "content-type": "text/plain; charset=UTF-8",
+    "host": "capture.example",
+    "user-agent": "Amazon Simple Notification Service Agent",
+    "x-amz-sns-message-id": "06f89b0f-be46-5eaa-a335-f878567e6908",
+    "x-amz-sns-message-type": "Notification",
+    "x-amz-sns-subscription-arn": "arn:aws:sns:us-east-1:827617851594:kythira-sns-evidence-610a718c-a:c9434b2d-34b9-4c7f-bbc4-0c8fab420450",
+    "x-amz-sns-topic-arn": "arn:aws:sns:us-east-1:827617851594:kythira-sns-evidence-610a718c-a"
+   },
+   "body": "{\n  \"Type\" : \"Notification\",\n  \"MessageId\" : \"06f89b0f-be46-5eaa-a335-f878567e6908\",\n  \"TopicArn\" : \"arn:aws:sns:us-east-1:827617851594:kythira-sns-evidence-610a718c-a\",\n  \"Message\" : \"Hello from the Kythira evidence run.\",\n  \"Timestamp\" : \"2026-11-18T17:52:56.503Z\",\n  \"SignatureVersion\" : \"1\",\n  \"Signature\" : \"BfzXPL9JD702/4zPAJDqwGvpvz4bXfidD2VHkkpA/wVP+Ae7MljtSJEekESKKNiOmYAE61FdeOduA09KB91HMELjVLqEcnEBFuFj9gvFBNWZ3zogwQD1J5kDQYI/IiS1hIi9wiftKNC1CLOQiEQJskowKhi0bqbpJyHp95cplO+yjtmsOGhDWIrb02MViPDYgMU+npAaoUWx8eSWimwK7Kme2n1zNqqHkJE4EpgYFzxDpi0OUCTTbuLaaALXpCWJgFeZVaJLAzyUc51rd2lX3zDXK43cKwMZ4yo9IM/C3UYrorDh0LCrPPlw8vUwL3ZM/rmdmOaGMVx1LOxqL0/hPg==\",\n  \"SigningCertURL\" : \"https://sns.us-east-1.amazonaws.com/SimpleNotificationService-1e59c4574facfe41babdb2d652f8ebef.pem\",\n  \"UnsubscribeURL\" : \"https://sns.us-east-1.amazonaws.com/?Action=Unsubscribe&SubscriptionArn=arn:aws:sns:us-east-1:827617851594:kythira-sns-evidence-610a718c-a:c9434b2d-34b9-4c7f-bbc4-0c8fab420450\"\n}"
+  },
+  {
+   "path": "/a/wrapped",
+   "label": "attributes",
+   "method": "POST",
+   "query": "",
+   "headers": {
+    "accept-encoding": "gzip,deflate",
+    "content-length": "1209",
+    "content-type": "text/plain; charset=UTF-8",
+    "host": "capture.example",
+    "user-agent": "Amazon Simple Notification Service Agent",
+    "x-amz-sns-message-id": "50300aa8-3822-572b-a261-69dfd01a5089",
+    "x-amz-sns-message-type": "Notification",
+    "x-amz-sns-subscription-arn": "arn:aws:sns:us-east-1:827617851594:kythira-sns-evidence-610a718c-a:c9434b2d-34b9-4c7f-bbc4-0c8fab420450",
+    "x-amz-sns-topic-arn": "arn:aws:sns:us-east-1:827617851594:kythira-sns-evidence-610a718c-a"
+   },
+   "body": "{\n  \"Type\" : \"Notification\",\n  \"MessageId\" : \"50300aa8-3822-572b-a261-69dfd01a5089\",\n  \"TopicArn\" : \"arn:aws:sns:us-east-1:827617851594:kythira-sns-evidence-610a718c-a\",\n  \"Subject\" : \"Evidence subject\",\n  \"Message\" : \"With attributes: <xml> & \\\"quotes\\\" and unicode é中.\",\n  \"Timestamp\" : \"2026-11-18T17:52:56.583Z\",\n  \"SignatureVersion\" : \"1\",\n  \"Signature\" : \"TxfKAjFvKNKGy43lrqGWGbjijAXMsnc0PQcDH8pul/yNVW0G2LPsfa07deYQujnSJiqpNpee9lxQ4sb+EEufK9lQlnDhO/JWp5XJDYTLKBykWZjEIKSPE5XJi1xHFoWqVgR/E6rna28PL9RRdGKfVlOTQdMGpBTkFcCqRRnm/5HmtSazZQsoJfUTD6YJupMLwlYX6rv/Wvvy2XgmtaLo/QViapRARieWqnmExZEgQ88YnpMHaddnQLFgokMr1w2vHCJZu8Spyp0gR6Rv9xyN+PUx4dUQvza0DIDIr2n/NHXAWDgisFfV0wiw0NBtooWH3Y2/E/9B2UxqRuZV0T7XoQ==\",\n  \"SigningCertURL\" : \"https://sns.us-east-1.amazonaws.com/SimpleNotificationService-1e59c4574facfe41babdb2d652f8ebef.pem\",\n  \"UnsubscribeURL\" : \"https://sns.us-east-1.amazonaws.com/?Action=Unsubscribe&SubscriptionArn=arn:aws:sns:us-east-1:827617851594:kythira-sns-evidence-610a718c-a:c9434b2d-34b9-4c7f-bbc4-0c8fab420450\",\n  \"MessageAttributes\" : {\n    \"blob\" : {\"Type\":\"Binary\",\"Value\":\"AAEC/w==\"},\n    \"color\" : {\"Type\":\"String\",\"Value\":\"red\"},\n    \"size\" : {\"Type\":\"Number\",\"Value\":\"4.5\"}\n  }\n}"
+  },
+  {
+   "path": "/a/wrapped",
+   "label": "structure-json",
+   "method": "POST",
+   "query": "",
+   "headers": {
+    "accept-encoding": "gzip,deflate",
+    "content-length": "957",
+    "content-type": "text/plain; charset=UTF-8",
+    "host": "capture.example",
+    "user-agent": "Amazon Simple Notification Service Agent",
+    "x-amz-sns-message-id": "6496fcb8-2986-5e78-8b12-9fcfc1beb9da",
+    "x-amz-sns-message-type": "Notification",
+    "x-amz-sns-subscription-arn": "arn:aws:sns:us-east-1:827617851594:kythira-sns-evidence-610a718c-a:c9434b2d-34b9-4c7f-bbc4-0c8fab420450",
+    "x-amz-sns-topic-arn": "arn:aws:sns:us-east-1:827617851594:kythira-sns-evidence-610a718c-a"
+   },
+   "body": "{\n  \"Type\" : \"Notification\",\n  \"MessageId\" : \"6496fcb8-2986-5e78-8b12-9fcfc1beb9da\",\n  \"TopicArn\" : \"arn:aws:sns:us-east-1:827617851594:kythira-sns-evidence-610a718c-a\",\n  \"Message\" : \"https body\",\n  \"Timestamp\" : \"2026-11-18T17:52:56.665Z\",\n  \"SignatureVersion\" : \"1\",\n  \"Signature\" : \"V4AvkPVhpz+dpr/ARFfkere6uTCWOybVYa+l7RdrvuQGLvHA75qBvW65dl9hAuS0VIYoJko5UOnwPJS7tCyygSPDO9so9W4EPAfojr03xYXhqBqovsT4jD6Y6CeHjlSUarONcWBswJEeloz+cokOaOSTNv4YfOmP5jlc596tsKoRMSFaGjPLwVNQyWgs5EOG0MGSSivDTEAR+SfPcOxvmWIKcfNdHjnQ/ppVQ6aoSv+4FNEGyzZ3rAQogtnUCjWRws8ao9Rdb6LFeqmJAGZ6aeOAVb3XhIrDttTgycYbifzpnkQUZGwxUPDXrFbBF3JsrxzBnwPYiAiYeL/V7Gl29A==\",\n  \"SigningCertURL\" : \"https://sns.us-east-1.amazonaws.com/SimpleNotificationService-1e59c4574facfe41babdb2d652f8ebef.pem\",\n  \"UnsubscribeURL\" : \"https://sns.us-east-1.amazonaws.com/?Action=Unsubscribe&SubscriptionArn=arn:aws:sns:us-east-1:827617851594:kythira-sns-evidence-610a718c-a:c9434b2d-34b9-4c7f-bbc4-0c8fab420450\"\n}"
+  },
+  {
+   "path": "/a/wrapped",
+   "label": "batch-first",
+   "method": "POST",
+   "query": "",
+   "headers": {
+    "accept-encoding": "gzip,deflate",
+    "content-length": "962",
+    "content-type": "text/plain; charset=UTF-8",
+    "host": "capture.example",
+    "user-agent": "Amazon Simple Notification Service Agent",
+    "x-amz-sns-message-id": "49c313a8-9100-53c2-965f-70df7938e460",
+    "x-amz-sns-message-type": "Notification",
+    "x-amz-sns-subscription-arn": "arn:aws:sns:us-east-1:827617851594:kythira-sns-evidence-610a718c-a:c9434b2d-34b9-4c7f-bbc4-0c8fab420450",
+    "x-amz-sns-topic-arn": "arn:aws:sns:us-east-1:827617851594:kythira-sns-evidence-610a718c-a"
+   },
+   "body": "{\n  \"Type\" : \"Notification\",\n  \"MessageId\" : \"49c313a8-9100-53c2-965f-70df7938e460\",\n  \"TopicArn\" : \"arn:aws:sns:us-east-1:827617851594:kythira-sns-evidence-610a718c-a\",\n  \"Message\" : \"batch entry one\",\n  \"Timestamp\" : \"2026-11-18T17:52:56.790Z\",\n  \"SignatureVersion\" : \"1\",\n  \"Signature\" : \"GX3+kiVKUOScO/Qav5argxdiR3BqcOY4y0cuRmPcGS2AMaRhU//ONm6XGaONTsqj9fIgGF55nklgGu0FgI1a/4cRdqSV6Itagx/opkhv8J5jUs25v1VkxcRY9AUDnq4SGEGzxBW2MqaXu3EgSaRfuQI8syWBuheyS9avzpAKYy0B4LnHTChrC5b4cSHocDQOlZU9Ou9lgPkftGddi3zok5D1yiVXDBq2e+xJijwhS3YDJvcOcNNRniwZIF0+8QCjnA9oVhWFwClIdnrWJW+bdPlgrw5E/Is0TPhchPFJHp0BGNWKBsrQzZTDV7vSEJ/oms6o6y4g5IdbdZzdL1pA5A==\",\n  \"SigningCertURL\" : \"https://sns.us-east-1.amazonaws.com/SimpleNotificationService-1e59c4574facfe41babdb2d652f8ebef.pem\",\n  \"UnsubscribeURL\" : \"https://sns.us-east-1.amazonaws.com/?Action=Unsubscribe&SubscriptionArn=arn:aws:sns:us-east-1:827617851594:kythira-sns-evidence-610a718c-a:c9434b2d-34b9-4c7f-bbc4-0c8fab420450\"\n}"
+  },
+  {
+   "path": "/a/wrapped",
+   "label": "batch-second",
+   "method": "POST",
+   "query": "",
+   "headers": {
+    "accept-encoding": "gzip,deflate",
+    "content-length": "993",
+    "content-type": "text/plain; charset=UTF-8",
+    "host": "capture.example",
+    "user-agent": "Amazon Simple Notification Service Agent",
+    "x-amz-sns-message-id": "ea5506e9-676c-5cde-bfc3-659e8f54fb7c",
+    "x-amz-sns-message-type": "Notification",
+    "x-amz-sns-subscription-arn": "arn:aws:sns:us-east-1:827617851594:kythira-sns-evidence-610a718c-a:c9434b2d-34b9-4c7f-bbc4-0c8fab420450",
+    "x-amz-sns-topic-arn": "arn:aws:sns:us-east-1:827617851594:kythira-sns-evidence-610a718c-a"
+   },
+   "body": "{\n  \"Type\" : \"Notification\",\n  \"MessageId\" : \"ea5506e9-676c-5cde-bfc3-659e8f54fb7c\",\n  \"TopicArn\" : \"arn:aws:sns:us-east-1:827617851594:kythira-sns-evidence-610a718c-a\",\n  \"Subject\" : \"Batch subject\",\n  \"Message\" : \"batch entry two\",\n  \"Timestamp\" : \"2026-11-18T17:52:56.790Z\",\n  \"SignatureVersion\" : \"1\",\n  \"Signature\" : \"BcL0CKNgfxgvInmObMTJck8tzACytxERsLwpC2Th7bme+XRval/SIamVyU1N5GNTb9gewOFpVrgB+bPjb98dHBWgI0UqN3keT8SY34H6LIWGw8MkmPX4Sz9zRzRvmov1ue5O8/iTfzwkW/6B4uywU8Z3EVPCt/2JR+ctfBf7q2TZsFeur6+Te8r0P/Mvj38ie3E5RjPTlBdYC6Usfq9sOXsUvk0qDeluf6FKB5zwRpbU18BulQWM82ALgPxzuOLrpDMgSFz6HlNQAlJG+RUC6GRypq9nEIqX3ltxac/t/om0sfN01mm6/VDirTRD2IY9InY/9DAHp3s7Cn/i8wOB9Q==\",\n  \"SigningCertURL\" : \"https://sns.us-east-1.amazonaws.com/SimpleNotificationService-1e59c4574facfe41babdb2d652f8ebef.pem\",\n  \"UnsubscribeURL\" : \"https://sns.us-east-1.amazonaws.com/?Action=Unsubscribe&SubscriptionArn=arn:aws:sns:us-east-1:827617851594:kythira-sns-evidence-610a718c-a:c9434b2d-34b9-4c7f-bbc4-0c8fab420450\"\n}"
+  },
+  {
+   "path": "/b/wrapped",
+   "label": "SubscriptionConfirmation",
+   "method": "POST",
+   "query": "",
+   "headers": {
+    "accept-encoding": "gzip,deflate",
+    "content-length": "1708",
+    "content-type": "text/plain; charset=UTF-8",
+    "host": "capture.example",
+    "user-agent": "Amazon Simple Notification Service Agent",
+    "x-amz-sns-message-id": "5776cbe0-80cd-4c90-8bd7-df25071a2086",
+    "x-amz-sns-message-type": "SubscriptionConfirmation",
+    "x-amz-sns-topic-arn": "arn:aws:sns:us-east-1:827617851594:kythira-sns-evidence-610a718c-b"
+   },
+   "body": "{\n  \"Type\" : \"SubscriptionConfirmation\",\n  \"MessageId\" : \"5776cbe0-80cd-4c90-8bd7-df25071a2086\",\n  \"Token\" : \"2336412f37fb687f5d51e6e2425929f4483a14c7b3a3738a53de2d927ba8e9bd86c0a14cf1cb86190373d005f6cc9aae3169bfc844f7299a0800375a2f8187fbf25da6ab90c708a4cf0cac69f669882a66bc2c34439faa611c8eab814cc5c83c64e5667dc4cb4199874807a53e933da1be5d84ec4a053c922d50e6d63ce20a62a5f0aad2b6f0d66b971680a148d58efd\",\n  \"TopicArn\" : \"arn:aws:sns:us-east-1:827617851594:kythira-sns-evidence-610a718c-b\",\n  \"Message\" : \"You have chosen to subscribe to the topic arn:aws:sns:us-east-1:827617851594:kythira-sns-evidence-610a718c-b.\\nTo confirm the subscription, visit the SubscribeURL included in this message.\",\n  \"SubscribeURL\" : \"https://sns.us-east-1.amazonaws.com/?Action=ConfirmSubscription&TopicArn=arn:aws:sns:us-east-1:827617851594:kythira-sns-evidence-610a718c-b&Token=2336412f37fb687f5d51e6e2425929f4483a14c7b3a3738a53de2d927ba8e9bd86c0a14cf1cb86190373d005f6cc9aae3169bfc844f7299a0800375a2f8187fbf25da6ab90c708a4cf0cac69f669882a66bc2c34439faa611c8eab814cc5c83c64e5667dc4cb4199874807a53e933da1be5d84ec4a053c922d50e6d63ce20a62a5f0aad2b6f0d66b971680a148d58efd\",\n  \"Timestamp\" : \"2026-11-18T17:52:46.231Z\",\n  \"SignatureVersion\" : \"2\",\n  \"Signature\" : \"A06bdl8jmStNI1ubyfEr6DduurwXFt/6FDs2KwejRhSQXxJCtaoYgPG2XRohLq4fUp2RJSuEEpbqf3Yvpeth4xvoHMUEvdWc6qrSAlhS8ZVNEjwBx61X16Mp+px9gJjJuKsXOFwUvPnCtvwad3Sq2hapE5nK6Ow2Hhv8PwyvZzPQuuSmNch965/ojeI3vvCOl37s7ljANUKNaGAUxnE0V2nbUYVIqFEUF0+E7bVHEVhisemBIDAZNQJ3VqI77LTmZHeIEaRo/IHLFkmTpE/M2PZ3upLkHAflAPE35aZEed9pKrTdEoXFdwLA5IjkaaFInTVBY/+JsOq5WcoRjD9+eQ==\",\n  \"SigningCertURL\" : \"https://sns.us-east-1.amazonaws.com/SimpleNotificationService-1e59c4574facfe41babdb2d652f8ebef.pem\"\n}"
+  },
+  {
+   "path": "/b/wrapped",
+   "label": "plain-v2",
+   "method": "POST",
+   "query": "",
+   "headers": {
+    "accept-encoding": "gzip,deflate",
+    "content-length": "978",
+    "content-type": "text/plain; charset=UTF-8",
+    "host": "capture.example",
+    "user-agent": "Amazon Simple Notification Service Agent",
+    "x-amz-sns-message-id": "670a2c54-e6aa-568f-8eed-4f230e92f12d",
+    "x-amz-sns-message-type": "Notification",
+    "x-amz-sns-subscription-arn": "arn:aws:sns:us-east-1:827617851594:kythira-sns-evidence-610a718c-b:208e8bf9-2275-4d8c-bb09-66f25d656e06",
+    "x-amz-sns-topic-arn": "arn:aws:sns:us-east-1:827617851594:kythira-sns-evidence-610a718c-b"
+   },
+   "body": "{\n  \"Type\" : \"Notification\",\n  \"MessageId\" : \"670a2c54-e6aa-568f-8eed-4f230e92f12d\",\n  \"TopicArn\" : \"arn:aws:sns:us-east-1:827617851594:kythira-sns-evidence-610a718c-b\",\n  \"Message\" : \"Signed with SignatureVersion 2.\",\n  \"Timestamp\" : \"2026-11-18T17:52:56.874Z\",\n  \"SignatureVersion\" : \"2\",\n  \"Signature\" : \"FCLuNrTYsBO1IPmeulACO2sszweN0HYLzk5X0s8T7uG1m+9md4bgOUIMEmRZqx0y16/q7b04j3mAuwiCQDtzfVV8UqVUMPW/CkFHlpoOVeXDequD/TqMokNYBNBCEf4HaEsfJtaThb2xAojptEBb8Yo1ky0GzxHypk0OelTdJiVSyX9G66PhK+IaJQqCukrU0zHzGh96YKpUERP9TonbMT/nKc/BprRX0TIhGm0dPNoBEvV3cjyqeqsevVhem3iQMrEub4NljsFRe1ayVJk+SA9rFXDFwUqwnCZWWl0uLHoyYKostnmbqGvj3jnlczjwExZsdw1kgmbHxZH896Ki2A==\",\n  \"SigningCertURL\" : \"https://sns.us-east-1.amazonaws.com/SimpleNotificationService-1e59c4574facfe41babdb2d652f8ebef.pem\",\n  \"UnsubscribeURL\" : \"https://sns.us-east-1.amazonaws.com/?Action=Unsubscribe&SubscriptionArn=arn:aws:sns:us-east-1:827617851594:kythira-sns-evidence-610a718c-b:208e8bf9-2275-4d8c-bb09-66f25d656e06\"\n}"
+  }
+ ],
+ "certificates": {
+  "https://sns.us-east-1.amazonaws.com/SimpleNotificationService-1e59c4574facfe41babdb2d652f8ebef.pem": "-----BEGIN CERTIFICATE-----\nMIIFwjCCBKqgAwIBAgIQDjkmX/3RNPbBjrrNAmk+CTANBgkqhkiG9w0BAQsFADA8\nMQswCQYDVQQGEwJVUzEPMA0GA1UEChMGQW1hem9uMRwwGgYDVQQDExNBbWF6b24g\nUlNBIDIwNDggTTA0MB4XDTI2MDgxNjAwMDAwMFoXDTI3MDMwMTIzNTk1OVowHDEa\nMBgGA1UEAxMRc25zLmFtYXpvbmF3cy5jb20wggEiMA0GCSqGSIb3DQEBAQUAA4IB\nDwAwggEKAoIBAQC/2ihMx9yVNDh8rRTQA0Mop4ezvILb/C12UxECZ7JtuiECdLb3\nX3EaS0AOl4gPJEfJaRMKC/KmYnTt6h6MxNfpPK+xwwZvIxnITIZTM4peUTWTBXBV\njhjxfhf6Ara/LFp5zObb3Ajlnj+BW7n+K5SFVIb21xZOlQA58FXmUgE2hd+ozrKy\nxgcwb0mOnQvSJ9L2Viqk4M1iLdCEgajD45BJItpTyJcq2VGswpLUqdFMGOCXp4ad\nRxa8zlt6bkaqijLr8nsVeIcHYa6026NHXj065hXO27OdgWzhtOHJVm6rGMWp8vyw\nTGLtD+3+1I9S9bmsSuIEugtYtTnVge/KmnsDAgMBAAGjggLeMIIC2jAfBgNVHSME\nGDAWgBQfUpJhVoJUf4Fm2B09CqoyXIfdCDAdBgNVHQ4EFgQUKKAt0bR7PnXg7TUg\nZjzpd9M21XEwHAYDVR0RBBUwE4IRc25zLmFtYXpvbmF3cy5jb20wEwYDVR0gBAww\nCjAIBgZngQwBAgEwDgYDVR0PAQH/BAQDAgWgMBMGA1UdJQQMMAoGCCsGAQUFBwMB\nMDsGA1UdHwQ0MDIwMKAuoCyGKmh0dHA6Ly9jcmwucjJtMDQuYW1hem9udHJ1c3Qu\nY29tL3IybTA0LmNybDB1BggrBgEFBQcBAQRpMGcwLQYIKwYBBQUHMAGGIWh0dHA6\nLy9vY3NwLnIybTA0LmFtYXpvbnRydXN0LmNvbTA2BggrBgEFBQcwAoYqaHR0cDov\nL2NydC5yMm0wNC5hbWF6b250cnVzdC5jb20vcjJtMDQuY2VyMAwGA1UdEwEB/wQC\nMAAwggF8BgorBgEEAdZ5AgQCBIIBbASCAWgBZgB1AExj3JjlnB2riPYeij3ero+r\nRKM3e1+blMP7oZz8wb4mAAABoAf2vaYAAAQDAEYwRAIgXAe/qcYQp3Z4qLTeGeEa\nDIK6mKPQxQbZSmi4j4Dvh+oCIHjUvooQDP8lgiUPHVMVoJaSnO5speyb4lPFsjNV\nHbZ4AHUA1tWNqdAXU/NqSqDHV0kCr+vH3CzTjNn3ZMgMiRkenwIAAAGgB/a9pAAA\nBAMARjBEAiBFUafuPEvLEf22tRoc97Brns21GbfnL4F8c6ZDWmOI5AIgAoOap/yM\nRDLHZy9oTamKvv0s6EhP50CY9mwL0Ewa3RUAdgAcn2gs6frwRWlQ+BuWiofd2zIQ\n2EzmyLLjglJKxM9ZnwAAAaAH9r5pAAAEAwBHMEUCIGjo/VlApnjeV0O/1b260+jp\nlzgnX3EWOXg7GiTYRzVtAiEApFfKATiw5yEcp1k9PRfulRR8eevlpZ6CztUGmKV9\n314wDQYJKoZIhvcNAQELBQADggEBAIIp2/MQNVcvLO0y7ggkAjSliM8etGm8PmOX\nYYYCnYSPRUWqyGMMVMPKvf3bgMvobBJ3phx3YsPXSb7G7l3LjAxU3e688/WzA8sK\nQQ7ZLCNTS5np7xOPMgJq664mRBmCRlIYFr6BXiuwucqwyQRQveHHyw3w9/4pqmql\nEmHMszsHfzSWu78KI0/1jWzq71OSLuZY67iWU6n3bdAHB0q41Wqs8431O/qY9ErQ\npFmuPQnYni+AbZ9CGWQ0FnDHFwDvhw3ZddxtkqPmj19PQafnuoQ8eNLx+gRTQlAp\nDA+nsyFdojhtQj18zfcf7dRmZzAKPc6piQSqUPEWt6OO9eY+3LQ=\n-----END CERTIFICATE-----\n"
+ }
+}
