@@ -78,13 +78,13 @@ Consequences for later tasks:
   (`ApproximateNumberOfMessages`) and receives ten at a time with a short
   wait and no attributes.
 - **The query protocol is still worth serving**: SDKs from before late
-  2023 (and aws-sdk-java v1, which never moved) speak it, and Requirement
+  2023 (aws-sdk-java v1 up to 1.12.575 among them) speak it, and Requirement
   3.1 asks for it.
 
 ## Not recorded yet, and why
 
 | Client | When | Why not now |
 |---|---|---|
-| Spring Cloud AWS | task 12 | It needs a Spring Boot application around it; the client suite runs it end to end against real nodes instead. |
-| SQS Extended Client | task 12 | It needs S3 for its payloads (Kythira's S3 service or a stand-in). |
-| aws-sdk-java v1 (query) | task 12 | The boto3 query recording covers the protocol; v1 joins the client suite. |
+| Spring Cloud AWS | task 12 (done) | Its template and listener container run end to end in `../clients/` instead. |
+| SQS Extended Client | task 12 (done) | It needs S3 for its payloads; `../clients/` runs it with moto as S3. |
+| aws-sdk-java v1 (query) | task 12 (done) | The boto3 query recording covers the protocol; `../clients/` runs v1 1.12.575, the last query-era release (1.12.585 on speak AWS JSON 1.0). |
