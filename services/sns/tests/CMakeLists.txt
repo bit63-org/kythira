@@ -79,4 +79,22 @@ endfunction()
 # retry state; property tests across replicas and a snapshot restore).
 kythira_sns_test(sns_topic_state_machine_test sns_topic_state_machine_test.cpp)
 
+# Task 3, Requirements 2.2, 2.3, 3.1 and 3.2: the query inputs as the
+# recorded clients send them, errors, topic ARNs and policies
+# (AddPermission, RemovePermission), the compatibility switches and limits,
+# and the `sns` action table; then the front end itself, with real SigV4
+# through the static-key authorizer and a recording authorizer for the
+# resources, condition keys and extra actions each request is checked on.
+kythira_sns_test(sns_gateway_inputs_test sns_gateway_inputs_test.cpp)
+kythira_sns_test(sns_front_end_test sns_front_end_test.cpp)
+
+# Task 3: the checked-in action table is what tools/gen_sns_actions.py makes
+# of the pinned service reference.
+add_test(NAME sns_actions_up_to_date
+    COMMAND "${Python3_EXECUTABLE}" "${_sns_dir}tools/gen_sns_actions.py"
+            "${_sns_dir}tools/sns-service-reference.json"
+            "${_sns_dir}include/kythira/sns/sns_actions.hpp" --check)
+set_tests_properties(sns_actions_up_to_date PROPERTIES
+    LABELS "unit;sns;sns-module" TIMEOUT 60)
+
 kythira_scale_test_timeouts()

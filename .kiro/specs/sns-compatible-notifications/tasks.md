@@ -57,10 +57,29 @@ first builds it to that design). Each task is one PR unless noted.
     requires identical results, state and logs. Splitting a topic's
     state across groups (task 9) is not done yet.
 
-- [ ] 3. Gateway, protocol and authorization
+- [x] 3. Gateway, protocol and authorization
   - Query codec, SigV4, `sns` action table, topic policies, static keys,
     compatibility profile
   - _Requirements: 2.2, 2.3, 3.1, 3.2_
+  - Done: `sns_front_end.hpp` takes a transport-free request through
+    framing (form POST or GET), SigV4 (`sns`, query-protocol errors),
+    the form (MissingAction, InvalidAction for an unknown version,
+    operation or one with no handler), admission, the topic the request
+    names (`TopicArn`, `ResourceArn`, the topic in `SubscriptionArn`, or
+    CreateTopic's `Name`), and authorization of the operation's `sns:`
+    action with the topic policy and tags, `aws:SourceOwner`,
+    Subscribe's `sns:Protocol` and `sns:Endpoint`, and the extra
+    actions CreateTopic needs for tags and a data protection policy.
+    `sns_actions.hpp` is generated from AWS's pinned service reference
+    (with the static-key roles), `sns_query.hpp` reads attribute maps,
+    message attributes, tags and batches by name in any order,
+    `sns_topic_policy.hpp` has the default topic policy, AddPermission
+    and RemovePermission, and `sns_compat_profile.hpp` the five
+    `kythira:compat:*` switches and SNS's documented limits by region.
+    Static keys are core's `static_keys_file.hpp` with
+    `sns_static_roles()`. The daemon mounts the front end on the Beast
+    host with task 4's handlers; the rate limiter that uses the profile's
+    rates plugs into the admission hook there too.
 
 - [ ] 4. Topic, subscription and publish API
   - Operations, confirmation tokens, attributes, message structure,
