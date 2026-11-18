@@ -108,6 +108,17 @@ elseif(TARGET Boost::json)
 endif()
 add_test(NAME s3_access_test COMMAND s3_access_test)
 
+# Task 6: browser POST uploads: the streaming multipart/form-data parser,
+# the policy document and its conditions, the policy's SigV4 signature.
+add_executable(s3_post_policy_test s3_post_policy_test.cpp)
+target_link_libraries(s3_post_policy_test PRIVATE kythira_s3 Boost::unit_test_framework)
+if(TARGET boost_json)
+    target_link_libraries(s3_post_policy_test PRIVATE boost_json)
+elseif(TARGET Boost::json)
+    target_link_libraries(s3_post_policy_test PRIVATE Boost::json)
+endif()
+add_test(NAME s3_post_policy_test COMMAND s3_post_policy_test)
+
 set_tests_properties(
     s3_model_coverage
     s3_model_coverage_checker
@@ -121,6 +132,7 @@ set_tests_properties(
     s3_authz_test
     s3_auth_test
     s3_access_test
+    s3_post_policy_test
     PROPERTIES LABELS "unit;s3;s3-module" TIMEOUT 60)
 
 kythira_scale_test_timeouts()

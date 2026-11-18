@@ -133,11 +133,30 @@ builds it to that design). Each task is one PR unless noted.
     the bytes are the caller's; acknowledging at quorum is left for
     measurement. Wiring into handlers is task 7.
 
-- [ ] 6. Gateway, authentication and authorization
+- [x] 6. Gateway, authentication and authorization
   - SigV4 in headers, query and streaming chunks with trailers, POST
     policy uploads, `s3` action table, bucket policies, Object Ownership
     and ACLs, Block Public Access, static keys
   - _Requirements: 4.2, 4.3, 5.1-5.6_
+  - Done: `s3_auth.hpp` authenticates header and presigned SigV4 with
+    S3's rules and every payload mode, refusing SigV2 and SigV4a with
+    S3's `InvalidRequest`; its `payload_reader` checks a hashed body or
+    decodes `aws-chunked` (signed chunks verified, trailers kept for
+    task 8). Core `aws_claim_resolver` lets a front end resolve a
+    claim's signing key (static keys, IAM, and the static-or-IAM
+    switch all implement it), which signed streaming and POST uploads
+    need. `s3_actions.hpp` is generated from the pinned Service
+    Authorization Reference; `s3_authz.hpp` turns a request into the
+    checks it needs (primary action, version twins, ACL/tagging/lock
+    extras, the copy source). `s3_access.hpp` decides: authorizer with
+    the bucket policy, then ACLs only when Object Ownership allows,
+    Block Public Access (account OR bucket, on by default) and
+    anonymous access through IAM's new `authorize_anonymous` or an
+    AllUsers grant. `s3_post_policy.hpp` parses POST forms as they
+    stream, checks the policy and verifies its signature through the
+    same key resolution. Canonical ids are account ids; email grants
+    are refused as in post-2019 regions. Wiring into the listener comes
+    with the handlers in task 7.
 
 - [ ] 7. Buckets and objects API
   - Bucket operations and sub-resources; object put/get/head/delete,
