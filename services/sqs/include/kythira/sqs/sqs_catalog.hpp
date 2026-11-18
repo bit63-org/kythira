@@ -115,13 +115,26 @@ namespace catalog_keys {
 inline constexpr std::size_t k_max_queue_tags = 50;
 
 /// Partitions a new queue starts with (design "Partitions", open question
-/// 1): a standard queue four, a FIFO queue one, a high-throughput FIFO
-/// queue (`perMessageGroupId`) sixteen.
+/// 1): a standard queue four (it grows with its send rate, up to
+/// `k_max_partitions`), a FIFO queue one, a high-throughput FIFO queue
+/// sixteen. High throughput is SQS's: `FifoThroughputLimit` of
+/// `perMessageGroupId` with `DeduplicationScope` of `messageGroup`. Only
+/// then may a FIFO queue span partitions, because its deduplication
+/// records are per partition and a group always maps to one. A FIFO
+/// queue's count is fixed at creation: changing it would move groups
+/// between partitions and break their order.
+[[nodiscard]] inline auto high_throughput_fifo(const queue_settings& s) -> bool {
+    return s._fifo && s._throughput_limit == "perMessageGroupId" &&
+           s._dedup_scope == "messageGroup";
+}
+
+inline constexpr std::uint16_t k_max_partitions = 64;
+
 [[nodiscard]] inline auto initial_partitions(const queue_settings& s) -> std::uint16_t {
     if (!s._fifo) {
         return 4;
     }
-    return s._throughput_limit == "perMessageGroupId" ? 16 : 1;
+    return high_throughput_fifo(s) ? 16 : 1;
 }
 
 // ---- records --------------------------------------------------------------
@@ -408,6 +421,10 @@ struct catalog_command {
         /// CancelMessageMoveTask: a running task becomes cancelling (the
         /// worker then cancels it); `does_not_exist` for any other.
         move_cancel = 9,
+        /// A standard queue's send rate grew: its partition count rises to
+        /// `_partitions` (never falls, never past `k_max_partitions`; FIFO
+        /// queues never grow). New sends spread over all of them.
+        grow = 10,
     };
 
     kind _op = kind::create;
@@ -495,7 +512,7 @@ struct catalog_result {
     std::uint8_t format = 0;
     std::uint8_t op = 0;
     catalog_command c;
-    if (!r.u8(format) || format != k_command_format || !r.u8(op) || op < 1 || op > 9) {
+    if (!r.u8(format) || format != k_command_format || !r.u8(op) || op < 1 || op > 10) {
         return std::nullopt;
     }
     c._op = static_cast<catalog_command::kind>(op);

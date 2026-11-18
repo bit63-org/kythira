@@ -33,6 +33,15 @@
 /// is gone (failed), or after a cancel (cancelled). The rate is a token
 /// bucket kept by the worker: a new leader starts it again, which can only
 /// make a pass smaller.
+///
+/// `grow_worker` grows standard queues (task 8, Requirement 9.1; design
+/// "Partitions"): on the node leading a queue's catalog entry it samples
+/// the queue's send count (the partitions' sequence counters) every
+/// `interval`, and when the rate per partition passes
+/// `per_partition_rate` it proposes a catalog `grow` doubling the count,
+/// up to `k_max_partitions`. New sends spread over every partition and
+/// receives rotate over all of them; nothing moves. A new leader starts
+/// sampling again, so growth waits one interval after a leader change.
 
 #include <kythira/sqs/sqs_catalog.hpp>
 #include <kythira/sqs/sqs_cluster.hpp>
@@ -407,6 +416,128 @@ private:
                          [this] { return !_running || _woken; });
             _woken = false;
             if (!_running) {
+                return;
+            }
+        }
+    }
+};
+
+template<queue_cluster Cluster> class grow_worker {
+public:
+    using state_machine_type = typename Cluster::state_machine_type;
+    using leads_fn = std::function<bool(const std::string& key)>;
+
+    struct options {
+        std::chrono::milliseconds _interval{10'000};
+        /// Sends a second one partition takes before the queue grows.
+        double _per_partition_rate = 500.0;
+    };
+
+    grow_worker(Cluster& cluster, leads_fn leads, options o = {})
+        : _cluster(cluster), _leads(std::move(leads)), _opt(o) {}
+    grow_worker(const grow_worker&) = delete;
+    auto operator=(const grow_worker&) -> grow_worker& = delete;
+    grow_worker(grow_worker&&) = delete;
+    auto operator=(grow_worker&&) -> grow_worker& = delete;
+    ~grow_worker() { stop(); }
+
+    /// One sample of every standard queue this node leads; proposes the
+    /// growths due. Returns how many it proposed.
+    auto run_once() -> std::size_t {
+        std::vector<queue_record> queues;
+        (void)_cluster.read(catalog_keys::prefix(), [&](const state_machine_type& sm) {
+            sm.for_each_queue([&](const queue_record& q) {
+                if (!q._settings._fifo) {
+                    queues.push_back(q);
+                }
+                return true;
+            });
+        });
+        const auto now = _cluster.now_ms();
+        std::size_t grown = 0;
+        std::map<std::uint64_t, sample> next;
+        for (const auto& q : queues) {
+            if (!_leads(catalog_keys::queue(q._account, q._name))) {
+                continue;
+            }
+            std::uint64_t sent = 0;
+            const auto n = std::max<std::uint16_t>(q._partitions, 1);
+            for (std::uint16_t p = 0; p < n; ++p) {
+                const auto t = q.target(p);
+                (void)_cluster.read(queue_keys::partition_prefix(t),
+                                    [&](const state_machine_type& sm) {
+                                        sent += sm.counters(t).next_sequence - 1;
+                                    });
+            }
+            next[q._id] = sample{sent, now};
+            const auto it = _samples.find(q._id);
+            if (it == _samples.end() || now <= it->second._ms || n >= k_max_partitions) {
+                continue;
+            }
+            const auto rate = static_cast<double>(sent - std::min(sent, it->second._sent)) *
+                              1000.0 / static_cast<double>(now - it->second._ms);
+            if (rate <= _opt._per_partition_rate * n) {
+                continue;
+            }
+            catalog_command c;
+            c._op = catalog_command::kind::grow;
+            c._account = q._account;
+            c._name = q._name;
+            c._now_ms = now;
+            c._partitions = static_cast<std::uint16_t>(std::min<int>(n * 2, k_max_partitions));
+            if (_cluster.propose(catalog_keys::queue(q._account, q._name),
+                                 record_detail::to_bytes(encode_catalog_command(c)))) {
+                ++grown;
+                ++_grown;
+            }
+        }
+        _samples = std::move(next);
+        return grown;
+    }
+
+    void start() {
+        _running = true;
+        _thread = std::thread([this] { loop(); });
+    }
+
+    void stop() {
+        {
+            const std::scoped_lock lock(_mutex);
+            _running = false;
+        }
+        _cv.notify_all();
+        if (_thread.joinable()) {
+            _thread.join();
+        }
+    }
+
+    [[nodiscard]] auto grown() const -> std::uint64_t { return _grown; }
+
+private:
+    struct sample {
+        std::uint64_t _sent = 0;
+        std::uint64_t _ms = 0;
+    };
+
+    Cluster& _cluster;
+    leads_fn _leads;
+    options _opt;
+    std::map<std::uint64_t, sample> _samples;
+    std::thread _thread;
+    std::mutex _mutex;
+    std::condition_variable _cv;
+    bool _running = false;
+    std::atomic<std::uint64_t> _grown{0};
+
+    void loop() {
+        for (;;) {
+            try {
+                (void)run_once();
+            } catch (const std::exception&) {
+                _samples.clear();  // a replica not ready yet; sample again
+            }
+            std::unique_lock lock(_mutex);
+            if (_cv.wait_for(lock, _opt._interval, [this] { return !_running; })) {
                 return;
             }
         }

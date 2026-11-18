@@ -147,7 +147,29 @@ BOOST_AUTO_TEST_CASE(initial_partitions_follow_the_queue_type) {
     s._fifo = true;
     BOOST_TEST(sqs::initial_partitions(s) == 1U);
     s._throughput_limit = "perMessageGroupId";
+    BOOST_TEST(sqs::initial_partitions(s) == 1U);  // not high throughput yet
+    s._dedup_scope = "messageGroup";
     BOOST_TEST(sqs::initial_partitions(s) == 16U);
+}
+
+BOOST_AUTO_TEST_CASE(grow_only_raises_a_standard_queue_partition_count) {
+    replica r;
+    BOOST_TEST_REQUIRE(r.run(create("std"))._record->_partitions == 4U);
+    auto g = create("std");
+    g._op = sqs::catalog_command::kind::grow;
+    g._partitions = 8;
+    BOOST_TEST(r.run(g)._record->_partitions == 8U);
+    g._partitions = 2;  // never falls
+    BOOST_TEST(r.run(g)._record->_partitions == 8U);
+    g._partitions = 1000;  // capped
+    BOOST_TEST(r.run(g)._record->_partitions == sqs::k_max_partitions);
+    auto f = create("q.fifo");
+    f._settings._fifo = true;
+    f._partitions = sqs::initial_partitions(f._settings);
+    BOOST_TEST_REQUIRE(r.run(f)._record->_partitions == 1U);
+    f._op = sqs::catalog_command::kind::grow;
+    f._partitions = 8;
+    BOOST_TEST(r.run(f)._record->_partitions == 1U);  // FIFO never grows
 }
 
 BOOST_AUTO_TEST_CASE(create_is_idempotent_on_identical_settings) {

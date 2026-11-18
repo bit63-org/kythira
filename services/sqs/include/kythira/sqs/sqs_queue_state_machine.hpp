@@ -376,6 +376,9 @@ public:
     /// batch stays small; the rest is done by the next entries, and the
     /// leader's ticks keep coming while any is due.
     static constexpr std::size_t k_housekeeping_limit = 128;
+    /// Message groups a standard queue's receive considers at once (fair
+    /// queues): the rotation goes on from there on the next receive.
+    static constexpr std::size_t k_max_fair_groups = 1024;
 
     // -- persistent_state_machine ------------------------------------------
 
@@ -882,6 +885,32 @@ private:
         return p + "h/" + queue_keys::hex16(seq) + "/" + group;
     }
 
+    /// A standard queue's visible messages, by message group (fair
+    /// queues; ungrouped messages are the group ""): `f/<group>\0<seq>`,
+    /// with `n/<group>` counting them.
+    static auto fair_prefix(const std::string& p, const std::string& group) -> std::string {
+        std::string k = p + "f/" + group;
+        k.push_back('\0');
+        return k;
+    }
+
+    auto fair_add(const std::string& p, const std::string& group, std::uint64_t seq) -> void {
+        put(fair_prefix(p, group) + queue_keys::hex16(seq), {});
+        const auto key = p + "n/" + group;
+        put_u64(key, read_u64(key).value_or(0) + 1);
+    }
+
+    auto fair_remove(const std::string& p, const std::string& group, std::uint64_t seq) -> void {
+        erase(fair_prefix(p, group) + queue_keys::hex16(seq));
+        const auto key = p + "n/" + group;
+        const auto n = read_u64(key).value_or(0);
+        if (n <= 1) {
+            erase(key);
+        } else {
+            put_u64(key, n - 1);
+        }
+    }
+
     /// The first message of a FIFO group, if the group has any.
     [[nodiscard]] auto group_head(const std::string& p, const std::string& group) const
         -> std::optional<std::uint64_t> {
@@ -917,7 +946,7 @@ private:
         // Leave the old state's index.
         if (m.status == state::visible) {
             if (!t.fifo) {
-                erase(p + "a/" + queue_keys::hex16(seq));
+                fair_remove(p, m.group_id, seq);
             } else if (group_head(p, m.group_id) == seq) {
                 erase(head_key(p, seq, m.group_id));
             }
@@ -932,7 +961,7 @@ private:
         ++count_of(c, next);
         if (next == state::visible) {
             if (!t.fifo) {
-                put(p + "a/" + queue_keys::hex16(seq), {});
+                fair_add(p, m.group_id, seq);
             } else if (group_head(p, m.group_id) == seq) {
                 put(head_key(p, seq, m.group_id), {});
             }
@@ -949,7 +978,7 @@ private:
                 std::uint64_t seq, const stored_message& m) -> void {
         if (m.status == state::visible) {
             if (!t.fifo) {
-                erase(p + "a/" + queue_keys::hex16(seq));
+                fair_remove(p, m.group_id, seq);
             }
         } else {
             erase(timed_key(p, "p/", m.at_ms, seq));
@@ -1164,6 +1193,13 @@ private:
                 put_u64(catalog_keys::deleted(c->_account, c->_name), c->_now_ms);
                 out._record = std::move(rec);
                 return out;
+            case catalog_command::kind::grow:
+                if (q._settings._fifo || c->_partitions <= q._partitions) {
+                    out._record = std::move(rec);
+                    return out;  // nothing to do: ok, unchanged
+                }
+                q._partitions = std::min(c->_partitions, k_max_partitions);
+                break;
             case catalog_command::kind::purge:
                 if (q._last_purge_ms != 0 && c->_now_ms < q._last_purge_ms + c->_cooldown_ms) {
                     out._outcome = status::purge_in_progress;
@@ -1255,7 +1291,7 @@ private:
         }
         auto counters = load_counters(p);
         if (c.op == queue_command::kind::purge) {
-            for (const char* sub : {"m/", "a/", "p/", "r/", "g/", "h/"}) {
+            for (const char* sub : {"m/", "f/", "n/", "c/", "p/", "r/", "g/", "h/"}) {
                 erase_prefix(p + sub);
             }
             counters.visible = counters.in_flight = counters.delayed = 0;
@@ -1341,7 +1377,7 @@ private:
             m.status = state::visible;
             ++c.visible;
             if (!t.fifo) {
-                put(p + "a/" + queue_keys::hex16(seq), {});
+                fair_add(p, s.group_id, seq);
             } else if (group_head(p, s.group_id) == seq) {
                 put(head_key(p, seq, s.group_id), {});
             }
@@ -1447,13 +1483,7 @@ private:
             std::uint64_t{cmd.visibility_timeout_s} * 1000, k_max_visibility_ms);
         const auto deadline = cmd.now_ms + timeout_ms;
         if (!t.fifo) {
-            std::vector<std::uint64_t> picked;
-            scan_prefix(p + "a/", [&](std::string_view k, std::string_view) {
-                if (const auto seq = queue_keys::parse_hex(k.substr(p.size() + 2))) {
-                    picked.push_back(*seq);
-                }
-                return picked.size() < want;
-            });
+            const auto picked = fair_pick(p, want);
             for (const auto seq : picked) {
                 if (auto m = load_message(p, seq)) {
                     if (dead_letter_due(cmd, *m, seq)) {
@@ -1506,6 +1536,59 @@ private:
             }
         }
         return out;
+    }
+
+    /// Up to `want` visible messages of a standard partition, oldest first
+    /// within each message group, taking one from each group in turn
+    /// (fair queues, Requirement 5.8): a group with a deep backlog takes
+    /// one place per round, so a quiet group's message waits for one
+    /// round, not for the backlog. The turn goes on from the group served
+    /// last (`c/`), so with more groups than places every group is reached.
+    /// A queue without message groups has the one group "": oldest first.
+    auto fair_pick(const std::string& p, std::uint32_t want) -> std::vector<std::uint64_t> {
+        std::vector<std::string> groups;
+        scan_prefix(p + "n/", [&](std::string_view k, std::string_view) {
+            groups.emplace_back(k.substr(p.size() + 2));
+            return groups.size() < k_max_fair_groups;
+        });
+        std::vector<std::uint64_t> picked;
+        if (groups.empty()) {
+            return picked;
+        }
+        // Rotate to the group after the one served last.
+        if (const auto last = read(p + "c/"); last && groups.size() > 1) {
+            const auto it = std::upper_bound(groups.begin(), groups.end(), *last);
+            std::rotate(groups.begin(), it == groups.end() ? groups.begin() : it, groups.end());
+        }
+        std::vector<std::vector<std::uint64_t>> runs(groups.size());
+        // At most `want` groups can be served, each at most `want` times.
+        for (std::size_t g = 0; g < groups.size() && g < want; ++g) {
+            const auto fp = fair_prefix(p, groups[g]);
+            scan_prefix(fp, [&](std::string_view k, std::string_view) {
+                if (const auto seq = queue_keys::parse_hex(k.substr(fp.size()))) {
+                    runs[g].push_back(*seq);
+                }
+                return runs[g].size() < want;
+            });
+        }
+        std::size_t last_group = 0;
+        for (std::size_t round = 0; picked.size() < want; ++round) {
+            bool any = false;
+            for (std::size_t g = 0; g < runs.size() && picked.size() < want; ++g) {
+                if (round < runs[g].size()) {
+                    picked.push_back(runs[g][round]);
+                    last_group = g;
+                    any = true;
+                }
+            }
+            if (!any) {
+                break;
+            }
+        }
+        if (groups.size() > 1) {
+            put(p + "c/", groups[last_group]);
+        }
+        return picked;
     }
 
     auto move_one(const queue_target& t, const std::string& p, partition_counters& c,

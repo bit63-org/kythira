@@ -143,9 +143,20 @@ PR unless noted.
     moves that library out of Kinesis
   - _Requirements: 8.1, 8.2_
 
-- [ ] 8. Partitioning and throughput
+- [x] 8. Partitioning and throughput
   - Partition growth for standard queues, FIFO high-throughput mode,
     throttling; fair queues (moved here from task 2)
+  - Done: fair queues in the state machine (a standard partition indexes
+    visible messages by message group and a receive takes one from each
+    group in turn, the turn carried across receives); `grow_worker`
+    doubling a standard queue's partitions (4 up to 64) when its send rate
+    passes 500 a second per partition, through a catalog `grow`;
+    high-throughput FIFO (16 partitions) only with SQS's pair of settings,
+    a FIFO count fixed at creation; FIFO request rates (`RequestThrottled`,
+    per front end) and in-flight limits (`OverLimit` for standard, no
+    messages for FIFO). The one deliberate difference from SQS is listed
+    in `doc/unsupported.md`. Growth stays within the one group until
+    task 12 spreads partitions over groups
   - _Requirements: 5.8, 9.1-9.3_
 
 - [ ] 9. SNS HTTPS bridge
