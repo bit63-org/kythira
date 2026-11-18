@@ -35,6 +35,14 @@ module's consumers (Requirement 17.3).
 | `include/kythira/s3/s3_auth.hpp` | SigV4 authentication with S3's rules (header and presigned, every payload mode; SigV2 and SigV4a refused) and the body reader that checks a hashed payload or decodes `aws-chunked` streams; `s3_auth_test` | 6 |
 | `include/kythira/s3/s3_access.hpp` | Object Ownership, ACLs (canned, header and XML), Block Public Access, policy publicness, and the access decision combining the authorizer, ACLs and anonymous access; `s3_access_test` | 6 |
 | `include/kythira/s3/s3_post_policy.hpp` | browser POST uploads: streaming multipart/form-data parser, policy document and conditions, policy signature; `s3_post_policy_test` | 6 |
+| `include/kythira/s3/s3_http.hpp` | the request and response the handlers see (pull body source, streamed response bodies) | 7 |
+| `include/kythira/s3/s3_metadata.hpp` | `metadata_access`, what handlers need of the metadata layer, and `local_metadata` in process | 7 |
+| `include/kythira/s3/s3_compat.hpp` | the compatibility profile and its `kythira:compat:*` bucket tags | 7 |
+| `include/kythira/s3/s3_context.hpp` | service options, handler context, a bucket's access state from its stored config | 7 |
+| `include/kythira/s3/s3_buckets.hpp` | bucket operations and the access, tagging and logging sub-resources | 6, 7 |
+| `include/kythira/s3/s3_objects.hpp` | object put, get/head (ranges, `partNumber`, overrides, conditions), delete, copy, attributes, tagging, ACLs | 6, 7 |
+| `include/kythira/s3/s3_listings.hpp` | ListObjects V1/V2 and DeleteObjects | 7 |
+| `include/kythira/s3/s3_service.hpp` | the request pipeline and browser POST uploads; `s3_service_test` | 6, 7 |
 | `include/kythira/s3/s3_routes.hpp` | the operation table as routes for core's REST-XML router, and `route_request` (addressing, query, operation); `s3_routing_test` routes every recorded client request | 3 |
 | `implemented-operations.txt` | operations the gateway implements | 1 onward |
 | `doc/unsupported.md` | every other operation, with its planned task, reason and the exact error it returns (`NotImplemented`, 501) | 1 onward |

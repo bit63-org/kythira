@@ -158,12 +158,28 @@ builds it to that design). Each task is one PR unless noted.
     are refused as in post-2019 regions. Wiring into the listener comes
     with the handlers in task 7.
 
-- [ ] 7. Buckets and objects API
+- [x] 7. Buckets and objects API
   - Bucket operations and sub-resources; object put/get/head/delete,
     multi-delete, copy, attributes, listings; ranges; conditional reads
     and writes; metadata and ETags; the compatibility profile and its
     per-bucket tags
   - _Requirements: 3.1-3.3, 6.1, 6.2, 7.1-7.4_
+  - Done: `s3_service.hpp` is the pipeline (route, SigV4, payload
+    check, bucket lookup, access check per `s3_authz`/`s3_access`,
+    handler); `s3_buckets.hpp`, `s3_objects.hpp` and `s3_listings.hpp`
+    are the handlers for 37 operations (the access sub-resources task 6
+    planned, plus this task's), moved to `implemented-operations.txt`.
+    The front end reaches metadata through the `metadata_access`
+    concept (`s3_metadata.hpp`; `local_metadata` in process until task
+    16). The index gained `set_object_metadata` (object tags and ACLs in
+    place), a create-time config map (new buckets never exist without
+    their ownership and Block Public Access), and copy overrides (a
+    copy's ACL is never the source's; tagging REPLACE). Compatibility
+    profile in `s3_compat.hpp` with `kythira:compat:*` bucket tags;
+    per-account bucket namespaces as an option. Checksums stay with
+    task 8 (DeleteObjects accepts a checksum header in place of
+    Content-MD5 but verifies only MD5), SSE-KMS/SSE-C requests answer
+    `NotImplemented` until task 11.
 
 - [ ] 8. Checksums
   - CRC32, CRC32C, CRC64NVME, SHA-1, SHA-256, full-object and composite,

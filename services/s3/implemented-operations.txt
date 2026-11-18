@@ -6,3 +6,40 @@
 # listed in doc/unsupported.md; tools/check_coverage.py (the ctest
 # s3_model_coverage) enforces it. A task that implements an operation moves
 # it from there to here.
+CopyObject
+CreateBucket
+DeleteBucket
+DeleteBucketOwnershipControls
+DeleteBucketPolicy
+DeleteBucketTagging
+DeleteObject
+DeleteObjectTagging
+DeleteObjects
+DeletePublicAccessBlock
+GetBucketAcl
+GetBucketLocation
+GetBucketLogging
+GetBucketOwnershipControls
+GetBucketPolicy
+GetBucketPolicyStatus
+GetBucketRequestPayment
+GetBucketTagging
+GetObject
+GetObjectAcl
+GetObjectAttributes
+GetObjectTagging
+GetPublicAccessBlock
+HeadBucket
+HeadObject
+ListBuckets
+ListObjects
+ListObjectsV2
+PutBucketAcl
+PutBucketLogging
+PutBucketOwnershipControls
+PutBucketPolicy
+PutBucketTagging
+PutObject
+PutObjectAcl
+PutObjectTagging
+PutPublicAccessBlock

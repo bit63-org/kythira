@@ -119,6 +119,19 @@ elseif(TARGET Boost::json)
 endif()
 add_test(NAME s3_post_policy_test COMMAND s3_post_policy_test)
 
+# Task 7: the request pipeline end to end (routing, SigV4, the access check,
+# bucket, object and listing handlers) over the in-process metadata layer.
+# It includes the persistent state machine contract, hence the shared test
+# PCH target like the index state machine test.
+add_raft_completion_test(s3_service_test s3_service_test.cpp)
+target_link_libraries(s3_service_test PRIVATE kythira_s3)
+if(TARGET boost_json)
+    target_link_libraries(s3_service_test PRIVATE boost_json)
+elseif(TARGET Boost::json)
+    target_link_libraries(s3_service_test PRIVATE Boost::json)
+endif()
+target_compile_definitions(s3_service_test PRIVATE KYTHIRA_S3_DIR_DEFAULT="${_s3_dir}")
+
 set_tests_properties(
     s3_model_coverage
     s3_model_coverage_checker
@@ -133,6 +146,7 @@ set_tests_properties(
     s3_auth_test
     s3_access_test
     s3_post_policy_test
+    s3_service_test
     PROPERTIES LABELS "unit;s3;s3-module" TIMEOUT 60)
 
 kythira_scale_test_timeouts()
