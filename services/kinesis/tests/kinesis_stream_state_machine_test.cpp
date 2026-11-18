@@ -352,6 +352,28 @@ BOOST_AUTO_TEST_CASE(refusals) {
     BOOST_TEST(d.run(k::drop_shard_command{"k/x"})._status == k::apply_status::not_found);
 }
 
+// A shard tip is answered in log order and changes nothing: LATEST takes
+// it so an iterator never starts before an acknowledged append.
+BOOST_AUTO_TEST_CASE(a_shard_tip_reads_the_last_counter_and_changes_nothing) {
+    sm_type sm;
+    driver d{sm};
+    const auto id = create_and_open(d, "s", 1);
+    const auto key = k::routing_key(id, 0);
+    BOOST_TEST(d.run(k::shard_tip_command{key})._last_counter == 0U);
+    (void)d.run(append(key, 1, 3));
+    const auto before = sm.entries();
+    const auto tip = d.run(k::shard_tip_command{key});
+    BOOST_TEST(tip._status == k::apply_status::ok);
+    BOOST_TEST(tip._last_counter == 3U);
+    BOOST_TEST((sm.entries() == before));
+    BOOST_TEST(d.run(k::shard_tip_command{"k/x"})._status == k::apply_status::not_found);
+
+    const k::stream_command c = k::shard_tip_command{key};
+    const auto bytes = k::encode_command(c);
+    BOOST_TEST((k::encode_command(k::decode_command(bytes)) == bytes));
+    BOOST_TEST(k::command_key(c) == key);
+}
+
 BOOST_AUTO_TEST_CASE(child_shards_start_at_their_counter) {
     sm_type sm;
     driver d{sm};

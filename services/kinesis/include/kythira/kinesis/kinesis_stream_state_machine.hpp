@@ -417,6 +417,16 @@ struct channel_checkpoint_command {
     std::uint64_t _next = 0;
 };
 
+/// A shard's tip as of this point in its group's log: proposed like a
+/// write, so the leader answers it after every append acknowledged before
+/// it, with `_last_counter` set to the shard's last counter. Changes
+/// nothing. GetShardIterator and SubscribeToShard use it for LATEST, so
+/// an iterator taken right after an acknowledged append never lands
+/// before that append, as a replica's own state could when it lags.
+struct shard_tip_command {
+    std::string _key{};
+};
+
 /// What a lease write requires of the lease's current state.
 enum class lease_condition : std::uint8_t {
     /// Whatever is there (or nothing).
@@ -485,7 +495,7 @@ using stream_command =
                  seal_shard_command, tier_segment_command, reshard_catalog_command,
                  set_ending_counters_command, set_stream_mode_command, tag_stream_command,
                  set_policy_command, set_monitoring_command, set_encryption_command,
-                 consumer_command, channel_command, channel_checkpoint_command>;
+                 consumer_command, channel_command, channel_checkpoint_command, shard_tip_command>;
 
 inline constexpr std::uint8_t stream_command_version = 1;
 
@@ -990,6 +1000,12 @@ inline auto decode_append(codec::reader& r) -> append_records_command {
             c._shard = r.str();
             c._expected = r.u64();
             c._next = r.u64();
+            out = std::move(c);
+            break;
+        }
+        case 25: {
+            shard_tip_command c;
+            c._key = r.str();
             out = std::move(c);
             break;
         }
@@ -1663,6 +1679,14 @@ private:
             _store->drop_stream(c._key);
         }
         return {};
+    }
+
+    auto apply_one(const shard_tip_command& c) -> apply_result {
+        const auto* s = shard_at(c._key);
+        if (s == nullptr) {
+            return {._status = apply_status::not_found};
+        }
+        return {._last_counter = s->_last_counter};
     }
 
     auto apply_one(const trim_shard_command& c) -> apply_result {
