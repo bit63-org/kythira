@@ -35,6 +35,7 @@
 
 #include <kythira/redis/cache_chunk_store.hpp>
 #include <kythira/redis/cache_kv_state_machine.hpp>
+#include <kythira/redis/redis_command_ids.hpp>
 #include <kythira/redis/redis_kv_commands.hpp>
 #include <kythira/redis/redis_kv_mvcc_state_machine.hpp>
 #include <kythira/redis/redis_kv_state_machine.hpp>
@@ -114,6 +115,54 @@ auto every_command() -> std::vector<named_command> {
          redis_kv_commit_command{"sccache/empty", k_deadline_ms, 0, sha_of_text(""), {}}},
         {"touch none", redis_kv_touch_command{}},
         {"touch two", redis_kv_touch_command{{"sccache/obj1", "sccache/big"}}},
+    };
+}
+
+using named_v3_command = std::pair<std::string, redis_kv_v3_command>;
+
+auto id_of(redis_command_id id) -> std::uint16_t {
+    return static_cast<std::uint16_t>(id);
+}
+
+/// One of each format-0x03 record (redis-general-data-types task 1), with
+/// the edge cases: no arguments, binary arguments, an empty bitmap, a
+/// multi-byte bitmap, an unbounded range.
+auto every_v3_command() -> std::vector<named_v3_command> {
+    const std::string binary("a\r\n\0b\xff", 6);
+    return {
+        {"exec INCR", redis_kv_exec_command{"counter",
+                                            id_of(redis_command_id::incr),
+                                            k_deadline_ms,
+                                            0,
+                                            {"counter"},
+                                            {std::byte{0x01}}}},
+        {"exec SET NX PXAT under the immutable rule",
+         redis_kv_exec_command{"lock",
+                               id_of(redis_command_id::set),
+                               k_deadline_ms,
+                               redis_kv_exec_policy::immutable_rule,
+                               {"lock", "owner", "NX", "PXAT", "1767225600500"},
+                               {std::byte{0x00}}}},
+        {"exec binary argument", redis_kv_exec_command{"h",
+                                                       id_of(redis_command_id::hset),
+                                                       k_deadline_ms,
+                                                       0,
+                                                       {"h", binary, ""},
+                                                       {std::byte{0x01}}}},
+        {"exec no keys, no arguments",
+         redis_kv_exec_command{"", id_of(redis_command_id::dbsize), 0, 0, {}, {}}},
+        {"exec nine keys",
+         redis_kv_exec_command{"k1",
+                               id_of(redis_command_id::unlink),
+                               k_deadline_ms,
+                               0,
+                               {"k1", "k2", "k3", "k4", "k5", "k6", "k7", "k8", "k9"},
+                               {std::byte{0xA5}, std::byte{0x01}}}},
+        {"range_delete prefix", redis_kv_range_delete_command{"tmp/", "tmp/", "tmp0", 1000}},
+        {"range_delete to the end", redis_kv_range_delete_command{"a", "a", "", 0xFFFFFFFFu}},
+        {"format_gate", redis_kv_format_gate_command{"g", 3}},
+        {"remove_members none", redis_kv_remove_members_command{"s", {}}},
+        {"remove_members two", redis_kv_remove_members_command{"s", {"m1", binary}}},
     };
 }
 
@@ -367,6 +416,28 @@ BOOST_AUTO_TEST_CASE(kv_command_encodings_match_the_golden_file, *boost::unit_te
         out += "  key=" + escape(redis_kv_command_key(bytes)) + "\n";
     }
     check_golden("kv_commands.txt", out);
+}
+
+// Format 0x03 (Requirement 14.1, 14.6) in a file of its own, so the 0x01 and
+// 0x02 fixtures above stay byte for byte as they were.
+BOOST_AUTO_TEST_CASE(v3_command_encodings_match_the_golden_file, *boost::unit_test::timeout(30)) {
+    std::string out =
+        "# Format 0x03 redis_kv_* record encodings (redis-general-data-types task 1).\n"
+        "# Regenerate with KYTHIRA_UPDATE_GOLDENS=1; a change here is a log-entry\n"
+        "# format change.\n";
+    for (const auto& [name, cmd] : every_v3_command()) {
+        const auto bytes = encode_redis_kv_command(cmd);
+        out += "command " + name + "\n";
+        out += hex_block(bytes);
+        BOOST_CHECK_MESSAGE(decode_redis_kv_v3_command(bytes) == cmd,
+                            name << " does not survive a decode round trip");
+        BOOST_CHECK(is_redis_kv_v3_record(bytes));
+        // A state machine before the format gate decodes only 0x01/0x02 and
+        // must refuse a 0x03 record rather than misread it.
+        BOOST_CHECK_THROW((void)decode_redis_kv_command(bytes), redis_kv_codec_error);
+        out += "  key=" + escape(redis_kv_command_key(bytes)) + "\n";
+    }
+    check_golden("kv_commands_v3.txt", out);
 }
 
 BOOST_AUTO_TEST_CASE(state_machine_bytes_match_the_golden_file, *boost::unit_test::timeout(120)) {
