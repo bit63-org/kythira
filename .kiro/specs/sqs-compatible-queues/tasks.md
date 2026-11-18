@@ -30,11 +30,23 @@ PR unless noted.
     first serves requests (task 3); until then there is nothing to run in
     `kythira_node`.
 
-- [ ] 2. Queue state machine
+- [x] 2. Queue state machine
   - Messages, visibility index, receipt sequence, counts, delays,
     retention, FIFO group heads and dedup, partitions; property tests with
     leader changes
   - _Requirements: 4.2, 4.3, 5.2, 5.4-5.8_
+  - Done (November 18, 2026): `sqs_queue_commands.hpp` (the entries and
+    replies, versioned and bounded) and `sqs_queue_state_machine.hpp`, a
+    `persistent_staged_state_machine` on the `kv_engine`: messages,
+    visible and pending indexes, retention index, FIFO group heads,
+    deduplication records with their expiry index, per-partition counts;
+    receives as committed entries with receipt sequences; housekeeping at
+    each entry's leader-stamped time, bounded per entry; splits only at
+    partition routing keys. `sqs_queue_state_machine_test` adds a seeded
+    model check against a plain reference model, with replicas restarted
+    or rebuilt from a snapshot mid-run. Fair queues (5.8) are not in this
+    task: they need the per-group spreading of task 8, where standard-queue
+    partitions are chosen, and are moved there.
 
 - [ ] 3. Gateway, protocols and authorization
   - JSON 1.0 and query codecs, SigV4, `sqs` action table, queue policies,
@@ -60,8 +72,8 @@ PR unless noted.
 
 - [ ] 8. Partitioning and throughput
   - Partition growth for standard queues, FIFO high-throughput mode,
-    throttling
-  - _Requirements: 9.1-9.3_
+    throttling; fair queues (moved here from task 2)
+  - _Requirements: 5.8, 9.1-9.3_
 
 - [ ] 9. SNS HTTPS bridge
   - Subscription confirmation, signature verification with the host
