@@ -20,8 +20,13 @@ first builds it to that design). Each task is one PR unless noted.
     operation table (with each error's query code and HTTP status) and its
     `--check` test, and the coverage test: 21 operations planned in task 4,
     21 SMS and mobile push operations listed as out of scope, all answered
-    with `InvalidAction` until implemented. Still open: the recording stub,
-    wire evidence from the CLI and SDKs, and recorded HTTP deliveries.
+    with `InvalidAction` until implemented.
+  - Part done (November 18, 2026): the recording stub
+    (`tests/evidence/recorder.py`) and checked-in wire evidence from the
+    AWS CLI v2, boto3 and the Java, JS and Go SDKs running one 21-request
+    scenario; `sns_wire_evidence` decodes every recording as the query
+    codec must and requires all five to agree. Still open: recorded SNS
+    HTTP deliveries, which need real SNS and a public endpoint.
 
 - [ ] 2. Topic state machine and publish log
   - Topics, subscriptions, FIFO dedup, publish into the record segment

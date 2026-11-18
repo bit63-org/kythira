@@ -31,6 +31,13 @@ add_test(NAME sns_operations_up_to_date
             "${_sns_dir}model/service-2.json"
             "${_sns_dir}include/kythira/sns/sns_operations.hpp" --check)
 
+# Task 1: the checked-in wire evidence (evidence/README.md) is well formed,
+# and every client's recording decodes to the same scenario.
+add_test(NAME sns_wire_evidence
+    COMMAND "${Python3_EXECUTABLE}" "${_sns_dir}tests/evidence/check_evidence.py"
+            "${_sns_dir}model/service-2.json"
+            "${_sns_dir}tests/evidence/data")
+
 # Task 1: sns_node links and runs.
 add_test(NAME sns_node_self_test COMMAND sns_node --self-test)
 
@@ -38,6 +45,7 @@ set_tests_properties(
     sns_model_coverage
     sns_model_coverage_checker
     sns_operations_up_to_date
+    sns_wire_evidence
     sns_node_self_test
     PROPERTIES LABELS "unit;sns;sns-module" TIMEOUT 60)
 
