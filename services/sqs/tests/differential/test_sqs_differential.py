@@ -99,6 +99,13 @@ class CompareTest(unittest.TestCase):
         self.assertEqual(len(failures), 1)
         self.assertIn("MD5OfMessageBody", failures[0])
 
+    def test_batch_entries_compare_in_any_order(self):
+        a = [self.step("delete_message_batch", {}, {"Successful": [{"Id": "d1"}, {"Id": "d0"}]})]
+        b = [self.step("delete_message_batch", {}, {"Successful": [{"Id": "d0"}, {"Id": "d1"}]})]
+        self.assertEqual(d.compare(a, b), ([], []))
+        c = [self.step("delete_message_batch", {}, {"Successful": [{"Id": "d0"}, {"Id": "d2"}]})]
+        self.assertEqual(len(d.compare(a, c)[0]), 1)
+
     def test_diverging_requests_stop_the_comparison(self):
         a = [self.step("send_message", {"MessageBody": "x"}, {}), self.step("list_queues", {}, {"a": 1})]
         b = [self.step("send_message", {"MessageBody": "y"}, {}), self.step("list_queues", {}, {"a": 2})]

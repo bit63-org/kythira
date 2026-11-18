@@ -35,7 +35,7 @@ endpoint=http://127.0.0.1:$port
   --seed "$seed" --steps "$steps"
 if compgen -G "$here/recordings/aws-seed-*.json" >/dev/null; then
   "$py" "$here/sqs_differential.py" compare --endpoint "$endpoint" \
-    --recording "$here/recordings" --allow "$here/recordings/allow.json"
+    --recording "$here/recordings" --allow "$here/recordings/allow.json" --strict-messages
 else
   echo "no recordings yet (recordings/README.md); self-check only"
 fi
