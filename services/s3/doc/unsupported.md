@@ -13,7 +13,7 @@ implement: the XML error `NotImplemented` ("A header you provided implies
 functionality that is not implemented") with HTTP status 501, which every
 SDK surfaces as a non-retryable service error (`s3_service.hpp`).
 
-The model has 116 operations. 44 are implemented; of the other 72, 31 are
+The model has 116 operations. 53 are implemented; of the other 63, 22 are
 planned in a spec task and 41 (`none`) are out of the spec's scope, or
 were added to S3 after the spec was written and wait on the owner's
 decision.
@@ -50,12 +50,8 @@ decision.
 | `GetBucketNotification` | task 14 | Not built yet (change log, notifications and replication). Deprecated in the model in favour of the `*Configuration` form; planned with it because old SDKs still send it. | `NotImplemented`, HTTP 501 |
 | `GetBucketNotificationConfiguration` | task 14 | Not built yet (change log, notifications and replication). | `NotImplemented`, HTTP 501 |
 | `GetBucketReplication` | task 14 | Not built yet (change log, notifications and replication). | `NotImplemented`, HTTP 501 |
-| `GetBucketVersioning` | task 10 | Not built yet (versioning and object lock). | `NotImplemented`, HTTP 501 |
 | `GetBucketWebsite` | task 15 | Not built yet (CORS and website hosting). | `NotImplemented`, HTTP 501 |
 | `GetObjectAnnotation` | none | Not in the spec: object annotations, added to S3 after the spec was written. Open question for the owner. | `NotImplemented`, HTTP 501 |
-| `GetObjectLegalHold` | task 10 | Not built yet (versioning and object lock). | `NotImplemented`, HTTP 501 |
-| `GetObjectLockConfiguration` | task 10 | Not built yet (versioning and object lock). | `NotImplemented`, HTTP 501 |
-| `GetObjectRetention` | task 10 | Not built yet (versioning and object lock). | `NotImplemented`, HTTP 501 |
 | `GetObjectTorrent` | none | Not in the spec: BitTorrent, which S3 no longer offers to new accounts. | `NotImplemented`, HTTP 501 |
 | `ListBucketAnalyticsConfigurations` | none | Out of scope: S3 Analytics (storage class analysis). | `NotImplemented`, HTTP 501 |
 | `ListBucketIntelligentTieringConfigurations` | none | Not in the spec: the Intelligent-Tiering archive tiers. Storage classes map to Kythira tiers through lifecycle (task 13). | `NotImplemented`, HTTP 501 |
@@ -63,7 +59,6 @@ decision.
 | `ListBucketMetricsConfigurations` | none | Not in the spec: CloudWatch request-metrics filters. Kythira exports its own metrics instead. | `NotImplemented`, HTTP 501 |
 | `ListDirectoryBuckets` | none | Out of scope: S3 Express One Zone directory buckets. | `NotImplemented`, HTTP 501 |
 | `ListObjectAnnotations` | none | Not in the spec: object annotations, added to S3 after the spec was written. Open question for the owner. | `NotImplemented`, HTTP 501 |
-| `ListObjectVersions` | task 10 | Not built yet (versioning and object lock). | `NotImplemented`, HTTP 501 |
 | `PutBucketAbac` | none | Not in the spec: bucket ABAC (tag-based access to general purpose buckets), added to S3 after the spec was written. Open question for the owner. | `NotImplemented`, HTTP 501 |
 | `PutBucketAccelerateConfiguration` | none | Out of scope: Transfer Acceleration. | `NotImplemented`, HTTP 501 |
 | `PutBucketAnalyticsConfiguration` | none | Out of scope: S3 Analytics (storage class analysis). | `NotImplemented`, HTTP 501 |
@@ -78,12 +73,8 @@ decision.
 | `PutBucketNotificationConfiguration` | task 14 | Not built yet (change log, notifications and replication). | `NotImplemented`, HTTP 501 |
 | `PutBucketReplication` | task 14 | Not built yet (change log, notifications and replication). | `NotImplemented`, HTTP 501 |
 | `PutBucketRequestPayment` | none | Out of scope: Requester Pays. `GetBucketRequestPayment` answers `BucketOwner`. | `NotImplemented`, HTTP 501 |
-| `PutBucketVersioning` | task 10 | Not built yet (versioning and object lock). | `NotImplemented`, HTTP 501 |
 | `PutBucketWebsite` | task 15 | Not built yet (CORS and website hosting). | `NotImplemented`, HTTP 501 |
 | `PutObjectAnnotation` | none | Not in the spec: object annotations, added to S3 after the spec was written. Open question for the owner. | `NotImplemented`, HTTP 501 |
-| `PutObjectLegalHold` | task 10 | Not built yet (versioning and object lock). | `NotImplemented`, HTTP 501 |
-| `PutObjectLockConfiguration` | task 10 | Not built yet (versioning and object lock). | `NotImplemented`, HTTP 501 |
-| `PutObjectRetention` | task 10 | Not built yet (versioning and object lock). | `NotImplemented`, HTTP 501 |
 | `RenameObject` | none | Out of scope: S3 Express One Zone directory buckets. | `NotImplemented`, HTTP 501 |
 | `RestoreObject` | task 13 | Not built yet (lifecycle and storage classes). | `NotImplemented`, HTTP 501 |
 | `SelectObjectContent` | none | Out of scope: S3 Select. | `NotImplemented`, HTTP 501 |

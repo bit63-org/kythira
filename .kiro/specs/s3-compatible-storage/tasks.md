@@ -229,8 +229,25 @@ builds it to that design). Each task is one PR unless noted.
     open-state keys). Tests: two cases in `s3_service_test` and new
     index assertions.
 
-- [ ] 10. Versioning and object lock
+- [x] 10. Versioning and object lock
   - _Requirements: 8.1, 8.2_
+  - Done: `s3_versioning.hpp` serves Get/PutBucketVersioning,
+    ListObjectVersions, Get/PutObjectLockConfiguration,
+    Get/PutObjectRetention and Get/PutObjectLegalHold over the index's
+    versioning states (task 4). The index enforces the lock: a version's
+    retention and legal hold are stored headers, every removal passes
+    `lock_refuses` (legal hold, COMPLIANCE, or GOVERNANCE without
+    `x-amz-bypass-governance-retention`), and the new `set_object_lock`
+    command never weakens COMPLIANCE and weakens GOVERNANCE only with
+    the bypass. `s3_object_lock.hpp` gives a new version its lock from
+    the request's headers or the bucket's default retention (PUT, copy,
+    browser POST, multipart: explicit at create, default at complete); a
+    copy never inherits its source's lock. MFA delete is refused with
+    `NotImplemented`. Lifecycle (task 13) will remove versions through
+    the same index path, so it can never expire a locked one. Tests:
+    `object_lock_protects_versions` and the extended versioning case in
+    `s3_service_test`, `object_lock_is_enforced_on_every_removal` in
+    the index test.
 
 - [ ] 11. Encryption
   - SSE-S3 default, SSE-KMS with bucket keys, SSE-C; chunk sealing in the

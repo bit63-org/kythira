@@ -33,8 +33,13 @@
 /// PUT, by GetObjectAttributes, and on a whole-object GET or HEAD with
 /// `x-amz-checksum-mode: ENABLED` (never on a range). A copy keeps it.
 ///
-/// **Not here yet.** Object lock
-/// headers (10) and SSE (11): a request that asks for SSE-KMS or SSE-C
+/// **Object lock** (task 10, `s3_object_lock.hpp`). A PUT, copy or
+/// multipart upload takes its lock from its headers or the bucket's
+/// default retention; reads return the lock headers; a delete passes
+/// `x-amz-bypass-governance-retention` to the index, which refuses to
+/// remove a locked version.
+///
+/// **Not here yet.** SSE (11): a request that asks for SSE-KMS or SSE-C
 /// is refused with `NotImplemented` rather than stored unencrypted.
 /// Storage classes other than `STANDARD` are stored and returned; their
 /// tiering is task 13.
@@ -46,6 +51,7 @@
 #include <kythira/s3/s3_context.hpp>
 #include <kythira/s3/s3_http.hpp>
 #include <kythira/s3/s3_metadata.hpp>
+#include <kythira/s3/s3_object_lock.hpp>
 
 #include <raft/aws_json_protocol.hpp>
 #include <raft/aws_rest_xml_protocol.hpp>
@@ -415,7 +421,8 @@ inline void object_headers(s3_response& r, const object_version& v, const bucket
         r.set("x-amz-meta-" + k, val);
     }
     for (const auto& [k, val] : c.system_metadata) {
-        if (k == tagging_metadata || k == object_acl_metadata) {
+        if (k == tagging_metadata || k.starts_with("x-kythira-") || k == lock_mode_metadata ||
+            k == legal_hold_metadata) {
             continue;
         }
         if (k.starts_with("x-amz-checksum-") && !checksums) {
@@ -423,6 +430,7 @@ inline void object_headers(s3_response& r, const object_version& v, const bucket
         }
         r.set(k, val);
     }
+    object_lock_headers(r, c.system_metadata);
     if (const auto n = stored_tags(v).size(); n > 0) {
         r.set("x-amz-tagging-count", std::to_string(n));
     }
@@ -626,6 +634,9 @@ template<metadata_access M>
     }
     if (*acl) {
         content->system_metadata[std::string(object_acl_metadata)] = **acl;
+    }
+    if (auto e = apply_object_lock(b, req.headers, ctx.now_ms(), content->system_metadata)) {
+        return *e;
     }
     write_conditions conditions;
     if (auto h = req.header("If-None-Match")) {
@@ -842,6 +853,7 @@ template<metadata_access M>
     c.target = ref_of(b.desc);
     c.key = req.resource.key;
     c.version_id = version_id;
+    c.bypass_governance = bypass_governance(req.headers);
     auto r = ctx.meta.propose(c);
     if (!r.ok()) {
         return from_index(r);
@@ -958,8 +970,14 @@ template<metadata_access M>
             return not_implemented();
         }
     }
-    // The new object's ACL is the request's, never the source's.
+    // The new object's ACL and lock are the request's, never the source's.
     c.override_metadata.emplace_back(object_acl_metadata);
+    for (const auto name : {lock_mode_metadata, lock_until_metadata, legal_hold_metadata}) {
+        c.override_metadata.emplace_back(name);
+    }
+    if (auto e = apply_object_lock(b, req.headers, c.now_ms, c.content.system_metadata)) {
+        return *e;
+    }
     auto acl = requested_acl(b, c.owner, req.headers);
     if (!acl) {
         return acl.error();

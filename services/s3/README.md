@@ -44,7 +44,9 @@ module's consumers (Requirement 17.3).
 | `include/kythira/s3/s3_listings.hpp` | ListObjects V1/V2 and DeleteObjects | 7, 8 |
 | `include/kythira/s3/s3_checksums.hpp` | additional checksums (CRC32, CRC32C, CRC64NVME, SHA-1, SHA-256): streaming, CRC combination for full-object multipart checksums, composite checksums, what a request asks for and its verification against a header or trailer; `s3_checksums_test` | 8 |
 | `include/kythira/s3/s3_multipart.hpp` | multipart upload: create, parts and part copies, listings, complete with checksums and conditions, abort, and the stale-upload sweep | 9 |
-| `include/kythira/s3/s3_service.hpp` | the request pipeline and browser POST uploads; `s3_service_test` | 6-9 |
+| `include/kythira/s3/s3_object_lock.hpp` | object lock on the write path: lock headers, default retention, the lock headers a read returns | 10 |
+| `include/kythira/s3/s3_versioning.hpp` | bucket versioning, ListObjectVersions, object lock configuration, retention and legal hold | 10 |
+| `include/kythira/s3/s3_service.hpp` | the request pipeline and browser POST uploads; `s3_service_test` | 6-10 |
 | `include/kythira/s3/s3_routes.hpp` | the operation table as routes for core's REST-XML router, and `route_request` (addressing, query, operation); `s3_routing_test` routes every recorded client request | 3 |
 | `implemented-operations.txt` | operations the gateway implements | 1 onward |
 | `doc/unsupported.md` | every other operation, with its planned task, reason and the exact error it returns (`NotImplemented`, 501) | 1 onward |

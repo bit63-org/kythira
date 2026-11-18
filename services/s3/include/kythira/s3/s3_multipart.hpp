@@ -341,6 +341,11 @@ template<metadata_access M>
     if (*acl) {
         content->system_metadata[std::string(object_acl_metadata)] = **acl;
     }
+    // An explicit lock is kept from now; the bucket's default retention
+    // counts from the complete.
+    if (auto e = apply_object_lock(b, req.headers, ctx.now_ms(), content->system_metadata, false)) {
+        return *e;
+    }
     if (checksum->chosen) {
         content->system_metadata[std::string(algorithm_key)] = to_string(checksum->algorithm);
         content->system_metadata[std::string(type_key)] = checksum->type();
@@ -872,6 +877,12 @@ template<metadata_access M>
     if (checksum) {
         c.content.system_metadata[checksum_header(kept.algorithm)] = *checksum;
         c.content.system_metadata[std::string(type_key)] = kept.type();
+    }
+    // The bucket's default retention, unless the upload named a lock.
+    if (b.desc.object_lock && lock_state_of(u->content.system_metadata).mode.empty()) {
+        if (auto e = apply_object_lock(b, {}, c.now_ms, c.content.system_metadata)) {
+            return *e;
+        }
     }
     if (auto h = req.header("If-None-Match")) {
         if (access_detail::trim(*h) != "*") {

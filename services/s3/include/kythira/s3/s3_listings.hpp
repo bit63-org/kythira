@@ -258,6 +258,7 @@ template<metadata_access M>
         c.target = ref_of(b.desc);
         c.key = *key;
         c.version_id = version;
+        c.bypass_governance = bypass_governance(req.headers);
         const auto r = ctx.meta.propose(c);
         if (!r.ok()) {
             error(from_index(r));
