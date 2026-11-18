@@ -98,6 +98,11 @@ kythira_sqs_test(sqs_catalog_test sqs_catalog_test.cpp)
 # (Requirements 4.1, 4.2, 5.1-5.5).
 kythira_sqs_test(sqs_service_test sqs_service_test.cpp)
 
+# Task 4: node-to-node forwarding to a group's leader (wire, HMAC, replay
+# window), stamping entries with the proposing node's clock, and
+# raft_queue_cluster over a stand-in multi-raft host.
+kythira_sqs_test(sqs_forward_test sqs_forward_test.cpp)
+
 # Task 3: the checked-in model, query-name and action headers are what their
 # generators make of the pinned inputs, so an upgrade of any input carries
 # its regenerated header and diff.
