@@ -14,6 +14,19 @@ find_package(Python3 REQUIRED COMPONENTS Interpreter)
 # The module root, set by ../CMakeLists.txt.
 set(_sqs_dir "${KYTHIRA_SQS_SOURCE_DIR}/")
 
+# add_raft_completion_test plus the module's headers. Binaries and working
+# directories go to build/tests/, which the coverage job collects test
+# binaries from, as the other modules' do.
+function(kythira_sqs_test test_name source_file)
+    add_raft_completion_test(${test_name} ${source_file})
+    target_link_libraries(${test_name} PRIVATE kythira_sqs)
+    set_target_properties(${test_name} PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests")
+    set_tests_properties(${test_name} PROPERTIES
+        WORKING_DIRECTORY "${CMAKE_BINARY_DIR}/tests"
+        LABELS "unit;sqs;sqs-module" TIMEOUT 120)
+endfunction()
+
 # Task 1, Requirement 2.1: every operation of the pinned model is implemented
 # or listed in doc/unsupported.md.
 add_test(NAME sqs_model_coverage
@@ -48,5 +61,9 @@ set_tests_properties(
     sqs_wire_evidence
     sqs_node_self_test
     PROPERTIES LABELS "unit;sqs;sqs-module" TIMEOUT 60)
+
+# Task 2: the queue state machine (Requirements 4.2, 4.3, 5.2, 5.4-5.7) on
+# memory_kv_engine, with a seeded model check that rebuilds replicas mid-run.
+kythira_sqs_test(sqs_queue_state_machine_test sqs_queue_state_machine_test.cpp)
 
 kythira_scale_test_timeouts()
