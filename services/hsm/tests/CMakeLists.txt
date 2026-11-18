@@ -86,6 +86,12 @@ target_link_libraries(hsm_remote_store_test PRIVATE kythira_test_support)
 set_tests_properties(hsm_remote_store_test PROPERTIES
     LABELS "integration;hsm;hsm-module" TIMEOUT 300)
 
+# hsm-independent-layers task 1, Requirements 1.1 and 2.1-2.5:
+# KYTHIRA_HSM_ROLES, what each role set runs, the start-time check.
+kythira_hsm_test(hsm_roles_test hsm_roles_test.cpp)
+set_tests_properties(hsm_roles_test PROPERTIES
+    LABELS "unit;hsm;hsm-module" TIMEOUT 60)
+
 # Task 6d: forwarding between members over HTTPS with client certificates
 # (wire format, membership, refusals before the host is asked) and the
 # operator API.
