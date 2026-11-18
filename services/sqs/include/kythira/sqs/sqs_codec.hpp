@@ -184,9 +184,14 @@ public:
         }
         aws_json::http_response r;
         r.status = 200;
-        const auto result =
-            op.output == aws_json::no_shape ? std::string() : json_to_xml(op.output, output);
-        r.body = aws_query::response_xml(op.name, sqs_query::k_xml_namespace, result, request_id);
+        // An action with an output shape always answers with its Result
+        // element, even an empty one: botocore looks the wrapper up by
+        // name, so a ReceiveMessage that found nothing must still carry
+        // <ReceiveMessageResult/>.
+        const bool has_output = op.output != aws_json::no_shape;
+        const auto result = has_output ? json_to_xml(op.output, output) : std::string();
+        r.body = aws_query::response_xml(op.name, sqs_query::k_xml_namespace, result, request_id,
+                                         has_output);
         r.headers.emplace_back("Content-Type", "text/xml");
         r.headers.emplace_back("x-amzn-RequestId", std::move(request_id));
         return r;

@@ -341,6 +341,20 @@ BOOST_AUTO_TEST_CASE(list_and_batch_answers_flatten_their_lists) {
                "<Tag><Key>team</Key><Value>k</Value></Tag>");
 }
 
+// botocore finds the answer by its <{Action}Result> wrapper, so an empty
+// receive must still carry the element or the client raises KeyError.
+BOOST_AUTO_TEST_CASE(empty_output_still_carries_the_result_element) {
+    const auto codec = make_codec();
+    const auto* op = sqs::sqs_codec::model().find_operation("ReceiveMessage");
+    BOOST_TEST_REQUIRE(op != nullptr);
+    const auto r = codec.respond(form_request("Action=ReceiveMessage"), *op, {}, "rid");
+    BOOST_TEST(r.body ==
+               R"(<ReceiveMessageResponse xmlns="http://queue.amazonaws.com/doc/2012-11-05/">)"
+               "<ReceiveMessageResult></ReceiveMessageResult>"
+               "<ResponseMetadata><RequestId>rid</RequestId></ResponseMetadata>"
+               "</ReceiveMessageResponse>");
+}
+
 BOOST_AUTO_TEST_CASE(operations_without_output_answer_with_metadata_only) {
     const auto codec = make_codec();
     const auto* op = sqs::sqs_codec::model().find_operation("DeleteMessage");
