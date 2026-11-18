@@ -126,3 +126,8 @@ CONFIG_HSM=y
 # and clang-tidy cover it. Needs the HSM and IAM modules, both on above.
 # configs/ci_no_kms_defconfig is this file without it.
 CONFIG_KMS=y
+# The SQS module (services/sqs/, .kiro/specs/sqs-compatible-queues/). Off by
+# default like every new module; on here so the build-and-test legs, coverage
+# and clang-tidy cover it. Needs only OpenSSL and Boost, which every leg has.
+# configs/ci_no_sqs_defconfig is this file without it.
+CONFIG_SQS=y
