@@ -50,6 +50,9 @@ on:
       # The core chunk store the service keeps object bytes in (task 2).
       - "include/raft/chunk_store.hpp"
       - "include/raft/chunk_service.hpp"
+      # The REST-XML codec the service routes and answers with (task 3).
+      - "include/raft/aws_rest_xml_protocol.hpp"
+      - "include/raft/aws_query_protocol.hpp"
   pull_request:
     branches: ['**']
     # Keep in step with the push list above.
@@ -68,6 +71,9 @@ on:
       # The core chunk store the service keeps object bytes in (task 2).
       - "include/raft/chunk_store.hpp"
       - "include/raft/chunk_service.hpp"
+      # The REST-XML codec the service routes and answers with (task 3).
+      - "include/raft/aws_rest_xml_protocol.hpp"
+      - "include/raft/aws_query_protocol.hpp"
   workflow_dispatch:
 
 permissions:
