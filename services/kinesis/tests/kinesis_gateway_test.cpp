@@ -230,6 +230,60 @@ BOOST_AUTO_TEST_CASE(a_signed_forwarded_write_commits_and_answers_its_result) {
     BOOST_TEST(absent);
 }
 
+BOOST_AUTO_TEST_CASE(a_node_without_the_gateway_role_serves_only_its_peers) {
+    // kinesis-independent-layers task 4: KINESIS_ROLES=data,segments is a
+    // voter that holds replicas. It keeps the internal endpoints, health
+    // and metrics, and turns clients away naming its roles.
+    node n;
+    n._gateway->set_roles(kythira::layers::role_set::parse("data,segments"));
+    const auto c = plain_client();
+
+    const auto h = c.request(n.address(), http::verb::get, kin::k_health_path, {});
+    BOOST_TEST_REQUIRE(h.has_value());
+    BOOST_TEST(h->_status == 200U);
+
+    const auto api = call(c, n, "ListStreams", json::object{});
+    BOOST_TEST(api._status == 404U);
+    BOOST_TEST(api._body.find("LayerNotServed") != std::string::npos);
+    BOOST_TEST(api._body.find("data,segments") != std::string::npos);
+    // The Lease API is a client surface too.
+    const auto lease =
+        c.request(n.address(), http::verb::get, std::string(kin::k_lease_path_prefix) + "x", {});
+    BOOST_TEST_REQUIRE(lease.has_value());
+    BOOST_TEST(lease->_status == 404U);
+
+    // A peer's signed write still commits here.
+    const std::string address = n.address();
+    auto forward = kin::make_http_forwarder<std::string>(
+        c, std::string(k_secret),
+        [&address](const std::string&) { return std::optional<std::string>(address); });
+    const auto r = forward("leader", "k", create("s"), kin::admission::none);
+    BOOST_TEST_REQUIRE(r.has_value());
+    BOOST_TEST((r->_status == kin::apply_status::ok));
+}
+
+BOOST_AUTO_TEST_CASE(health_and_the_refusal_carry_the_roles_header) {
+    node n;
+    const https::request_context ctx{};
+    https::request health{http::verb::get, kin::k_health_path, 11};
+    const auto h = n._gateway->handle(health, ctx);
+    BOOST_TEST(h[kin::k_roles_header] == "gateway,front_end,data,segments");
+
+    n._gateway->set_roles(kythira::layers::role_set::parse("data,segments"));
+    BOOST_TEST(n._gateway->handle(health, ctx)[kin::k_roles_header] == "data,segments");
+    https::request api{http::verb::post, "/", 11};
+    api.set("X-Amz-Target", "Kinesis_20131202.ListStreams");
+    api.body() = "{}";
+    api.prepare_payload();
+    const auto refused = n._gateway->handle(api, ctx);
+    BOOST_TEST(refused.result_int() == 404U);
+    BOOST_TEST(refused[kin::k_roles_header] == "data,segments");
+    // SubscribeToShard's streaming route steps aside, so handle() refuses it.
+    https::request sub{http::verb::post, "/", 11};
+    sub.set("X-Amz-Target", "Kinesis_20131202.SubscribeToShard");
+    BOOST_TEST(!n._gateway->stream(sub, ctx).has_value());
+}
+
 BOOST_AUTO_TEST_CASE(an_unavailable_leader_answers_503_and_the_forwarder_gives_up) {
     node n;
     n._cluster->set_unavailable(true);

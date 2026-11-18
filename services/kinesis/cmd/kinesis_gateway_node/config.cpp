@@ -372,6 +372,17 @@ void read_kinesis_side(const reader& r, node_options& o) {
 
     o._disk_floor_bytes = r.u64("KINESIS_DISK_FLOOR_BYTES", "1073741824");
     o._metrics = r.flag("KINESIS_METRICS", "false");
+    {
+        const auto text = r.opt("KINESIS_ROLES", "gateway,front_end,data,segments");
+        try {
+            o._roles = kythira::layers::role_set::parse(text);
+        } catch (const std::invalid_argument& e) {
+            fail("KINESIS_ROLES: " + std::string(e.what()));
+        }
+        if (const auto gap = unserved_roles(o._roles)) {
+            fail("KINESIS_ROLES=" + text + ": " + *gap);
+        }
+    }
     o._kms = r.opt("KINESIS_KMS", "off");
     o._kms_set = r.set("KINESIS_KMS");
     if (o._kms != "off" && o._kms != "local" && o._kms != "aws" && o._kms != "pkcs11" &&
@@ -608,9 +619,38 @@ auto composite_env(service_node::env_lookup env) -> service_node::env_lookup {
     };
 }
 
+auto unserved_roles(kythira::layers::role_set roles) -> std::optional<std::string> {
+    using kythira::layers::role;
+    if (roles.empty()) {
+        return "names no role; a node runs at least one of gateway, front_end, data, segments";
+    }
+    if (!roles.has(role::data)) {
+        return "a node without the data role reaches the data layer through the data-layer "
+               "API of data nodes (kinesis-independent-layers task 6), which this build does "
+               "not have yet; add data";
+    }
+    if (!roles.has(role::segments)) {
+        return "data without segments keeps its record segments on a volume assigned on a "
+               "segment node (kinesis-independent-layers task 10), which this build does not "
+               "have yet; add segments";
+    }
+    if (roles.has(role::gateway) && !roles.has(role::front_end)) {
+        return "gateway without front_end hands each call to a front end "
+               "(kinesis-independent-layers task 8), which this build does not have yet; add "
+               "front_end";
+    }
+    if (roles.has(role::front_end) && !roles.has(role::gateway)) {
+        return "front_end without gateway serves the internal front-end API "
+               "(kinesis-independent-layers task 7), which this build does not have yet; add "
+               "gateway";
+    }
+    return std::nullopt;
+}
+
 auto describe(const node_options& o) -> std::string {
     std::ostringstream out;
     out << "node_id=" << kythira::host_node_id_text(o._node_id) << '\n'
+        << "roles=" << o._roles.to_string() << '\n'
         << "raft=" << o._bind_address << ':' << o._raft_port
         << (o._allow_plaintext_raft ? " (plaintext allowed)" : "") << '\n'
         << "voters=" << o._peers.size() << '\n'
@@ -715,6 +755,9 @@ auto usage() -> std::string {
            "  KINESIS_COMMAND_TIMEOUT_MS       commit timeout per write (5000)\n"
            "  KINESIS_METRICS                  serve Prometheus metrics on GET /metrics,\n"
            "                                   unauthenticated (false)\n"
+           "  KINESIS_ROLES                    layers this node runs, a subset of gateway,\n"
+           "                                   front_end, data, segments (all four);\n"
+           "                                   data,segments serves only peers\n"
            "  KINESIS_KMS                      key provider for encrypted streams: off, local,\n"
            "                                   aws, pkcs11 or kythira (off; kythira_node:\n"
            "                                   kythira when the KMS module runs)\n"

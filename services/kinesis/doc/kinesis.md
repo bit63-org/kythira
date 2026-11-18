@@ -157,6 +157,7 @@ every shard in another.
 | Encryption at rest | `KINESIS_KMS=local` with `KINESIS_KMS_PASSPHRASE[_FILE]`, or `KINESIS_KMS=aws` with `KINESIS_KMS_REGION` and AWS credentials | [encryption.md](encryption.md) |
 | Tiering to an object store | `KINESIS_TIER_AFTER_HOURS` (or `_MS`), `KINESIS_TIER_PROVIDER` (`s3`, `azure-blob`, `gcs`, `oci-objectstorage`, `oss`), `KINESIS_TIER_BUCKET`, `_PREFIX`, `_ENDPOINT` | [retention.md](retention.md) |
 | Disk floor | `KINESIS_DISK_FLOOR_BYTES` (1 GiB by default, 0 turns it off) | [retention.md](retention.md) |
+| Layer roles | `KINESIS_ROLES`: a subset of `gateway`, `front_end`, `data`, `segments` (all four by default). `data,segments` is a voter that serves only its peers and answers clients with a 404 naming its roles. Other sets are refused at start until the rest of the independent-layers spec lands | [kinesis-independent-layers](../../../.kiro/specs/kinesis-independent-layers/) |
 
 ### Containers
 
