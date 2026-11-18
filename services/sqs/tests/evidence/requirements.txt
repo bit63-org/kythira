@@ -1,0 +1,10 @@
+# Copyright (c) 2026 Clark Rawlins
+# SPDX-License-Identifier: Apache-2.0
+
+# The JSON-protocol Python clients of the evidence recordings. boto3 and
+# botocore match the model pin; Kombu is the transport Celery uses, and its
+# SQS receive path needs pycurl.
+boto3==1.43.100
+botocore==1.43.100
+kombu==5.5.4
+pycurl==7.49.0

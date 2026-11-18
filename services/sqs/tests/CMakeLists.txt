@@ -31,6 +31,13 @@ add_test(NAME sqs_operations_up_to_date
             "${_sqs_dir}model/service-2.json"
             "${_sqs_dir}include/kythira/sqs/sqs_operations.hpp" --check)
 
+# Task 1: the checked-in wire evidence (evidence/README.md) is well formed,
+# names only model operations and shows every scenario finishing.
+add_test(NAME sqs_wire_evidence
+    COMMAND "${Python3_EXECUTABLE}" "${_sqs_dir}tests/evidence/check_evidence.py"
+            "${_sqs_dir}model/service-2.json"
+            "${_sqs_dir}tests/evidence/data")
+
 # Task 1: sqs_node links and runs.
 add_test(NAME sqs_node_self_test COMMAND sqs_node --self-test)
 
@@ -38,6 +45,7 @@ set_tests_properties(
     sqs_model_coverage
     sqs_model_coverage_checker
     sqs_operations_up_to_date
+    sqs_wire_evidence
     sqs_node_self_test
     PROPERTIES LABELS "unit;sqs;sqs-module" TIMEOUT 60)
 

@@ -1,0 +1,615 @@
+{
+ "client": "awscli-2.31.0",
+ "requests": [
+  {
+   "method": "POST",
+   "path": "/",
+   "http_version": "HTTP/1.1",
+   "content_type": "application/x-amz-json-1.0",
+   "headers": [
+    [
+     "Host",
+     "127.0.0.1:<port>"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "X-Amz-Target",
+     "AmazonSQS.CreateQueue"
+    ],
+    [
+     "Content-Type",
+     "application/x-amz-json-1.0"
+    ],
+    [
+     "x-amzn-query-mode",
+     "true"
+    ],
+    [
+     "User-Agent",
+     "aws-cli/2.31.0 md/awscrt#0.27.6 ua/2.1 os/linux#<kernel> md/arch#<arch> lang/python#3.13.7 md/pyimpl#CPython m/E,N,Z,b cfg/retry-mode#standard md/installer#exe md/distrib#ubuntu.24 md/prompt#off md/command#sqs.create-queue"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/sqs/aws4_request, SignedHeaders=content-type;host;x-amz-date;x-amz-target;x-amzn-query-mode, Signature=<hex>"
+    ],
+    [
+     "Content-Length",
+     "97"
+    ]
+   ],
+   "operation": "CreateQueue",
+   "body": {
+    "Attributes": {
+     "VisibilityTimeout": "45"
+    },
+    "QueueName": "evidence",
+    "tags": {
+     "team": "kythira"
+    }
+   },
+   "response_status": 200,
+   "response_type": null
+  },
+  {
+   "method": "POST",
+   "path": "/",
+   "http_version": "HTTP/1.1",
+   "content_type": "application/x-amz-json-1.0",
+   "headers": [
+    [
+     "Host",
+     "127.0.0.1:<port>"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "X-Amz-Target",
+     "AmazonSQS.GetQueueUrl"
+    ],
+    [
+     "Content-Type",
+     "application/x-amz-json-1.0"
+    ],
+    [
+     "x-amzn-query-mode",
+     "true"
+    ],
+    [
+     "User-Agent",
+     "aws-cli/2.31.0 md/awscrt#0.27.6 ua/2.1 os/linux#<kernel> md/arch#<arch> lang/python#3.13.7 md/pyimpl#CPython m/E,N,Z,b cfg/retry-mode#standard md/installer#exe md/distrib#ubuntu.24 md/prompt#off md/command#sqs.get-queue-url"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/sqs/aws4_request, SignedHeaders=content-type;host;x-amz-date;x-amz-target;x-amzn-query-mode, Signature=<hex>"
+    ],
+    [
+     "Content-Length",
+     "25"
+    ]
+   ],
+   "operation": "GetQueueUrl",
+   "body": {
+    "QueueName": "evidence"
+   },
+   "response_status": 200,
+   "response_type": null
+  },
+  {
+   "method": "POST",
+   "path": "/",
+   "http_version": "HTTP/1.1",
+   "content_type": "application/x-amz-json-1.0",
+   "headers": [
+    [
+     "Host",
+     "127.0.0.1:<port>"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "X-Amz-Target",
+     "AmazonSQS.GetQueueAttributes"
+    ],
+    [
+     "Content-Type",
+     "application/x-amz-json-1.0"
+    ],
+    [
+     "x-amzn-query-mode",
+     "true"
+    ],
+    [
+     "User-Agent",
+     "aws-cli/2.31.0 md/awscrt#0.27.6 ua/2.1 os/linux#<kernel> md/arch#<arch> lang/python#3.13.7 md/pyimpl#CPython m/E,N,Z,b cfg/retry-mode#standard md/installer#exe md/distrib#ubuntu.24 md/prompt#off md/command#sqs.get-queue-attributes"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/sqs/aws4_request, SignedHeaders=content-type;host;x-amz-date;x-amz-target;x-amzn-query-mode, Signature=<hex>"
+    ],
+    [
+     "Content-Length",
+     "87"
+    ]
+   ],
+   "operation": "GetQueueAttributes",
+   "body": {
+    "AttributeNames": [
+     "All"
+    ],
+    "QueueUrl": "http://127.0.0.1:<port>/123456789012/evidence"
+   },
+   "response_status": 200,
+   "response_type": null
+  },
+  {
+   "method": "POST",
+   "path": "/",
+   "http_version": "HTTP/1.1",
+   "content_type": "application/x-amz-json-1.0",
+   "headers": [
+    [
+     "Host",
+     "127.0.0.1:<port>"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "X-Amz-Target",
+     "AmazonSQS.ListQueues"
+    ],
+    [
+     "Content-Type",
+     "application/x-amz-json-1.0"
+    ],
+    [
+     "x-amzn-query-mode",
+     "true"
+    ],
+    [
+     "User-Agent",
+     "aws-cli/2.31.0 md/awscrt#0.27.6 ua/2.1 os/linux#<kernel> md/arch#<arch> lang/python#3.13.7 md/pyimpl#CPython m/C,E,N,Z,b cfg/retry-mode#standard md/installer#exe md/distrib#ubuntu.24 md/prompt#off md/command#sqs.list-queues"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/sqs/aws4_request, SignedHeaders=content-type;host;x-amz-date;x-amz-target;x-amzn-query-mode, Signature=<hex>"
+    ],
+    [
+     "Content-Length",
+     "2"
+    ]
+   ],
+   "operation": "ListQueues",
+   "body": {},
+   "response_status": 200,
+   "response_type": null
+  },
+  {
+   "method": "POST",
+   "path": "/",
+   "http_version": "HTTP/1.1",
+   "content_type": "application/x-amz-json-1.0",
+   "headers": [
+    [
+     "Host",
+     "127.0.0.1:<port>"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "X-Amz-Target",
+     "AmazonSQS.SendMessage"
+    ],
+    [
+     "Content-Type",
+     "application/x-amz-json-1.0"
+    ],
+    [
+     "x-amzn-query-mode",
+     "true"
+    ],
+    [
+     "User-Agent",
+     "aws-cli/2.31.0 md/awscrt#0.27.6 ua/2.1 os/linux#<kernel> md/arch#<arch> lang/python#3.13.7 md/pyimpl#CPython m/E,N,Z,b cfg/retry-mode#standard md/installer#exe md/distrib#ubuntu.24 md/prompt#off md/command#sqs.send-message"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/sqs/aws4_request, SignedHeaders=content-type;host;x-amz-date;x-amz-target;x-amzn-query-mode, Signature=<hex>"
+    ],
+    [
+     "Content-Length",
+     "211"
+    ]
+   ],
+   "operation": "SendMessage",
+   "body": {
+    "MessageAttributes": {
+     "b": {
+      "BinaryValue": "AAEC",
+      "DataType": "Binary"
+     },
+     "s": {
+      "DataType": "String",
+      "StringValue": "text"
+     }
+    },
+    "MessageBody": "hello",
+    "QueueUrl": "http://127.0.0.1:<port>/123456789012/evidence"
+   },
+   "response_status": 200,
+   "response_type": null
+  },
+  {
+   "method": "POST",
+   "path": "/",
+   "http_version": "HTTP/1.1",
+   "content_type": "application/x-amz-json-1.0",
+   "headers": [
+    [
+     "Host",
+     "127.0.0.1:<port>"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "X-Amz-Target",
+     "AmazonSQS.SendMessageBatch"
+    ],
+    [
+     "Content-Type",
+     "application/x-amz-json-1.0"
+    ],
+    [
+     "x-amzn-query-mode",
+     "true"
+    ],
+    [
+     "User-Agent",
+     "aws-cli/2.31.0 md/awscrt#0.27.6 ua/2.1 os/linux#<kernel> md/arch#<arch> lang/python#3.13.7 md/pyimpl#CPython m/E,N,Z,b cfg/retry-mode#standard md/installer#exe md/distrib#ubuntu.24 md/prompt#off md/command#sqs.send-message-batch"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/sqs/aws4_request, SignedHeaders=content-type;host;x-amz-date;x-amz-target;x-amzn-query-mode, Signature=<hex>"
+    ],
+    [
+     "Content-Length",
+     "147"
+    ]
+   ],
+   "operation": "SendMessageBatch",
+   "body": {
+    "Entries": [
+     {
+      "Id": "one",
+      "MessageBody": "one"
+     },
+     {
+      "Id": "two",
+      "MessageBody": "two"
+     }
+    ],
+    "QueueUrl": "http://127.0.0.1:<port>/123456789012/evidence"
+   },
+   "response_status": 200,
+   "response_type": null
+  },
+  {
+   "method": "POST",
+   "path": "/",
+   "http_version": "HTTP/1.1",
+   "content_type": "application/x-amz-json-1.0",
+   "headers": [
+    [
+     "Host",
+     "127.0.0.1:<port>"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "X-Amz-Target",
+     "AmazonSQS.ReceiveMessage"
+    ],
+    [
+     "Content-Type",
+     "application/x-amz-json-1.0"
+    ],
+    [
+     "x-amzn-query-mode",
+     "true"
+    ],
+    [
+     "User-Agent",
+     "aws-cli/2.31.0 md/awscrt#0.27.6 ua/2.1 os/linux#<kernel> md/arch#<arch> lang/python#3.13.7 md/pyimpl#CPython m/E,N,Z,b cfg/retry-mode#standard md/installer#exe md/distrib#ubuntu.24 md/prompt#off md/command#sqs.receive-message"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/sqs/aws4_request, SignedHeaders=content-type;host;x-amz-date;x-amz-target;x-amzn-query-mode, Signature=<hex>"
+    ],
+    [
+     "Content-Length",
+     "169"
+    ]
+   ],
+   "operation": "ReceiveMessage",
+   "body": {
+    "AttributeNames": [
+     "All"
+    ],
+    "MaxNumberOfMessages": 1,
+    "MessageAttributeNames": [
+     "All"
+    ],
+    "QueueUrl": "http://127.0.0.1:<port>/123456789012/evidence",
+    "WaitTimeSeconds": 1
+   },
+   "response_status": 200,
+   "response_type": null
+  },
+  {
+   "method": "POST",
+   "path": "/",
+   "http_version": "HTTP/1.1",
+   "content_type": "application/x-amz-json-1.0",
+   "headers": [
+    [
+     "Host",
+     "127.0.0.1:<port>"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "X-Amz-Target",
+     "AmazonSQS.ChangeMessageVisibility"
+    ],
+    [
+     "Content-Type",
+     "application/x-amz-json-1.0"
+    ],
+    [
+     "x-amzn-query-mode",
+     "true"
+    ],
+    [
+     "User-Agent",
+     "aws-cli/2.31.0 md/awscrt#0.27.6 ua/2.1 os/linux#<kernel> md/arch#<arch> lang/python#3.13.7 md/pyimpl#CPython m/E,N,Z,b cfg/retry-mode#standard md/installer#exe md/distrib#ubuntu.24 md/prompt#off md/command#sqs.change-message-visibility"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/sqs/aws4_request, SignedHeaders=content-type;host;x-amz-date;x-amz-target;x-amzn-query-mode, Signature=<hex>"
+    ],
+    [
+     "Content-Length",
+     "169"
+    ]
+   ],
+   "operation": "ChangeMessageVisibility",
+   "body": {
+    "QueueUrl": "http://127.0.0.1:<port>/123456789012/evidence",
+    "ReceiptHandle": "cmVjZWlwdC0xLTAwMDAwMDAwLTAwMDAtNDAwMC04MDAwLTAwMDAwMDAwMDAwMQ==",
+    "VisibilityTimeout": 0
+   },
+   "response_status": 200,
+   "response_type": null
+  },
+  {
+   "method": "POST",
+   "path": "/",
+   "http_version": "HTTP/1.1",
+   "content_type": "application/x-amz-json-1.0",
+   "headers": [
+    [
+     "Host",
+     "127.0.0.1:<port>"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "X-Amz-Target",
+     "AmazonSQS.DeleteMessage"
+    ],
+    [
+     "Content-Type",
+     "application/x-amz-json-1.0"
+    ],
+    [
+     "x-amzn-query-mode",
+     "true"
+    ],
+    [
+     "User-Agent",
+     "aws-cli/2.31.0 md/awscrt#0.27.6 ua/2.1 os/linux#<kernel> md/arch#<arch> lang/python#3.13.7 md/pyimpl#CPython m/E,N,Z,b cfg/retry-mode#standard md/installer#exe md/distrib#ubuntu.24 md/prompt#off md/command#sqs.delete-message"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/sqs/aws4_request, SignedHeaders=content-type;host;x-amz-date;x-amz-target;x-amzn-query-mode, Signature=<hex>"
+    ],
+    [
+     "Content-Length",
+     "145"
+    ]
+   ],
+   "operation": "DeleteMessage",
+   "body": {
+    "QueueUrl": "http://127.0.0.1:<port>/123456789012/evidence",
+    "ReceiptHandle": "cmVjZWlwdC0xLTAwMDAwMDAwLTAwMDAtNDAwMC04MDAwLTAwMDAwMDAwMDAwMQ=="
+   },
+   "response_status": 200,
+   "response_type": null
+  },
+  {
+   "method": "POST",
+   "path": "/",
+   "http_version": "HTTP/1.1",
+   "content_type": "application/x-amz-json-1.0",
+   "headers": [
+    [
+     "Host",
+     "127.0.0.1:<port>"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "X-Amz-Target",
+     "AmazonSQS.PurgeQueue"
+    ],
+    [
+     "Content-Type",
+     "application/x-amz-json-1.0"
+    ],
+    [
+     "x-amzn-query-mode",
+     "true"
+    ],
+    [
+     "User-Agent",
+     "aws-cli/2.31.0 md/awscrt#0.27.6 ua/2.1 os/linux#<kernel> md/arch#<arch> lang/python#3.13.7 md/pyimpl#CPython m/E,N,Z,b cfg/retry-mode#standard md/installer#exe md/distrib#ubuntu.24 md/prompt#off md/command#sqs.purge-queue"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/sqs/aws4_request, SignedHeaders=content-type;host;x-amz-date;x-amz-target;x-amzn-query-mode, Signature=<hex>"
+    ],
+    [
+     "Content-Length",
+     "60"
+    ]
+   ],
+   "operation": "PurgeQueue",
+   "body": {
+    "QueueUrl": "http://127.0.0.1:<port>/123456789012/evidence"
+   },
+   "response_status": 200,
+   "response_type": null
+  },
+  {
+   "method": "POST",
+   "path": "/",
+   "http_version": "HTTP/1.1",
+   "content_type": "application/x-amz-json-1.0",
+   "headers": [
+    [
+     "Host",
+     "127.0.0.1:<port>"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "X-Amz-Target",
+     "AmazonSQS.DeleteQueue"
+    ],
+    [
+     "Content-Type",
+     "application/x-amz-json-1.0"
+    ],
+    [
+     "x-amzn-query-mode",
+     "true"
+    ],
+    [
+     "User-Agent",
+     "aws-cli/2.31.0 md/awscrt#0.27.6 ua/2.1 os/linux#<kernel> md/arch#<arch> lang/python#3.13.7 md/pyimpl#CPython m/E,N,Z,b cfg/retry-mode#standard md/installer#exe md/distrib#ubuntu.24 md/prompt#off md/command#sqs.delete-queue"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/sqs/aws4_request, SignedHeaders=content-type;host;x-amz-date;x-amz-target;x-amzn-query-mode, Signature=<hex>"
+    ],
+    [
+     "Content-Length",
+     "60"
+    ]
+   ],
+   "operation": "DeleteQueue",
+   "body": {
+    "QueueUrl": "http://127.0.0.1:<port>/123456789012/evidence"
+   },
+   "response_status": 200,
+   "response_type": null
+  }
+ ],
+ "summary": {
+  "operations": [
+   "CreateQueue",
+   "GetQueueUrl",
+   "GetQueueAttributes",
+   "ListQueues",
+   "SendMessage",
+   "SendMessageBatch",
+   "ReceiveMessage",
+   "ChangeMessageVisibility",
+   "DeleteMessage",
+   "PurgeQueue",
+   "DeleteQueue"
+  ],
+  "content_types": [
+   "application/x-amz-json-1.0"
+  ],
+  "http_versions": [
+   "HTTP/1.1"
+  ]
+ }
+}

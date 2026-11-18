@@ -6,7 +6,7 @@ and the shared core pieces of `.kiro/specs/kinesis-independent-layers/`
 (a task that needs one first builds it to that design). Each task is one
 PR unless noted.
 
-- [ ] 1. Module skeleton and evidence
+- [x] 1. Module skeleton and evidence
   - `SQS` Kconfig option, `services/sqs/`, module number 9, boundary list,
     `sqs-module.yml`; pinned model and coverage test; recorded wire
     evidence from the CLI, SDKs (JSON and query), JMS, Spring and Kombu
@@ -17,8 +17,18 @@ PR unless noted.
     tests, module-off assertion), the pinned model (botocore 1.43.100, 23
     operations), the generated operation table with its `--check` test, and
     the coverage test with every operation listed in
-    `services/sqs/doc/unsupported.md` against its task. Still open: the
-    recording stub and wire evidence.
+    `services/sqs/doc/unsupported.md` against its task.
+  - Done (November 18, 2026): the recording stub and wire evidence in
+    `services/sqs/tests/evidence/` (AWS CLI v2, boto3 on JSON and on the
+    query protocol, aws-sdk-java-v2, the JMS library and Kombu), checked
+    by `sqs_wire_evidence`. Spring Cloud AWS, the Extended Client and
+    aws-sdk-java v1 move to task 12 (README there says why). Findings for
+    task 3: every JSON client sends `x-amzn-query-mode: true`, so errors
+    need the query code in `x-amzn-query-error`; `ReceiveMessage` must
+    accept both `AttributeNames` and `MessageSystemAttributeNames`. The
+    module registers with `module_registry` (module 9) when the daemon
+    first serves requests (task 3); until then there is nothing to run in
+    `kythira_node`.
 
 - [ ] 2. Queue state machine
   - Messages, visibility index, receipt sequence, counts, delays,

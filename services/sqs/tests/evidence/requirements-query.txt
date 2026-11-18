@@ -1,0 +1,9 @@
+# Copyright (c) 2026 Clark Rawlins
+# SPDX-License-Identifier: Apache-2.0
+
+# The query-era botocore: its sqs model still uses the AWS query protocol
+# (botocore moved SQS to AWS JSON 1.0 soon after). recorder.py decodes and
+# answers query requests from this model, and clients/boto3_client.py run
+# under it records what a query-protocol SDK sends.
+boto3==1.28.40
+botocore==1.31.40

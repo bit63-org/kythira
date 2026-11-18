@@ -1,0 +1,46 @@
+// Copyright (c) 2026 Clark Rawlins
+// SPDX-License-Identifier: Apache-2.0
+
+// The evidence scenarios through aws-sdk-java-v2's synchronous SQS client
+// and through the Amazon SQS Java Messaging Library (JMS) on top of it.
+// Versions are pinned: the evidence records what exactly these versions
+// send. The SDK is the same 2.57.11 the Kinesis evidence pins; the BOM
+// holds the messaging library to it too.
+
+plugins {
+    id 'application'
+}
+
+repositories {
+    // repo1 is the same Maven Central; the CI proxy rate-limits the other name less.
+    maven { url = 'https://repo1.maven.org/maven2' }
+}
+
+dependencies {
+    implementation platform('software.amazon.awssdk:bom:2.57.11')
+    implementation 'software.amazon.awssdk:sqs'
+    implementation 'software.amazon.awssdk:url-connection-client'
+    implementation 'com.amazonaws:amazon-sqs-java-messaging-lib:2.1.5'
+    runtimeOnly 'org.slf4j:slf4j-nop:2.0.17'
+}
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(21)
+    }
+}
+
+application {
+    mainClass = 'kythira.evidence.JavaSdkV2Client'
+}
+
+// The JMS scenario, as a second start script beside the SDK one.
+tasks.register('jmsStartScripts', CreateStartScripts) {
+    mainClass = 'kythira.evidence.JmsClient'
+    applicationName = 'sqs-evidence-jms'
+    outputDir = layout.buildDirectory.dir('jms-scripts').get().asFile
+    classpath = startScripts.classpath
+}
+distributions.main.contents {
+    into('bin') { from(tasks.named('jmsStartScripts')) }
+}
