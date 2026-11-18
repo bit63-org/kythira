@@ -66,6 +66,15 @@ add_test(NAME s3_routing_test COMMAND s3_routing_test)
 add_raft_completion_test(s3_index_state_machine_test s3_index_state_machine_test.cpp)
 target_link_libraries(s3_index_state_machine_test PRIVATE kythira_s3)
 
+# Task 5: the write and read path for object bytes (placement, chunking,
+# write quorum, commit after durability, verified reads with repair), on
+# in-memory copies and on real chunk stores.
+find_package(Threads REQUIRED)
+add_executable(s3_data_path_test s3_data_path_test.cpp)
+target_link_libraries(s3_data_path_test PRIVATE
+    kythira_s3 Boost::unit_test_framework Threads::Threads)
+add_test(NAME s3_data_path_test COMMAND s3_data_path_test)
+
 set_tests_properties(
     s3_model_coverage
     s3_model_coverage_checker
@@ -74,6 +83,7 @@ set_tests_properties(
     s3_gateway_node_self_test
     s3_routing_test
     s3_index_state_machine_test
+    s3_data_path_test
     PROPERTIES LABELS "unit;s3;s3-module" TIMEOUT 60)
 
 kythira_scale_test_timeouts()

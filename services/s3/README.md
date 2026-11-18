@@ -29,6 +29,7 @@ module's consumers (Requirement 17.3).
 | `tools/fetch_model.sh` | downloads the model at a botocore tag and regenerates the header | 1 |
 | `include/kythira/s3/model/operations.hpp` | the generated operation table: name, HTTP method, request URI with its distinguishing query keys, success status, streaming body flags, checksum requirement, deprecation, required query parameters and headers (checked in, so a model upgrade shows its diff) | 1, 3 |
 | `include/kythira/s3/s3_index_records.hpp`, `s3_index_state_machine.hpp` | the object index: key layout and record encoding, and the persistent state machine for buckets, versions, uploads and reference counts; `s3_index_state_machine_test` | 4 |
+| `include/kythira/s3/s3_placement.hpp`, `s3_data_path.hpp` | where a chunk's copies live (co-located on the owning group's replicas, or rendezvous over blob nodes), and the front end's write path (chunking, SHA-256, write quorum, commit only after durability) and read path (verified reads, repair of missing or corrupt copies); `s3_data_path_test` | 5 |
 | `include/kythira/s3/s3_routes.hpp` | the operation table as routes for core's REST-XML router, and `route_request` (addressing, query, operation); `s3_routing_test` routes every recorded client request | 3 |
 | `implemented-operations.txt` | operations the gateway implements | 1 onward |
 | `doc/unsupported.md` | every other operation, with its planned task, reason and the exact error it returns (`NotImplemented`, 501) | 1 onward |
