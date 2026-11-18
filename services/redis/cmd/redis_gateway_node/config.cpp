@@ -3,6 +3,7 @@
 
 #include "config.hpp"
 
+#include <kythira/redis/redis_server_identity.hpp>
 #include <raft/net_bind.hpp>
 
 #include <arpa/inet.h>
@@ -533,6 +534,17 @@ auto from_env() -> node_options {
         to_u64("KYTHIRA_REDIS_WORKER_THREADS", get_opt("KYTHIRA_REDIS_WORKER_THREADS", "8"));
     g._log_commands =
         to_bool("KYTHIRA_REDIS_LOG_COMMANDS", get_opt("KYTHIRA_REDIS_LOG_COMMANDS", "false"));
+    // Server identity (redis-general-data-types Requirement 1.5): the Redis
+    // compatibility level clients gate features on, which must stay a plain
+    // major.minor.patch. kythira_version is the build's (the config default).
+    g._redis_compat_version =
+        get_opt("KYTHIRA_REDIS_COMPAT_VERSION", kythira::k_redis_compat_version.data());
+    if (!kythira::is_plain_redis_version(g._redis_compat_version)) {
+        throw std::invalid_argument(
+            "redis_gateway_node: KYTHIRA_REDIS_COMPAT_VERSION must be a plain "
+            "major.minor.patch such as 7.0.0, with no suffix (got '" +
+            g._redis_compat_version + "')");
+    }
 
     if (auto pg = get_opt("KYTHIRA_REDIS_PEER_GATEWAYS", ""); !pg.empty()) {
         o._peer_gateways = parse_id_map("KYTHIRA_REDIS_PEER_GATEWAYS", pg);
@@ -726,6 +738,7 @@ auto usage() -> std::string {
            "  KYTHIRA_REDIS_PEER_GATEWAYS      id=host:port,... of every peer's gateway [peer host "
            "+ LISTEN port, or TLS_LISTEN port when forwarding over TLS]\n"
            "  KYTHIRA_REDIS_IO_THREADS, KYTHIRA_REDIS_WORKER_THREADS, KYTHIRA_REDIS_LOG_COMMANDS\n"
+           "  KYTHIRA_REDIS_COMPAT_VERSION     redis_version / HELLO version, plain x.y.z [7.0.0]\n"
            "\n"
            "\n"
            "Disk-backed cache (environment; .kiro/specs/disk-backed-build-cache/):\n"

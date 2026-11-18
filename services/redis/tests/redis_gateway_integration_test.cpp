@@ -1828,6 +1828,87 @@ BOOST_AUTO_TEST_CASE(a_space_refusal_stops_set_but_not_del, *boost::unit_test::t
     BOOST_CHECK(info.find("kythira_space_refusals:") != std::string::npos);
 }
 
+// Kythira names itself as Kythira and reports a plain Redis compatibility
+// level that clients can parse (redis-general-data-types Requirement
+// 1.5-1.6): `server`/`server_name` kythira, `kythira_version` the build's,
+// `version`/`redis_version` a bare major.minor.patch, and `standalone`
+// unless the Cluster compatibility mode is on.
+BOOST_AUTO_TEST_CASE(hello_and_info_identify_kythira, *boost::unit_test::timeout(120)) {
+    redis_gateway_config cfg;
+    cfg._kythira_version = "9.8.7+gabc1234";
+    cfg._redis_compat_version = "7.2.4";
+    cluster c(cfg);
+    BOOST_REQUIRE(c.await_all_leaders(std::chrono::seconds{20}));
+
+    resp_client ops(c.port(c.leader_of(k_sccache_group)));
+    BOOST_REQUIRE_EQUAL(ops.auth("ops", "ops-secret"), "+OK\r\n");
+    const auto hello = ops.call({"HELLO", "2"});
+    BOOST_CHECK(hello.find("$6\r\nserver\r\n$7\r\nkythira\r\n") != std::string::npos);
+    BOOST_CHECK(hello.find("$7\r\nversion\r\n$5\r\n7.2.4\r\n") != std::string::npos);
+    BOOST_CHECK(hello.find("$15\r\nkythira_version\r\n$14\r\n9.8.7+gabc1234\r\n") !=
+                std::string::npos);
+    BOOST_CHECK(hello.find("$4\r\nmode\r\n$10\r\nstandalone\r\n") != std::string::npos);
+    BOOST_CHECK(hello.find("cluster") == std::string::npos);
+
+    const auto info = ops.call({"INFO"});
+    BOOST_CHECK(info.find("\r\nredis_version:7.2.4\r\n") != std::string::npos);
+    BOOST_CHECK(info.find("\r\nserver_name:kythira\r\n") != std::string::npos);
+    BOOST_CHECK(info.find("\r\nkythira_version:9.8.7+gabc1234\r\n") != std::string::npos);
+    BOOST_CHECK(info.find("\r\nredis_mode:standalone\r\n") != std::string::npos);
+    BOOST_CHECK(info.find("-kythira") == std::string::npos);
+}
+
+// The Cluster compatibility mode (phase 2) is the only thing that makes the
+// gateway report `cluster`; the flag is wired now so the mode string has one
+// source.
+BOOST_AUTO_TEST_CASE(cluster_mode_only_with_the_compatibility_mode,
+                     *boost::unit_test::timeout(120)) {
+    redis_gateway_config cfg;
+    cfg._cluster_compat_mode = true;
+    cluster c(cfg);
+    BOOST_REQUIRE(c.await_all_leaders(std::chrono::seconds{20}));
+    resp_client ops(c.port(c.leader_of(k_sccache_group)));
+    BOOST_REQUIRE_EQUAL(ops.auth("ops", "ops-secret"), "+OK\r\n");
+    BOOST_CHECK(ops.call({"HELLO", "2"}).find("$4\r\nmode\r\n$7\r\ncluster\r\n") !=
+                std::string::npos);
+    BOOST_CHECK(ops.call({"INFO"}).find("\r\nredis_mode:cluster\r\n") != std::string::npos);
+}
+
+// A compatibility level with a vendor suffix, or not three numbers, would
+// break clients' version parsers, so the gateway refuses to start with one.
+BOOST_AUTO_TEST_CASE(a_suffixed_compat_version_is_refused_at_start,
+                     *boost::unit_test::timeout(60)) {
+    BOOST_CHECK(kythira::is_plain_redis_version("7.0.0"));
+    BOOST_CHECK(kythira::is_plain_redis_version("10.12.345"));
+    for (const char* bad : {"7.0.0-kythira", "7.0", "7..0", ".7.0.0", "7.0.0.", "7.0.0.1", "v7.0.0",
+                            "7.0.x", "", " 7.0.0"}) {
+        BOOST_CHECK_MESSAGE(!kythira::is_plain_redis_version(bad), bad);
+    }
+
+    message_fabric fabric{2};
+    config_type cfg{
+        .node_id = 1,
+        .network_client = fabric_client{fabric, 1},
+        .network_server = fabric_server{fabric, 1},
+        .store_factory = [](const group_id_type&) { return host_types::persistence_engine_type{}; },
+    };
+    cfg.partitioner = kythira::make_partitioner<key_type>(kythira::redis_kv_partitioner{});
+    with_state_machines(cfg);
+    host_type host(std::move(cfg));
+    redis_acl acl;
+    acl.reload(acl_text());
+    kythira::console_logger logger{kythira::log_level::error};
+    kythira::noop_metrics metrics;
+    redis_gateway_config gcfg;
+    gcfg._listen = "127.0.0.1:0";
+    gcfg._redis_compat_version = "7.0.0-kythira";
+    gateway_type gw(host, acl, logger, metrics, gcfg, nullptr);
+    BOOST_CHECK_EXCEPTION(gw.start(), std::runtime_error, [](const std::runtime_error& e) {
+        return std::string(e.what()).find("major.minor.patch") != std::string::npos;
+    });
+    BOOST_CHECK(!gw.is_running());
+}
+
 // The reply bytes of every command the default build supports, including its
 // errors, pinned before the gateway moves into services/redis/
 // (.kiro/specs/redis-gateway-module/ task 1). The script avoids replies that
@@ -1836,7 +1917,11 @@ BOOST_AUTO_TEST_CASE(a_space_refusal_stops_set_but_not_del, *boost::unit_test::t
 // the same file: the store must not change a single reply byte.
 // Regenerate with KYTHIRA_UPDATE_GOLDENS=1; a change is a wire change.
 BOOST_AUTO_TEST_CASE(resp_replies_match_the_golden_file, *boost::unit_test::timeout(120)) {
-    cluster c;
+    // HELLO carries kythira_version, which is the build's git describe by
+    // default; pin it so the file does not change with every commit.
+    redis_gateway_config pinned;
+    pinned._kythira_version = "0.1.0+golden";
+    cluster c(pinned);
     BOOST_REQUIRE(c.await_all_leaders(std::chrono::seconds{20}));
     const auto port = c.port(c.leader_of(k_sccache_group));
     using kythira::testing::golden::escape;
@@ -2096,7 +2181,7 @@ BOOST_AUTO_TEST_CASE(a_credential_verifier_vouches_only_for_selected_users,
     {
         resp_client farm(port);
         auto hello = farm.call({"HELLO", "3", "AUTH", "farm", "good"});
-        BOOST_CHECK_EQUAL(hello.rfind("%7\r\n", 0), 0U);
+        BOOST_CHECK_EQUAL(hello.rfind("%8\r\n", 0), 0U);
         BOOST_CHECK_EQUAL(farm.call({"GET", "sccache/seam"}), bulk("v"));
     }
     // The internal user is never vouched for from outside, and a user the

@@ -16,6 +16,8 @@
 
 #include "config.hpp"
 
+#include <raft/build_version.hpp>
+
 #include <cstdlib>
 #include <limits>
 #include <map>
@@ -83,6 +85,7 @@ struct gateway_env {
         "KYTHIRA_REDIS_TXN_ISOLATION",
         "KYTHIRA_REDIS_TXN_LOCK_TTL_MS",
         "KYTHIRA_REDIS_TXN_MAX_RETRIES",
+        "KYTHIRA_REDIS_COMPAT_VERSION",
     };
     gateway_env(const gateway_env&) = delete;
     auto operator=(const gateway_env&) -> gateway_env& = delete;
@@ -143,6 +146,27 @@ BOOST_AUTO_TEST_CASE(localhost_bind_needs_no_opt_in) {
     auto opt = from_env();
     BOOST_TEST(!opt._allow_plaintext_raft);
     BOOST_TEST(opt._bind_address == "localhost");
+}
+
+// The server identity (redis-general-data-types Requirement 1.5): the build's
+// own version, and a Redis compatibility level that defaults to the build's
+// and may be overridden, but only with a plain major.minor.patch.
+BOOST_AUTO_TEST_CASE(server_identity_settings) {
+    gateway_env env;
+    ::setenv("KYTHIRA_RAFT_BIND", "127.0.0.1", 1);
+    {
+        auto opt = from_env();
+        BOOST_TEST(opt._gateway._redis_compat_version == "7.0.0");
+        BOOST_TEST(opt._gateway._kythira_version == std::string(kythira::build_version()));
+        BOOST_TEST(!opt._gateway._kythira_version.empty());
+        BOOST_TEST(!opt._gateway._cluster_compat_mode);
+    }
+    ::setenv("KYTHIRA_REDIS_COMPAT_VERSION", "7.2.4", 1);
+    BOOST_TEST(from_env()._gateway._redis_compat_version == "7.2.4");
+    for (const char* bad : {"7.2.4-kythira", "7.2", "seven", ""}) {
+        ::setenv("KYTHIRA_REDIS_COMPAT_VERSION", bad, 1);
+        BOOST_CHECK_THROW((void)from_env(), std::invalid_argument);
+    }
 }
 
 // A plaintext-only node neither forwards over TLS nor, without the opt-in,

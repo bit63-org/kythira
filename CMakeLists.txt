@@ -1035,6 +1035,32 @@ target_include_directories(kythira_core_headers SYSTEM INTERFACE
     $<INSTALL_INTERFACE:include/kythira/third_party/pkcs11>
 )
 
+# The build's own version, kythira::build_version() (include/raft/
+# build_version.hpp): the project version plus `git describe`. The definition
+# is generated into the build tree at configure time and refreshed before
+# every build by a target that rewrites it only when the value changed (the
+# BYPRODUCTS line lets Ninja skip the recompile when it did not), so a new
+# commit costs one tiny compile and a relink of the programs that report it.
+find_package(Git QUIET)
+set(KYTHIRA_BUILD_VERSION_CPP "${CMAKE_BINARY_DIR}/generated/kythira_build_version.cpp")
+set(_kythira_build_version_cmd
+    "${CMAKE_COMMAND}"
+    "-DSOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}"
+    "-DOUTPUT=${KYTHIRA_BUILD_VERSION_CPP}"
+    "-DPROJECT_VERSION=${PROJECT_VERSION}"
+    "-DGIT_EXECUTABLE=${GIT_EXECUTABLE}"
+    -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/kythira_build_version.cmake")
+execute_process(COMMAND ${_kythira_build_version_cmd} COMMAND_ERROR_IS_FATAL ANY)
+add_custom_target(kythira_build_version_gen
+    COMMAND ${_kythira_build_version_cmd}
+    BYPRODUCTS "${KYTHIRA_BUILD_VERSION_CPP}"
+    COMMENT "Checking the build version"
+    VERBATIM)
+add_library(kythira_build_version STATIC "${KYTHIRA_BUILD_VERSION_CPP}")
+add_dependencies(kythira_build_version kythira_build_version_gen)
+target_link_libraries(kythira_build_version PUBLIC kythira_core_headers)
+target_compile_features(kythira_build_version PUBLIC cxx_std_23)
+
 # HTTP/2 for the core HTTPS server (beast_https_server.hpp,
 # h2_server_session.hpp): Kinesis SubscribeToShard needs it, since AWS SDKs
 # subscribe over HTTP/2. nghttp2 comes from vcpkg (already pinned for curl)

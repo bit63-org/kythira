@@ -120,6 +120,7 @@ The Redis front end:
 | `KYTHIRA_REDIS_IO_THREADS` | `2` | Listener/IO threads |
 | `KYTHIRA_REDIS_WORKER_THREADS` | `8` | Command workers |
 | `KYTHIRA_REDIS_LOG_COMMANDS` | `false` | Log every command (keys, never values or secrets) at debug |
+| `KYTHIRA_REDIS_COMPAT_VERSION` | `7.0.0` | The Redis compatibility level reported as `HELLO`'s `version` and `INFO`'s `redis_version`; see *Server identity*. Must be a plain `major.minor.patch`, or the node refuses to start |
 | `KYTHIRA_REDIS_TRANSACTIONS` | `off` | Run `MSET`, multi-key `DEL`, `MGET` and `MULTI`/`EXEC`/`DISCARD` as cross-shard transactions; see *Transactions*. Refused at startup by a build without `CONFIG_REDIS_GATEWAY_TRANSACTIONS=y`, and with `KYTHIRA_CACHE_PERSISTENCE=file` (allowed with `memory` and `engine`) |
 | `KYTHIRA_REDIS_TXN_ISOLATION` | `read_committed` | Each connection's isolation until it sends `KYTHIRA.ISOLATION`. A level the build cannot give refuses to start |
 | `KYTHIRA_REDIS_TXN_MAX_RETRIES` | `2` | Automatic retries of a transaction that met another one's lock, each under a fresh transaction id |
@@ -702,6 +703,23 @@ JSON and 8.0 MiB under CBOR — and takes 158 ms of leader CPU to serialize
 against 5 ms. The measurement is in the design document's serializer section.
 
 ## Observability
+
+### Server identity
+
+The gateway names itself as Kythira, never as Redis, the way Valkey does
+(`.kiro/specs/redis-general-data-types/` Requirement 1.5-1.6):
+
+| Field | `HELLO` | `INFO server` | Value |
+|---|---|---|---|
+| vendor | `server` | `server_name` | `kythira` |
+| Kythira's version | `kythira_version` | `kythira_version` | the build's: CMake project version plus `git describe`, e.g. `0.1.0+a746630` |
+| compatibility level | `version` | `redis_version` | a plain `major.minor.patch`, the Redis release whose command set the build implements for its target clients (`7.0.0`); `KYTHIRA_REDIS_COMPAT_VERSION` overrides it |
+| mode | `mode` | `redis_mode` | `standalone`; `cluster` only in the Cluster protocol compatibility mode (phase 2) |
+
+Clients such as Lettuce and StackExchange.Redis parse `redis_version` to
+decide which commands to send, so it never carries a vendor suffix (earlier
+builds answered `7.0.0-kythira`). Earlier builds also reported `cluster`,
+which cluster-aware tools take as a promise that `CLUSTER` commands work.
 
 `INFO` (admin) reports the shards this node holds and leads, key and expiring
 key counts, approximate bytes, and counters for writes, deletes, value

@@ -14,7 +14,8 @@ include(kythira_test_helpers)
 function(kythira_redis_test test_name source_file)
     add_raft_completion_test(${test_name} ${source_file})
     target_include_directories(${test_name} PRIVATE "${KYTHIRA_REDIS_INCLUDE_DIR}")
-    target_link_libraries(${test_name} PRIVATE kythira_test_support)
+    # kythira_build_version: the gateway's default kythira_version.
+    target_link_libraries(${test_name} PRIVATE kythira_test_support kythira_build_version)
     set_target_properties(${test_name} PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests")
     set_tests_properties(${test_name} PROPERTIES

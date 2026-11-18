@@ -200,7 +200,7 @@
 < :1\r\n
 ## RESP3 and RESET
 > v3 HELLO 3 AUTH farm farm-secret SETNAME three
-< %7\r\n$6\r\nserver\r\n$7\r\nkythira\r\n$7\r\nversion\r\n$13\r\n7.0.0-kythira\r\n$5\r\nproto\r\n:3\r\n$2\r\nid\r\n:0\r\n$4\r\nmode\r\n$7\r\ncluster\r\n$4\r\nrole\r\n$6\r\nmaster\r\n$7\r\nmodules\r\n*0\r\n
+< %8\r\n$6\r\nserver\r\n$7\r\nkythira\r\n$7\r\nversion\r\n$5\r\n7.0.0\r\n$15\r\nkythira_version\r\n$12\r\n0.1.0+golden\r\n$5\r\nproto\r\n:3\r\n$2\r\nid\r\n:0\r\n$4\r\nmode\r\n$10\r\nstandalone\r\n$4\r\nrole\r\n$6\r\nmaster\r\n$7\r\nmodules\r\n*0\r\n
 > v3 GET sccache/none
 < _\r\n
 > v3 GET sccache/bin
@@ -216,9 +216,9 @@
 > v3 COMMAND COUNT
 < :17\r\n
 > v3 HELLO
-< %7\r\n$6\r\nserver\r\n$7\r\nkythira\r\n$7\r\nversion\r\n$13\r\n7.0.0-kythira\r\n$5\r\nproto\r\n:3\r\n$2\r\nid\r\n:0\r\n$4\r\nmode\r\n$7\r\ncluster\r\n$4\r\nrole\r\n$6\r\nmaster\r\n$7\r\nmodules\r\n*0\r\n
+< %8\r\n$6\r\nserver\r\n$7\r\nkythira\r\n$7\r\nversion\r\n$5\r\n7.0.0\r\n$15\r\nkythira_version\r\n$12\r\n0.1.0+golden\r\n$5\r\nproto\r\n:3\r\n$2\r\nid\r\n:0\r\n$4\r\nmode\r\n$10\r\nstandalone\r\n$4\r\nrole\r\n$6\r\nmaster\r\n$7\r\nmodules\r\n*0\r\n
 > v3 HELLO 2
-< *14\r\n$6\r\nserver\r\n$7\r\nkythira\r\n$7\r\nversion\r\n$13\r\n7.0.0-kythira\r\n$5\r\nproto\r\n:2\r\n$2\r\nid\r\n:0\r\n$4\r\nmode\r\n$7\r\ncluster\r\n$4\r\nrole\r\n$6\r\nmaster\r\n$7\r\nmodules\r\n*0\r\n
+< *16\r\n$6\r\nserver\r\n$7\r\nkythira\r\n$7\r\nversion\r\n$5\r\n7.0.0\r\n$15\r\nkythira_version\r\n$12\r\n0.1.0+golden\r\n$5\r\nproto\r\n:2\r\n$2\r\nid\r\n:0\r\n$4\r\nmode\r\n$10\r\nstandalone\r\n$4\r\nrole\r\n$6\r\nmaster\r\n$7\r\nmodules\r\n*0\r\n
 > v3 GET sccache/none
 < $-1\r\n
 > v3 RESET
