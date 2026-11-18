@@ -403,4 +403,44 @@ struct catalog_result {
     return c;
 }
 
+/// Rewrites the leader clock (`now_ms`) of an encoded catalog or partition
+/// entry in place, so the node that proposes an entry stamps it with its
+/// own clock even when another node built it (a forwarded proposal):
+/// times in committed entries are the proposing leader's (Requirement
+/// 5.4). False, and `entry` unchanged, when it is neither kind or too short.
+[[nodiscard]] inline auto stamp_now(std::vector<std::byte>& entry, std::uint64_t now_ms) -> bool {
+    const auto u8 = [&](std::size_t i) { return std::to_integer<std::uint8_t>(entry[i]); };
+    std::size_t at = 0;
+    if (entry.size() >= 2 && u8(0) == catalog_detail::k_command_format) {
+        // format, op, account and name as length-prefixed strings.
+        at = 2;
+        for (int field = 0; field < 2; ++field) {
+            if (entry.size() < at + 4) {
+                return false;
+            }
+            std::size_t n = 0;
+            for (std::size_t i = 0; i < 4; ++i) {
+                n |= static_cast<std::size_t>(u8(at + i)) << (8 * i);
+            }
+            at += 4;
+            if (entry.size() - at < n) {
+                return false;
+            }
+            at += n;
+        }
+    } else if (!entry.empty() && u8(0) == command_detail::k_command_format) {
+        // format, op, then the target: queue id, partition, fifo, retention.
+        at = 1 + 1 + 8 + 2 + 1 + 4;
+    } else {
+        return false;
+    }
+    if (entry.size() < at + 8) {
+        return false;
+    }
+    for (std::size_t i = 0; i < 8; ++i) {
+        entry[at + i] = static_cast<std::byte>((now_ms >> (8 * i)) & 0xFFU);
+    }
+    return true;
+}
+
 }  // namespace kythira::sqs
