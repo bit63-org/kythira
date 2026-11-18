@@ -332,7 +332,9 @@ change what is built.
 ### Property 4: The estimate is falsifiable, and says where
 
 The pre-registered $0.50 per month and 1 to 5 TB egress are checked by the
-audit script against the bill (Requirement 6.5). The per-leg bytes that the
+audit script against the bill (Requirement 6.5; its ceilings were raised to
+$10 and 10 TB a month on November 18, 2026, after the investigation it
+requires). The per-leg bytes that the
 estimate is least sure of are printed on every run (Requirement 5.5).
 
 ## Error Handling

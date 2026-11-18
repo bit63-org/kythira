@@ -133,6 +133,25 @@ for prefix in vcpkg/x64-linux/ vcpkg/arm64-linux/ sccache/ clang-tidy/; do
             | "  \($p): \($d | length) objects, \(($d | map(.size // 0) | add // 0) / 1048576 | floor) MiB"'
     fi
 done
+# Everything ELSE at the top of the bucket. The loop above can only count the
+# prefixes it names, so a prefix nobody named is invisible to it -- and
+# sccache-measure-3/, left by task 1's measurements, sat in this bucket for
+# two months outside every lifecycle rule because of exactly that (found
+# 2026-11-18 by listing the bucket by hand). One delimiter listing returns
+# the top-level "directories" and any object with no '/' in its name; every
+# one that is not a known prefix is printed, with a warning, because no
+# lifecycle rule here matches it and it will be billed until someone
+# deletes it. Informational, like the rest of this section: a stray prefix
+# costs cents, and it is not the tag leak that fails this audit.
+if out=$(try "top-level prefixes" oci os object list --bucket-name "$BUCKET" \
+             --delimiter / --fields name,size --all); then
+    printf '%s' "$out" | jq -r '
+        [ (.prefixes // [])[], ((.data // [])[] | .name) ]
+        | map(select(. != "vcpkg/" and . != "sccache/" and . != "clang-tidy/"))
+        | if length == 0 then "  no other top-level prefixes"
+          else .[] | "  ::warning::unexpected top-level entry \(.) -- no lifecycle rule here covers it, so it never expires"
+          end'
+fi
 echo
 
 # ── 2. Lifecycle ─────────────────────────────────────────────────────────────

@@ -352,6 +352,19 @@ that is a number, not "faster".
    figure SHALL be under 5 TB per month. Exceeding either SHALL be treated
    as a falsified estimate and investigated, not absorbed.
 
+   **Amended November 18, 2026: the ceilings are now $10 a month and 10 TB
+   of egress a month**, by the maintainer's decision after the
+   investigation this criterion asks for (tasks.md task 11, "November 18
+   reading"). November was on pace for about $6.80 and 8.5 TB. The cause
+   was found, not guessed: CI runs about doubled from November 10, and
+   since November 6 same-repo pull requests write to the cache too, so
+   writes went from about 2 GiB to about 14 GiB a day and the 30-day
+   lifecycle holds proportionally more. That is the cache doing more of
+   its job, not churn, so the 30-day expiry stays and the ceilings move.
+   10 TB is OCI's free egress allowance, so egress still costs nothing
+   inside the new ceiling; above it, it starts to bill. The rule in the
+   previous paragraph still applies to the new figures.
+
 ### Requirement 7: Verify the real wiring, not just the plan
 
 **User Story:** As the maintainer who found that ccache had cached to a

@@ -1186,6 +1186,48 @@ bucket does.
       `doc/TODO.md`'s Known Follow-ups.
   - _Requirements: 6.5, 7.4, 8.3_
 
+  - **November 18, 2026 reading: both of Requirement 6.5's original
+    ceilings breached in November, investigated, and the ceilings raised
+    to $10 and 10 TB a month** (the maintainer's choice over shortening
+    the sccache expiry). The same grouped usage query, run on the
+    maintainer's machine, with a `DAILY` series from October 1:
+
+    | | October (whole month) | November 1–18 |
+    | --- | ---: | ---: |
+    | Outbound Data Transfer Zone 1 | **2,764 GB** · $0 | **4,439 GB** · $0 |
+    | Requests (units of 10,000) | 439.35 · $1.48 | 493.71 · $1.66 |
+    | Storage | 98.75 GB-months · $2.26 | 88.10 GB-months · $1.99 |
+    | | **$3.74** | **$3.65** |
+
+    - **October stayed inside both ceilings.** The October 1–9 pace that
+      projected 4.8 TB did not last: the daily series drops from about
+      150 GB a day to about 60 after October 10.
+    - **November steps up on November 10** (718 GB that day). November 1–9
+      averaged about 140 GB a day and November 10–18 about 350, so the
+      month ends near **8.5 TB and $6.80**: over 5 TB around November 20
+      and over $5 around November 25.
+    - **Why, measured rather than inferred.** `ci.yml` runs went from
+      about 23 a day (October 4–26) to about 56 a day (November 10–18),
+      with the 20-job runner limit saturated. And since November 6 (PR
+      [#710](https://github.com/crawlins/kythira/pull/710)) same-repo pull
+      requests write to the cache, so objects written per day, read off
+      each object's `time-created`, rose from 0.1–3.7 GiB in late October
+      to 5–7 GiB in early November and **7–32 GiB (about 14 a day) from
+      November 9**. Storage is write rate times the 30-day lifecycle, so
+      `sccache/` is now 112,092 objects and 193 GiB (64 GiB on October 9)
+      and storage is half the bill. Both are more use of the cache, not
+      the churn the October entry suspected, so the expiry stays at 30
+      days and Requirement 6.5's ceilings move instead. At today's write
+      rate storage settles near 400 GiB, about $10 a month, which is the
+      new ceiling; a further rise in CI volume is what would breach it.
+    - **A stray prefix, found by listing the bucket**: `sccache-measure-3/`
+      (task 1's measurement, 4,421 objects, 2.1 GiB) matches no lifecycle
+      rule, and `audit.sh` could not see it because it counts only the
+      prefixes it names. `audit.sh` now lists the bucket's top level and
+      warns about every entry no rule covers, with a stub check in
+      `test-audit.sh`, and `provision.sh` gains a one-day rule for that
+      prefix, which removes it without granting anyone `OBJECT_DELETE`.
+
 - [x] 12. TODO row and close-out — **September 9, 2026** (the row and the
       7.1 audit; Tasks 10 and 11 will amend the row when they land, which is
       why the spec reads 9/12 rather than 12/12)
