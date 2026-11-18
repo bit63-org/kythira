@@ -6,3 +6,22 @@
 # listed in doc/unsupported.md; tools/check_coverage.py (the ctest
 # sqs_model_coverage) enforces it. A task that implements an operation moves
 # it from there to here.
+AddPermission
+ChangeMessageVisibility
+ChangeMessageVisibilityBatch
+CreateQueue
+DeleteMessage
+DeleteMessageBatch
+DeleteQueue
+GetQueueAttributes
+GetQueueUrl
+ListQueueTags
+ListQueues
+PurgeQueue
+ReceiveMessage
+RemovePermission
+SendMessage
+SendMessageBatch
+SetQueueAttributes
+TagQueue
+UntagQueue
