@@ -166,6 +166,37 @@ private:
     std::variant<principal_context, sigv4::aws_error> _v;
 };
 
+/// Who owns a SigV4 claim's access key, and the key that signs for it, for
+/// a front end that must check more than the request's own signature: the
+/// chunk signatures of a streaming upload (`sigv4_chunk_decoder.hpp`) and
+/// an S3 browser POST, whose signature covers a policy document instead of
+/// a canonical request. The signature itself is not checked; the caller
+/// does that with `key`. The key is derived for the claim's scope only, so
+/// it signs nothing outside that day, region and service.
+struct resolved_claim {
+    principal_context who;
+    sigv4::signing_key key{};
+};
+
+class resolve_result {
+public:
+    resolve_result(resolved_claim r) : _v(std::move(r)) {}    // NOLINT(google-explicit-constructor)
+    resolve_result(sigv4::aws_error e) : _v(std::move(e)) {}  // NOLINT(google-explicit-constructor)
+
+    [[nodiscard]] auto has_value() const -> bool { return _v.index() == 0; }
+    explicit operator bool() const { return has_value(); }
+    [[nodiscard]] auto value() const -> const resolved_claim& { return std::get<0>(_v); }
+    [[nodiscard]] auto operator*() const -> const resolved_claim& { return value(); }
+    [[nodiscard]] auto operator->() const -> const resolved_claim* { return &value(); }
+    [[nodiscard]] auto error() const -> const sigv4::aws_error& {
+        static const sigv4::aws_error none{};
+        return has_value() ? none : std::get<1>(_v);
+    }
+
+private:
+    std::variant<resolved_claim, sigv4::aws_error> _v;
+};
+
 /// Anything that authenticates a SigV4 request and authorizes an action.
 template<typename A>
 concept aws_request_authorizer =
@@ -174,5 +205,14 @@ concept aws_request_authorizer =
         { a.authenticate(req, rules) } -> std::same_as<authn_result>;
         { a.authorize(who, r) } -> std::same_as<authz_decision>;
     };
+
+/// An authorizer that can also resolve a claim's key (see
+/// `resolved_claim`): the access key must exist and be active, and a
+/// session token must open and name it. Errors are the ones `authenticate`
+/// gives for the same key.
+template<typename A>
+concept aws_claim_resolver = requires(A& a, const sigv4::claim& c, sigv4::error_protocol p) {
+    { a.resolve(c, p) } -> std::same_as<resolve_result>;
+};
 
 }  // namespace kythira::aws_auth

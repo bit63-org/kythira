@@ -51,6 +51,10 @@ struct iam_hooks {
     std::function<authz_decision(const principal_context&, const authz_request&)> authorize;
     /// Whether IAM has an access key with this id (for the `both` check).
     std::function<bool(std::string_view)> has_key;
+    /// IAM's `resolve` (`aws_claim_resolver`), for streaming uploads and
+    /// S3 POST policies. A daemon whose services need neither may leave it
+    /// empty; such claims are then refused.
+    std::function<resolve_result(const sigv4::claim&, sigv4::error_protocol)> resolve;
 };
 
 class static_or_iam_authorizer {
@@ -119,6 +123,33 @@ public:
         return _static.authenticate(req, rules);
     }
 
+    /// `aws_claim_resolver`, chosen as `authenticate` chooses.
+    [[nodiscard]] auto resolve(const sigv4::claim& c, sigv4::error_protocol protocol)
+        -> resolve_result {
+        const auto by_iam = [&]() -> resolve_result {
+            if (!_iam->resolve) {
+                return sigv4::aws_error{
+                    "NotImplemented", "This gateway cannot verify the request's signing key.", 501};
+            }
+            return _iam->resolve(c, protocol);
+        };
+        switch (_mode) {
+            case auth_mode::static_keys:
+                return _static.resolve(c, protocol);
+            case auth_mode::iam:
+                return by_iam();
+            case auth_mode::both:
+                break;
+        }
+        if (!_static_ids.contains(c.access_key_id)) {
+            return by_iam();
+        }
+        if (_iam->has_key && _iam->has_key(c.access_key_id)) {
+            return sigv4::invalid_client_token_id(protocol);
+        }
+        return _static.resolve(c, protocol);
+    }
+
     [[nodiscard]] auto authorize(const principal_context& who, const authz_request& r)
         -> authz_decision {
         if (_mode == auth_mode::static_keys ||
@@ -140,5 +171,6 @@ private:
 };
 
 static_assert(aws_request_authorizer<static_or_iam_authorizer>);
+static_assert(aws_claim_resolver<static_or_iam_authorizer>);
 
 }  // namespace kythira::aws_auth
