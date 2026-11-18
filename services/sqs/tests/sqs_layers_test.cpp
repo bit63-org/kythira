@@ -16,11 +16,18 @@
 #include <kythira/sqs/sqs_data_access.hpp>
 #include <kythira/sqs/sqs_forward.hpp>
 #include <kythira/sqs/sqs_front_end.hpp>
+#include <kythira/sqs/sqs_gateway.hpp>
+#include <kythira/sqs/sqs_layers.hpp>
 #include <kythira/sqs/sqs_listener.hpp>
 #include <kythira/sqs/sqs_remote_cluster.hpp>
 #include <kythira/sqs/sqs_service.hpp>
 
 #include <raft/beast_https_server.hpp>
+#if KYTHIRA_SQS_TEST_IDENTITIES
+#include <raft/certificate_authority.hpp>
+#include <raft/certificate_provider.hpp>
+#include <raft/layer_identity.hpp>
+#endif
 #include <raft/mtls_https_client.hpp>
 #include <raft/static_key_authorizer.hpp>
 
@@ -30,6 +37,8 @@
 #include <boost/json.hpp>
 
 #include <chrono>
+#include <filesystem>
+#include <fstream>
 #include <memory>
 #include <optional>
 #include <string>
@@ -535,7 +544,7 @@ BOOST_AUTO_TEST_CASE(calls_survive_the_wire) {
                   "/",
                   "a=b",
                   {{"X-Amz-Target", "AmazonSQS.ListQueues"}},
-                  std::string("{\"x\":\"\0\"}", 10),
+                  std::string("{\"x\":\"\0\"}", 9),
                   "10.0.0.7",
                   false};
     c._principal.type = kythira::aws_auth::principal_type::assumed_role;
@@ -602,3 +611,187 @@ BOOST_AUTO_TEST_CASE(an_unreachable_front_end_is_a_retryable_error) {
 }
 
 BOOST_AUTO_TEST_SUITE_END()
+
+#if KYTHIRA_SQS_TEST_IDENTITIES
+
+namespace {
+
+namespace layers = kythira::layers;
+
+/// A CA, and certificates with layer identities written to files.
+struct identity_ca {
+    raft::testing::certificate_authority ca;
+    std::filesystem::path dir =
+        std::filesystem::temp_directory_path() /
+        ("sqs-layers-" + std::to_string(::getpid()) + "-" +
+         std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+
+    identity_ca() {
+        std::filesystem::create_directories(dir);
+        write("ca.pem", ca.root_certificate_pem());
+    }
+    ~identity_ca() {
+        std::error_code ec;
+        std::filesystem::remove_all(dir, ec);
+    }
+    identity_ca(const identity_ca&) = delete;
+    auto operator=(const identity_ca&) -> identity_ca& = delete;
+    identity_ca(identity_ca&&) = delete;
+    auto operator=(identity_ca&&) -> identity_ca& = delete;
+
+    void write(const std::string& name, const std::string& pem) const {
+        std::ofstream(dir / name) << pem;
+    }
+    [[nodiscard]] auto path(const std::string& name) const -> std::string {
+        return (dir / name).string();
+    }
+
+    /// Writes `<name>.crt` and `<name>.key` naming `roles` in `cluster`
+    /// (no identity at all with an empty role set).
+    void issue(const std::string& name, layers::role_set roles, const std::string& cluster = "c1") {
+        raft::testing::leaf_certificate_options leaf;
+        leaf.subject.common_name = name;
+        auto csr = raft::testing::generate_key_and_csr(leaf);
+        raft::testing::csr_signing_options o;
+        o.dns_names = {"localhost"};
+        o.ip_addresses = {"127.0.0.1"};
+        o.client_auth = true;
+        if (!roles.empty()) {
+            layers::add_layer_identity(
+                o, layers::identity{
+                       .service = "sqs", .cluster = cluster, .node_id = name, .roles = roles});
+        }
+        const auto pem = ca.sign_csr(csr.csr_pem, o);
+        write(name + ".crt", pem.chain_pem);
+        write(name + ".key", csr.private_key_pem);
+    }
+};
+
+/// A front end and data node over TLS whose internal routes check
+/// identities of cluster c1.
+struct tls_node {
+    std::unique_ptr<az::static_key_authorizer> auth = make_auth();
+    std::unique_ptr<front_end_t> fe;
+    std::unique_ptr<sqs::sqs_http_handler<front_end_t>> handler;
+    std::unique_ptr<kythira::https::server> server;
+
+    explicit tls_node(const identity_ca& ca) {
+        fe = std::make_unique<front_end_t>(sqs::sqs_front_end_config{}, *auth);
+        handler = std::make_unique<sqs::sqs_http_handler<front_end_t>>(
+            *fe, std::string(k_forward_secret), [](const std::string&, std::vector<std::byte>) {
+                return std::optional<std::vector<std::byte>>{};
+            });
+        handler->set_local_query(
+            [](const sqs::data_query&) { return std::optional<sqs::data_answer>{}; });
+        handler->set_serve_calls(true);
+        handler->set_peer_check(sqs::identity_peer_check(
+            sqs::internal_route_guard("c1", std::string(k_forward_secret))));
+        kythira::https::server_config hc;
+        hc.bind_address = "127.0.0.1";
+        hc.port = 0;
+        hc.tls_cert_path = ca.path("server.crt");
+        hc.tls_key_path = ca.path("server.key");
+        hc.client_ca_path = ca.path("ca.pem");
+        server = std::make_unique<kythira::https::server>(
+            hc, [this](const kythira::https::request& r, const kythira::https::request_context& c) {
+                return (*handler)(r, c);
+            });
+        server->start();
+    }
+    ~tls_node() { server->stop(); }
+    tls_node(const tls_node&) = delete;
+    auto operator=(const tls_node&) -> tls_node& = delete;
+    tls_node(tls_node&&) = delete;
+    auto operator=(tls_node&&) -> tls_node& = delete;
+
+    /// POSTs `body` to `path` presenting certificate `who` (none when
+    /// empty), signed with the forwarding secret when `sign`; the status
+    /// and body.
+    [[nodiscard]] auto post(const identity_ca& ca, const std::string& who, const std::string& path,
+                            const std::string& body, bool sign = false) const
+        -> std::pair<unsigned, std::string> {
+        kythira::mtls::client_config cc;
+        cc.ca_path = ca.path("ca.pem");
+        cc.client_certificate = !who.empty();
+        if (!who.empty()) {
+            cc.cert_path = ca.path(who + ".crt");
+            cc.key_path = ca.path(who + ".key");
+        }
+        const kythira::mtls::client client(cc);
+        std::vector<std::pair<std::string, std::string>> headers;
+        if (sign) {
+            headers.emplace_back(
+                std::string(sqs::forward::k_header),
+                sqs::forward::sign(k_forward_secret, body, std::chrono::system_clock::now()));
+        }
+        const auto r = client.request("POST", "https://127.0.0.1:" + std::to_string(server->port()),
+                                      path, body, "application/json", "sqs-layers-test", headers);
+        BOOST_TEST_REQUIRE(r.has_value());
+        return {r->first, r->second};
+    }
+};
+
+}  // namespace
+
+BOOST_AUTO_TEST_SUITE(identities)
+
+// Requirement 11.4: over TLS each layer reaches only its own routes.
+BOOST_AUTO_TEST_CASE(each_layer_reaches_only_its_routes) {
+    using layers::role;
+    identity_ca ca;
+    ca.issue("server", {role::front_end, role::data});
+    ca.issue("fe", {role::front_end});
+    ca.issue("gw", {role::gateway});
+    ca.issue("data", {role::data});
+    ca.issue("stranger", {role::front_end}, "c2");
+    ca.issue("plain", {});
+    tls_node node(ca);
+    const std::string query(sqs::data_wire::k_query_path);
+    const std::string call(sqs::k_call_path);
+    const std::string avail(sqs::k_availability_path);
+
+    // Past the check, a malformed body is a 400.
+    BOOST_TEST(node.post(ca, "fe", query, "{}").first == 400U);
+    BOOST_TEST(node.post(ca, "data", query, "{}").first == 400U);
+    BOOST_TEST(node.post(ca, "gw", call, "{}").first == 400U);
+
+    // A front end's certificate cannot name a principal; a gateway's
+    // cannot read queues.
+    const auto fe_call = node.post(ca, "fe", call, "{}");
+    BOOST_TEST(fe_call.first == 403U);
+    BOOST_TEST(fe_call.second.find("may not call") != std::string::npos);
+    BOOST_TEST(node.post(ca, "gw", query, "{}").first == 403U);
+    BOOST_TEST(node.post(ca, "gw", std::string(sqs::forward::k_path), "{}").first == 403U);
+    // Another cluster's identity is none at all.
+    BOOST_TEST(node.post(ca, "stranger", query, "{}").first == 403U);
+
+    // Without an identity, the forwarding secret holds data alone.
+    BOOST_TEST(node.post(ca, "plain", query, "{}").first == 403U);
+    BOOST_TEST(node.post(ca, "plain", query, "{}", true).first == 400U);
+    BOOST_TEST(node.post(ca, "", query, "{}", true).first == 400U);
+    const auto secret_call = node.post(ca, "", call, "{}", true);
+    BOOST_TEST(secret_call.first == 403U);
+    BOOST_TEST(secret_call.second.find("forward secret may not call") != std::string::npos);
+    BOOST_TEST(node.post(ca, "", query, "{}").first == 403U);
+    // No feed here: the route is not served, whoever asks.
+    BOOST_TEST(node.post(ca, "fe", avail, "{}").first == 404U);
+}
+
+BOOST_AUTO_TEST_CASE(the_route_table_covers_every_internal_path) {
+    const auto guard = sqs::internal_route_guard("c1", "");
+    using layers::role;
+    for (const auto path :
+         {sqs::forward::k_path, sqs::data_wire::k_query_path, sqs::k_availability_path}) {
+        const auto* r = guard.rule_for(path);
+        BOOST_TEST_REQUIRE(r != nullptr);
+        BOOST_TEST((r->allowed == layers::role_set{role::front_end, role::data}));
+    }
+    const auto* c = guard.rule_for(sqs::k_call_path);
+    BOOST_TEST_REQUIRE(c != nullptr);
+    BOOST_TEST((c->allowed == layers::role_set{role::gateway}));
+    BOOST_TEST(guard.rule_for("/") == nullptr);
+}
+
+BOOST_AUTO_TEST_SUITE_END()
+
+#endif  // KYTHIRA_SQS_TEST_IDENTITIES

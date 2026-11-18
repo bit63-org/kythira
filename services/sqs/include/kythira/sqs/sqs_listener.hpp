@@ -53,6 +53,11 @@ namespace kythira::sqs {
 /// Answers a front end's named read from this node's replica, or nullopt.
 using local_querier = std::function<std::optional<data_answer>(const data_query&)>;
 
+/// Decides whether the caller of an internal path may make the call: an
+/// empty answer lets it through, anything else is the reason it is refused.
+using peer_check_fn =
+    std::function<std::string(const https::request&, const https::request_context&)>;
+
 /// Proposes a forwarded entry here; what `apply()` returned, or nullopt.
 using local_proposer = std::function<std::optional<std::vector<std::byte>>(
     const std::string& key, std::vector<std::byte> entry)>;
@@ -123,16 +128,16 @@ public:
         -> https::response {
         const std::string_view target = req.target();
         if (target == forward::k_path) {
-            return forwarded(req);
+            return forwarded(req, ctx);
         }
         if (target == data_wire::k_query_path) {
-            return queried(req);
+            return queried(req, ctx);
         }
         if (target == k_availability_path) {
-            return availability(req);
+            return availability(req, ctx);
         }
         if (target == k_call_path) {
-            return called(req);
+            return called(req, ctx);
         }
         if (!_client_api) {
             return listener_detail::plain(
@@ -176,6 +181,13 @@ public:
     /// Serves `/sns-bridge/...` through `bridge` (set before serving).
     void set_sns_bridge(bridge_fn bridge) { _bridge = std::move(bridge); }
 
+    /// Replaces the forwarding-secret check on every internal path with
+    /// `check`, which answers why a caller is refused, or an empty string
+    /// to let it through (over TLS: the caller's layer identity against
+    /// the route, `sqs_layers.hpp`). With it, the internal paths answer
+    /// even without a forwarding secret. Set before serving.
+    void set_peer_check(peer_check_fn check) { _peer_check = std::move(check); }
+
     /// false: only the internal endpoints answer, every other path 404 (a
     /// node without the front-end role; set before serving).
     void set_client_api(bool on) { _client_api = on; }
@@ -189,6 +201,7 @@ private:
     availability_feed* _feed = nullptr;
     std::chrono::milliseconds _feed_wait{10000};
     bool _client_api = true;
+    peer_check_fn _peer_check;
     gateway_forwarder* _gateway = nullptr;
     bool _serve_calls = false;
     clock_fn _clock;
@@ -207,16 +220,16 @@ private:
         return std::move(*answer);
     }
 
-    auto called(const https::request& req) -> https::response {
+    auto called(const https::request& req, const https::request_context& ctx) -> https::response {
         using listener_detail::plain;
-        if (_secret.empty() || !_serve_calls) {
+        if (!internal_on() || !_serve_calls) {
             return plain(404, "not found\n", req.version());
         }
         if (req.method() != boost::beast::http::verb::post) {
             return plain(405, "POST only\n", req.version());
         }
-        if (!signed_by_peer(req)) {
-            return plain(403, "bad or stale forwarding signature\n", req.version());
+        if (auto why = refusal(req, ctx)) {
+            return plain(403, *why, req.version());
         }
         auto call = decode_call(req.body());
         if (!call) {
@@ -229,16 +242,17 @@ private:
         return out;
     }
 
-    auto availability(const https::request& req) -> https::response {
+    auto availability(const https::request& req, const https::request_context& ctx)
+        -> https::response {
         using listener_detail::plain;
-        if (_secret.empty() || _feed == nullptr) {
+        if (!internal_on() || _feed == nullptr) {
             return plain(404, "not found\n", req.version());
         }
         if (req.method() != boost::beast::http::verb::post) {
             return plain(405, "POST only\n", req.version());
         }
-        if (!signed_by_peer(req)) {
-            return plain(403, "bad or stale forwarding signature\n", req.version());
+        if (auto why = refusal(req, ctx)) {
+            return plain(403, *why, req.version());
         }
         boost::system::error_code ec;
         const auto v = boost::json::parse(req.body(), ec);
@@ -254,6 +268,25 @@ private:
         return r;
     }
 
+    /// Whether the internal paths answer at all.
+    [[nodiscard]] auto internal_on() const -> bool { return !_secret.empty() || _peer_check; }
+
+    /// Why the caller of an internal path is refused, or nullopt.
+    [[nodiscard]] auto refusal(const https::request& req, const https::request_context& ctx) const
+        -> std::optional<std::string> {
+        if (_peer_check) {
+            auto why = _peer_check(req, ctx);
+            if (why.empty()) {
+                return std::nullopt;
+            }
+            return why + "\n";
+        }
+        if (signed_by_peer(req)) {
+            return std::nullopt;
+        }
+        return std::string("bad or stale forwarding signature\n");
+    }
+
     /// Whether `req` carries a valid forwarding signature over its body.
     [[nodiscard]] auto signed_by_peer(const https::request& req) const -> bool {
         const auto header = req[forward::k_header];
@@ -261,16 +294,16 @@ private:
                                _clock());
     }
 
-    auto queried(const https::request& req) -> https::response {
+    auto queried(const https::request& req, const https::request_context& ctx) -> https::response {
         using listener_detail::plain;
-        if (_secret.empty() || !_query) {
+        if (!internal_on() || !_query) {
             return plain(404, "not found\n", req.version());
         }
         if (req.method() != boost::beast::http::verb::post) {
             return plain(405, "POST only\n", req.version());
         }
-        if (!signed_by_peer(req)) {
-            return plain(403, "bad or stale forwarding signature\n", req.version());
+        if (auto why = refusal(req, ctx)) {
+            return plain(403, *why, req.version());
         }
         const auto q = decode_query(req.body());
         if (!q) {
@@ -287,16 +320,17 @@ private:
         return r;
     }
 
-    auto forwarded(const https::request& req) -> https::response {
+    auto forwarded(const https::request& req, const https::request_context& ctx)
+        -> https::response {
         using listener_detail::plain;
-        if (_secret.empty() || !_propose) {
+        if (!internal_on() || !_propose) {
             return plain(404, "not found\n", req.version());
         }
         if (req.method() != boost::beast::http::verb::post) {
             return plain(405, "POST only\n", req.version());
         }
-        if (!signed_by_peer(req)) {
-            return plain(403, "bad or stale forwarding signature\n", req.version());
+        if (auto why = refusal(req, ctx)) {
+            return plain(403, *why, req.version());
         }
         auto p = forward::decode_body(req.body());
         if (!p) {

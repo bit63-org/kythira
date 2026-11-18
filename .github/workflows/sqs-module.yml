@@ -267,13 +267,14 @@ jobs:
 
   clients:
     # Task 12 (Requirements 13.1, 13.2): real SQS clients against the
-    # in-memory sqs_node this run built, through
+    # sqs_node this run built (in-memory, then durable in the split
+    # layouts of task 10), through
     # services/sqs/tests/clients/run_suite.sh. Every client is pinned: the
     # Python ones by requirements files, the AWS CLI by version, Go by
     # go.sum, JavaScript by package-lock.json, the Java ones by their
     # Gradle builds, which run in the digest-pinned Gradle
     # image the Kinesis module uses so there is one JDK and Gradle to keep
-    # current. The split-layout runs join with task 10.
+    # current.
     name: SQS client suites
     needs: build
     runs-on: ubuntu-24.04
@@ -364,6 +365,24 @@ jobs:
           # the runner's.
           export JAVA_HOME=$JAVA_HOME_21_X64
           services/sqs/tests/clients/run_suite.sh
+
+      # Task 10: the same clients through a gateway, a front end and three
+      # data nodes, on plaintext and over TLS with layer identities.
+      - name: Run the client suites on the split layouts
+        env:
+          SUITE_GO: ${{ runner.temp }}/sqs-suite-go
+          SQS_NODE: ${{ runner.temp }}/sqs/sqs_node
+          SUITE_PYTHON: ${{ runner.temp }}/venv/bin/python
+          QUERY_PYTHON: ${{ runner.temp }}/venvq/bin/python
+          AWS_CLI: ${{ runner.temp }}/awsbin/aws
+          JAVA_CLIENTS: ${{ github.workspace }}/services/sqs/tests/evidence/clients/java/build/install/sqs-evidence-java/bin
+          SUITE_JAVA_CLIENTS: ${{ github.workspace }}/services/sqs/tests/clients/java/build/install/sqs-suite-spring/bin
+        run: |
+          export JAVA_HOME=$JAVA_HOME_21_X64
+          for layout in split split-tls; do
+            echo "### $layout"
+            SQS_SUITE_LAYOUT=$layout services/sqs/tests/clients/run_suite.sh
+          done
 
       # Task 13: the differential mix against a node at SQS's default
       # limits, self-checked, then compared with every checked-in recording

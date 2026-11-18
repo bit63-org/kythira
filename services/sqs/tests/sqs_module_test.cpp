@@ -394,4 +394,31 @@ BOOST_AUTO_TEST_CASE(a_durable_node_refuses_settings_that_would_break_handles) {
     BOOST_TEST(!m.configure(lookup).has_value());
 }
 
+// Task 10: over TLS a node that runs only some layers calls the others, and
+// checks them (and shows them its layer identity) against the peer CA.
+BOOST_AUTO_TEST_CASE(a_partial_node_over_tls_needs_the_peer_ca) {
+    temp_dir dir;
+    module_type m(true);
+    auto env = base_env(dir, "1", 7410, 0);
+    env["SQS_ALLOW_PLAINTEXT"] = "off";
+    env["SQS_TLS_CERT"] = (dir.path / "node.crt").string();
+    env["SQS_TLS_KEY"] = (dir.path / "node.key").string();
+    env["KYTHIRA_SQS_ROLES"] = "front_end";
+    env["SQS_DATA_ENDPOINTS"] = "https://127.0.0.1:9324";
+    const auto lookup = [&env](std::string_view name) -> std::optional<std::string> {
+        const auto it = env.find(name);
+        return it == env.end() ? std::nullopt : std::optional<std::string>(it->second);
+    };
+    auto e = m.configure(lookup);
+    BOOST_TEST_REQUIRE(e.has_value());
+    BOOST_TEST(e->find("SQS_PEER_CA") != std::string::npos);
+    env["SQS_IDENTITY_CLUSTER"] = "a/b";
+    env["SQS_PEER_CA"] = (dir.path / "ca.pem").string();
+    e = m.configure(lookup);
+    BOOST_TEST_REQUIRE(e.has_value());
+    BOOST_TEST(e->find("SQS_IDENTITY_CLUSTER") != std::string::npos);
+    env["SQS_IDENTITY_CLUSTER"] = "prod-east";
+    BOOST_TEST(!m.configure(lookup).has_value());
+}
+
 BOOST_AUTO_TEST_SUITE_END()
