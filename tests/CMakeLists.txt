@@ -776,6 +776,20 @@ if(FIU_FOUND)
     target_include_directories(binary_file_persistence_unit_test PRIVATE ${FIU_INCLUDE_DIRS})
 endif()
 
+# .kiro/specs/raft-log-encryption/ tasks 1-3: the key ring, the per-log
+# AES-256-GCM cipher, and the binary engine sealing records and snapshots,
+# including migration both ways and an interrupted rewrite (libfiu cases
+# compile away without it).
+add_raft_completion_test(raft_log_encryption_unit_test raft_log_encryption_unit_test.cpp)
+target_link_libraries(raft_log_encryption_unit_test PRIVATE OpenSSL::Crypto)
+set_tests_properties(raft_log_encryption_unit_test PROPERTIES
+    LABELS "unit;persistence" TIMEOUT 300)
+if(FIU_FOUND)
+    target_compile_definitions(raft_log_encryption_unit_test PRIVATE FIU_ENABLE)
+    target_link_libraries(raft_log_encryption_unit_test PRIVATE ${FIU_LDFLAGS})
+    target_include_directories(raft_log_encryption_unit_test PRIVATE ${FIU_INCLUDE_DIRS})
+endif()
+
 # .kiro/specs/durable-append-barrier/ — the barrier-coverage, crash, group-commit
 # and ordering tests. Drives a real `node<Types>` over a file-backed engine, so
 # it is registered beside file_persistence_unit_test rather than with the

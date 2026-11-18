@@ -20,6 +20,8 @@
 /// meta       magic, version, term, vote, log_start, crc32; rewritten atomically
 /// log.<n>    segments: { u64 index, u64 term, u8 type, u32 len, bytes, u32 crc }*
 /// snapshot   magic, version, last index/term, configuration, state, crc32
+/// log-id     magic, version, 16 random bytes, crc32 (only with a key ring)
+/// rewrite    magic, version, phase, first new segment, crc32 (mid-rewrite)
 /// ```
 ///
 /// All integers are big-endian, and every CRC is CRC-32 over the bytes before
@@ -70,6 +72,20 @@
 /// created), and only then publishes the sample. Concurrent callers coalesce
 /// onto one fsync. Term, vote, `meta` and the snapshot are synchronous.
 ///
+/// **Sealing at rest** (`.kiro/specs/raft-log-encryption/`). Given a key
+/// ring in its options (`raft_log_encryption.hpp`), the engine seals each new
+/// record's command with AES-256-GCM: bit 7 of the type byte is set and the
+/// payload becomes `u32 generation, nonce, ciphertext, tag`, with the header
+/// as written and the generation as additional data. The framing and CRC are
+/// unchanged, so torn tails are cut exactly as above without a key. The load
+/// reads headers only; `read_locked` decrypts. The snapshot is sealed as
+/// format version 2 (unsealed snapshots stay version 1). `log-id` beside
+/// `meta` holds the random id that salts this log's keys. Records of both
+/// kinds may sit in one log, so turning sealing on or off is a restart, and
+/// `rewrite_records()` converts the rest, crash-safe through a `rewrite`
+/// marker file. An engine with no key ring refuses a log holding sealed
+/// records.
+///
 /// The engine is movable (the group factory returns it by value), which is
 /// why its state is behind a `unique_ptr`. Moving one that is in use is not
 /// supported.
@@ -77,6 +93,7 @@
 #include <raft/crc32.hpp>
 #include <raft/exceptions.hpp>
 #include <raft/fault_injection.hpp>
+#include <raft/log_sealing.hpp>
 #include <raft/persistence.hpp>
 #include <raft/types.hpp>
 
@@ -93,6 +110,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <random>
 #include <set>
 #include <span>
 #include <string>
@@ -115,6 +133,12 @@ struct binary_file_persistence_options {
     /// `false` makes `barrier_through` a no-op and `durability()` answer
     /// `buffered`, as `file_persistence_engine`'s flag does. Benchmarks only.
     bool _barriers_enabled = true;
+    /// The node's key ring (`raft_log_encryption.hpp`). With one, records
+    /// and the snapshot are sealed or opened as `_encryption` says; without
+    /// one, a sealed record found on load is refused
+    /// (.kiro/specs/raft-log-encryption/).
+    std::shared_ptr<log_key_ring> _key_ring;
+    log_encryption_mode _encryption = log_encryption_mode::seal;
 };
 
 namespace detail::binary_persistence {
@@ -122,6 +146,16 @@ namespace detail::binary_persistence {
 inline constexpr std::uint32_t meta_magic = 0x4B42464DU;      // "KBFM"
 inline constexpr std::uint32_t snapshot_magic = 0x4B424653U;  // "KBFS"
 inline constexpr std::uint32_t format_version = 1;
+/// A snapshot whose body is sealed (raft-log-encryption design, Snapshot).
+/// Unsealed snapshots are still written as version 1, so an older binary
+/// reads them.
+inline constexpr std::uint32_t sealed_snapshot_version = 2;
+inline constexpr std::uint32_t log_id_magic = 0x4B424649U;   // "KBFI"
+inline constexpr std::uint32_t rewrite_magic = 0x4B424652U;  // "KBFR"
+/// Bit 7 of a record's type byte: the payload is `u32 generation, nonce,
+/// ciphertext, tag`. Every `entry_type` is below it.
+inline constexpr std::uint8_t sealed_type_flag = 0x80U;
+inline constexpr std::size_t generation_bytes = 4;
 /// u64 index, u64 term, u8 type, u32 len.
 inline constexpr std::size_t record_header_bytes = 8 + 8 + 1 + 4;
 inline constexpr std::size_t record_overhead = record_header_bytes + 4;
@@ -186,6 +220,14 @@ private:
     }
     std::span<const std::byte> _in;
     std::size_t _pos = 0;
+};
+
+/// What a fault point throws to stand in for a process killed at that
+/// point: the engine leaves the disk as it is instead of cleaning up.
+class injected_crash : public persistence_exception {
+public:
+    explicit injected_crash(const std::string& where)
+        : persistence_exception("binary_file_persistence: injected crash " + where) {}
 };
 
 /// An fd that closes when the last holder lets go, so a barrier can fsync a
@@ -358,7 +400,7 @@ public:
 
     explicit binary_file_persistence_engine(std::filesystem::path dir,
                                             binary_file_persistence_options options = {})
-        : _s(std::make_unique<state>(std::move(dir), options)) {}
+        : _s(std::make_unique<state>(std::move(dir), std::move(options))) {}
 
     binary_file_persistence_engine(binary_file_persistence_engine&&) noexcept = default;
     auto operator=(binary_file_persistence_engine&&) noexcept
@@ -472,26 +514,8 @@ public:
     auto save_snapshot(const snapshot_t& snap) -> void {
         fiu_do_on("raft/persistence/save_snapshot",
                   throw std::runtime_error("chaos: save_snapshot"););
-        namespace bp = detail::binary_persistence;
-        bp::writer w;
-        w.u32(bp::snapshot_magic);
-        w.u32(bp::format_version);
-        w.u64(static_cast<std::uint64_t>(snap.last_included_index()));
-        w.u64(static_cast<std::uint64_t>(snap.last_included_term()));
-        const auto& cfg = snap.configuration();
-        bp::write_node_list(w, cfg.nodes());
-        w.u8(cfg.is_joint_consensus() ? 1 : 0);
-        w.u8(cfg.old_nodes() ? 1 : 0);
-        if (cfg.old_nodes()) {
-            bp::write_node_list(w, *cfg.old_nodes());
-        }
-        bp::write_node_list(w, cfg.learners());
-        w.u64(snap.state_machine_state().size());
-        w.bytes(snap.state_machine_state());
-        w.crc();
         const std::lock_guard lock(_s->_mu);
-        bp::atomic_replace(_s->_dir / "snapshot", w.data());
-        _s->_snapshot = snap;
+        _s->write_snapshot_locked(snap);
     }
 
     auto load_snapshot() -> std::optional<snapshot_t> {
@@ -593,13 +617,47 @@ public:
 
     [[nodiscard]] auto directory() const -> const std::filesystem::path& { return _s->_dir; }
 
+    // ---- sealing (.kiro/specs/raft-log-encryption/) -----------------------
+
+    /// The lowest key generation any live record or the snapshot is sealed
+    /// under, or nullopt if nothing live is sealed. A node prunes its key
+    /// ring below the minimum of this across its engines (requirement 5.2).
+    [[nodiscard]] auto lowest_live_generation() const -> std::optional<std::uint32_t> {
+        const std::lock_guard lock(_s->_mu);
+        return _s->lowest_live_generation_locked();
+    }
+
+    /// Live records that are sealed, and all live records; for tests and
+    /// for an operator watching a migration finish.
+    [[nodiscard]] auto sealed_record_count() const -> std::size_t {
+        const std::lock_guard lock(_s->_mu);
+        return static_cast<std::size_t>(
+            std::count_if(_s->_entries.begin(), _s->_entries.end(),
+                          [](const entry_location& e) { return e._sealed; }));
+    }
+
+    /// Rewrite every live record and the snapshot under this engine's
+    /// current mode: seal plaintext records (or re-seal them under the
+    /// newest generation), or, in `decrypt_only` or with no key ring, write
+    /// them back in the clear (requirement 4.4). Crash-safe: a `rewrite`
+    /// marker beside `meta` tells the next load which run of segments is
+    /// whole. Blocks the engine while it runs.
+    auto rewrite_records() -> void {
+        const std::lock_guard lock(_s->_mu);
+        _s->rewrite_locked();
+    }
+
 private:
     struct entry_location {
         TermId _term{};
         entry_type _type = entry_type::normal;
         std::uint64_t _segment = 0;
         std::uint64_t _offset = 0;
+        /// Payload bytes on disk: the command, or, sealed, the generation,
+        /// nonce, ciphertext and tag.
         std::uint32_t _len = 0;
+        bool _sealed = false;
+        std::uint32_t _generation = 0;
     };
 
     struct segment {
@@ -609,11 +667,14 @@ private:
 
     struct state {
         state(std::filesystem::path dir, binary_file_persistence_options options)
-            : _dir(std::move(dir)), _options(options) {
+            : _dir(std::move(dir)), _options(std::move(options)) {
             if (_options._segment_max_bytes == 0) {
                 throw std::invalid_argument("binary_file_persistence: segment size of zero");
             }
             std::filesystem::create_directories(_dir);
+            if (_options._key_ring) {
+                load_or_create_log_id();
+            }
             load_meta();
             load_snapshot_file();
             load_segments();
@@ -628,6 +689,10 @@ private:
         /// The first index the log may hold; records below it are dead.
         LogIndex _log_start{0};
         std::optional<snapshot_t> _snapshot;
+        /// The generation the snapshot file is sealed under, if it is.
+        std::optional<std::uint32_t> _snapshot_generation;
+        /// This log's cipher, when the engine has a key ring.
+        std::unique_ptr<log_cipher> _cipher;
 
         /// `_entries[i]` is index `_first_index + i`.
         std::deque<entry_location> _entries;
@@ -714,6 +779,101 @@ private:
             _log_start = static_cast<LogIndex>(r.u64());
         }
 
+        // ---- log id and sealing -------------------------------------------
+
+        /// The log's random id (`log-id`), made the first time an engine with
+        /// a key ring opens the directory. It salts the log's keys, so a
+        /// record copied into another log does not open.
+        void load_or_create_log_id() {
+            namespace bp = detail::binary_persistence;
+            const auto path = _dir / "log-id";
+            std::array<std::byte, log_id_bytes> id{};
+            if (auto bytes = bp::read_whole(path)) {
+                bp::reader r(checked(*bytes, path));
+                check_header(r, bp::log_id_magic, path);
+                const auto b = r.bytes(log_id_bytes);
+                std::copy(b.begin(), b.end(), id.begin());
+            } else {
+                std::random_device rd;
+                for (std::size_t i = 0; i < id.size(); i += 4) {
+                    const auto v = rd();
+                    for (std::size_t k = 0; k < 4 && i + k < id.size(); ++k) {
+                        id[i + k] = static_cast<std::byte>(v >> (8U * k));
+                    }
+                }
+                bp::writer w;
+                w.u32(bp::log_id_magic);
+                w.u32(bp::format_version);
+                w.bytes(id);
+                w.crc();
+                bp::atomic_replace(path, w.data());
+            }
+            _cipher = _options._key_ring->cipher_for(std::span<const std::byte, log_id_bytes>(id));
+        }
+
+        [[nodiscard]] auto sealing() const -> bool {
+            return _cipher && _options._encryption == log_encryption_mode::seal;
+        }
+
+        [[nodiscard]] auto no_key_ring(const std::string& what) const -> persistence_exception {
+            return persistence_exception(
+                "binary_file_persistence: " + what +
+                " is sealed, and this engine has no key ring. Start the node with its Raft "
+                "log key ring (KYTHIRA_RAFT_LOG_KMS; .kiro/specs/raft-log-encryption/).");
+        }
+
+        [[nodiscard]] auto lowest_live_generation_locked() const -> std::optional<std::uint32_t> {
+            std::optional<std::uint32_t> out = _snapshot_generation;
+            for (const auto& e : _entries) {
+                if (e._sealed && (!out || e._generation < *out)) {
+                    out = e._generation;
+                }
+            }
+            return out;
+        }
+
+        // ---- snapshot -----------------------------------------------------
+
+        void write_snapshot_locked(const snapshot_t& snap) {
+            namespace bp = detail::binary_persistence;
+            bp::writer inner;
+            const auto& cfg = snap.configuration();
+            bp::write_node_list(inner, cfg.nodes());
+            inner.u8(cfg.is_joint_consensus() ? 1 : 0);
+            inner.u8(cfg.old_nodes() ? 1 : 0);
+            if (cfg.old_nodes()) {
+                bp::write_node_list(inner, *cfg.old_nodes());
+            }
+            bp::write_node_list(inner, cfg.learners());
+            inner.u64(snap.state_machine_state().size());
+            inner.bytes(snap.state_machine_state());
+
+            bp::writer w;
+            w.u32(bp::snapshot_magic);
+            std::optional<std::uint32_t> generation;
+            if (sealing()) {
+                generation = _cipher->newest_generation();
+                w.u32(bp::sealed_snapshot_version);
+                w.u64(static_cast<std::uint64_t>(snap.last_included_index()));
+                w.u64(static_cast<std::uint64_t>(snap.last_included_term()));
+                w.u8(1);
+                w.u32(*generation);
+                // Everything so far is the additional data: the version,
+                // the place in the log and the generation are bound.
+                const auto sealed = _cipher->seal(*generation, w.data(), inner.data());
+                w.bytes(sealed);
+            } else {
+                w.u32(bp::format_version);
+                w.u64(static_cast<std::uint64_t>(snap.last_included_index()));
+                w.u64(static_cast<std::uint64_t>(snap.last_included_term()));
+                w.bytes(inner.data());
+            }
+            w.crc();
+            bp::atomic_replace(_dir / "snapshot", w.data());
+            _snapshot = snap;
+            _snapshot_generation = generation;
+        }
+
         void load_snapshot_file() {
             namespace bp = detail::binary_persistence;
             const auto path = _dir / "snapshot";
@@ -721,19 +881,49 @@ private:
             if (!bytes) {
                 return;
             }
-            bp::reader r(checked(*bytes, path));
-            check_header(r, bp::snapshot_magic, path);
+            const auto body = checked(*bytes, path);
+            bp::reader r(body);
+            const auto magic = r.u32();
+            const auto version = r.u32();
+            if (magic != bp::snapshot_magic ||
+                (version != bp::format_version && version != bp::sealed_snapshot_version)) {
+                throw persistence_exception("binary_file_persistence: " + path.string() +
+                                            " has an unknown format");
+            }
             snapshot_t snap{};
             snap._last_included_index = static_cast<LogIndex>(r.u64());
             snap._last_included_term = static_cast<TermId>(r.u64());
-            snap._configuration._nodes = bp::read_node_list<NodeId>(r);
-            snap._configuration._is_joint_consensus = r.u8() != 0;
-            if (r.u8() != 0) {
-                snap._configuration._old_nodes = bp::read_node_list<NodeId>(r);
+            std::vector<std::byte> opened;
+            std::span<const std::byte> inner = body.subspan(r.position());
+            if (version == bp::sealed_snapshot_version) {
+                const bool sealed = r.u8() != 0;
+                if (sealed) {
+                    const auto generation = r.u32();
+                    if (!_cipher) {
+                        throw no_key_ring(path.string());
+                    }
+                    const auto aad = body.first(r.position());
+                    try {
+                        opened = _cipher->open(generation, aad, body.subspan(r.position()));
+                    } catch (const persistence_exception& e) {
+                        throw persistence_exception("binary_file_persistence: " + path.string() +
+                                                    ": " + e.what());
+                    }
+                    inner = opened;
+                    _snapshot_generation = generation;
+                } else {
+                    inner = body.subspan(r.position());
+                }
             }
-            snap._configuration._learners = bp::read_node_list<NodeId>(r);
-            const auto len = r.u64();
-            const auto state_bytes = r.bytes(static_cast<std::size_t>(len));
+            bp::reader ir(inner);
+            snap._configuration._nodes = bp::read_node_list<NodeId>(ir);
+            snap._configuration._is_joint_consensus = ir.u8() != 0;
+            if (ir.u8() != 0) {
+                snap._configuration._old_nodes = bp::read_node_list<NodeId>(ir);
+            }
+            snap._configuration._learners = bp::read_node_list<NodeId>(ir);
+            const auto len = ir.u64();
+            const auto state_bytes = ir.bytes(static_cast<std::size_t>(len));
             snap._state_machine_state.assign(state_bytes.begin(), state_bytes.end());
             _snapshot = std::move(snap);
         }
@@ -756,6 +946,7 @@ private:
                 }
             }
             std::sort(numbers.begin(), numbers.end());
+            settle_rewrite(numbers);
             for (std::size_t i = 0; i < numbers.size(); ++i) {
                 scan_segment(numbers[i], i + 1 == numbers.size());
             }
@@ -840,9 +1031,31 @@ private:
                 bp::reader h(record);
                 const auto index = static_cast<LogIndex>(h.u64());
                 const auto term = static_cast<TermId>(h.u64());
-                const auto type = static_cast<entry_type>(h.u8());
+                const auto raw_type = h.u8();
+                const bool sealed = (raw_type & bp::sealed_type_flag) != 0;
+                const auto type = static_cast<entry_type>(
+                    raw_type & static_cast<std::uint8_t>(~bp::sealed_type_flag));
+                std::uint32_t generation = 0;
+                if (sealed) {
+                    // The CRC passed, so this is the record as written: a
+                    // short body is damage, not a torn tail.
+                    const auto where =
+                        "the record at offset " + std::to_string(off) + " of " + path.string();
+                    if (!_cipher) {
+                        throw no_key_ring(where);
+                    }
+                    if (len < bp::generation_bytes + sealed_overhead_bytes) {
+                        throw persistence_exception("binary_file_persistence: " + where +
+                                                    " is too short to be sealed");
+                    }
+                    bp::reader g(std::span<const std::byte>(record.data() + bp::record_header_bytes,
+                                                            bp::generation_bytes));
+                    generation = g.u32();
+                }
                 if (index >= _log_start) {
                     index_loaded_record(path, off, index, term, type, len, n);
+                    _entries.back()._sealed = sealed;
+                    _entries.back()._generation = generation;
                 }
                 off += bp::record_overhead + len;
             }
@@ -882,12 +1095,130 @@ private:
             _dirty.erase(n);
         }
 
+        // ---- rewrite (raft-log-encryption design, Modes) -------------------
+
+        static constexpr std::uint8_t rewrite_pending = 1;
+        static constexpr std::uint8_t rewrite_committed = 2;
+
+        void write_rewrite_marker(std::uint8_t phase, std::uint64_t from) {
+            namespace bp = detail::binary_persistence;
+            bp::writer w;
+            w.u32(bp::rewrite_magic);
+            w.u32(bp::format_version);
+            w.u8(phase);
+            w.u64(from);
+            w.crc();
+            bp::atomic_replace(_dir / "rewrite", w.data());
+        }
+
+        /// Finish or undo a rewrite a crash interrupted, before the segments
+        /// load. `pending, from N`: the old run below N is whole, so the new
+        /// segments go. `committed, from N`: the new run is whole and synced,
+        /// so the old segments go.
+        void settle_rewrite(std::vector<std::uint64_t>& numbers) {
+            namespace bp = detail::binary_persistence;
+            const auto path = _dir / "rewrite";
+            auto bytes = bp::read_whole(path);
+            if (!bytes) {
+                return;
+            }
+            bp::reader r(checked(*bytes, path));
+            check_header(r, bp::rewrite_magic, path);
+            const auto phase = r.u8();
+            const auto from = r.u64();
+            if (phase != rewrite_pending && phase != rewrite_committed) {
+                throw persistence_exception("binary_file_persistence: " + path.string() +
+                                            " names an unknown phase");
+            }
+            std::vector<std::uint64_t> keep;
+            for (const auto n : numbers) {
+                const bool is_new = n >= from;
+                if (is_new == (phase == rewrite_committed)) {
+                    keep.push_back(n);
+                } else {
+                    const auto seg = segment_path(n);
+                    if (::unlink(seg.c_str()) != 0 && errno != ENOENT) {
+                        throw persistence_exception(bp::errno_text("unlink(" + seg.string() + ")"));
+                    }
+                }
+            }
+            numbers = std::move(keep);
+            if (!bp::fsync_path(_dir, O_RDONLY | O_DIRECTORY)) {
+                throw persistence_exception(bp::errno_text("fsync(" + _dir.string() + ")"));
+            }
+            if (::unlink(path.c_str()) != 0 && errno != ENOENT) {
+                throw persistence_exception(bp::errno_text("unlink(" + path.string() + ")"));
+            }
+            if (!bp::fsync_path(_dir, O_RDONLY | O_DIRECTORY)) {
+                throw persistence_exception(bp::errno_text("fsync(" + _dir.string() + ")"));
+            }
+        }
+
+        void rewrite_locked() {
+            namespace bp = detail::binary_persistence;
+            if (_snapshot) {
+                write_snapshot_locked(*_snapshot);
+            }
+            if (_entries.empty()) {
+                return;
+            }
+            const std::uint64_t from = _next_segment;
+            write_rewrite_marker(rewrite_pending, from);
+            fiu_do_on(
+                "raft/binary_persistence/rewrite_after_pending",
+                throw detail::binary_persistence::injected_crash("after the pending marker"););
+            std::deque<entry_location> rewritten;
+            try {
+                for (std::size_t i = 0; i < _entries.size(); ++i) {
+                    auto e = read_locked(static_cast<LogIndex>(_first_index + i));
+                    rewritten.push_back(place_record(encode_record(*e), from));
+                    fiu_do_on("raft/binary_persistence/rewrite_mid_copy",
+                              throw detail::binary_persistence::injected_crash("while copying"););
+                }
+                for (auto it = _segments.lower_bound(from); it != _segments.end(); ++it) {
+                    if (::fsync(it->second._file->fd()) != 0) {
+                        throw persistence_exception(
+                            bp::errno_text("fsync(" + segment_path(it->first).string() + ")"));
+                    }
+                }
+                if (!bp::fsync_path(_dir, O_RDONLY | O_DIRECTORY)) {
+                    throw persistence_exception(bp::errno_text("fsync(" + _dir.string() + ")"));
+                }
+            } catch (const detail::binary_persistence::injected_crash&) {
+                throw;  // A test's stand-in for a kill: leave the disk as is.
+            } catch (...) {
+                // Drop the half-written run; the old one is untouched.
+                while (!_segments.empty() && _segments.rbegin()->first >= from) {
+                    remove_segment(_segments.rbegin()->first);
+                }
+                [[maybe_unused]] const int rc = ::unlink((_dir / "rewrite").c_str());
+                throw;
+            }
+            write_rewrite_marker(rewrite_committed, from);
+            fiu_do_on(
+                "raft/binary_persistence/rewrite_after_commit",
+                throw detail::binary_persistence::injected_crash("after the committed marker"););
+            _entries = std::move(rewritten);
+            while (!_segments.empty() && _segments.begin()->first < from) {
+                remove_segment(_segments.begin()->first);
+            }
+            if (!bp::fsync_path(_dir, O_RDONLY | O_DIRECTORY)) {
+                throw persistence_exception(bp::errno_text("fsync(" + _dir.string() + ")"));
+            }
+            if (::unlink((_dir / "rewrite").c_str()) != 0) {
+                throw persistence_exception(bp::errno_text("unlink(rewrite)"));
+            }
+            if (!bp::fsync_path(_dir, O_RDONLY | O_DIRECTORY)) {
+                throw persistence_exception(bp::errno_text("fsync(" + _dir.string() + ")"));
+            }
+        }
+
         /// The segment appends go to, created or rolled as needed.
-        auto open_segment() -> std::pair<std::uint64_t, segment*> {
+        auto open_segment(std::uint64_t min_segment) -> std::pair<std::uint64_t, segment*> {
             namespace bp = detail::binary_persistence;
             if (!_segments.empty()) {
                 auto& [n, seg] = *_segments.rbegin();
-                if (seg._size < _options._segment_max_bytes) {
+                if (n >= min_segment && seg._size < _options._segment_max_bytes) {
                     return {n, &seg};
                 }
             }
@@ -937,31 +1268,78 @@ private:
                 // Record it first, or the next load would skip this record.
                 write_meta(_current_term, _voted_for, index);
             }
+            auto loc = place_record(encode_record(entry), 0);
+            _dirty.insert(loc._segment);
+            if (_entries.empty()) {
+                _first_index = index;
+            }
+            _entries.push_back(loc);
+        }
+
+        /// A record's bytes and where it will say it is.
+        struct encoded_record {
+            std::vector<std::byte> _bytes;
+            entry_location _loc;
+        };
+
+        /// Frame `entry` as a record, sealed if this engine seals.
+        [[nodiscard]] auto encode_record(const log_entry_t& entry) -> encoded_record {
+            namespace bp = detail::binary_persistence;
             const auto& command = entry.command();
-            if (command.size() > bp::max_record_len) {
+            const bool seal = sealing();
+            const std::size_t payload =
+                command.size() + (seal ? bp::generation_bytes + sealed_overhead_bytes : 0);
+            if (payload > bp::max_record_len) {
                 throw persistence_exception("binary_file_persistence: command of " +
                                             std::to_string(command.size()) + " bytes");
             }
             bp::writer w;
-            w.u64(static_cast<std::uint64_t>(index));
+            w.u64(static_cast<std::uint64_t>(entry.index()));
             w.u64(static_cast<std::uint64_t>(entry.term()));
-            w.u8(static_cast<std::uint8_t>(entry.type()));
-            w.u32(static_cast<std::uint32_t>(command.size()));
-            w.bytes(command);
+            const auto type = static_cast<std::uint8_t>(entry.type());
+            w.u8(seal ? static_cast<std::uint8_t>(type | bp::sealed_type_flag) : type);
+            w.u32(static_cast<std::uint32_t>(payload));
+            std::uint32_t generation = 0;
+            if (seal) {
+                generation = _cipher->newest_generation();
+                w.u32(generation);
+                // The header as written and the generation are the
+                // additional data: a record moved to another index, term
+                // or type, or relabelled to another generation, fails.
+                const auto sealed = _cipher->seal(generation, w.data(), command);
+                w.bytes(sealed);
+            } else {
+                w.bytes(command);
+            }
             w.crc();
-            auto [n, seg] = open_segment();
+            return encoded_record{
+                ._bytes = std::move(w.data()),
+                ._loc = entry_location{._term = entry.term(),
+                                       ._type = entry.type(),
+                                       ._segment = 0,
+                                       ._offset = 0,
+                                       ._len = static_cast<std::uint32_t>(payload),
+                                       ._sealed = seal,
+                                       ._generation = generation}};
+        }
+
+        /// Write `rec` at the end of the newest segment numbered at least
+        /// `min_segment`, rolling to a new one as needed.
+        auto place_record(encoded_record rec, std::uint64_t min_segment) -> entry_location {
+            namespace bp = detail::binary_persistence;
+            auto [n, seg] = open_segment(min_segment);
             const std::uint64_t offset = seg->_size;
             try {
                 // A process killed here leaves a torn record for the next
                 // load to cut off; the fault point stands in for that kill.
                 fiu_do_on("raft/binary_persistence/torn_append", {
-                    const auto half = w.data().size() / 2;
+                    const auto half = rec._bytes.size() / 2;
                     bp::pwrite_all(seg->_file->fd(),
-                                   std::span<const std::byte>(w.data().data(), half), offset,
+                                   std::span<const std::byte>(rec._bytes.data(), half), offset,
                                    segment_path(n));
                     throw persistence_exception("binary_file_persistence: injected torn append");
                 });
-                bp::pwrite_all(seg->_file->fd(), w.data(), offset, segment_path(n));
+                bp::pwrite_all(seg->_file->fd(), rec._bytes, offset, segment_path(n));
             } catch (...) {
                 // Leave nothing for the next append to follow. If this fails
                 // too, the next load's torn-tail rule cuts the same bytes.
@@ -969,16 +1347,10 @@ private:
                     ::ftruncate(seg->_file->fd(), static_cast<off_t>(offset));
                 throw;
             }
-            seg->_size += w.data().size();
-            _dirty.insert(n);
-            if (_entries.empty()) {
-                _first_index = index;
-            }
-            _entries.push_back(entry_location{._term = entry.term(),
-                                              ._type = entry.type(),
-                                              ._segment = n,
-                                              ._offset = offset,
-                                              ._len = static_cast<std::uint32_t>(command.size())});
+            seg->_size += rec._bytes.size();
+            rec._loc._segment = n;
+            rec._loc._offset = offset;
+            return rec._loc;
         }
 
         [[nodiscard]] auto read_locked(LogIndex index) const -> std::optional<log_entry_t> {
@@ -1007,7 +1379,23 @@ private:
             e._term = loc._term;
             e._type = loc._type;
             const auto* body = record.data() + bp::record_header_bytes;
-            e._command.assign(body, body + loc._len);
+            if (loc._sealed) {
+                const std::size_t aad_len = bp::record_header_bytes + bp::generation_bytes;
+                try {
+                    e._command = _cipher->open(
+                        loc._generation, std::span<const std::byte>(record.data(), aad_len),
+                        std::span<const std::byte>(record.data() + aad_len,
+                                                   loc._len - bp::generation_bytes));
+                } catch (const persistence_exception& ex) {
+                    throw persistence_exception("binary_file_persistence: record for index " +
+                                                std::to_string(static_cast<std::uint64_t>(index)) +
+                                                " at offset " + std::to_string(loc._offset) +
+                                                " of " + segment_path(loc._segment).string() +
+                                                ": " + ex.what());
+                }
+            } else {
+                e._command.assign(body, body + loc._len);
+            }
             return e;
         }
 
