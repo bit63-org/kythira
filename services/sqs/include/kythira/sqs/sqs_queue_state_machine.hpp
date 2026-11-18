@@ -31,6 +31,10 @@
 ///
 /// Sequences and times are 16 hex digits, so keys sort numerically.
 ///
+/// The same state machine applies the queue catalog (`sqs_catalog.hpp`),
+/// whose keys sort before every partition and whose entries carry a format
+/// byte of their own; the split veto keeps the catalog in one group.
+///
 /// A receive is a committed entry (design "A receive is a write"): `apply()`
 /// first runs the partition's housekeeping at the entry's `now_ms` (moving
 /// messages whose delay or visibility timeout ended to visible, deleting
@@ -53,6 +57,7 @@
 /// timeout ends between entries is counted in flight until the next entry,
 /// which is the approximation SQS documents.
 
+#include <kythira/sqs/sqs_catalog.hpp>
 #include <kythira/sqs/sqs_queue_commands.hpp>
 
 #include <raft/memory_kv_engine.hpp>
@@ -404,8 +409,14 @@ public:
     auto stage(const std::vector<std::byte>& entry, kythira::write_batch& batch)
         -> std::vector<std::byte> {
         _batch = &batch;
+        const auto text = record_detail::to_string(entry);
+        if (is_catalog_entry(text)) {
+            auto out = record_detail::to_bytes(encode_catalog_result(run_catalog(text)));
+            _batch = nullptr;
+            return out;
+        }
         queue_result result;
-        const auto c = decode_queue_command(record_detail::to_string(entry));
+        const auto c = decode_queue_command(text);
         if (!c || !_range.contains(queue_keys::partition_prefix(c->target))) {
             result.outcome = queue_result::status::malformed;
         } else {
@@ -611,6 +622,38 @@ public:
             });
         }
         return best;
+    }
+
+    /// The catalog record of queue `name` of `account`, as of the last
+    /// applied entry.
+    [[nodiscard]] auto find_queue(std::string_view account, std::string_view name) const
+        -> std::optional<queue_record> {
+        return load_record(catalog_keys::queue(account, name));
+    }
+
+    /// Up to `max` queues of `account` whose names start with `prefix` and
+    /// sort after `after` (ListQueues' `NextToken`), in name order.
+    [[nodiscard]] auto list_queues(std::string_view account, std::string_view prefix,
+                                   std::string_view after, std::size_t max) const
+        -> std::vector<queue_record> {
+        std::vector<queue_record> out;
+        const auto base = catalog_keys::queues_prefix(account);
+        scan_prefix(base + std::string(prefix), [&](std::string_view k, std::string_view v) {
+            if (k.substr(base.size()) <= after) {
+                return true;
+            }
+            if (out.size() >= max) {
+                return false;
+            }
+            auto q = decode_queue_record(v);
+            if (!q) {
+                throw kythira::persistent_storage_error(
+                    "sqs_queue_state_machine: corrupt queue record");
+            }
+            out.push_back(std::move(*q));
+            return true;
+        });
+        return out;
     }
 
     [[nodiscard]] auto engine() const -> engine_type& {
@@ -903,6 +946,145 @@ private:
                 }
             }
         }
+    }
+
+    // -- catalog --------------------------------------------------------------
+
+    [[nodiscard]] auto load_record(const std::string& key) const -> std::optional<queue_record> {
+        const auto v = read(key);
+        if (!v) {
+            return std::nullopt;
+        }
+        auto q = decode_queue_record(*v);
+        if (!q) {
+            throw kythira::persistent_storage_error(
+                "sqs_queue_state_machine: corrupt queue record");
+        }
+        return q;
+    }
+
+    [[nodiscard]] auto read_u64(const std::string& key) const -> std::optional<std::uint64_t> {
+        const auto v = read(key);
+        if (!v) {
+            return std::nullopt;
+        }
+        command_detail::reader r(*v);
+        std::uint64_t x = 0;
+        if (!r.le(x) || !r.done()) {
+            throw kythira::persistent_storage_error("sqs_queue_state_machine: corrupt catalog");
+        }
+        return x;
+    }
+
+    auto put_u64(const std::string& key, std::uint64_t v) -> void {
+        std::string out;
+        command_detail::put_le(out, v);
+        put(key, std::move(out));
+    }
+
+    auto run_catalog(std::string_view text) -> catalog_result {
+        using status = catalog_result::status;
+        catalog_result out;
+        const auto c = decode_catalog_command(text);
+        if (!c || !catalog_keys::valid_account(c->_account) || c->_name.empty() ||
+            c->_name.find('\0') != std::string::npos || !_range.contains(catalog_keys::next_id()) ||
+            !_range.contains(catalog_keys::queue(c->_account, c->_name))) {
+            out._outcome = status::malformed;
+            return out;
+        }
+        const auto key = catalog_keys::queue(c->_account, c->_name);
+        auto rec = load_record(key);
+        if (c->_op == catalog_command::kind::create) {
+            if (rec) {
+                out._outcome =
+                    rec->_settings == c->_settings ? status::exists : status::name_exists;
+                out._record = std::move(rec);
+                return out;
+            }
+            const auto gone = catalog_keys::deleted(c->_account, c->_name);
+            if (const auto at = read_u64(gone)) {
+                if (c->_now_ms < *at + c->_cooldown_ms) {
+                    out._outcome = status::deleted_recently;
+                    return out;
+                }
+                erase(gone);
+            }
+            if (c->_tags.size() > k_max_queue_tags) {
+                out._outcome = status::too_many_tags;
+                return out;
+            }
+            const auto id = read_u64(catalog_keys::next_id()).value_or(1);
+            put_u64(catalog_keys::next_id(), id + 1);
+            queue_record q;
+            q._id = id;
+            q._account = c->_account;
+            q._name = c->_name;
+            q._settings = c->_settings;
+            q._tags = c->_tags;
+            q._created_ms = q._modified_ms = c->_now_ms;
+            q._version = 1;
+            q._partitions = std::max<std::uint16_t>(c->_partitions, 1);
+            put(key, encode_queue_record(q));
+            out._record = std::move(q);
+            return out;
+        }
+        if (!rec) {
+            out._outcome = status::does_not_exist;
+            return out;
+        }
+        auto& q = *rec;
+        switch (c->_op) {
+            case catalog_command::kind::set_settings: {
+                if (q._version != c->_expected_version) {
+                    out._outcome = status::conflict;
+                    out._record = std::move(rec);
+                    return out;
+                }
+                auto next = c->_settings;
+                next._fifo = q._settings._fifo;  // fixed at creation
+                if (next != q._settings) {
+                    q._settings = std::move(next);
+                    q._modified_ms = c->_now_ms;
+                }
+                break;
+            }
+            case catalog_command::kind::tag: {
+                auto tags = q._tags;
+                for (const auto& [k, v] : c->_tags) {
+                    tags[k] = v;
+                }
+                if (tags.size() > k_max_queue_tags) {
+                    out._outcome = status::too_many_tags;
+                    return out;
+                }
+                q._tags = std::move(tags);
+                break;
+            }
+            case catalog_command::kind::untag:
+                for (const auto& k : c->_tag_keys) {
+                    q._tags.erase(k);
+                }
+                break;
+            case catalog_command::kind::delete_:
+                erase(key);
+                put_u64(catalog_keys::deleted(c->_account, c->_name), c->_now_ms);
+                out._record = std::move(rec);
+                return out;
+            case catalog_command::kind::purge:
+                if (q._last_purge_ms != 0 && c->_now_ms < q._last_purge_ms + c->_cooldown_ms) {
+                    out._outcome = status::purge_in_progress;
+                    return out;
+                }
+                q._last_purge_ms = c->_now_ms;
+                break;
+            default:
+                out._outcome = status::malformed;
+                return out;
+        }
+        ++q._version;
+        put(key, encode_queue_record(q));
+        out._record = std::move(rec);
+        return out;
     }
 
     // -- commands -----------------------------------------------------------
