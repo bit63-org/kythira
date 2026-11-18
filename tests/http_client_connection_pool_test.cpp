@@ -22,7 +22,7 @@
 #include "recording_metrics.hpp"
 #include "test_ports.hpp"
 
-#include <folly/executors/CPUThreadPoolExecutor.h>
+#include <raft/executor_default.hpp>
 
 #include <atomic>
 #include <chrono>
@@ -38,10 +38,10 @@ namespace {
 
 using serializer_type = kythira::json_rpc_serializer<std::vector<std::byte>>;
 using server_types = kythira::http_transport_types<serializer_type, kythira::noop_metrics,
-                                                   folly::CPUThreadPoolExecutor>;
+                                                   kythira::executor_default>;
 using client_types =
     kythira::http_transport_types<serializer_type, kythira::testing::recording_metrics,
-                                  folly::CPUThreadPoolExecutor>;
+                                  kythira::executor_default>;
 
 constexpr const char* bind_address = "127.0.0.1";
 constexpr std::uint64_t peer_id = 1;

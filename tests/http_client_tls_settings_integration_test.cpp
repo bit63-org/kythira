@@ -17,7 +17,7 @@
 #include <raft/json_serializer.hpp>
 #include "ca_test_fixture.hpp"
 #include "test_ports.hpp"
-#include <folly/executors/CPUThreadPoolExecutor.h>
+#include <raft/executor_default.hpp>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
@@ -28,7 +28,7 @@
 namespace {
 using test_types =
     kythira::http_transport_types<kythira::json_rpc_serializer<std::vector<std::byte>>,
-                                  kythira::noop_metrics, folly::CPUThreadPoolExecutor>;
+                                  kythira::noop_metrics, kythira::executor_default>;
 
 constexpr const char* test_bind_address = "127.0.0.1";
 constexpr std::uint64_t test_node_id = 1;

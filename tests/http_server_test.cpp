@@ -7,7 +7,7 @@
 #include <raft/http_transport.hpp>
 #include <raft/http_transport_impl.hpp>
 #include <raft/json_serializer.hpp>
-#include <folly/executors/CPUThreadPoolExecutor.h>
+#include <raft/executor_default.hpp>
 
 #include "http_limit_test_helpers.hpp"
 #include "test_ports.hpp"
@@ -22,7 +22,7 @@ constexpr std::uint16_t test_bind_port = 8082;
 // Define transport types for testing
 using test_transport_types =
     kythira::http_transport_types<kythira::json_rpc_serializer<std::vector<std::byte>>,
-                                  kythira::noop_metrics, folly::CPUThreadPoolExecutor>;
+                                  kythira::noop_metrics, kythira::executor_default>;
 }
 
 BOOST_AUTO_TEST_SUITE(http_server_tests)

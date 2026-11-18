@@ -9,7 +9,7 @@
 #include <raft/json_serializer.hpp>
 #include "ca_test_fixture.hpp"
 #include "test_ports.hpp"
-#include <folly/executors/CPUThreadPoolExecutor.h>
+#include <raft/executor_default.hpp>
 #include <filesystem>
 #include <fstream>
 #include <thread>
@@ -89,7 +89,7 @@ BOOST_AUTO_TEST_SUITE(http_ssl_mutual_tls_integration_tests)
 BOOST_AUTO_TEST_CASE(mutual_tls_handshake_actually_completes, *boost::unit_test::timeout(60)) {
     using test_types =
         kythira::http_transport_types<kythira::json_rpc_serializer<std::vector<std::byte>>,
-                                      kythira::noop_metrics, folly::CPUThreadPoolExecutor>;
+                                      kythira::noop_metrics, kythira::executor_default>;
     const std::uint16_t handshake_test_port = kythira::testing::free_port();
 
     mtls_material material;
@@ -141,7 +141,7 @@ BOOST_AUTO_TEST_CASE(server_rejects_connection_with_no_client_certificate,
                      *boost::unit_test::timeout(60)) {
     using test_types =
         kythira::http_transport_types<kythira::json_rpc_serializer<std::vector<std::byte>>,
-                                      kythira::noop_metrics, folly::CPUThreadPoolExecutor>;
+                                      kythira::noop_metrics, kythira::executor_default>;
     const std::uint16_t handshake_test_port = kythira::testing::free_port();
 
     mtls_material material;
@@ -179,7 +179,7 @@ BOOST_AUTO_TEST_CASE(server_rejects_connection_with_no_client_certificate,
 namespace {
 using mtls_test_types =
     kythira::http_transport_types<kythira::json_rpc_serializer<std::vector<std::byte>>,
-                                  kythira::noop_metrics, folly::CPUThreadPoolExecutor>;
+                                  kythira::noop_metrics, kythira::executor_default>;
 
 auto make_mtls_server(mtls_material& material, std::uint16_t port)
     -> std::unique_ptr<kythira::cpp_httplib_server<mtls_test_types>> {
@@ -280,7 +280,7 @@ BOOST_AUTO_TEST_CASE(test_client_certificate_authentication_end_to_end,
                      *boost::unit_test::timeout(120)) {
     using test_types =
         kythira::http_transport_types<kythira::json_rpc_serializer<std::vector<std::byte>>,
-                                      kythira::noop_metrics, folly::CPUThreadPoolExecutor>;
+                                      kythira::noop_metrics, kythira::executor_default>;
 
     mtls_material material;
     const auto& server_files = material.server();
@@ -333,7 +333,7 @@ BOOST_AUTO_TEST_CASE(test_client_certificate_authentication_end_to_end,
 BOOST_AUTO_TEST_CASE(test_client_certificate_verification, *boost::unit_test::timeout(60)) {
     using test_types =
         kythira::http_transport_types<kythira::json_rpc_serializer<std::vector<std::byte>>,
-                                      kythira::noop_metrics, folly::CPUThreadPoolExecutor>;
+                                      kythira::noop_metrics, kythira::executor_default>;
 
     mtls_material material;
     const auto& server_files = material.server();
@@ -354,7 +354,7 @@ BOOST_AUTO_TEST_CASE(test_client_certificate_verification, *boost::unit_test::ti
 BOOST_AUTO_TEST_CASE(test_mutual_tls_connection_establishment, *boost::unit_test::timeout(60)) {
     using test_types =
         kythira::http_transport_types<kythira::json_rpc_serializer<std::vector<std::byte>>,
-                                      kythira::noop_metrics, folly::CPUThreadPoolExecutor>;
+                                      kythira::noop_metrics, kythira::executor_default>;
 
     mtls_material material;
     const auto& server_files = material.server();
@@ -398,7 +398,7 @@ BOOST_AUTO_TEST_CASE(test_client_certificate_authentication_failures,
                      *boost::unit_test::timeout(60)) {
     using test_types =
         kythira::http_transport_types<kythira::json_rpc_serializer<std::vector<std::byte>>,
-                                      kythira::noop_metrics, folly::CPUThreadPoolExecutor>;
+                                      kythira::noop_metrics, kythira::executor_default>;
 
     mtls_material material;
     const auto& server_files = material.server();
@@ -435,7 +435,7 @@ BOOST_AUTO_TEST_CASE(test_client_certificate_authentication_failures,
 BOOST_AUTO_TEST_CASE(test_invalid_client_certificate_rejection, *boost::unit_test::timeout(60)) {
     using test_types =
         kythira::http_transport_types<kythira::json_rpc_serializer<std::vector<std::byte>>,
-                                      kythira::noop_metrics, folly::CPUThreadPoolExecutor>;
+                                      kythira::noop_metrics, kythira::executor_default>;
 
     mtls_material material;
     const auto& server_files = material.server();
@@ -480,7 +480,7 @@ BOOST_AUTO_TEST_CASE(test_invalid_client_certificate_rejection, *boost::unit_tes
 BOOST_AUTO_TEST_CASE(test_cipher_suite_mismatch_detection, *boost::unit_test::timeout(60)) {
     using test_types =
         kythira::http_transport_types<kythira::json_rpc_serializer<std::vector<std::byte>>,
-                                      kythira::noop_metrics, folly::CPUThreadPoolExecutor>;
+                                      kythira::noop_metrics, kythira::executor_default>;
 
     mtls_material material;
     const auto& server_files = material.server();

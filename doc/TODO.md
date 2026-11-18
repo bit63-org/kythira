@@ -3720,21 +3720,22 @@ unverified completion claim.
 ### Build Tooling
 
 - [ ] **Over-wide Folly gates found by the no-folly CI job.** The job
-  (ci.yml, `configs/ci_no_folly_defconfig`) drops 160 tests relative to
-  `ci_full_defconfig`; `configs/no-folly-test-allowlist.txt` gives each a
-  reason. About 50 of them are gated wider than their source needs. The
-  stdexec and Boost backend suites used to be the worst case, registered
-  inside tests/CMakeLists.txt's `if(TARGET Folly::folly)` block so a
-  Folly-free build never tested either backend; 13 stdexec and 2 Boost
-  tests now sit outside it, leaving inside only the four that compare a
-  backend with the Folly one. Beyond that,
-  17 are behind `if(TARGET Folly::folly)` with no direct Folly use, 13 only name
-  `folly::Executor` as a never-invoked transport `executor_type` (the 14
-  ungated CoAP tests with the same pattern were switched to `int`, as
-  `coap_conformance_types.hpp` does), and `tests/chaos/`,
-  `tests/docker_chaos/`, the Alibaba component tests,
-  `redis_gateway_integration_test` and `cmd/ca_cluster_node` are gated on
-  Folly as a whole. Un-gating one means building and running it on the
+  (ci.yml, `configs/ci_no_folly_defconfig`) drops the tests
+  `configs/no-folly-test-allowlist.txt` lists relative to
+  `ci_full_defconfig`, each with a reason. The stdexec and Boost backend
+  suites now sit outside tests/CMakeLists.txt's `if(TARGET Folly::folly)`
+  block, leaving inside only the four that compare a backend with the Folly
+  one. November 2026 un-gated 44 more: the CoAP, HTTP and negotiation
+  suites that only named `folly::Executor` / `folly::CPUThreadPoolExecutor`
+  as a never-invoked `executor_type` (now `int` or
+  `kythira::executor_default`), the CoAP suites on
+  `include/raft/test_types.hpp` (now `future_default` / `promise_default`),
+  and suites with no Folly use at all. Three the list called "no direct
+  Folly" really test `kythira::Future` from raft/future.hpp, which includes
+  Folly unconditionally, and stay gated with that reason. Still gated on
+  Folly as a whole: `tests/chaos/`, `tests/docker_chaos/`, the Alibaba
+  component tests, `redis_gateway_integration_test` and its twins, and
+  `cmd/ca_cluster_node`. Un-gating one means building and running it on the
   Boost backend, then deleting its allowlist line in the same change (the
   checker rejects stale lines).
 

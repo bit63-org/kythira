@@ -8,7 +8,7 @@
 #include <raft/http_transport_impl.hpp>
 #include <raft/json_serializer.hpp>
 #include <httplib.h>
-#include <folly/executors/CPUThreadPoolExecutor.h>
+#include <raft/executor_default.hpp>
 
 #include <thread>
 #include <chrono>
@@ -26,7 +26,7 @@ constexpr std::size_t property_test_iterations = 100;
 // Define transport types for testing using the provided template
 using test_transport_types =
     kythira::http_transport_types<kythira::json_serializer, kythira::noop_metrics,
-                                  folly::CPUThreadPoolExecutor>;
+                                  kythira::executor_default>;
 }
 
 BOOST_AUTO_TEST_SUITE(http_server_property_tests)

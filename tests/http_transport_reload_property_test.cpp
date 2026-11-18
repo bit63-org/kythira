@@ -14,7 +14,7 @@
 
 #include <httplib.h>
 
-#include <folly/executors/CPUThreadPoolExecutor.h>
+#include <raft/executor_default.hpp>
 
 #include <chrono>
 #include <fstream>
@@ -29,8 +29,7 @@ constexpr const char* test_bind_address = "127.0.0.1";
 
 using test_types =
     kythira::http_transport_types<kythira::json_rpc_serializer<std::vector<std::byte>>,
-                                  kythira::testing::recording_metrics,
-                                  folly::CPUThreadPoolExecutor>;
+                                  kythira::testing::recording_metrics, kythira::executor_default>;
 
 // Overwrites the file at `path` with `content` via a same-directory rename —
 // the same atomic-replace shape ca_test_fixture::renew() (task 20) will use.

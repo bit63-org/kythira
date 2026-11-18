@@ -6,7 +6,6 @@
 
 #include "../include/raft/commit_waiter.hpp"
 #include "../include/raft/completion_exceptions.hpp"
-#include "../include/raft/future.hpp"
 #include <random>
 #include <vector>
 #include <cstddef>

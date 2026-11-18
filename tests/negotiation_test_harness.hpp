@@ -28,7 +28,7 @@
 #include "recording_metrics.hpp"
 #include "test_timeout_scale.hpp"
 
-#include <folly/executors/CPUThreadPoolExecutor.h>
+#include <raft/executor_default.hpp>
 
 #include <algorithm>
 #include <chrono>
@@ -81,7 +81,7 @@ using kythira::testing::recording_metrics;
 template<typename Default_Serializer, typename Registry>
 struct negotiating_transport_types
     : kythira::http_transport_types<Default_Serializer, recording_metrics,
-                                    folly::CPUThreadPoolExecutor> {
+                                    kythira::executor_default> {
     using serializer_registry_type = Registry;
 };
 
