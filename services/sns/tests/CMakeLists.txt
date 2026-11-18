@@ -38,6 +38,16 @@ add_test(NAME sns_wire_evidence
             "${_sns_dir}model/service-2.json"
             "${_sns_dir}tests/evidence/data")
 
+# Task 1: the real SNS HTTP deliveries (evidence/deliveries/README.md):
+# headers agree with bodies and every signature verifies against the saved
+# certificate. The checker's self-test signs with a throwaway key.
+add_test(NAME sns_real_deliveries
+    COMMAND "${Python3_EXECUTABLE}" "${_sns_dir}tests/evidence/deliveries/check_deliveries.py"
+            "${_sns_dir}tests/evidence/deliveries/deliveries.json")
+add_test(NAME sns_real_deliveries_checker
+    COMMAND "${Python3_EXECUTABLE}" "${_sns_dir}tests/evidence/deliveries/check_deliveries.py"
+            --self-test)
+
 # Task 1: sns_node links and runs.
 add_test(NAME sns_node_self_test COMMAND sns_node --self-test)
 
@@ -46,6 +56,8 @@ set_tests_properties(
     sns_model_coverage_checker
     sns_operations_up_to_date
     sns_wire_evidence
+    sns_real_deliveries
+    sns_real_deliveries_checker
     sns_node_self_test
     PROPERTIES LABELS "unit;sns;sns-module" TIMEOUT 60)
 

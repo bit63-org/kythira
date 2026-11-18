@@ -6,7 +6,7 @@ sqs-compatible-queues/` (tasks 1-4 for SQS delivery) and the shared core
 pieces of `.kiro/specs/kinesis-independent-layers/` (a task that needs one
 first builds it to that design). Each task is one PR unless noted.
 
-- [ ] 1. Module skeleton and evidence
+- [x] 1. Module skeleton and evidence
   - `SNS` Kconfig option, `services/sns/`, module number 10, boundary
     list, `sns-module.yml`; pinned model and coverage test; recorded wire
     evidence from the CLI and SDKs; recorded SNS HTTP deliveries
@@ -25,8 +25,17 @@ first builds it to that design). Each task is one PR unless noted.
     (`tests/evidence/recorder.py`) and checked-in wire evidence from the
     AWS CLI v2, boto3 and the Java, JS and Go SDKs running one 21-request
     scenario; `sns_wire_evidence` decodes every recording as the query
-    codec must and requires all five to agree. Still open: recorded SNS
-    HTTP deliveries, which need real SNS and a public endpoint.
+    codec must and requires all five to agree.
+  - Done (November 18, 2026): real SNS HTTP deliveries,
+    `tests/evidence/deliveries/` (one run on Clark's machine, under
+    $0.01, nothing left behind). 14 deliveries: confirmations and
+    notifications for wrapped and raw subscriptions, SignatureVersion 1 and
+    2, subject, String/Number/Binary attributes, `MessageStructure` json
+    and `PublishBatch`. `sns_real_deliveries` checks headers against bodies
+    and verifies all 9 signatures by the documented strings. Finding: SNS
+    sent no `UnsubscribeConfirmation` within a minute of the topic owner's
+    `Unsubscribe` on either of two runs, although the documentation lists
+    one; task 6 follows the recording.
 
 - [ ] 2. Topic state machine and publish log
   - Topics, subscriptions, FIFO dedup, publish into the record segment
