@@ -18,14 +18,17 @@
 #include <kythira/sqs/sqs_front_end.hpp>
 #include <kythira/sqs/sqs_messages.hpp>
 #include <kythira/sqs/sqs_service.hpp>
+#include <kythira/sqs/sqs_workers.hpp>
 
 #include <raft/static_key_authorizer.hpp>
 
 #include <boost/json.hpp>
 
+#include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <set>
 #include <string>
 #include <string_view>
@@ -548,4 +551,255 @@ BOOST_FIXTURE_TEST_CASE(the_query_protocol_gets_xml_answers, fixture) {
     BOOST_TEST(missing.status == 400U);
     BOOST_TEST(missing.body.find("<Code>AWS.SimpleQueueService.NonExistentQueue</Code>") !=
                std::string::npos);
+}
+
+// -- task 6: dead-letter queues ---------------------------------------------------
+
+namespace {
+
+auto redrive_to(std::string_view dlq, int count) -> std::string {
+    return std::string(R"({"deadLetterTargetArn":"arn:aws:sqs:us-east-1:)") +
+           std::string(k_account) + ":" + std::string(dlq) + R"(","maxReceiveCount":)" +
+           std::to_string(count) + "}";
+}
+
+auto arn_of(std::string_view name) -> std::string {
+    return "arn:aws:sqs:us-east-1:" + std::string(k_account) + ":" + std::string(name);
+}
+
+}  // namespace
+
+BOOST_FIXTURE_TEST_CASE(a_message_received_too_often_moves_to_its_dead_letter_queue, fixture) {
+    const auto dlq = create("orders-dlq");
+    const auto url = create("orders", {{"RedrivePolicy", redrive_to("orders-dlq", 2)}});
+    const auto sent = send(url, "poison");
+    BOOST_TEST_REQUIRE(sent.status == 200U);
+    const auto id = sent.str("MessageId");
+    // Received twice (maxReceiveCount), each time left to time out.
+    for (int i = 0; i < 2; ++i) {
+        const auto got = receive(url, 10, {{"VisibilityTimeout", 1}});
+        BOOST_TEST_REQUIRE(got.size() == 1U);
+        BOOST_TEST(field(got[0], "MessageId") == id);
+        now += 1500;
+    }
+    // The third receive moves it instead of delivering it: in one queue only.
+    BOOST_TEST(receive(url).empty());
+    BOOST_TEST(attributes(url).at("ApproximateNumberOfMessages").as_string() == "0");
+    BOOST_TEST(attributes(url).at("ApproximateNumberOfMessagesNotVisible").as_string() == "0");
+    const auto moved = receive(dlq, 10, {{"MessageSystemAttributeNames", json::array{"All"}}});
+    BOOST_TEST_REQUIRE(moved.size() == 1U);
+    BOOST_TEST(field(moved[0], "MessageId") == id);
+    BOOST_TEST(field(moved[0], "Body") == "poison");
+    const auto& attrs = moved[0].at("Attributes").as_object();
+    BOOST_TEST(attrs.at("DeadLetterQueueSourceArn").as_string() == arn_of("orders"));
+    BOOST_TEST(attrs.at("ApproximateReceiveCount").as_string() == "1");
+}
+
+BOOST_FIXTURE_TEST_CASE(a_fifo_group_keeps_its_order_into_its_dead_letter_queue, fixture) {
+    const auto dlq = create("jobs-dlq.fifo", {{"FifoQueue", "true"}});
+    const auto url = create("jobs.fifo", {{"FifoQueue", "true"},
+                                          {"ContentBasedDeduplication", "true"},
+                                          {"RedrivePolicy", redrive_to("jobs-dlq.fifo", 1)}});
+    for (const auto* b : {"first", "second"}) {
+        BOOST_TEST_REQUIRE(send(url, b, {{"MessageGroupId", "g"}}).status == 200U);
+    }
+    // Both delivered once, then left to time out.
+    BOOST_TEST_REQUIRE(receive(url, 10, {{"VisibilityTimeout", 1}}).size() == 2U);
+    now += 1500;
+    BOOST_TEST(receive(url).empty());
+    const auto moved = receive(dlq, 10, {{"MessageSystemAttributeNames", json::array{"All"}}});
+    BOOST_TEST_REQUIRE(moved.size() == 2U);
+    BOOST_TEST(field(moved[0], "Body") == "first");
+    BOOST_TEST(field(moved[1], "Body") == "second");
+    BOOST_TEST(moved[0].at("Attributes").at("MessageGroupId").as_string() == "g");
+}
+
+BOOST_FIXTURE_TEST_CASE(redrive_allow_policies_are_enforced, fixture) {
+    create("closed", {{"RedriveAllowPolicy", R"({"redrivePermission":"denyAll"})"}});
+    create("picky",
+           {{"RedriveAllowPolicy", R"({"redrivePermission":"byQueue","sourceQueueArns":[")" +
+                                       arn_of("chosen") + R"("]})"}});
+    BOOST_TEST(call("CreateQueue", {{"QueueName", "a"},
+                                    {"Attributes", {{"RedrivePolicy", redrive_to("closed", 3)}}}})
+                   .status == 400U);
+    BOOST_TEST(call("CreateQueue", {{"QueueName", "other"},
+                                    {"Attributes", {{"RedrivePolicy", redrive_to("picky", 3)}}}})
+                   .status == 400U);
+    create("chosen", {{"RedrivePolicy", redrive_to("picky", 3)}});
+    const auto plain = create("plain");
+    const auto r =
+        call("SetQueueAttributes",
+             {{"QueueUrl", plain}, {"Attributes", {{"RedrivePolicy", redrive_to("closed", 3)}}}});
+    BOOST_TEST(r.status == 400U);
+    BOOST_TEST(r.type() == "com.amazon.coral.validate#ValidationException");
+}
+
+BOOST_FIXTURE_TEST_CASE(dead_letter_source_queues_are_listed_and_paged, fixture) {
+    const auto dlq = create("dlq");
+    create("unrelated");
+    for (const auto* n : {"c-src", "a-src", "b-src"}) {
+        create(n, {{"RedrivePolicy", redrive_to("dlq", 5)}});
+    }
+    auto r = call("ListDeadLetterSourceQueues", {{"QueueUrl", dlq}});
+    BOOST_TEST_REQUIRE(r.status == 200U);
+    const auto& all = r.body.at("queueUrls").as_array();
+    BOOST_TEST_REQUIRE(all.size() == 3U);
+    BOOST_TEST(all[0].as_string() == "http://localhost:9324/111122223333/a-src");
+    BOOST_TEST(all[2].as_string() == "http://localhost:9324/111122223333/c-src");
+    BOOST_TEST(!r.body.contains("NextToken"));
+    r = call("ListDeadLetterSourceQueues", {{"QueueUrl", dlq}, {"MaxResults", 2}});
+    BOOST_TEST_REQUIRE(r.body.at("queueUrls").as_array().size() == 2U);
+    const auto token = r.str("NextToken");
+    r = call("ListDeadLetterSourceQueues",
+             {{"QueueUrl", dlq}, {"MaxResults", 2}, {"NextToken", token}});
+    BOOST_TEST_REQUIRE(r.body.at("queueUrls").as_array().size() == 1U);
+    BOOST_TEST(r.body.at("queueUrls").as_array()[0].as_string() ==
+               "http://localhost:9324/111122223333/c-src");
+    BOOST_TEST(!r.body.contains("NextToken"));
+    // A queue nothing redrives to: an empty list, still present.
+    r = call("ListDeadLetterSourceQueues",
+             {{"QueueUrl", "http://localhost:9324/111122223333/unrelated"}});
+    BOOST_TEST(r.body.at("queueUrls").as_array().empty());
+}
+
+// -- task 6: message move tasks ---------------------------------------------------
+
+namespace {
+
+struct mover : fixture {
+    sqs::move_worker<sqs::local_queue_cluster> worker{
+        cluster, [](const std::string&) { return true; }, sqs::sqs_arn_queue};
+
+    /// Sends `body` to `url` and lets one receive (maxReceiveCount 1) and
+    /// the next move it to the dead-letter queue.
+    void dead_letter(const std::string& url, const std::string& body) {
+        BOOST_TEST_REQUIRE(send(url, body).status == 200U);
+        BOOST_TEST_REQUIRE(receive(url, 10, {{"VisibilityTimeout", 1}}).size() == 1U);
+        now += 1500;
+        BOOST_TEST_REQUIRE(receive(url).empty());
+    }
+
+    auto tasks(const std::string& source, int max = 10) -> json::array {
+        const auto r =
+            call("ListMessageMoveTasks", {{"SourceArn", arn_of(source)}, {"MaxResults", max}});
+        BOOST_REQUIRE_MESSAGE(r.status == 200, json::serialize(r.body));
+        return r.body.at("Results").as_array();
+    }
+
+    auto bodies(const std::string& url) -> std::vector<std::string> {
+        std::vector<std::string> out;
+        for (const auto& m : receive(url)) {
+            out.push_back(field(m, "Body"));
+        }
+        std::sort(out.begin(), out.end());
+        return out;
+    }
+};
+
+}  // namespace
+
+BOOST_FIXTURE_TEST_CASE(a_move_task_redrives_each_message_to_its_source, mover) {
+    const auto dlq = create("dlq");
+    const auto a = create("a", {{"RedrivePolicy", redrive_to("dlq", 1)}});
+    const auto b = create("b", {{"RedrivePolicy", redrive_to("dlq", 1)}});
+    dead_letter(a, "for-a");
+    dead_letter(b, "for-b");
+    BOOST_TEST(attributes(dlq).at("ApproximateNumberOfMessages").as_string() == "2");
+
+    // Only a dead-letter queue is a source; destinations must exist.
+    auto r = call("StartMessageMoveTask", {{"SourceArn", arn_of("a")}});
+    BOOST_TEST(r.status == 400U);
+    r = call("StartMessageMoveTask", {{"SourceArn", arn_of("nope")}});
+    BOOST_TEST(r.type() == "com.amazonaws.sqs#ResourceNotFoundException");
+    r = call("StartMessageMoveTask",
+             {{"SourceArn", arn_of("dlq")}, {"DestinationArn", arn_of("nope")}});
+    BOOST_TEST(r.type() == "com.amazonaws.sqs#ResourceNotFoundException");
+    r = call("StartMessageMoveTask",
+             {{"SourceArn", arn_of("dlq")}, {"MaxNumberOfMessagesPerSecond", 501}});
+    BOOST_TEST(r.status == 400U);
+
+    r = call("StartMessageMoveTask", {{"SourceArn", arn_of("dlq")}});
+    BOOST_TEST_REQUIRE(r.status == 200U);
+    BOOST_TEST(!r.str("TaskHandle").empty());
+    // One active task per source.
+    r = call("StartMessageMoveTask", {{"SourceArn", arn_of("dlq")}});
+    BOOST_TEST(r.type() == "com.amazonaws.sqs#UnsupportedOperation");
+    auto listed = tasks("dlq");
+    BOOST_TEST_REQUIRE(listed.size() == 1U);
+    BOOST_TEST(listed[0].at("Status").as_string() == "RUNNING");
+    BOOST_TEST(listed[0].as_object().contains("TaskHandle"));
+    BOOST_TEST(listed[0].at("ApproximateNumberOfMessagesToMove").as_int64() == 2);
+
+    BOOST_TEST(!worker.run_once());
+    BOOST_TEST(worker.moved() == 2U);
+    BOOST_TEST(attributes(dlq).at("ApproximateNumberOfMessages").as_string() == "0");
+    BOOST_TEST(bodies(a) == std::vector<std::string>{"for-a"});
+    BOOST_TEST(bodies(b) == std::vector<std::string>{"for-b"});
+    listed = tasks("dlq");
+    BOOST_TEST_REQUIRE(listed.size() == 1U);
+    BOOST_TEST(listed[0].at("Status").as_string() == "COMPLETED");
+    BOOST_TEST(!listed[0].as_object().contains("TaskHandle"));
+    BOOST_TEST(listed[0].at("ApproximateNumberOfMessagesMoved").as_int64() == 2);
+    BOOST_TEST(listed[0].at("SourceArn").as_string() == arn_of("dlq"));
+    // A new task may start once the last ended; the newest lists first.
+    now += 10;
+    BOOST_TEST(call("StartMessageMoveTask", {{"SourceArn", arn_of("dlq")}}).status == 200U);
+    BOOST_TEST(tasks("dlq", 1).size() == 1U);
+    BOOST_TEST(tasks("dlq").size() == 2U);
+    BOOST_TEST(tasks("dlq")[0].at("Status").as_string() == "RUNNING");
+}
+
+BOOST_FIXTURE_TEST_CASE(a_move_task_keeps_its_rate_and_can_be_cancelled, mover) {
+    const auto dlq = create("dlq");
+    const auto src = create("src", {{"RedrivePolicy", redrive_to("dlq", 1)}});
+    const auto dest = create("elsewhere");
+    for (const auto* body : {"one", "two", "three"}) {
+        dead_letter(src, body);
+    }
+    const auto r = call("StartMessageMoveTask", {{"SourceArn", arn_of("dlq")},
+                                                 {"DestinationArn", arn_of("elsewhere")},
+                                                 {"MaxNumberOfMessagesPerSecond", 1}});
+    BOOST_TEST_REQUIRE(r.status == 200U);
+    const auto handle = r.str("TaskHandle");
+    // One message a second.
+    BOOST_TEST(worker.run_once());
+    BOOST_TEST(worker.moved() == 1U);
+    BOOST_TEST(worker.run_once());
+    BOOST_TEST(worker.moved() == 1U);
+    now += 1000;
+    BOOST_TEST(worker.run_once());
+    BOOST_TEST(worker.moved() == 2U);
+    const auto listed = tasks("dlq");
+    BOOST_TEST(listed[0].at("DestinationArn").as_string() == arn_of("elsewhere"));
+    BOOST_TEST(listed[0].at("MaxNumberOfMessagesPerSecond").as_int64() == 1);
+
+    const auto c = call("CancelMessageMoveTask", {{"TaskHandle", handle}});
+    BOOST_TEST_REQUIRE(c.status == 200U);
+    BOOST_TEST(c.body.at("ApproximateNumberOfMessagesMoved").as_int64() == 2);
+    // Cancelling, then cancelled by the worker; the last message stays.
+    BOOST_TEST(tasks("dlq")[0].at("Status").as_string() == "CANCELLING");
+    BOOST_TEST(!worker.run_once());
+    BOOST_TEST(tasks("dlq")[0].at("Status").as_string() == "CANCELLED");
+    BOOST_TEST(attributes(dlq).at("ApproximateNumberOfMessages").as_string() == "1");
+    BOOST_TEST(bodies(dest).size() == 2U);
+    // A task that is not running, or a handle that names none, is not found.
+    BOOST_TEST(call("CancelMessageMoveTask", {{"TaskHandle", handle}}).type() ==
+               "com.amazonaws.sqs#ResourceNotFoundException");
+    BOOST_TEST(call("CancelMessageMoveTask", {{"TaskHandle", "bm90LWEtaGFuZGxl"}}).type() ==
+               "com.amazonaws.sqs#ResourceNotFoundException");
+}
+
+BOOST_FIXTURE_TEST_CASE(a_move_task_fails_when_its_destination_is_gone, mover) {
+    create("dlq");
+    const auto src = create("src", {{"RedrivePolicy", redrive_to("dlq", 1)}});
+    const auto dest = create("gone");
+    dead_letter(src, "stuck");
+    BOOST_TEST_REQUIRE(call("StartMessageMoveTask",
+                            {{"SourceArn", arn_of("dlq")}, {"DestinationArn", arn_of("gone")}})
+                           .status == 200U);
+    BOOST_TEST_REQUIRE(call("DeleteQueue", {{"QueueUrl", dest}}).status == 200U);
+    BOOST_TEST(!worker.run_once());
+    const auto listed = tasks("dlq");
+    BOOST_TEST(listed[0].at("Status").as_string() == "FAILED");
+    BOOST_TEST(!listed[0].at("FailureReason").as_string().empty());
 }

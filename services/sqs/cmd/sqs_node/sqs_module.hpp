@@ -260,6 +260,7 @@ public:
     using handler_type = sqs::sqs_http_handler<front_end_type>;
     using service_type = sqs::sqs_service<cluster_type>;
     using worker_type = sqs::tick_worker<cluster_type>;
+    using mover_type = sqs::move_worker<cluster_type>;
 
     /// The local id of the bootstrap group.
     static constexpr std::uint64_t k_first_group = 1;
@@ -358,6 +359,9 @@ public:
         _worker = std::make_unique<worker_type>(
             *_cluster, [this](const std::string& key) { return _cluster->leads(key); });
         _worker_ptr.store(_worker.get(), std::memory_order_release);
+        _mover = std::make_unique<mover_type>(
+            *_cluster, [this](const std::string& key) { return _cluster->leads(key); },
+            sqs::sqs_arn_queue);
     }
 
     void publish(service_node::module_registry& /*registry*/) override {}
@@ -366,6 +370,7 @@ public:
         _hub.reopen();
         _raft->start();
         _worker->start();
+        _mover->start();
         _driving = true;
         _driver = std::thread([this] {
             while (_driving.load(std::memory_order_acquire)) {
@@ -442,6 +447,9 @@ public:
         if (_worker) {
             _worker->stop();
         }
+        if (_mover) {
+            _mover->stop();
+        }
         _driving.store(false, std::memory_order_release);
         if (_driver.joinable()) {
             _driver.join();
@@ -457,6 +465,7 @@ public:
         _service.reset();
         _worker_ptr.store(nullptr, std::memory_order_release);
         _worker.reset();
+        _mover.reset();
         _cluster.reset();
         _peers.reset();
         _raft.reset();
@@ -485,6 +494,7 @@ public:
             {"long_polls_parked", static_cast<double>(_hub.parked()), {}},
             {"long_polls_woken", static_cast<double>(_hub.notified()), {}},
             {"ticks_proposed", static_cast<double>(_worker ? _worker->ticks() : 0), {}},
+            {"messages_moved", static_cast<double>(_mover ? _mover->moved() : 0), {}},
             {"raft_term_sum", service_node::raft_term_sum(*_raft), {}},
         };
     }
@@ -506,6 +516,8 @@ private:
     /// For the state machines' listener, which may run before the worker
     /// exists or after it has gone.
     std::atomic<worker_type*> _worker_ptr{nullptr};
+    /// Runs the message move tasks of the queues this node leads.
+    std::unique_ptr<mover_type> _mover;
     std::unique_ptr<front_end_type> _front_end;
     std::unique_ptr<handler_type> _handler_owner;
     std::atomic<handler_type*> _handler{nullptr};

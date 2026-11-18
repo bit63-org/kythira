@@ -226,6 +226,10 @@ auto serve() -> int {
             worker.wake();
         });
         worker.start();
+        // Message move tasks (StartMessageMoveTask).
+        s::move_worker<s::local_queue_cluster> mover(
+            cluster, [](const std::string&) { return true; }, s::sqs_arn_queue);
+        mover.start();
         s::sqs_service_config sc;
         sc._receipt_keys = receipt_keys(opt);
         sc._profile = *profile;
