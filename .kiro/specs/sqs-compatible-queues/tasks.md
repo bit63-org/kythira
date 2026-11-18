@@ -159,9 +159,19 @@ PR unless noted.
     task 12 spreads partitions over groups
   - _Requirements: 5.8, 9.1-9.3_
 
-- [ ] 9. SNS HTTPS bridge
+- [x] 9. SNS HTTPS bridge
   - Subscription confirmation, signature verification with the host
     allow list, raw and wrapped enqueue
+  - Done: `sqs_sns_bridge.hpp` on `/sns-bridge/<account>/<queue>`
+    (`SQS_SNS_BRIDGE=on`): SignatureVersion 1 and 2 checked against a
+    certificate fetched only from `SQS_SNS_CERT_HOSTS`
+    (`sns.<region>.amazonaws.com` by default) and cached; subscription
+    confirmation through the subscribe URL on the same hosts; the envelope
+    or, with `kythira:sns-bridge-raw`, the raw message with its attributes.
+    A queue opts in with `kythira:sns-bridge-topics` (topic ARNs, or `*`
+    for its own account's). A run against real SNS belongs to task 13's
+    dispatch bundle. Requirement 10.2 (Kythira's SNS delivering directly)
+    is the SNS spec's side
   - _Requirements: 10.1, 10.2_
 
 - [ ] 10. Independent layers
