@@ -74,6 +74,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <cstdio>
 #include <filesystem>
 #include <functional>
 #include <map>
@@ -2373,3 +2374,79 @@ BOOST_AUTO_TEST_CASE(reauth_extends_a_verified_connection_and_denials_spend_the_
 }
 
 BOOST_AUTO_TEST_SUITE_END()
+
+// The co-located latency and throughput measurement of
+// .kiro/specs/redis-general-data-types/ Requirement 24.4: the layer work must
+// not slow a node that runs every layer. Disabled, as it asserts nothing and
+// takes about a minute; run it by name on the build before and after a
+// change, alternating, and compare (doc/redis-layers.md has the baseline):
+//   redis_gateway_integration_test --run_test=colocated_measurement
+// Per round and per entry node (the shard's leader, then a follower, which
+// forwards): sequential 1 KiB SET and GET latency over 2000 keys, then the
+// ops/s of 8 clients doing 25% SET for 3 s.
+namespace {
+auto pct(std::vector<double> v, double p) -> double {
+    std::sort(v.begin(), v.end());
+    return v[std::min(v.size() - 1, static_cast<std::size_t>(p * static_cast<double>(v.size())))];
+}
+}  // namespace
+BOOST_AUTO_TEST_CASE(colocated_measurement,
+                     *boost::unit_test::disabled() * boost::unit_test::timeout(600)) {
+    cluster c;
+    BOOST_REQUIRE(c.await_all_leaders(std::chrono::seconds{20}));
+    const auto leader = c.leader_of(k_sccache_group);
+    const auto follower = c.a_follower_of(k_sccache_group);
+    for (int round = 0; round < 3; ++round) {
+        for (auto [id, where] : {std::pair{leader, "leader"}, std::pair{follower, "follower"}}) {
+            const std::string value(1024, 'v');
+            {
+                resp_client k(c.port(id));
+                BOOST_REQUIRE_EQUAL(k.auth("farm", "farm-secret"), "+OK\r\n");
+                std::vector<double> set_us, get_us;
+                for (int i = 0; i < 2000; ++i) {
+                    const auto key =
+                        "sccache/m" + std::to_string(round) + where + std::to_string(i);
+                    auto t0 = std::chrono::steady_clock::now();
+                    BOOST_REQUIRE_EQUAL(k.call({"SET", key, value}), "+OK\r\n");
+                    auto t1 = std::chrono::steady_clock::now();
+                    (void)k.call({"GET", key});
+                    auto t2 = std::chrono::steady_clock::now();
+                    set_us.push_back(std::chrono::duration<double, std::micro>(t1 - t0).count());
+                    get_us.push_back(std::chrono::duration<double, std::micro>(t2 - t1).count());
+                }
+                std::printf(
+                    "MEASURE round=%d via=%s SET p50=%.0fus p99=%.0fus GET p50=%.0fus p99=%.0fus\n",
+                    round, where, pct(set_us, .5), pct(set_us, .99), pct(get_us, .5),
+                    pct(get_us, .99));
+            }
+            std::atomic<bool> stop{false};
+            std::atomic<std::uint64_t> ops{0};
+            std::vector<std::thread> ts;
+            for (int t = 0; t < 8; ++t) {
+                ts.emplace_back([&, t] {
+                    resp_client k(c.port(id));
+                    (void)k.auth("farm", "farm-secret");
+                    std::uint64_t n = 0;
+                    while (!stop.load()) {
+                        const auto key =
+                            "sccache/t" + std::to_string(t) + "/" + std::to_string(n % 512);
+                        if (n % 4 == 0) {
+                            (void)k.call({"SET", key, value});
+                        } else {
+                            (void)k.call({"GET", key});
+                        }
+                        ++n;
+                    }
+                    ops += n;
+                });
+            }
+            std::this_thread::sleep_for(std::chrono::seconds{3});
+            stop = true;
+            for (auto& t : ts) {
+                t.join();
+            }
+            std::printf("MEASURE round=%d via=%s 8 clients 25%% SET: %.0f ops/s\n", round, where,
+                        static_cast<double>(ops.load()) / 3.0);
+        }
+    }
+}

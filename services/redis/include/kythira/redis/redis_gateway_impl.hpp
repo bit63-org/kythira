@@ -557,7 +557,7 @@ template<typename Host, typename Logger, typename Metrics>
 redis_gateway<Host, Logger, Metrics>::redis_gateway(Host& host, redis_acl& acl, Logger& logger,
                                                     Metrics& metrics, redis_gateway_config config,
                                                     endpoint_resolver resolver)
-    : _host(host),
+    : _data(host),
       _acl(acl),
       _logger(logger),
       _metrics(metrics),
@@ -590,17 +590,6 @@ inline auto parse_listen(const std::string& spec) -> std::pair<std::string, std:
         throw std::invalid_argument("listen port out of range: " + port_text);
     }
     return {host, static_cast<std::uint16_t>(port)};
-}
-
-/// The KV state machine itself, whether or not the host wraps it in
-/// `transactional_state_machine`. Intents are invisible to every plain read
-/// (multi-raft-transactions Requirement 5.1), so plain reads look here.
-template<typename SM> auto kv_of(SM& sm) -> auto& {
-    if constexpr (is_transactional_state_machine_v<std::remove_const_t<SM>>) {
-        return sm.inner();
-    } else {
-        return sm;
-    }
 }
 
 inline auto to_bytes(std::string_view s) -> std::vector<std::byte> {
@@ -813,16 +802,16 @@ auto redis_gateway<Host, Logger, Metrics>::start() -> void {
             }
             // The host's resolver reaches a primary this host does not lead
             // through the same forward link the coordinator uses.
-            _host.set_txn_forwarder([this](const std::vector<std::string>& keys,
-                                           const std::vector<std::byte>& envelope,
-                                           std::chrono::milliseconds timeout) {
+            _data.host().set_txn_forwarder([this](const std::vector<std::string>& keys,
+                                                  const std::vector<std::byte>& envelope,
+                                                  std::chrono::milliseconds timeout) {
                 return txn_send(keys, envelope, timeout);
             });
             if constexpr (k_snapshot) {
                 // Under mvcc::on every plain write needs a commit timestamp;
                 // a host that does not lead the oracle asks its leader's
                 // gateway for one.
-                _host.set_timestamp_forwarder(
+                _data.host().set_timestamp_forwarder(
                     [this](std::size_t n, std::chrono::milliseconds timeout) {
                         return txn_allocate_timestamps(n, timeout);
                     });
@@ -926,7 +915,7 @@ auto redis_gateway<Host, Logger, Metrics>::stop() -> void {
     }
     if constexpr (k_transactional) {
         if (_config._transactions) {
-            _host.set_txn_forwarder({});
+            _data.host().set_txn_forwarder({});
         }
     }
     boost::system::error_code ec;
@@ -1170,7 +1159,7 @@ auto redis_gateway<Host, Logger, Metrics>::authorize(session& s, std::string_vie
 template<typename Host, typename Logger, typename Metrics>
 auto redis_gateway<Host, Logger, Metrics>::touch_lru(group_id_type group, const std::string& key)
     -> void {
-    if (auto* node = _host.group_node(group); node != nullptr && !node->is_leader()) {
+    if (auto* node = _data.local_replica(group); node != nullptr && !node->is_leader()) {
         // A follower keeps no LRU of its own; the read is queued for the
         // leader's (Requirement 6.2), and only when something will send it.
         if (!_cache_hooks._advisory) {
@@ -1198,14 +1187,14 @@ auto redis_gateway<Host, Logger, Metrics>::touch_lru(group_id_type group, const 
 
 template<typename Host, typename Logger, typename Metrics>
 auto redis_gateway<Host, Logger, Metrics>::note_access(const std::string& key) -> void {
-    if (auto desc = _host.resolve(key)) {
+    if (auto desc = _data.route(key)) {
         touch_lru(desc->group_id(), key);
     }
 }
 
 template<typename Host, typename Logger, typename Metrics>
 auto redis_gateway<Host, Logger, Metrics>::note_removed(const std::string& key) -> void {
-    if (auto desc = _host.resolve(key)) {
+    if (auto desc = _data.route(key)) {
         forget_lru(desc->group_id(), key);
     }
 }
@@ -1235,33 +1224,32 @@ template<typename Host, typename Logger, typename Metrics>
 auto redis_gateway<Host, Logger, Metrics>::locate(const std::string& key, std::string& error_reply,
                                                   std::optional<node_id_type>& forward_to)
     -> group_node_type* {
-    resp_writer w;
-    if (!_host.is_running()) {
-        error_reply = w.error("LOADING Kythira is loading the dataset in memory");
-        return nullptr;
-    }
-    auto desc = _host.resolve(key);
-    if (!desc) {
-        error_reply = w.error("ERR no shard owns this key");
-        return nullptr;
-    }
-    auto* node = _host.group_node(desc->group_id());
+    redis_data_status status{};
+    auto* node = _data.replica_for(key, status, forward_to);
     if (node == nullptr) {
-        // The routing row exists but no replica is here: any voter can say
-        // who leads, so send the command to one of them.
-        for (const auto& voter : desc->voters()) {
-            if (voter != _host.node_id()) {
-                forward_to = voter;
-                break;
-            }
-        }
-        if (desc->leader_hint() && *desc->leader_hint() != _host.node_id()) {
-            forward_to = desc->leader_hint();
-        }
-        error_reply = w.error("ERR shard has no reachable leader, retry");
-        return nullptr;
+        error_reply = data_error(status);
     }
     return node;
+}
+
+/// The wire error for a data-layer outcome other than `ok`. The same text
+/// for RESP2 and RESP3, so no session writer is needed.
+template<typename Host, typename Logger, typename Metrics>
+auto redis_gateway<Host, Logger, Metrics>::data_error(redis_data_status status) -> std::string {
+    resp_writer w;
+    switch (status) {
+        case redis_data_status::loading:
+            return w.error("LOADING Kythira is loading the dataset in memory");
+        case redis_data_status::unrouted:
+            return w.error("ERR no shard owns this key");
+        case redis_data_status::not_replicated:
+            return w.error("ERR value not yet replicated here, retry");
+        case redis_data_status::ok:
+        case redis_data_status::no_leader:
+        case redis_data_status::barrier_failed:
+            break;
+    }
+    return w.error("ERR shard has no reachable leader, retry");
 }
 
 template<typename Host, typename Logger, typename Metrics>
@@ -1275,7 +1263,7 @@ auto redis_gateway<Host, Logger, Metrics>::submit(session& s, const std::string&
     std::exception_ptr failure;
     for (int attempt = 0; !failure; ++attempt) {
         try {
-            auto future = _host.submit_command(key, command, _config._command_timeout);
+            auto future = _data.propose(key, command, _config._command_timeout);
             if (!future.wait(_config._command_timeout)) {
                 error_reply = s._writer.error("ERR timeout submitting to shard, retry");
                 return false;
@@ -1309,69 +1297,38 @@ auto redis_gateway<Host, Logger, Metrics>::submit(session& s, const std::string&
     }
 }
 
-/// Local read under the configured consistency. Never `node::read_state()`:
-/// that serializes the entire shard to answer one key, which for a cache
-/// holding gigabytes of compiler output would be the slowest GET ever built.
-/// `with_state_machine` runs under the node mutex, so the lambda takes only
-/// the shared handle and everything else — expiry check, socket write —
-/// happens after the lock is released.
+/// Local read under the configured consistency, through the data layer
+/// (redis_data_access.hpp, which says why it never serialises the shard).
 template<typename Host, typename Logger, typename Metrics>
 auto redis_gateway<Host, Logger, Metrics>::read_local(session& s, const std::string& key)
     -> read_result {
     read_result r;
-    auto* node = locate(key, r._error, r._forward_to);
-    if (node == nullptr) {
-        return r;
-    }
-    if (_config._read_consistency != redis_read_consistency::any_replica && !node->is_leader()) {
-        r._forward_to = node->known_leader();
-        r._error = s._writer.error("ERR shard has no reachable leader, retry");
-        return r;
-    }
-    if (_config._read_consistency == redis_read_consistency::linearizable) {
-        // A committed no-op proves this leader's applied state includes every
-        // write that preceded the read. A sweep naming the key with deadline
-        // 0 is that no-op: apply() only deletes on an exact deadline match
-        // and 0 never matches, so nothing changes, and the key routes it.
-        auto sweep = encode_redis_kv_command(redis_kv_sweep_command{{{key, 0}}});
-        if (!submit(s, key, sweep, r._error, r._forward_to)) {
-            return r;
-        }
-    }
-    auto lookup = [&key](auto& sm) {
-        return std::pair{redis_gateway_detail::kv_of(sm).lookup(key), value_access::context_of(sm)};
+    auto read = [&](auto&& barrier) {
+        return _data.read(key, _config._read_consistency == redis_read_consistency::any_replica,
+                          std::forward<decltype(barrier)>(barrier));
     };
-    if (_config._read_consistency == redis_read_consistency::any_replica) {
-        std::tie(r._entry, r._context) = node->with_state_machine(lookup);
-    } else {
-        // A leader elected a moment ago may not have applied every write its
-        // predecessor acknowledged yet; answering from that state would
-        // report an acknowledged SET as missing. Retry until it has.
-        auto entry = node->with_leader_state_machine(lookup);
-        if (!entry) {
-            if (!node->is_leader()) {
-                r._forward_to = node->known_leader();  // stepped down since the check above
-            }
-            r._error = s._writer.error("ERR shard has no reachable leader, retry");
-            return r;
-        }
-        std::tie(r._entry, r._context) = std::move(*entry);
+    auto outcome = _config._read_consistency == redis_read_consistency::linearizable
+                       // A committed no-op proves this leader's applied state includes
+                       // every write that preceded the read. A sweep naming the key
+                       // with deadline 0 is that no-op: apply() only deletes on an exact
+                       // deadline match and 0 never matches, so nothing changes, and
+                       // the key routes it.
+                       ? read([&] {
+                             auto sweep =
+                                 encode_redis_kv_command(redis_kv_sweep_command{{{key, 0}}});
+                             return submit(s, key, sweep, r._error, r._forward_to);
+                         })
+                       : read(nullptr);
+    if (outcome._status == redis_data_status::barrier_failed) {
+        return r;  // submit() filled the error and the hint
     }
-    // A disk-backed entry whose chunks are not all here yet (a follower, or a
-    // leader, still fetching) is unservable on this node. A follower hands
-    // the read to the leader; a leader answers it as a miss rather than wait.
-    // Every read path goes through here, so EXISTS, STRLEN and TTL agree
-    // with what GET would serve.
-    if (r._entry && !value_access::servable(*r._entry)) {
-        if (!node->is_leader()) {
-            if (auto leader = node->known_leader()) {
-                r._forward_to = leader;
-                r._error = s._writer.error("ERR value not yet replicated here, retry");
-                return r;
-            }
-        }
-        r._entry = nullptr;
+    if (outcome._status != redis_data_status::ok) {
+        r._forward_to = outcome._leader;
+        r._error = data_error(outcome._status);
+        return r;
     }
+    r._entry = std::move(outcome._entry);
+    r._context = std::move(outcome._context);
     return r;
 }
 
@@ -1999,7 +1956,7 @@ auto redis_gateway<Host, Logger, Metrics>::handle_get(session& s, const resp_com
     }
     ++_stats._hits;
     emit("redis.hits", "GET");
-    if (auto desc = _host.resolve(key)) {
+    if (auto desc = _data.route(key)) {
         touch_lru(desc->group_id(), key);
     }
     return s._writer.bulk(bytes->view());
@@ -2227,7 +2184,7 @@ auto redis_gateway<Host, Logger, Metrics>::handle_set(session& s, const resp_com
     ++_stats._writes;
     emit("redis.writes", name);
     emit("redis.bytes_written", name, static_cast<std::int64_t>(value.size()));
-    if (auto desc = _host.resolve(key)) {
+    if (auto desc = _data.route(key)) {
         touch_lru(desc->group_id(), key);
     }
     return s._writer.simple_string("OK");
@@ -2279,7 +2236,7 @@ auto redis_gateway<Host, Logger, Metrics>::handle_del(session& s, const resp_com
     }
     ++_stats._deletes;
     emit("redis.deletes", "DEL");
-    if (auto desc = _host.resolve(key)) {
+    if (auto desc = _data.route(key)) {
         forget_lru(desc->group_id(), key);
     }
     return s._writer.integer(live ? 1 : 0);
@@ -2288,8 +2245,8 @@ auto redis_gateway<Host, Logger, Metrics>::handle_del(session& s, const resp_com
 template<typename Host, typename Logger, typename Metrics>
 auto redis_gateway<Host, Logger, Metrics>::handle_dbsize(session& s) -> std::string {
     std::size_t keys = 0;
-    for (const auto& g : _host.group_ids()) {
-        if (auto* node = _host.group_node(g)) {
+    for (const auto& g : _data.local_groups()) {
+        if (auto* node = _data.local_replica(g)) {
             keys += node->with_state_machine(
                 [](auto& sm) { return redis_gateway_detail::kv_of(sm).approximate_key_count(); });
         }
@@ -2304,8 +2261,8 @@ auto redis_gateway<Host, Logger, Metrics>::handle_info(session& s) -> std::strin
     std::size_t bytes = 0;
     std::size_t shards = 0;
     std::size_t led = 0;
-    for (const auto& g : _host.group_ids()) {
-        if (auto* node = _host.group_node(g)) {
+    for (const auto& g : _data.local_groups()) {
+        if (auto* node = _data.local_replica(g)) {
             ++shards;
             if (node->is_leader()) {
                 ++led;
@@ -2420,7 +2377,7 @@ auto redis_gateway<Host, Logger, Metrics>::handle_command(session& s, const resp
 template<typename Host, typename Logger, typename Metrics>
 auto redis_gateway<Host, Logger, Metrics>::txn_client::resolve(const std::string& key)
     -> std::optional<group_id_type> {
-    if (auto desc = _gateway._host.resolve(key)) {
+    if (auto desc = _gateway._data.route(key)) {
         return desc->group_id();
     }
     return std::nullopt;
@@ -2446,7 +2403,7 @@ auto redis_gateway<Host, Logger, Metrics>::txn_client::refresh(std::exception_pt
     try {
         std::rethrow_exception(std::move(error));
     } catch (const shard_epoch_mismatch_exception<group_id_type, std::string, node_id_type>& e) {
-        std::ignore = _gateway._host.learn_descriptors(e.current_descriptors());
+        std::ignore = _gateway._data.learn_routes(e.current_descriptors());
         return true;
     } catch (const redis_gateway_detail::txn_moved_error&) {
         // The peer's host knows the new tiling and this one will learn it
@@ -2467,7 +2424,7 @@ auto redis_gateway<Host, Logger, Metrics>::txn_client::read(const std::string& k
 
 template<typename Host, typename Logger, typename Metrics>
 auto redis_gateway<Host, Logger, Metrics>::txn_client::now_ms() const -> std::uint64_t {
-    return _gateway._host.txn_now_ms();
+    return _gateway._data.txn_now_ms();
 }
 
 template<typename Host, typename Logger, typename Metrics>
@@ -2505,13 +2462,13 @@ auto redis_gateway<Host, Logger, Metrics>::txn_allocate_timestamps(
     for (;;) {
         std::optional<node_id_type> hint;
         try {
-            return _host.allocate_timestamps(n, left()).get();
+            return _data.allocate_timestamps(n, left()).get();
         } catch (const shard_not_leader_exception<group_id_type, node_id_type>& e) {
             hint = e.leader_hint();
         } catch (const timestamp_oracle_unavailable_exception& e) {
             last = e.what();
         }
-        if (hint && *hint != _host.node_id()) {
+        if (hint && *hint != _data.self()) {
             if (auto reply =
                     forward_argv({"KYTHIRA.TXN", "TS", std::to_string(n)}, *hint, "KYTHIRA.TXN")) {
                 auto parsed = redis_gateway_detail::parse_peer_reply(*reply);
@@ -2542,12 +2499,12 @@ auto redis_gateway<Host, Logger, Metrics>::txn_read_at_local(const std::string& 
     if constexpr (!k_snapshot) {
         return std::nullopt;
     } else {
-        auto desc = _host.resolve(key);
+        auto desc = _data.route(key);
         if (!desc) {
             return std::nullopt;
         }
         const auto group = desc->group_id();
-        if (auto* node = _host.group_node(group); node == nullptr || !node->is_leader()) {
+        if (auto* node = _data.local_replica(group); node == nullptr || !node->is_leader()) {
             return std::nullopt;
         }
         try {
@@ -2555,8 +2512,8 @@ auto redis_gateway<Host, Logger, Metrics>::txn_read_at_local(const std::string& 
             // when this returns, so a commit at or below `ts` shows as a
             // version or as its intent (Requirement 8.5). Through the host,
             // which holds the group alive for the round.
-            (void)_host.read_state(key, timeout).get();
-            auto looked = _host.with_group_state_machine(
+            (void)_data.read_barrier(key, timeout).get();
+            auto looked = _data.with_local_state_machine(
                 group,
                 [&](state_machine_type& sm, const auto& d)
                     -> std::optional<
@@ -2606,7 +2563,7 @@ auto redis_gateway<Host, Logger, Metrics>::txn_read_at(const std::string& key, s
         if (auto local = txn_read_at_local(key, ts, left())) {
             return std::move(*local);
         }
-        if (auto to = txn_leader_of(key); to && *to != _host.node_id()) {
+        if (auto to = txn_leader_of(key); to && *to != _data.self()) {
             if (auto reply = forward_argv({"KYTHIRA.TXN", "READAT", std::to_string(ts), key}, *to,
                                           "KYTHIRA.TXN")) {
                 auto parsed = redis_gateway_detail::parse_peer_reply(*reply);
@@ -2637,22 +2594,7 @@ auto redis_gateway<Host, Logger, Metrics>::txn_read_at(const std::string& key, s
 template<typename Host, typename Logger, typename Metrics>
 auto redis_gateway<Host, Logger, Metrics>::txn_leader_of(const std::string& key)
     -> std::optional<node_id_type> {
-    auto desc = _host.resolve(key);
-    if (!desc) {
-        return std::nullopt;
-    }
-    if (auto* node = _host.group_node(desc->group_id()); node != nullptr) {
-        return node->known_leader();
-    }
-    if (desc->leader_hint() && *desc->leader_hint() != _host.node_id()) {
-        return desc->leader_hint();
-    }
-    for (const auto& voter : desc->voters()) {
-        if (voter != _host.node_id()) {
-            return voter;
-        }
-    }
-    return std::nullopt;
+    return _data.leader_of(key);
 }
 
 /// Local leader first; otherwise the leader's gateway over the forward link,
@@ -2683,7 +2625,7 @@ auto redis_gateway<Host, Logger, Metrics>::txn_send(const std::vector<std::strin
             }
             std::optional<node_id_type> hint;
             try {
-                auto f = _host.submit_txn(keys, envelope, left());
+                auto f = _data.propose_txn(keys, envelope, left());
                 if (!f.wait(left())) {
                     throw std::runtime_error("redis gateway: transaction op timed out");
                 }
@@ -2694,7 +2636,7 @@ auto redis_gateway<Host, Logger, Metrics>::txn_send(const std::vector<std::strin
                 // No replica here: ask whoever the routing row names.
             }
             auto to = hint ? hint : txn_leader_of(keys.front());
-            if (to && *to != _host.node_id()) {
+            if (to && *to != _data.self()) {
                 std::vector<std::string> argv{"KYTHIRA.TXN", "SEND",
                                               redis_gateway_detail::to_string(envelope)};
                 argv.insert(argv.end(), keys.begin(), keys.end());
@@ -2730,11 +2672,11 @@ auto redis_gateway<Host, Logger, Metrics>::txn_read_local(const std::string& key
     if constexpr (!k_transactional) {
         return std::nullopt;
     } else {
-        auto desc = _host.resolve(key);
+        auto desc = _data.route(key);
         if (!desc) {
             return std::nullopt;
         }
-        auto* node = _host.group_node(desc->group_id());
+        auto* node = _data.local_replica(desc->group_id());
         if (node == nullptr || !node->is_leader()) {
             return std::nullopt;
         }
@@ -2774,7 +2716,7 @@ auto redis_gateway<Host, Logger, Metrics>::txn_read(const std::string& key,
         if (auto local = txn_read_local(key)) {
             return std::move(*local);
         }
-        if (auto to = txn_leader_of(key); to && *to != _host.node_id()) {
+        if (auto to = txn_leader_of(key); to && *to != _data.self()) {
             if (auto reply = forward_argv({"KYTHIRA.TXN", "READ", key}, *to, "KYTHIRA.TXN")) {
                 auto parsed = redis_gateway_detail::parse_peer_reply(*reply);
                 using kind = redis_gateway_detail::peer_reply::kind;
@@ -3196,7 +3138,7 @@ auto redis_gateway<Host, Logger, Metrics>::handle_multi_del(session& s, const re
             _stats._deletes += present.size();
             emit("redis.deletes", "DEL", static_cast<std::int64_t>(present.size()));
             for (const auto& key : present) {
-                if (auto desc = _host.resolve(key)) {
+                if (auto desc = _data.route(key)) {
                     forget_lru(desc->group_id(), key);
                 }
             }
@@ -3470,7 +3412,7 @@ auto redis_gateway<Host, Logger, Metrics>::handle_internal_txn(session& s, const
                 return s._writer.error("ERR wrong arguments for 'kythira.txn ts'");
             }
             try {
-                auto range = _host.allocate_timestamps(n, _config._command_timeout).get();
+                auto range = _data.allocate_timestamps(n, _config._command_timeout).get();
                 return s._writer.bulk(redis_gateway_detail::encode_timestamp_range(range));
             } catch (const shard_not_leader_exception<group_id_type, node_id_type>&) {
                 return s._writer.error("ERR not the timestamp oracle's leader, retry");
@@ -3505,8 +3447,8 @@ auto redis_gateway<Host, Logger, Metrics>::handle_internal_txn(session& s, const
             }
             std::vector<std::string> keys(cmd._argv.begin() + 3, cmd._argv.end());
             try {
-                auto f = _host.submit_txn(keys, redis_gateway_detail::to_bytes(cmd._argv[2]),
-                                          _config._command_timeout);
+                auto f = _data.propose_txn(keys, redis_gateway_detail::to_bytes(cmd._argv[2]),
+                                           _config._command_timeout);
                 if (!f.wait(_config._command_timeout)) {
                     return s._writer.error("ERR timeout submitting to shard, retry");
                 }
@@ -3532,20 +3474,20 @@ auto redis_gateway<Host, Logger, Metrics>::handle_internal_txn(session& s, const
 
 template<typename Host, typename Logger, typename Metrics>
 auto redis_gateway<Host, Logger, Metrics>::run_maintenance() -> std::size_t {
-    if (!_host.is_running()) {
+    if (!_data.running()) {
         return 0;
     }
     std::size_t proposals = 0;
     const auto now = now_ms();
-    for (const auto& group : _host.group_ids()) {
-        auto* node = _host.group_node(group);
+    for (const auto& group : _data.local_groups()) {
+        auto* node = _data.local_replica(group);
         if (node == nullptr || !node->is_leader()) {
             // Followers keep no LRU: theirs would be stale on promotion anyway.
             std::lock_guard<std::mutex> lock(_lru_mutex);
             _lru.erase(group);
             continue;
         }
-        auto desc = _host.local_descriptor(group);
+        auto desc = _data.local_route(group);
         if (!desc) {
             continue;
         }
@@ -3566,8 +3508,8 @@ auto redis_gateway<Host, Logger, Metrics>::run_maintenance() -> std::size_t {
             sweep._entries = std::move(expired);
             auto count = sweep._entries.size();
             try {
-                auto f = _host.submit_command(group, desc->epoch(), encode_redis_kv_command(sweep),
-                                              _config._command_timeout);
+                auto f = _data.propose_to(group, desc->epoch(), encode_redis_kv_command(sweep),
+                                          _config._command_timeout);
                 if (f.wait(_config._command_timeout)) {
                     (void)std::move(f).get();
                     _stats._expirations += count;
@@ -3675,7 +3617,7 @@ auto redis_gateway<Host, Logger, Metrics>::run_maintenance() -> std::size_t {
         }
         try {
             auto count = victims.size();
-            auto f = _host.submit_command(
+            auto f = _data.propose_to(
                 group, desc->epoch(),
                 encode_redis_kv_command(redis_kv_evict_command{std::move(victims)}),
                 _config._command_timeout);
@@ -3700,7 +3642,7 @@ auto redis_gateway<Host, Logger, Metrics>::space_refusal(const std::string& key)
     if (!_cache_hooks._write_refusal) {
         return std::nullopt;
     }
-    auto desc = _host.resolve(key);
+    auto desc = _data.route(key);
     if (!desc) {
         return std::nullopt;
     }
@@ -3721,13 +3663,13 @@ auto redis_gateway<Host, Logger, Metrics>::send_advisories() -> void {
         std::lock_guard<std::mutex> lock(_lru_mutex);
         queued.swap(_remote_touches);
     }
-    for (const auto& group : _host.group_ids()) {
-        auto* node = _host.group_node(group);
+    for (const auto& group : _data.local_groups()) {
+        auto* node = _data.local_replica(group);
         if (node == nullptr || node->is_leader()) {
             continue;
         }
         auto leader = node->known_leader();
-        if (!leader || *leader == _host.node_id()) {
+        if (!leader || *leader == _data.self()) {
             continue;
         }
         auto& batch = batches[*leader];
@@ -3809,7 +3751,7 @@ auto redis_gateway<Host, Logger, Metrics>::handle_advise(session& s, const resp_
         } catch (const std::exception&) {
             continue;
         }
-        auto* node = _host.group_node(group);
+        auto* node = _data.local_replica(group);
         if (node == nullptr || !node->is_leader()) {
             continue;
         }
