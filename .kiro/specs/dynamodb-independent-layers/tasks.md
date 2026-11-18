@@ -6,10 +6,17 @@ after every task. The shared core pieces (layer identity, route cache,
 built by `.kiro/specs/kinesis-independent-layers/` tasks 1, 3, 5, 9 and
 11; a task here that needs one first builds it to that spec's design.
 
-- [ ] 1. `KYTHIRA_DYNAMODB_ROLES` and role validation
+- [x] 1. `KYTHIRA_DYNAMODB_ROLES` and role validation
   - Config, `kythira_node` aliases, start-time validation, no engine or
     Raft log without `data`, roles in health and metrics
   - _Requirements: 1.1, 2.1-2.4_
+  - Built with the role set from the Kinesis spec's task 3
+    (`include/raft/layer_roles.hpp`). Until the remote backend (task 4),
+    the handoff (task 5) and remote volumes (task 6) exist, the node
+    serves all four roles or `data,segments` and refuses every other set
+    at start, naming the missing part; each of those tasks lifts its
+    refusal. A `data,segments` voter keeps the gateway's listener for
+    forwarded ops and answers clients 404.
 
 - [ ] 2. Leader-side workers in the data role
   - Move the TTL sweeper out of the gateway composition; place catalog

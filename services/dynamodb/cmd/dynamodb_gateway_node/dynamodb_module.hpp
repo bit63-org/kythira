@@ -375,9 +375,9 @@ public:
 
     [[nodiscard]] auto health() const -> kythira::service_node::module_health override {
         if (!_started) {
-            return {false, "not started"};
+            return {false, "not started", _cfg.roles.to_string()};
         }
-        return {true, {}};
+        return {true, {}, _cfg.roles.to_string()};
     }
 
     [[nodiscard]] auto metrics() const
@@ -385,7 +385,16 @@ public:
         if (!_serving) {
             return {};
         }
-        return {{"raft_term_sum", _serving->raft_term_sum(), {}}};
+        std::vector<kythira::service_node::module_metric> out{
+            {"raft_term_sum", _serving->raft_term_sum(), {}}};
+        // kythira_dynamodb_role{role="..."}: 1 for each layer this node
+        // runs, 0 for the others, so a query finds every node of a layer.
+        for (const auto r : kythira::layers::every_role) {
+            out.push_back({"role",
+                           _cfg.roles.has(r) ? 1.0 : 0.0,
+                           {{"role", std::string(kythira::layers::role_name(r))}}});
+        }
+        return out;
     }
 
     /// The API's port once started (tests pass port 0).

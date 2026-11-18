@@ -678,7 +678,7 @@ public:
                         " on " + _cfg.http.bind_address + ":" + std::to_string(_gateway->port()) +
                         ", raft on " + c.raft_bind + ":" + std::to_string(c.raft_port) + ", node " +
                         c.node_id + " of " + std::to_string(_spec.voters.size()) + ", engine " +
-                        std::string(Storage::k_name));
+                        std::string(Storage::k_name) + ", roles " + _cfg.roles.to_string());
         // The strong host is ready once its catalog has taken this node's
         // seed (ids from `k_strong_table_id_base`; only the first voter's
         // changes anything), which takes a leader that a quorum spanning

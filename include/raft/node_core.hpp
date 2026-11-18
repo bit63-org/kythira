@@ -393,6 +393,9 @@ public:
             if (!all[i].health.detail.empty()) {
                 body += R"(,"detail":")" + json_escape(all[i].health.detail) + "\"";
             }
+            if (!all[i].health.roles.empty()) {
+                body += R"(,"roles":")" + json_escape(all[i].health.roles) + "\"";
+            }
             body += "}";
         }
         body += R"(},"healthy":)" + std::string(ok ? "true" : "false") + "}";
