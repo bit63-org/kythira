@@ -92,6 +92,13 @@ foreach(_kms_test IN ITEMS kms_catalog_test kms_catalog_property_test)
         LABELS "unit;kms;kms-module" TIMEOUT 120)
 endforeach()
 
+# kms-independent-layers task 1, Requirements 3.1-3.3: the catalog seam
+# handlers and jobs are built over answers what the replica does, and a
+# catalog that cannot answer is KMSInternalException, never NotFound.
+kythira_kms_test(kms_catalog_access_test kms_catalog_access_test.cpp)
+set_tests_properties(kms_catalog_access_test PROPERTIES
+    LABELS "unit;kms;kms-module" TIMEOUT 120)
+
 # Task 5, Requirements 3.4, 4.1, 4.4, 4.5 and 9.2-9.4: two-step key
 # creation and the leader's jobs over an in-memory PKCS#11 backend, with
 # the scan of the catalog's log, engine and checkpoint for generated

@@ -15,6 +15,7 @@
 #include <kythira/kms/kms_api.hpp>
 #include <kythira/kms/kms_backing.hpp>
 #include <kythira/kms/kms_catalog.hpp>
+#include <kythira/kms/kms_catalog_access.hpp>
 #include <kythira/kms/kms_crypto_api.hpp>
 #include <kythira/kms/kms_front_end.hpp>
 #include <kythira/kms/kms_grants_api.hpp>
@@ -51,6 +52,9 @@ inline const auto k_now = sv4::detail::parse_amz_date("20261115T120000Z").value(
 inline constexpr std::string_view k_service_arn = "arn:aws:iam::111122223333:user/kinesis-svc";
 
 using catalog_t = kms::kms_catalog_state_machine<>;
+/// What the handlers and jobs are built over, as in the module
+/// (kms_catalog_access.hpp): every API test goes through the seam.
+using reader_t = kms::kms_catalog_reader;
 
 /// Static keys for authentication; authorization through a hook the test
 /// can replace, recording every request it is asked.
@@ -156,16 +160,20 @@ struct fixture {
     std::uint64_t now = 1'790'000'000'000;
     bool leaderless = false;
     int next_id = 0;
-    kms::key_jobs<catalog_t> jobs{sm, *hsm,
-                                  [this](const std::vector<std::byte>& c) { return propose(c); },
-                                  [this] { return now; }, std::chrono::minutes(5)};
-    test_authorizer auth;
-    kms::front_end<test_authorizer> fe{config(), auth};
-    kms::key_management_api<catalog_t> api{kms::api_deps<catalog_t>{
-        .catalog =
+    /// The co-located access over `sm`: the barrier fails while
+    /// `leaderless`, and proposals apply to `sm` directly.
+    kms::local_catalog_access<catalog_t> access{kms::local_catalog_access<catalog_t>::functions{
+        .replica =
             [this] { return std::shared_ptr<const catalog_t>(&sm, [](const catalog_t*) {}); },
         .barrier = [this] { return !leaderless; },
         .propose = [this](const std::vector<std::byte>& c) { return propose(c); },
+    }};
+    kms::key_jobs<reader_t> jobs{*access.reader(), *hsm,
+                                 [this](const std::vector<std::byte>& c) { return propose(c); },
+                                 [this] { return now; }, std::chrono::minutes(5)};
+    test_authorizer auth;
+    kms::front_end<test_authorizer> fe{config(), auth};
+    kms::key_management_api<reader_t> api{with_catalog(kms::api_deps<reader_t>{
         .create_key = [this](kms::key_record k,
                              const kms::tag_map& t) { return jobs.create_key(std::move(k), t); },
         .clock_ms = [this] { return now; },
@@ -180,38 +188,28 @@ struct fixture {
                                  const kms::managed_service& s) { return ensure(account, s); },
         .ensure_owned = [this](std::string_view account,
                                const kms::managed_service& s) { return ensure_owned(account, s); },
-    }};
+    })};
 
-    kms::grants_api<catalog_t> grants{kms::api_deps<catalog_t>{
-        .catalog =
-            [this] { return std::shared_ptr<const catalog_t>(&sm, [](const catalog_t*) {}); },
-        .barrier = [this] { return !leaderless; },
-        .propose = [this](const std::vector<std::byte>& c) { return propose(c); },
+    kms::grants_api<reader_t> grants{with_catalog(kms::api_deps<reader_t>{
         .create_key = {},
         .clock_ms = [this] { return now; },
         .new_key_id = kms::random_key_id,
         .rotate = {},
         .ensure_managed = {},
-    }};
+    })};
 
-    kms::crypto_api<catalog_t> crypto{kms::crypto_deps<catalog_t>{
-        .catalog =
-            [this] { return std::shared_ptr<const catalog_t>(&sm, [](const catalog_t*) {}); },
-        .barrier = [this] { return !leaderless; },
+    kms::crypto_api<reader_t> crypto{with_catalog(kms::crypto_deps<reader_t>{
         .hsm = [this] { return hsm_bound ? hsm : nullptr; },
         .ensure_managed = [this](std::string_view account,
                                  const kms::managed_service& s) { return ensure(account, s); },
         .ensure_owned = [this](std::string_view account,
                                const kms::managed_service& s) { return ensure_owned(account, s); },
-    }};
+    })};
 
-    kms::signing_api<catalog_t> signing{kms::crypto_deps<catalog_t>{
-        .catalog =
-            [this] { return std::shared_ptr<const catalog_t>(&sm, [](const catalog_t*) {}); },
-        .barrier = [this] { return !leaderless; },
+    kms::signing_api<reader_t> signing{with_catalog(kms::crypto_deps<reader_t>{
         .hsm = [this] { return hsm_bound ? hsm : nullptr; },
         .ensure_managed = {},
-    }};
+    })};
 
     fixture() {
         sm.open(engine, sm.engine_range());
@@ -239,22 +237,21 @@ struct fixture {
         return kms::ensure_owned_key(managed(), account, s);
     }
 
-    auto managed() -> kms::managed_deps<catalog_t> {
-        return kms::managed_deps<catalog_t>{
-            .catalog =
-                [this] {
-                    return leaderless
-                               ? nullptr
-                               : std::shared_ptr<const catalog_t>(&sm, [](const catalog_t*) {});
-                },
-            .propose = [this](const std::vector<std::byte>& c) { return propose(c); },
+    auto managed() -> kms::managed_deps<reader_t> {
+        return with_catalog(kms::managed_deps<reader_t>{
             .create_key = [this](
                               kms::key_record k,
                               const kms::tag_map& t) { return jobs.create_key(std::move(k), t); },
             .clock_ms = [this] { return now; },
             .partition = "aws",
             .region = "us-east-1",
-        };
+        });
+    }
+
+    /// `deps` with its catalog members filled from `access`.
+    template<typename Deps> auto with_catalog(Deps deps) -> Deps {
+        kms::fill_catalog_deps(deps, access);
+        return deps;
     }
 
     auto propose(const std::vector<std::byte>& c) -> kms::catalog_status {

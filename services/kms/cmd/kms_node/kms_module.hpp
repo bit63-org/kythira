@@ -36,6 +36,7 @@
 #include <kythira/kms/kms_actions.hpp>
 #include <kythira/kms/kms_api.hpp>
 #include <kythira/kms/kms_backing.hpp>
+#include <kythira/kms/kms_catalog_access.hpp>
 #include <kythira/kms/kms_crypto_api.hpp>
 #include <kythira/kms/kms_audit.hpp>
 #include <kythira/kms/kms_front_end.hpp>
@@ -146,7 +147,11 @@ public:
     using raft_host = kythira::multi_raft<types, std::string, std::uint64_t>;
     using raft_config = kythira::multi_raft_config<types, std::string, std::uint64_t>;
     using kms_host = kythira::kms::basic_kms_host<raft_host, engine_type>;
-    using catalog_type = typename kms_host::catalog_type;
+    using replica_type = typename kms_host::catalog_type;
+    /// Handlers and jobs see the catalog only through this
+    /// (kms_catalog_access.hpp), whatever the node's layout.
+    using catalog_type = kythira::kms::kms_catalog_reader;
+    using access_type = kythira::kms::local_catalog_access<replica_type>;
     using jobs_type = kythira::kms::key_jobs<catalog_type>;
     using authorizer_type = kythira::aws_auth::static_or_iam_authorizer;
     using front_end_type = kythira::kms::front_end<authorizer_type>;
@@ -232,6 +237,7 @@ public:
         _peer_policy.allow_plaintext = _opt.insecure_plaintext;
         _host = std::make_unique<kms_host>(*_raft, _ctx, hopts);
         _host->bootstrap();
+        _access = std::make_unique<access_type>(access_type::over_host(*_host));
         build_api();
     }
 
@@ -353,6 +359,7 @@ public:
             _store.reset();
         }
         _backend.reset();
+        _access.reset();
         _host.reset();
         _raft.reset();
         _started = false;
@@ -489,17 +496,14 @@ private:
         _front_end->set_observer(
             [audit = _audit.get()](const kythira::kms::request_record& r) { audit->record(r); });
         _client = std::make_shared<client_type>(*_front_end);
-        const auto catalog = [this] { return _host->catalog(); };
-        const auto barrier = [this] { return _host->barrier(); };
-        const auto propose = [this](const std::vector<std::byte>& c) { return _host->propose(c); };
+        const auto propose = [this](const std::vector<std::byte>& c) {
+            return _access->propose(c);
+        };
         kythira::kms::api_deps<catalog_type> deps{
-            .catalog = catalog,
-            .barrier = barrier,
-            .propose = propose,
             .create_key = [this, propose](
                               kythira::kms::key_record k,
                               const kythira::kms::tag_map& tags) -> kythira::kms::key_result {
-                auto c = _host->catalog();
+                auto c = _access->reader();
                 auto hsm = store();
                 if (!c || !hsm) {
                     return {kythira::kms::key_outcome::unavailable,
@@ -512,7 +516,7 @@ private:
             .new_key_id = kythira::kms::random_key_id,
             .rotate = [this, propose](std::string_view id,
                                       kythira::kms::rotation_type t) -> kythira::kms::key_result {
-                auto c = _host->catalog();
+                auto c = _access->reader();
                 auto hsm = store();
                 if (!c || !hsm) {
                     return {kythira::kms::key_outcome::unavailable,
@@ -523,18 +527,16 @@ private:
             },
             .ensure_managed = {},
         };
+        kythira::kms::fill_catalog_deps(deps, *_access);
         // AWS managed keys on first use (kms_managed.hpp), through the same
         // CreateKey steps.
-        const kythira::kms::managed_deps<catalog_type> mdeps{
-            .catalog = [this]() -> std::shared_ptr<const catalog_type> {
-                return _host->barrier() ? _host->catalog() : nullptr;
-            },
-            .propose = propose,
+        kythira::kms::managed_deps<catalog_type> mdeps{
             .create_key = deps.create_key,
             .clock_ms = now_ms,
             .partition = _opt.partition,
             .region = _opt.region,
         };
+        kythira::kms::fill_catalog_deps(mdeps, *_access);
         deps.ensure_managed = [mdeps](std::string_view account,
                                       const kythira::kms::managed_service& s) {
             return kythira::kms::ensure_managed_key(mdeps, account, s);
@@ -546,13 +548,12 @@ private:
         };
         _api = std::make_unique<kythira::kms::key_management_api<catalog_type>>(deps);
         _grants = std::make_unique<kythira::kms::grants_api<catalog_type>>(deps);
-        const kythira::kms::crypto_deps<catalog_type> cdeps{
-            .catalog = catalog,
-            .barrier = barrier,
+        kythira::kms::crypto_deps<catalog_type> cdeps{
             .hsm = [this] { return store(); },
             .ensure_managed = deps.ensure_managed,
             .ensure_owned = deps.ensure_owned,
         };
+        kythira::kms::fill_catalog_deps(cdeps, *_access);
         _crypto = std::make_unique<kythira::kms::crypto_api<catalog_type>>(cdeps);
         _signing = std::make_unique<kythira::kms::signing_api<catalog_type>>(cdeps);
         _api->register_on(*_front_end);
@@ -651,7 +652,7 @@ private:
     }
 
     void run_jobs_once() {
-        if (!_host->leads() || !_host->barrier()) {
+        if (!_host->leads() || !_access->barrier()) {
             return;
         }
         apply_account_limits();
@@ -659,7 +660,7 @@ private:
             return;
         }
         if (!_jobs) {
-            _catalog = _host->catalog();
+            _catalog = _access->reader();
             if (!_catalog) {
                 return;
             }
@@ -669,7 +670,7 @@ private:
             }
             _jobs = std::make_unique<jobs_type>(
                 *_catalog, *_jobs_store,
-                [this](const std::vector<std::byte>& c) { return _host->propose(c); },
+                [this](const std::vector<std::byte>& c) { return _access->propose(c); },
                 [] {
                     return static_cast<std::uint64_t>(
                         std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -702,7 +703,7 @@ private:
         if (_opt.account_limits.empty()) {
             return;
         }
-        const auto c = _host->catalog();
+        const auto c = _access->reader();
         if (!c) {
             return;
         }
@@ -711,8 +712,8 @@ private:
                 continue;
             }
             try {
-                const auto s =
-                    _host->propose(kythira::kms::make_set_account_limits_command(account, limits));
+                const auto s = _access->propose(
+                    kythira::kms::make_set_account_limits_command(account, limits));
                 if (s != kythira::kms::catalog_status::ok) {
                     log(kythira::log_level::warning,
                         "kms: account limits for " + account + " were not written");
@@ -799,6 +800,7 @@ private:
     std::shared_ptr<typename group_sm::context> _ctx;
     std::unique_ptr<raft_host> _raft;
     std::unique_ptr<kms_host> _host;
+    std::unique_ptr<access_type> _access;
     std::shared_ptr<kythira::pkcs11::backend> _backend;
     // The backing store, shared by the jobs and the API once bound.
     std::mutex _store_mutex;
