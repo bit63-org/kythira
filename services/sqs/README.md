@@ -24,6 +24,7 @@ Built when `CONFIG_SQS=y` (`services/sqs/Kconfig`, off by default).
 | `implemented-operations.txt` | operations the gateway implements | 1 onward |
 | `doc/unsupported.md` | every other operation, with its planned task, reason and the exact error it returns | 1 onward |
 | `doc/configuration.md`, `doc/delivery.md`, `doc/encryption.md`, `doc/sns-bridge.md` | operator documentation: every setting and compatibility switch; delivery guarantees and where time comes from; SSE-SQS and SSE-KMS; the SNS bridge | 14 |
+| `tests/differential/`, `doc/differential.md` | the differential test against recordings of real SQS: the seeded mix, its normaliser and comparison (`sqs_differential_tool`), `run_replay.sh` for CI; no recording yet | 13 |
 | `doc/measurements.md`, `tools/sqs_load.py` | the measurement rows (Requirement 13.5) and the load tool that takes them | 14 |
 | `tools/check_coverage.py`, `tools/test_check_coverage.py` | the coverage check (Requirement 2.1) and its fixture tests | 1 |
 | `tests/evidence/` | the recording stub, the clients and the checked-in wire evidence (AWS CLI v2, boto3 on JSON and query, Java SDK v2, JMS, Kombu); `sqs_wire_evidence` checks it | 1 |
