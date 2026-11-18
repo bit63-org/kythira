@@ -153,6 +153,23 @@ if(KYTHIRA_SQS_MODULE_AVAILABLE)
     set_tests_properties(sqs_module_test PROPERTIES
         WORKING_DIRECTORY "${CMAKE_BINARY_DIR}/tests"
         LABELS "integration;sqs;sqs-module" TIMEOUT 300)
+
+    # Task 11: the migration paths between layouts (Requirements 12.1-12.3,
+    # 13.3), each both ways under standard and FIFO load, on the same
+    # in-process nodes (sqs_module_harness.hpp).
+    add_beast_test(sqs_migration_test sqs_migration_test.cpp)
+    target_link_libraries(sqs_migration_test PRIVATE
+        kythira_sqs_node_common kythira_test_support Threads::Threads)
+    set_target_properties(sqs_migration_test PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests")
+    set_tests_properties(sqs_migration_test PROPERTIES
+        WORKING_DIRECTORY "${CMAKE_BINARY_DIR}/tests"
+        LABELS "integration;sqs;sqs-module" TIMEOUT 600)
+
+    # Task 11: the whole path again, in containers under Docker and rootless
+    # Podman, with a node of every layer killed on the way (docker/; its
+    # targets are docker-sqs-node-image and docker-sqs-node-tests).
+    add_subdirectory(docker)
 endif()
 
 # Task 3: the checked-in model, query-name and action headers are what their

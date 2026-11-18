@@ -67,6 +67,8 @@ A node runs every layer by default. `KYTHIRA_SQS_ROLES` splits them:
 | `SQS_DATA_ENDPOINTS` | | Base URLs of the data nodes' SQS listeners, comma-separated. Required by a front end without `data`. |
 | `SQS_FRONT_END_ENDPOINTS` | | Base URLs of the front ends' SQS listeners, comma-separated. Required by a gateway without `front_end`. |
 | `SQS_IDENTITY_CLUSTER` | `default` | The cluster part of the layer identities this node accepts over TLS (below). |
+| `SQS_JOIN` | off | A data node that joins a running group as a learner, to receive a replica by evacuation ([migration.md](migration.md)). |
+| `SQS_EVACUATE_TIMEOUT_MS` | 300000 | How long one `evacuate` admin call runs before it answers 504. Calling it again carries the move on. |
 
 - **gateway** checks clients' SigV4 signatures. With `front_end` it
   serves the API in-process. Without it, it hands each request with the
@@ -122,6 +124,7 @@ not require one, so SDK clients connect as before.
 |---|---|
 | `/_kythira/sqs/v1/propose`, `/query`, `/availability` | `front_end`, `data` |
 | `/_kythira/sqs/v1/call` | `gateway` |
+| `/_kythira/sqs/v1/admin/...` (`peer`, `evacuate`, `step`) | `data` |
 
 A front end's certificate therefore cannot make a gateway's call, which
 names any principal it likes, and a gateway's cannot read or write

@@ -42,11 +42,13 @@
 
 #include <raft/memory_kv_engine.hpp>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <mutex>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -119,7 +121,19 @@ public:
 
     [[nodiscard]] auto now_ms() -> std::uint64_t { return _clock(); }
 
-    [[nodiscard]] auto endpoints() const -> const std::vector<std::string>& { return _endpoints; }
+    [[nodiscard]] auto endpoints() const -> std::vector<std::string> {
+        const std::lock_guard lock(_endpoints_mutex);
+        return _endpoints;
+    }
+
+    /// Adds a data node (an evacuation's target, `sqs_evacuate.hpp`); one
+    /// already known is left alone. Safe while calls run.
+    void add_endpoint(const std::string& url) {
+        const std::lock_guard lock(_endpoints_mutex);
+        if (std::find(_endpoints.begin(), _endpoints.end(), url) == _endpoints.end()) {
+            _endpoints.push_back(url);
+        }
+    }
 
     [[nodiscard]] static auto system_clock_ms() -> std::uint64_t {
         return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -128,6 +142,7 @@ public:
     }
 
 private:
+    mutable std::mutex _endpoints_mutex;
     std::vector<std::string> _endpoints;
     std::string _secret;
     data_transport _transport;
@@ -147,10 +162,11 @@ private:
             headers.emplace_back(std::string(forward::k_header),
                                  forward::sign(_secret, body, _wall()));
         }
-        const auto first = start.load() % _endpoints.size();
-        for (std::size_t i = 0; i < _endpoints.size(); ++i) {
-            const auto at = (first + i) % _endpoints.size();
-            const auto r = _transport(_endpoints[at], path, headers, body);
+        const auto endpoints = this->endpoints();
+        const auto first = start.load() % endpoints.size();
+        for (std::size_t i = 0; i < endpoints.size(); ++i) {
+            const auto at = (first + i) % endpoints.size();
+            const auto r = _transport(endpoints[at], path, headers, body);
             if (!r || r->first == 503) {
                 continue;
             }

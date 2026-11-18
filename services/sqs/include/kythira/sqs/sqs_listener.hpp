@@ -33,6 +33,7 @@
 
 #include <kythira/sqs/sqs_availability.hpp>
 #include <kythira/sqs/sqs_data_access.hpp>
+#include <kythira/sqs/sqs_evacuate.hpp>
 #include <kythira/sqs/sqs_forward.hpp>
 #include <kythira/sqs/sqs_front_end.hpp>
 #include <kythira/sqs/sqs_gateway.hpp>
@@ -57,6 +58,10 @@ using local_querier = std::function<std::optional<data_answer>(const data_query&
 /// empty answer lets it through, anything else is the reason it is refused.
 using peer_check_fn =
     std::function<std::string(const https::request&, const https::request_context&)>;
+
+/// Answers an admin call: its path and body in, a status and JSON body out.
+using admin_fn =
+    std::function<std::pair<unsigned, std::string>(std::string_view path, std::string_view body)>;
 
 /// Proposes a forwarded entry here; what `apply()` returned, or nullopt.
 using local_proposer = std::function<std::optional<std::vector<std::byte>>(
@@ -139,6 +144,9 @@ public:
         if (target == k_call_path) {
             return called(req, ctx);
         }
+        if (target.starts_with(k_admin_prefix)) {
+            return administered(req, ctx);
+        }
         if (!_client_api) {
             return listener_detail::plain(
                 404, "this node serves no SQS client API (KYTHIRA_SQS_ROLES)\n", req.version());
@@ -178,6 +186,12 @@ public:
         _feed_wait = wait;
     }
 
+    /// Serves the admin calls under `/_kythira/sqs/v1/admin/`
+    /// (`sqs_evacuate.hpp`) through `admin`, which gets the path and body
+    /// and answers a status and a JSON body (set before serving; a data
+    /// node only).
+    void set_admin(admin_fn admin) { _admin = std::move(admin); }
+
     /// Serves `/sns-bridge/...` through `bridge` (set before serving).
     void set_sns_bridge(bridge_fn bridge) { _bridge = std::move(bridge); }
 
@@ -202,6 +216,7 @@ private:
     std::chrono::milliseconds _feed_wait{10000};
     bool _client_api = true;
     peer_check_fn _peer_check;
+    admin_fn _admin;
     gateway_forwarder* _gateway = nullptr;
     bool _serve_calls = false;
     clock_fn _clock;
@@ -240,6 +255,27 @@ private:
         out.body() = encode_call_answer(_front_end.handle_as(call->_request, call->_principal));
         out.prepare_payload();
         return out;
+    }
+
+    auto administered(const https::request& req, const https::request_context& ctx)
+        -> https::response {
+        using listener_detail::plain;
+        if (!internal_on() || !_admin) {
+            return plain(404, "not found\n", req.version());
+        }
+        if (req.method() != boost::beast::http::verb::post) {
+            return plain(405, "POST only\n", req.version());
+        }
+        if (auto why = refusal(req, ctx)) {
+            return plain(403, *why, req.version());
+        }
+        const std::string_view target = req.target();
+        const auto [status, body] = _admin(target.substr(0, target.find('?')), req.body());
+        https::response r{static_cast<boost::beast::http::status>(status), req.version()};
+        r.set(boost::beast::http::field::content_type, "application/json");
+        r.body() = body;
+        r.prepare_payload();
+        return r;
     }
 
     auto availability(const https::request& req, const https::request_context& ctx)
