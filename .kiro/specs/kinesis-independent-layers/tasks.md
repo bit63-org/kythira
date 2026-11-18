@@ -43,7 +43,7 @@ every role (7, 8, 10).
     module's groups
   - _Requirements: 2.1-2.6, 1.5_
 
-- [ ] 5. Route cache in core
+- [x] 5. Route cache in core
   - `include/raft/route_cache.hpp`: range map with epochs, leader hints,
     suspect addresses, refresh on stale epoch, not-leader, unknown group
     and connection failure; `net_resolve` for names
