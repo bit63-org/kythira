@@ -10,6 +10,7 @@
 #pragma once
 
 #include "run_cluster.hpp"
+#include "terminate_backtrace.hpp"
 #include "test_ports.hpp"
 
 #include <raft/sigv4_verifier.hpp>
