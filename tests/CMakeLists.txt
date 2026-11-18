@@ -5402,6 +5402,22 @@ set_tests_properties(aws_query_protocol_test PROPERTIES
     LABELS "unit;aws;iam"
 )
 
+# S3 spec task 3: the AWS REST-XML protocol codec (query strings,
+# addressing and bucket names, the router, the strict XML reader, error and
+# response documents). S3's own route table is checked against recorded
+# client traffic in services/s3/tests (s3_routing_test).
+add_executable(aws_rest_xml_protocol_test aws_rest_xml_protocol_test.cpp)
+target_link_libraries(aws_rest_xml_protocol_test PRIVATE
+    Boost::unit_test_framework
+    OpenSSL::Crypto
+)
+target_compile_features(aws_rest_xml_protocol_test PRIVATE cxx_std_23)
+add_test(NAME aws_rest_xml_protocol_test COMMAND aws_rest_xml_protocol_test)
+set_tests_properties(aws_rest_xml_protocol_test PROPERTIES
+    TIMEOUT 30
+    LABELS "unit;aws;s3"
+)
+
 # DynamoDB spec task 2: the AWS JSON protocol codec shared by the DynamoDB
 # and Kinesis modules (framing, the generated shape tables, AWS's two-pass
 # validation, the standard response headers, dispatch), on a fixture model.
