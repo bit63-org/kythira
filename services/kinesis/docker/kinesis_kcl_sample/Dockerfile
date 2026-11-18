@@ -15,23 +15,24 @@
 
 FROM gradle:8.14.3-jdk21@sha256:21bd311ed01360c189b8870c6b6e988199ff10f72d445d02fb39d3cff9da91d7 AS build
 
+# Retries Maven Central's 429s; see the script.
+COPY services/kinesis/docker/kinesis_kcl_sample/gradle_retry.sh /usr/local/bin/gradle_retry.sh
 COPY services/kinesis/java/kythira-kcl-leases /src/services/kinesis/java/kythira-kcl-leases
 COPY services/kinesis/tests/kcl/sample /src/services/kinesis/tests/kcl/sample
 COPY services/kinesis/tests/kcl/sample3 /src/services/kinesis/tests/kcl/sample3
 WORKDIR /src/services/kinesis/tests/kcl/sample
-# One worker: Maven Central answers bursts of parallel downloads with 429s.
-RUN gradle --no-daemon --max-workers=1 -q installDist
+RUN sh /usr/local/bin/gradle_retry.sh installDist
 # The same consumer on KCL 3.x (task 16), leases in DynamoDB only.
 WORKDIR /src/services/kinesis/tests/kcl/sample3
-RUN gradle --no-daemon --max-workers=1 -q installDist
+RUN sh /usr/local/bin/gradle_retry.sh installDist
 # The KPL producer of the conformance case (task 17).
 COPY services/kinesis/tests/kpl /src/services/kinesis/tests/kpl
 WORKDIR /src/services/kinesis/tests/kpl
-RUN gradle --no-daemon --max-workers=1 -q installDist
+RUN sh /usr/local/bin/gradle_retry.sh installDist
 # The Flink connector's job (task 17).
 COPY services/kinesis/tests/flink /src/services/kinesis/tests/flink
 WORKDIR /src/services/kinesis/tests/flink
-RUN gradle --no-daemon --max-workers=1 -q installDist
+RUN sh /usr/local/bin/gradle_retry.sh installDist
 
 FROM eclipse-temurin:21-jre@sha256:0b99b3376fbb50dbf9c0af8535fdd5b8eb0d3fdfc8b1e4967f383b6919f6901a
 

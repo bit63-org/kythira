@@ -123,16 +123,27 @@ jobs:
         env:
           GRADLE_IMAGE: gradle:8.14.3-jdk21@sha256:21bd311ed01360c189b8870c6b6e988199ff10f72d445d02fb39d3cff9da91d7
         run: |
-          # One worker: Maven Central answers bursts of parallel downloads
-          # with 429s.
+          # Maven Central answers bursts of downloads with 429s; the
+          # script runs one worker and retries with backoff, as the KCL
+          # image's Dockerfile does. It only ever wraps compiling (which is
+          # where the downloads happen): a retried `test` would also retry
+          # a failing test until it passed. The test run after it keeps
+          # Gradle's per-request retry for any runtime-only artifact.
+          retry=/work/services/kinesis/docker/kinesis_kcl_sample/gradle_retry.sh
           docker run --rm --user "$(id -u):$(id -g)" \
             -e GRADLE_USER_HOME=/work/.gradle-home \
             -v "$PWD:/work" -w /work/services/kinesis/java/kythira-kcl-leases \
-            "$GRADLE_IMAGE" gradle --no-daemon --max-workers=1 test
+            "$GRADLE_IMAGE" sh "$retry" testClasses
+          docker run --rm --user "$(id -u):$(id -g)" \
+            -e GRADLE_USER_HOME=/work/.gradle-home \
+            -v "$PWD:/work" -w /work/services/kinesis/java/kythira-kcl-leases \
+            "$GRADLE_IMAGE" gradle --no-daemon --max-workers=1 \
+              -Dorg.gradle.internal.repository.max.retries=6 \
+              -Dorg.gradle.internal.repository.initial.backoff=2000 test
           docker run --rm --user "$(id -u):$(id -g)" \
             -e GRADLE_USER_HOME=/work/.gradle-home \
             -v "$PWD:/work" -w /work/services/kinesis/tests/kcl/sample \
-            "$GRADLE_IMAGE" gradle --no-daemon --max-workers=1 installDist
+            "$GRADLE_IMAGE" sh "$retry" installDist
 
   build:
     name: Kinesis module on and off (clang++-18, x64)
