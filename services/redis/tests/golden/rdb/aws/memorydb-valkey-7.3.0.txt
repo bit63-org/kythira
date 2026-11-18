@@ -1,0 +1,19 @@
+# Copyright (c) 2026 Clark Rawlins
+# SPDX-License-Identifier: Apache-2.0
+
+service: Amazon MemoryDB (1 shard, 0 replicas, ACL open-access)
+engine: Valkey
+engine version: 7.3 (patch 7.3.0)
+node type: db.t4g.small
+region: us-east-1
+date: 2026-11-18
+seed: services/redis/tests/golden/rdb/valkey-8.0.rdb, database 0 only, re-saved by valkey:8.0
+rdb header (first 9 bytes): REDIS0011
+size: 39228 bytes
+sha256: 7d89169ffee5e8889ef4aac5b9947b19f7b30371720a555474f3e1021290b4b7
+export: create-snapshot, then copy-snapshot --target-bucket
+note: MemoryDB has only database 0 and refused the multi-database seed
+  ("number of databases required to load the RDB file is higher than the
+  configured amount"), so the seed was loaded into a local container of
+  the same engine, databases 1-15 were flushed (dropping 4 of 29 keys:
+  3 in db1, 1 in db9), and the SAVE output was used.

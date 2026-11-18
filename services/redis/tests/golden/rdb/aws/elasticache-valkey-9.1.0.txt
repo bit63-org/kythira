@@ -1,0 +1,14 @@
+# Copyright (c) 2026 Clark Rawlins
+# SPDX-License-Identifier: Apache-2.0
+
+service: Amazon ElastiCache (node-based replication group, cluster mode disabled, 1 node)
+engine: Valkey
+engine version: 9.1.0
+node type: cache.t4g.micro
+region: us-east-1
+date: 2026-11-18
+seed: services/redis/tests/golden/rdb/valkey-8.0.rdb (loaded as is)
+rdb header (first 9 bytes): VALKEY080
+size: 39018 bytes
+sha256: 2076a1d56beb213a04f69c5cd56e228647ed58f5ca446c328180f1559b818580
+export: create-snapshot, then copy-snapshot --target-bucket
