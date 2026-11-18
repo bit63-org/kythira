@@ -28,6 +28,10 @@
 /// | `tweak(options)` | adjust store options; must keep segments small enough to roll |
 ///
 /// A harness is default-constructed once per case.
+///
+/// The helpers take the `segment_store` interface
+/// (.kiro/specs/kinesis-independent-layers/ task 1), so every case drives
+/// the store through the same virtual calls a state machine makes.
 
 #include <raft/record_segment_store.hpp>
 
@@ -108,9 +112,9 @@ inline auto ts_of(std::uint64_t seq) -> std::int64_t {
 
 /// Append records `[from, to]` (every `step`-th) in batches of `batch`.
 template<typename Harness>
-auto append_range(Harness& h, record_segment_store& store, const std::string& stream,
-                  std::uint64_t from, std::uint64_t to, std::uint64_t step = 1,
-                  std::size_t batch = 7) -> std::vector<record_segment_descriptor> {
+auto append_range(Harness& h, segment_store& store, const std::string& stream, std::uint64_t from,
+                  std::uint64_t to, std::uint64_t step = 1, std::size_t batch = 7)
+    -> std::vector<record_segment_descriptor> {
     std::vector<record_segment_descriptor> sealed;
     std::vector<std::vector<std::byte>> payloads;
     std::vector<segment_record_view> views;
@@ -135,8 +139,8 @@ auto append_range(Harness& h, record_segment_store& store, const std::string& st
 }
 
 /// Every record from `from` to the end, through `read`.
-inline auto read_all(const record_segment_store& store, const std::string& stream,
-                     std::uint64_t from = 0) -> std::vector<segment_record> {
+inline auto read_all(const segment_store& store, const std::string& stream, std::uint64_t from = 0)
+    -> std::vector<segment_record> {
     std::vector<segment_record> out;
     std::uint64_t next = from;
     for (;;) {
@@ -190,8 +194,8 @@ inline auto segment_files(const std::filesystem::path& data_dir, const std::stri
 
 /// A transport that reads straight from another store, as the daemon's
 /// `GET` handler would.
-inline auto transport_from(const std::vector<const record_segment_store*>& peers)
-    -> record_segment_store::fetch_transport {
+inline auto transport_from(const std::vector<const segment_store*>& peers)
+    -> segment_store::fetch_transport {
     return [peers](const std::string& peer, const std::string& stream, std::uint64_t first,
                    std::uint64_t length) -> std::optional<std::vector<std::byte>> {
         const auto i = static_cast<std::size_t>(std::stoul(peer));

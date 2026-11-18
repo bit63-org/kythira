@@ -7,9 +7,11 @@
 ///        outside the Raft snapshot (.kiro/specs/kinesis-compatible-streams/
 ///        task 3, design "Record segment store", Requirements 11.1 and 11.5).
 ///
-/// Kinesis keeps a shard's record bytes here, and DynamoDB's change log is
-/// the second user (.kiro/specs/dynamodb-compatible-api/ task 15), so the
-/// interface knows nothing of either: a *stream* is an opaque key, and a
+/// The local implementation of `segment_store` (`segment_store.hpp`), which
+/// state machines hold by pointer. Kinesis keeps a shard's record bytes
+/// here, and DynamoDB's change log is the second user
+/// (.kiro/specs/dynamodb-compatible-api/ task 15), so the interface knows
+/// nothing of either: a *stream* is an opaque key, and a
 /// *record* is a caller-chosen 64-bit sequence, a timestamp and opaque bytes.
 /// A state machine appends in `apply()`, keeps the small segment index
 /// (`record_segment_descriptor`) in its own snapshot, and never puts record
@@ -93,6 +95,7 @@
 /// order (they come from one group's apply loop), which `append` checks.
 
 #include <raft/crc32.hpp>
+#include <raft/segment_store.hpp>
 #include <raft/fault_injection.hpp>
 
 #include <openssl/evp.h>
@@ -126,17 +129,6 @@
 
 namespace kythira {
 
-/// A segment's SHA-256, over its whole file (header, records and, once
-/// sealed, footer).
-using segment_sha256 = std::array<std::byte, 32>;
-
-/// An I/O failure or an impossible on-disk state. A state machine treats it
-/// as fatal for the replica: skipping an append would let it diverge.
-class record_segment_error : public std::runtime_error {
-public:
-    using std::runtime_error::runtime_error;
-};
-
 struct record_segment_store_options {
     /// The node's data directory for this store. `streams/` and `tmp/` go
     /// under it. One store per node is shared by every group on it.
@@ -158,85 +150,6 @@ struct record_segment_store_options {
     std::uint64_t _index_interval_bytes = std::uint64_t{64} * 1024;
     /// `false` makes `barrier()` a no-op (benchmarks and tmpfs tests).
     bool _barriers_enabled = true;
-};
-
-/// A record as the store holds it.
-struct segment_record {
-    std::uint64_t _seq = 0;
-    std::int64_t _timestamp_ms = 0;
-    std::vector<std::byte> _data;
-
-    friend auto operator==(const segment_record&, const segment_record&) -> bool = default;
-};
-
-/// A record to append; the bytes are borrowed for the call.
-struct segment_record_view {
-    std::uint64_t _seq = 0;
-    std::int64_t _timestamp_ms = 0;
-    std::span<const std::byte> _data;
-};
-
-/// One segment as a state machine records it in its replicated index. For
-/// an active segment the size and digest are of what was written so far,
-/// which is enough to fetch and verify that prefix from a peer.
-struct record_segment_descriptor {
-    std::string _stream;
-    std::uint64_t _first_seq = 0;
-    std::uint64_t _last_seq = 0;
-    std::uint64_t _records = 0;
-    std::int64_t _first_timestamp_ms = 0;
-    std::int64_t _last_timestamp_ms = 0;
-    /// File size in bytes.
-    std::uint64_t _bytes = 0;
-    segment_sha256 _sha256{};
-    bool _sealed = false;
-
-    friend auto operator==(const record_segment_descriptor&, const record_segment_descriptor&)
-        -> bool = default;
-};
-
-struct record_segment_append_result {
-    /// Segments this append sealed by rolling, oldest first. A state machine
-    /// moves them to sealed in its index.
-    std::vector<record_segment_descriptor> _sealed;
-};
-
-/// Limits for one read. At least one record is returned when one is
-/// available, even if it alone exceeds `_max_bytes`, so a reader always
-/// makes progress.
-struct segment_read_limits {
-    std::size_t _max_records = 10'000;
-    std::uint64_t _max_bytes = std::uint64_t{10} * 1024 * 1024;
-};
-
-struct segment_read_result {
-    std::vector<segment_record> _records;
-    /// Where to continue: one past the last returned record, or the
-    /// requested position when nothing was returned.
-    std::uint64_t _next_seq = 0;
-    /// `read_segment` only: the segment holds nothing at or after
-    /// `_next_seq`, so the caller moves to the next segment in its index.
-    /// Always `false` for an active segment, which may still grow.
-    bool _segment_exhausted = false;
-};
-
-struct record_segment_store_stats {
-    std::uint64_t _streams = 0;
-    std::uint64_t _active_segments = 0;
-    std::uint64_t _sealed_segments = 0;
-    std::uint64_t _bytes_on_disk = 0;
-    std::uint64_t _records_appended = 0;
-    std::uint64_t _barriers = 0;
-    /// Active segments whose torn tail an open scan truncated.
-    std::uint64_t _torn_tails_truncated = 0;
-    /// Files an open scan could not trust and renamed to `.corrupt`.
-    std::uint64_t _quarantined = 0;
-    /// Segments installed from a peer.
-    std::uint64_t _installed = 0;
-    /// Peer answers that were absent or did not match the descriptor.
-    std::uint64_t _fetch_misses = 0;
-    /// Records a read found failing their CRC.
-    std::uint64_t _read_crc_failures = 0;
 };
 
 // ---------------------------------------------------------------------------
@@ -690,14 +603,11 @@ private:
     return detail::segments::sha256_of(bytes);
 }
 
-class record_segment_store {
+class record_segment_store final : public segment_store {
 public:
-    /// Fetches up to `length` bytes of a peer's copy of a segment, from
-    /// offset 0 (the peer's `read_segment_bytes`). `nullopt` when the peer
-    /// is down or has no copy.
-    using fetch_transport = std::function<std::optional<std::vector<std::byte>>(
-        const std::string& peer, const std::string& stream, std::uint64_t first_seq,
-        std::uint64_t length)>;
+    using segment_store::append;
+    using segment_store::read;
+    using segment_store::read_segment;
 
     /// Opens (creating if needed) the store: wipes `tmp/`, reads every
     /// sealed segment's footer, scans every active segment (truncating a
@@ -722,10 +632,14 @@ public:
     auto operator=(const record_segment_store&) -> record_segment_store& = delete;
     record_segment_store(record_segment_store&&) = delete;
     auto operator=(record_segment_store&&) -> record_segment_store& = delete;
-    ~record_segment_store() = default;
+    ~record_segment_store() override = default;
 
     [[nodiscard]] auto options() const noexcept -> const record_segment_store_options& {
         return _options;
+    }
+
+    [[nodiscard]] auto max_record_bytes() const noexcept -> std::uint32_t override {
+        return _options._max_record_bytes;
     }
 
     // ---- writes (from apply) --------------------------------------------
@@ -735,7 +649,7 @@ public:
     /// new segment when a record would break the size or age bound and
     /// returns the segments that sealed. Durable only after `barrier()`.
     auto append(const std::string& stream, std::span<const segment_record_view> records)
-        -> record_segment_append_result {
+        -> record_segment_append_result override {
         namespace s = detail::segments;
         validate_key(stream);
         record_segment_append_result result;
@@ -786,16 +700,10 @@ public:
         return result;
     }
 
-    /// Convenience overload for one record.
-    auto append(const std::string& stream, const segment_record_view& record)
-        -> record_segment_append_result {
-        return append(stream, std::span<const segment_record_view>(&record, 1));
-    }
-
     /// Make every append that returned before this call durable. Concurrent
     /// callers share one round of fsyncs. Throws if an fsync fails; the
     /// caller must not acknowledge the entries it covered.
-    void barrier() {
+    void barrier() override {
         if (!_options._barriers_enabled) {
             return;
         }
@@ -837,7 +745,7 @@ public:
     /// Seal the stream's active segment (a leader-proposed seal, or before
     /// tiering). Returns its final descriptor, or `nullopt` if the stream
     /// has no active segment. Durable on return.
-    auto seal(const std::string& stream) -> std::optional<record_segment_descriptor> {
+    auto seal(const std::string& stream) -> std::optional<record_segment_descriptor> override {
         const std::lock_guard lock(_mu);
         auto it = _streams.find(stream);
         if (it == _streams.end()) {
@@ -855,7 +763,7 @@ public:
     /// snapshot that covers the stream up to `seq`, before the log tail is
     /// replayed. A sealed segment cut in the middle becomes active again,
     /// footer removed. Durable on return.
-    void truncate_after(const std::string& stream, std::optional<std::uint64_t> seq) {
+    void truncate_after(const std::string& stream, std::optional<std::uint64_t> seq) override {
         if (!seq) {
             drop_stream(stream);
             return;
@@ -892,7 +800,8 @@ public:
     /// leader-proposed retention trim). The active segment is never trimmed.
     /// Returns the first sequences of the removed segments. Durable on
     /// return.
-    auto trim_before(const std::string& stream, std::uint64_t seq) -> std::vector<std::uint64_t> {
+    auto trim_before(const std::string& stream, std::uint64_t seq)
+        -> std::vector<std::uint64_t> override {
         const std::lock_guard lock(_mu);
         std::vector<std::uint64_t> removed;
         auto it = _streams.find(stream);
@@ -919,7 +828,7 @@ public:
 
     /// Remove one sealed segment's local copy (after it was tiered, or to
     /// replace a copy a read found corrupt). Returns whether one was there.
-    auto remove_segment(const std::string& stream, std::uint64_t first_seq) -> bool {
+    auto remove_segment(const std::string& stream, std::uint64_t first_seq) -> bool override {
         const std::lock_guard lock(_mu);
         auto it = _streams.find(stream);
         if (it == _streams.end()) {
@@ -940,7 +849,7 @@ public:
     }
 
     /// Remove a stream and all its segments. Durable on return.
-    void drop_stream(const std::string& stream) {
+    void drop_stream(const std::string& stream) override {
         const std::lock_guard lock(_mu);
         auto it = _streams.find(stream);
         if (it == _streams.end()) {
@@ -968,7 +877,7 @@ public:
     /// one exists. Returns `false` if an identical sealed copy was already
     /// here. Durable on return.
     auto install_segment(const record_segment_descriptor& d, std::span<const std::byte> bytes)
-        -> bool {
+        -> bool override {
         namespace s = detail::segments;
         validate_key(d._stream);
         if (bytes.size() != d._bytes) {
@@ -1036,7 +945,7 @@ public:
     /// skipped (counted in `_fetch_misses`). Returns whether it was
     /// installed (or already present).
     auto fetch_segment(const record_segment_descriptor& d, std::span<const std::string> peers,
-                       const fetch_transport& transport) -> bool {
+                       const fetch_transport& transport) -> bool override {
         if (has_segment(d)) {
             return true;
         }
@@ -1067,7 +976,7 @@ public:
     /// `nullopt` if the segment is not here.
     [[nodiscard]] auto read_segment_bytes(const std::string& stream, std::uint64_t first_seq,
                                           std::uint64_t length) const
-        -> std::optional<std::vector<std::byte>> {
+        -> std::optional<std::vector<std::byte>> override {
         auto view = view_of(stream, first_seq);
         if (!view) {
             return std::nullopt;
@@ -1088,9 +997,8 @@ public:
     /// silently skipped. `nullopt` if the segment is not here (fetch it).
     /// Throws `record_segment_error` if a record fails its CRC.
     [[nodiscard]] auto read_segment(const std::string& stream, std::uint64_t first_seq,
-                                    std::uint64_t from_seq,
-                                    const segment_read_limits& limits = {}) const
-        -> std::optional<segment_read_result> {
+                                    std::uint64_t from_seq, const segment_read_limits& limits) const
+        -> std::optional<segment_read_result> override {
         auto view = view_of(stream, first_seq);
         if (!view) {
             return std::nullopt;
@@ -1107,7 +1015,8 @@ public:
     /// local (check `local_segments` against the index); otherwise use
     /// `read_segment`.
     [[nodiscard]] auto read(const std::string& stream, std::uint64_t from_seq,
-                            const segment_read_limits& limits = {}) const -> segment_read_result {
+                            const segment_read_limits& limits) const
+        -> segment_read_result override {
         segment_read_result out;
         out._next_seq = from_seq;
         for (const auto first : local_segment_starts(stream)) {
@@ -1129,7 +1038,7 @@ public:
     /// segment opened from disk the digest is computed on first call (one
     /// read of the file) and cached.
     [[nodiscard]] auto describe(const std::string& stream, std::uint64_t first_seq) const
-        -> std::optional<record_segment_descriptor> {
+        -> std::optional<record_segment_descriptor> override {
         std::shared_ptr<detail::segments::file_handle> fd;
         record_segment_descriptor d;
         {
@@ -1172,7 +1081,7 @@ public:
 
     /// Descriptors of every local segment of `stream`, oldest first.
     [[nodiscard]] auto local_segments(const std::string& stream) const
-        -> std::vector<record_segment_descriptor> {
+        -> std::vector<record_segment_descriptor> override {
         std::vector<record_segment_descriptor> out;
         for (const auto first : local_segment_starts(stream)) {
             if (auto d = describe(stream, first)) {
@@ -1184,14 +1093,15 @@ public:
 
     /// Whether this node holds a segment identical to `d` (same first
     /// sequence, size, seal state and digest).
-    [[nodiscard]] auto has_segment(const record_segment_descriptor& d) const -> bool {
+    [[nodiscard]] auto has_segment(const record_segment_descriptor& d) const -> bool override {
         auto local = describe(d._stream, d._first_seq);
         return local && local->_bytes == d._bytes && local->_sealed == d._sealed &&
                local->_sha256 == d._sha256;
     }
 
     /// The highest sequence stored for `stream`.
-    [[nodiscard]] auto last_seq(const std::string& stream) const -> std::optional<std::uint64_t> {
+    [[nodiscard]] auto last_seq(const std::string& stream) const
+        -> std::optional<std::uint64_t> override {
         const std::lock_guard lock(_mu);
         auto it = _streams.find(stream);
         if (it == _streams.end()) {
@@ -1201,7 +1111,7 @@ public:
     }
 
     /// Every stream with at least one local segment.
-    [[nodiscard]] auto streams() const -> std::vector<std::string> {
+    [[nodiscard]] auto streams() const -> std::vector<std::string> override {
         const std::lock_guard lock(_mu);
         std::vector<std::string> out;
         out.reserve(_streams.size());
@@ -1211,7 +1121,7 @@ public:
         return out;
     }
 
-    [[nodiscard]] auto stats() const -> record_segment_store_stats {
+    [[nodiscard]] auto stats() const -> record_segment_store_stats override {
         const std::lock_guard lock(_mu);
         auto out = _stats;
         out._streams = _streams.size();

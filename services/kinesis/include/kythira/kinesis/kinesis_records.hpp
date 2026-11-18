@@ -65,10 +65,9 @@ struct shard_read {
 /// through `open`. Throws `record_segment_error` if a record fails its CRC,
 /// `record_open_error` for a sealed record with no `open`, and whatever
 /// `open` throws.
-[[nodiscard]] inline auto read_shard(const record_segment_store& store,
-                                     const segment_fetcher& fetch, const std::string& key,
-                                     const shard_state& state, std::uint64_t from,
-                                     std::int64_t min_timestamp_ms,
+[[nodiscard]] inline auto read_shard(const segment_store& store, const segment_fetcher& fetch,
+                                     const std::string& key, const shard_state& state,
+                                     std::uint64_t from, std::int64_t min_timestamp_ms,
                                      const segment_read_limits& limits,
                                      const record_opener& open = {}) -> shard_read {
     shard_read out;

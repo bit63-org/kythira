@@ -2726,7 +2726,7 @@ private:
     struct shard_snapshot {
         bool _found = false;
         shard_state _state;
-        record_segment_store* _store = nullptr;
+        segment_store* _store = nullptr;
         segment_fetcher _fetch;
     };
 

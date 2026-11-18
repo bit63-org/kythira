@@ -140,7 +140,7 @@ private:
 /// Fetch `d` from the object store into `store`. False when the object is
 /// absent or its bytes do not match `d` (never installed then). Throws
 /// what the object store throws for a transport failure.
-inline auto fetch_from_tier(record_segment_store& store, const tier_store& tier,
+inline auto fetch_from_tier(segment_store& store, const tier_store& tier,
                             const record_segment_descriptor& d) -> bool {
     if (!tier.configured()) {
         return false;

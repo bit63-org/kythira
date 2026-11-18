@@ -247,7 +247,7 @@ public:
         const std::vector<std::string>& keys, const std::vector<std::byte>& envelope)>;
 
     gateway(
-        FrontEnd& front_end, local_proposer propose, const record_segment_store* store,
+        FrontEnd& front_end, local_proposer propose, const segment_store* store,
         std::string forward_secret,
         clock_fn clock = [] { return std::chrono::system_clock::now(); })
         : _front_end(front_end),
@@ -351,7 +351,7 @@ private:
     lease_handler _leases;
     txn_handler _txn;
     local_proposer _propose;
-    const record_segment_store* _store;
+    const segment_store* _store;
     std::string _secret;
     clock_fn _clock;
     gateway_stats _stats;
@@ -522,7 +522,7 @@ template<typename NodeId>
     const peer_client& client, std::string secret,
     std::function<std::chrono::system_clock::time_point()> clock = [] {
         return std::chrono::system_clock::now();
-    }) -> record_segment_store::fetch_transport {
+    }) -> segment_store::fetch_transport {
     return [&client, secret = std::move(secret), clock = std::move(clock)](
                const std::string& peer, const std::string& stream, std::uint64_t first_seq,
                std::uint64_t length) -> std::optional<std::vector<std::byte>> {

@@ -16,8 +16,10 @@
 
 #include <raft/record_segment_store.hpp>
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <filesystem>
 #include <string>
 #include <thread>
 #include <vector>
@@ -151,6 +153,49 @@ BOOST_AUTO_TEST_CASE(a_disabled_barrier_is_a_no_op) {
     store.append("s", kythira::segment_record_view{1, 0, p});
     store.barrier();
     BOOST_TEST(store.stats()._barriers == 0U);
+}
+
+// Benchmark row for .kiro/specs/kinesis-independent-layers/ task 1: the
+// state machines now call the store through `segment_store`, so time the
+// same append-and-barrier workload through the interface and through the
+// concrete (final) class. Informational: it prints one row per path and
+// checks only that both did the same work, since a timing bound would make
+// a loaded CI runner fail the build.
+BOOST_AUTO_TEST_CASE(append_and_barrier_cost_through_the_interface) {
+    constexpr int rounds = 2000;
+    constexpr int per_round = 8;
+    const std::vector<std::byte> p(512, std::byte{7});
+    auto run = [&](auto&& append, auto&& barrier) {
+        const auto start = std::chrono::steady_clock::now();
+        std::uint64_t seq = 0;
+        for (int r = 0; r < rounds; ++r) {
+            for (int i = 0; i < per_round; ++i) {
+                ++seq;
+                append(kythira::segment_record_view{seq, static_cast<std::int64_t>(seq), p});
+            }
+            barrier();
+        }
+        return std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - start)
+                   .count() /
+               rounds;
+    };
+    auto store_at = [](const std::filesystem::path& dir) {
+        kythira::record_segment_store_options o;
+        o._data_dir = dir;
+        return o;
+    };
+    kythira::segment_conformance::scratch_dir d;
+    kythira::record_segment_store direct(store_at(d.path() / "direct"));
+    kythira::record_segment_store behind(store_at(d.path() / "interface"));
+    kythira::segment_store& iface = behind;
+    const auto direct_us =
+        run([&](const auto& r) { direct.append("s", r); }, [&] { direct.barrier(); });
+    const auto iface_us =
+        run([&](const auto& r) { iface.append("s", r); }, [&] { iface.barrier(); });
+    BOOST_TEST_MESSAGE("segment_store append x" << per_round << " + barrier, us/round: direct "
+                                                << direct_us << ", interface " << iface_us);
+    BOOST_TEST(direct.last_seq("s") == iface.last_seq("s"));
+    BOOST_TEST(direct.stats()._records_appended == behind.stats()._records_appended);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

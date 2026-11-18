@@ -623,7 +623,7 @@ public:
 
     /// The node's change record store (task 15), whose segments this node
     /// serves to peers (the `segment` op). Set before `start()`.
-    auto set_change_log(kythira::record_segment_store* store) -> void { _change_log = store; }
+    auto set_change_log(kythira::segment_store* store) -> void { _change_log = store; }
 
     /// Fetches and installs a change log segment of `group` from the
     /// group's other voters: the item state machine's fetcher, for the
@@ -2059,7 +2059,7 @@ private:
     Host& _host;
     forwarder _forward;
     /// The node's change record store (task 15), or none.
-    kythira::record_segment_store* _change_log = nullptr;
+    kythira::segment_store* _change_log = nullptr;
     raft_backend_options _options;
     clock_fn _clock;
     capacity_throttler _throttler;

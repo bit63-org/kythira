@@ -59,7 +59,7 @@ public:
 
     /// The node's change record store and segment fetcher, handed to the
     /// item group this opens (task 15, `change_log.hpp`).
-    auto set_change_log(kythira::record_segment_store* store,
+    auto set_change_log(kythira::segment_store* store,
                         typename items_type::change_log_fetcher fetch = {}) -> void {
         _log = store;
         _fetch = std::move(fetch);
@@ -216,7 +216,7 @@ private:
 
     std::optional<catalog_type> _catalog;
     std::optional<items_type> _items;
-    kythira::record_segment_store* _log = nullptr;
+    kythira::segment_store* _log = nullptr;
     typename items_type::change_log_fetcher _fetch;
 };
 

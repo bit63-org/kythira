@@ -103,7 +103,7 @@ public:
     using clock_fn = std::function<std::int64_t()>;
 
     explicit local_stream_cluster(
-        record_segment_store* store = nullptr,
+        segment_store* store = nullptr,
         clock_fn clock =
             [] {
                 return std::chrono::duration_cast<std::chrono::milliseconds>(

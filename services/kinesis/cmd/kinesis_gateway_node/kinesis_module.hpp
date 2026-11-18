@@ -679,7 +679,7 @@ private:
     std::unique_ptr<kythira::record_segment_store> _store;
     std::unique_ptr<kinesis::peer_client> _peers;
     std::vector<std::string> _other_gateways;
-    kythira::record_segment_store::fetch_transport _transport;
+    kythira::segment_store::fetch_transport _transport;
     std::unique_ptr<object_tier> _tier_owner;
     kinesis::tier_store _tier;
     kinesis::fetched_segments _fetched;
