@@ -24,6 +24,7 @@
 #include <optional>
 #include <set>
 #include <span>
+#include <sstream>
 #include <string>
 #include <utility>
 #include <vector>
@@ -151,7 +152,9 @@ struct fixture {
         headers.emplace_back("Host", std::string(k_host));
         if (!key.empty()) {
             headers.emplace_back("X-Amz-Date", std::string(k_date));
-            headers.emplace_back("x-amz-content-sha256", sv4::detail::sha256_hex(body));
+            if (!s3::find_header(headers, "x-amz-content-sha256")) {
+                headers.emplace_back("x-amz-content-sha256", sv4::detail::sha256_hex(body));
+            }
             std::vector<std::string> names;
             for (const auto& [k, v] : headers) {
                 names.push_back(sv4::detail::lower(k));
@@ -564,6 +567,85 @@ BOOST_AUTO_TEST_CASE(copies_follow_their_directives_and_conditions) {
     BOOST_TEST(
         f.send("PUT", "/theirs/x", {{"x-amz-copy-source", "/bkt/src"}}, {}, "AKIDOTHER").code() ==
         "AccessDenied");
+}
+
+BOOST_AUTO_TEST_CASE(checksums_are_verified_stored_and_returned) {
+    using s3::checksum_algorithm;
+    fixture f;
+    f.make_bucket("bkt");
+    const std::string body = "checksummed body, long enough for several chunks of 64 bytes";
+
+    // No checksum asked for: CRC64NVME, returned on the PUT.
+    const auto plain = f.send("PUT", "/bkt/plain", {}, body);
+    BOOST_TEST_REQUIRE(plain.status == 200U, plain.body);
+    const auto crc64 = s3::checksum_of(checksum_algorithm::crc64nvme, body);
+    BOOST_TEST(plain.header("x-amz-checksum-crc64nvme") == crc64);
+    BOOST_TEST(plain.header("x-amz-checksum-type") == "FULL_OBJECT");
+
+    // Returned on a read only with checksum mode, and never on a range.
+    BOOST_TEST(f.send("GET", "/bkt/plain").header("x-amz-checksum-crc64nvme").empty());
+    const s3::header_list mode{{"x-amz-checksum-mode", "ENABLED"}};
+    BOOST_TEST(f.send("GET", "/bkt/plain", mode).header("x-amz-checksum-crc64nvme") == crc64);
+    BOOST_TEST(f.send("HEAD", "/bkt/plain", mode).header("x-amz-checksum-crc64nvme") == crc64);
+    auto ranged = mode;
+    ranged.emplace_back("Range", "bytes=0-3");
+    BOOST_TEST(f.send("GET", "/bkt/plain", ranged).header("x-amz-checksum-crc64nvme").empty());
+
+    // A header value is checked; a wrong one stores nothing.
+    const auto sha = s3::checksum_of(checksum_algorithm::sha256, body);
+    const auto put = f.send("PUT", "/bkt/sha", {{"x-amz-checksum-sha256", sha}}, body);
+    BOOST_TEST_REQUIRE(put.status == 200U, put.body);
+    BOOST_TEST(put.header("x-amz-checksum-sha256") == sha);
+    const auto wrong = s3::checksum_of(checksum_algorithm::sha256, "other");
+    BOOST_TEST(f.send("PUT", "/bkt/bad", {{"x-amz-checksum-sha256", wrong}}, body).code() ==
+               "BadDigest");
+    BOOST_TEST(f.send("GET", "/bkt/bad").code() == "NoSuchKey");
+    BOOST_TEST(f.send("PUT", "/bkt/bad", {{"x-amz-checksum-crc32", "nope"}}, body).code() ==
+               "InvalidRequest");
+
+    const auto attrs =
+        f.send("GET", "/bkt/sha?attributes", {{"x-amz-object-attributes", "Checksum"}});
+    BOOST_TEST_REQUIRE(attrs.status == 200U, attrs.body);
+    BOOST_TEST(contains(attrs.body, "<Checksum><ChecksumSHA256>" + sha +
+                                        "</ChecksumSHA256>"
+                                        "<ChecksumType>FULL_OBJECT</ChecksumType></Checksum>"));
+
+    // A copy keeps the source's checksum.
+    f.send("PUT", "/bkt/copy", {{"x-amz-copy-source", "/bkt/sha"}});
+    BOOST_TEST(f.send("HEAD", "/bkt/copy", mode).header("x-amz-checksum-sha256") == sha);
+
+    // An aws-chunked body with the checksum in its trailer.
+    const auto chunked = [&](std::string_view trailer_value) {
+        std::ostringstream wire;
+        wire << std::hex << body.size() << "\r\n"
+             << body << "\r\n0\r\n"
+             << "x-amz-checksum-crc32:" << trailer_value << "\r\n\r\n";
+        return f.send("PUT", "/bkt/trailer",
+                      {{"x-amz-content-sha256", "STREAMING-UNSIGNED-PAYLOAD-TRAILER"},
+                       {"Content-Encoding", "aws-chunked"},
+                       {"x-amz-decoded-content-length", std::to_string(body.size())},
+                       {"x-amz-trailer", "x-amz-checksum-crc32"},
+                       {"x-amz-sdk-checksum-algorithm", "CRC32"}},
+                      wire.str());
+    };
+    const auto crc32 = s3::checksum_of(checksum_algorithm::crc32, body);
+    const auto trailed = chunked(crc32);
+    BOOST_TEST_REQUIRE(trailed.status == 200U, trailed.body);
+    BOOST_TEST(trailed.header("x-amz-checksum-crc32") == crc32);
+    BOOST_TEST(f.send("GET", "/bkt/trailer").body == body);
+    BOOST_TEST(chunked(s3::checksum_of(checksum_algorithm::crc32, "x")).code() == "BadDigest");
+
+    // DeleteObjects accepts a checksum header in place of Content-MD5.
+    const std::string del = "<Delete><Object><Key>plain</Key></Object></Delete>";
+    const auto d =
+        f.send("POST", "/bkt?delete",
+               {{"x-amz-checksum-crc32c", s3::checksum_of(checksum_algorithm::crc32c, del)}}, del);
+    BOOST_TEST_REQUIRE(d.status == 200U, d.body);
+    BOOST_TEST(contains(d.body, "<Deleted><Key>plain</Key></Deleted>"));
+    BOOST_TEST(f.send("POST", "/bkt?delete",
+                      {{"x-amz-checksum-crc32c", s3::checksum_of(checksum_algorithm::crc32c, "x")}},
+                      del)
+                   .code() == "BadDigest");
 }
 
 BOOST_AUTO_TEST_CASE(access_follows_keys_roles_and_accounts) {

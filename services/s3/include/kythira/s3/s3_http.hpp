@@ -93,6 +93,9 @@ struct s3_request {
     aws_rest_xml::query query;
     header_list headers;
     body_source body;
+    /// The body's trailers (`x-amz-checksum-*` of an `aws-chunked` body),
+    /// once `body` has reported its end; none when not set.
+    std::function<header_list()> trailers;
     /// From the connection, for condition keys and logs.
     std::string source_ip;
     bool secure_transport = true;

@@ -202,7 +202,9 @@ private:
         req.source_ip = in.source_ip;
         req.secure_transport = in.secure_transport;
         req.request_id = request_id;
-        req.body = checked_body(*auth, signed_view, std::move(in.body));
+        auto reader = std::make_shared<payload_reader>(*auth, signed_view);
+        req.trailers = [reader] { return reader->trailers(); };
+        req.body = checked_body(reader, std::move(in.body));
 
         const std::string op(req.op());
         if (!implemented_operations().contains(op)) {
@@ -216,9 +218,8 @@ private:
     }
 
     /// The raw body through the payload reader.
-    [[nodiscard]] static auto checked_body(const authenticated& auth, const sigv4::request& view,
-                                           body_source raw) -> body_source {
-        auto reader = std::make_shared<payload_reader>(auth, view);
+    [[nodiscard]] static auto checked_body(std::shared_ptr<payload_reader> reader, body_source raw)
+        -> body_source {
         auto done = std::make_shared<bool>(false);
         return
             [reader, done, raw = std::move(raw)](std::string& out) -> aws_rest_xml::result<bool> {
