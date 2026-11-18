@@ -79,6 +79,12 @@ target_compile_definitions(sqs_codec_test PRIVATE
 # edits of AddPermission and RemovePermission.
 kythira_sqs_test(sqs_front_end_test sqs_front_end_test.cpp)
 
+# Task 4: message bodies and attributes (validation, MD5 digests SQS
+# clients check, attribute selection), receipt handles and their key ring,
+# and queue attributes against the compatibility profile (Requirements
+# 4.1, 5.1, 5.3).
+kythira_sqs_test(sqs_messages_test sqs_messages_test.cpp)
+
 # Task 3: the checked-in model, query-name and action headers are what their
 # generators make of the pinned inputs, so an upgrade of any input carries
 # its regenerated header and diff.
