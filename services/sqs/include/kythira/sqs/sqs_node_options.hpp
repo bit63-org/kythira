@@ -7,6 +7,7 @@
 /// @brief `sqs_node`'s settings from its environment
 ///        (`.kiro/specs/sqs-compatible-queues/` task 4).
 ///
+// clang-format off
 /// | Variable | Default | Meaning |
 /// |---|---|---|
 /// | `SQS_LISTEN` | `0.0.0.0:9324` | the API listener, `host:port` (port 0 picks one) |
@@ -17,10 +18,13 @@
 /// | `SQS_PARTITION` | `aws` | the ARN partition |
 /// | `SQS_STATIC_KEYS_FILE` | required | static access keys (core's `static_keys_file.hpp`) |
 /// | `SQS_RECEIPT_KEYS_FILE` | | receipt-handle keys (`sqs_receipts.hpp`) |
-/// | `SQS_FORWARD_SECRET` | | the cluster's shared secret: node-to-node forwarding, and the receipt
-/// key when no key file is given | | `SQS_COMPAT` | | compatibility switches, `name=value`
-/// comma-separated (`sqs_compat_profile.hpp`) | | `SQS_MAX_BODY_BYTES` | 4194304 | the largest
-/// request body the listener reads |
+/// | `SQS_FORWARD_SECRET` | | the cluster's shared secret: node-to-node forwarding, and the receipt and SSE-SQS keys when no key file is given |
+/// | `SQS_SSE_KEY_FILE` | | the SSE-SQS master secret, at least 16 bytes (`sqs_sse.hpp`) |
+/// | `SQS_KMS` | `none` | the SSE-KMS key provider: `none` (KMS-encrypted queues refuse sends with KmsNotFound) or `local` |
+/// | `SQS_KMS_PASSPHRASE_FILE` | | `local`'s passphrase; every node needs the same one |
+/// | `SQS_COMPAT` | | compatibility switches, `name=value` comma-separated (`sqs_compat_profile.hpp`) |
+/// | `SQS_MAX_BODY_BYTES` | 4194304 | the largest request body the listener reads |
+// clang-format on
 ///
 /// Everything is checked here, before a port is bound; a refusal names the
 /// variable.
@@ -49,6 +53,10 @@ struct sqs_node_options {
     std::string _static_keys_file;
     std::string _receipt_keys_file;
     std::string _forward_secret;
+    std::string _sse_key_file;
+    /// `none` or `local`.
+    std::string _kms = "none";
+    std::string _kms_passphrase_file;
     std::vector<std::pair<std::string, std::string>> _compat;
     std::uint64_t _max_body_bytes = std::uint64_t{4} * 1024 * 1024;
 };
@@ -136,6 +144,15 @@ namespace node_options_detail {
     o._forward_secret = get("SQS_FORWARD_SECRET").value_or("");
     if (!o._forward_secret.empty() && o._forward_secret.size() < 16) {
         return std::string("SQS_FORWARD_SECRET must be at least 16 bytes");
+    }
+    o._sse_key_file = get("SQS_SSE_KEY_FILE").value_or("");
+    o._kms = get("SQS_KMS").value_or(o._kms);
+    if (o._kms != "none" && o._kms != "local") {
+        return std::string("SQS_KMS must be none or local");
+    }
+    o._kms_passphrase_file = get("SQS_KMS_PASSPHRASE_FILE").value_or("");
+    if (o._kms == "local" && o._kms_passphrase_file.empty()) {
+        return std::string("SQS_KMS=local needs SQS_KMS_PASSPHRASE_FILE");
     }
     if (const auto v = get("SQS_COMPAT"); v && !v->empty()) {
         std::string_view rest = *v;

@@ -42,8 +42,10 @@
 /// entry. The move-task operations keep their tasks in the catalog; the
 /// move worker (`sqs_workers.hpp`) does the moving.
 ///
-/// Not yet here: sealing bodies (task 7), partition growth, throttling and
-/// fair queues (task 8). FIFO `ReceiveRequestAttemptId` is accepted and
+/// Encrypted queues (task 7): a send seals body and attributes after the
+/// digests are taken; a receive opens them (`sqs_sse.hpp`).
+///
+/// Not yet here: partition growth, throttling and fair queues (task 8). FIFO `ReceiveRequestAttemptId` is accepted and
 /// not yet honoured.
 
 #include <kythira/sqs/sqs_catalog.hpp>
@@ -58,6 +60,7 @@
 #include <kythira/sqs/sqs_queue_policy.hpp>
 #include <kythira/sqs/sqs_queue_state_machine.hpp>
 #include <kythira/sqs/sqs_receipts.hpp>
+#include <kythira/sqs/sqs_sse.hpp>
 
 #include <raft/aws_json_protocol.hpp>
 
@@ -100,6 +103,11 @@ struct sqs_service_config {
     /// Where long polls park; the replica's state machines notify it. Null:
     /// every receive answers at once. Outlives the service.
     availability_hub* _waits = nullptr;
+    /// Seals and opens bodies of encrypted queues (`sqs_sse.hpp`); every
+    /// front end of a cluster needs the same SSE-SQS master key. Null: a
+    /// random SSE-SQS key for this process and no SSE-KMS provider, which
+    /// is right for one in-memory node only.
+    std::shared_ptr<sse_keys> _sse;
 };
 
 namespace service_detail {
@@ -276,6 +284,10 @@ public:
         : _cluster(cluster), _config(std::move(config)) {
         if (_config._receipt_keys._keys.empty()) {
             throw std::invalid_argument("sqs_service: no receipt key");
+        }
+        if (!_config._sse) {
+            _config._sse = std::make_shared<sse_keys>(key_provider(wrapping_provider(random_key())),
+                                                      key_provider{});
         }
     }
 
@@ -1282,7 +1294,41 @@ private:
         e.md5_of_body = md5_hex(*body);
         e.md5_of_attributes = md5_of_attributes(attrs);
         e.md5_of_system_attributes = md5_of_attributes(sys);
+        // Sealed last: the digests and the deduplication hash are over the
+        // plaintext (Requirement 8.2).
+        if (s._sqs_managed_sse || !s._kms_key_id.empty()) {
+            try {
+                e.body = _config._sse->seal(
+                    sse_keys::target{ctx._queue->_arn, s._kms_key_id, s._kms_reuse_s}, e.message_id,
+                    e.body, e.attributes, _cluster.now_ms());
+                e.attributes.clear();
+            } catch (const kms_error& k) {
+                return kms_error_of(k);
+            }
+        }
         return out;
+    }
+
+    /// SQS's error for a key provider's failure.
+    [[nodiscard]] static auto kms_error_of(const kms_error& k) -> aws_json::error {
+        switch (k.failure()) {
+            case kms_failure::access_denied:
+                return modeled_error("KmsAccessDenied", k.what());
+            case kms_failure::disabled:
+                return modeled_error("KmsDisabled", k.what());
+            case kms_failure::invalid_state:
+                return modeled_error("KmsInvalidState", k.what());
+            case kms_failure::throttling:
+                return modeled_error("KmsThrottled", k.what());
+            case kms_failure::opt_in_required:
+                return modeled_error("KmsOptInRequired", k.what());
+            case kms_failure::invalid_key_usage:
+                return modeled_error("KmsInvalidKeyUsage", k.what());
+            case kms_failure::not_found:
+            case kms_failure::unavailable:
+            default:
+                return modeled_error("KmsNotFound", k.what());
+        }
     }
 
     [[nodiscard]] auto send_partition(const queue_record& q, const send_entry& e,
@@ -1507,6 +1553,16 @@ private:
     }
 
     auto receive_message_op(sqs_call_context& ctx, boost::json::object& in) -> result {
+        try {
+            return receive_messages(ctx, in);
+        } catch (const kms_error& k) {
+            // The messages taken stay in flight and come back after their
+            // visibility timeout, as on SQS.
+            return kms_error_of(k);
+        }
+    }
+
+    auto receive_messages(sqs_call_context& ctx, boost::json::object& in) -> result {
         using namespace service_detail;
         const auto q = queue_of(ctx);
         if (!q) {
@@ -1616,13 +1672,20 @@ private:
             receipt_handle{q._id, partition, m.sequence, m.receive_sequence, m.visible_at_ms},
             _config._receipt_keys);
         out["MD5OfBody"] = m.md5_of_body;
-        out["Body"] = m.body;
+        std::string attributes_stored = m.attributes;
+        if (is_sealed(m.body)) {
+            auto o = _config._sse->open(m.message_id, m.body, _cluster.now_ms());
+            out["Body"] = std::move(o._body);
+            attributes_stored = std::move(o._attributes);
+        } else {
+            out["Body"] = m.body;
+        }
         if (auto sys = system_attributes(q, partition, m, system_names); !sys.empty()) {
             out["Attributes"] = std::move(sys);
         }
         // The digest is over the attributes returned, which is what an SDK
         // recomputes and compares.
-        if (auto attrs = select_attributes(decode_attributes(m.attributes), attribute_names);
+        if (auto attrs = select_attributes(decode_attributes(attributes_stored), attribute_names);
             !attrs.empty()) {
             out["MD5OfMessageAttributes"] = md5_of_attributes(attrs);
             out["MessageAttributes"] = std::move(attrs);

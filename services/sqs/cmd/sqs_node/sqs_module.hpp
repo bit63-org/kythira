@@ -304,6 +304,12 @@ public:
                     "SQS_RECEIPT_KEYS_FILE or SQS_FORWARD_SECRET is required: receipt handles "
                     "must verify on every node and after a restart");
             }
+            if (_opt._sse_key_file.empty() && _opt._forward_secret.empty()) {
+                return std::string(
+                    "SQS_SSE_KEY_FILE or SQS_FORWARD_SECRET is required: queues are encrypted "
+                    "with SSE-SQS by default and their messages must open on every node and "
+                    "after a restart");
+            }
             if (_cluster_opt._voters.size() > 1 && _opt._forward_secret.empty()) {
                 return std::string(
                     "SQS_FORWARD_SECRET is required with more than one node: followers forward "
@@ -319,6 +325,14 @@ public:
                     ? sqs::derived_receipt_key(_opt._forward_secret)
                     : sqs::parse_receipt_keys(module_detail::read_file(_opt._receipt_keys_file,
                                                                        "SQS_RECEIPT_KEYS_FILE"));
+            _service_config._sse = sqs::node_sse_keys(
+                _opt._sse_key_file.empty()
+                    ? std::string()
+                    : module_detail::read_file(_opt._sse_key_file, "SQS_SSE_KEY_FILE"),
+                _opt._forward_secret,
+                _opt._kms == "local" ? std::optional<std::string>(module_detail::read_file(
+                                           _opt._kms_passphrase_file, "SQS_KMS_PASSPHRASE_FILE"))
+                                     : std::nullopt);
             _authorizer = std::make_unique<authorizer_type>(
                 aws_auth::parse_static_keys(
                     module_detail::read_file(_opt._static_keys_file, "SQS_STATIC_KEYS_FILE")),
