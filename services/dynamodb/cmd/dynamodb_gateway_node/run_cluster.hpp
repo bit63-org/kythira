@@ -29,6 +29,7 @@
 #include <kythira/dynamodb/gateway.hpp>
 #include <kythira/dynamodb/group_state_machine.hpp>
 #include <kythira/dynamodb/raft_backend.hpp>
+#include <kythira/dynamodb/remote_backend.hpp>
 #include <kythira/dynamodb/routed_backend.hpp>
 
 #include <raft/beast_http_transport_impl.hpp>
@@ -605,10 +606,14 @@ public:
                     kythira::service_node::module_numbers::dynamodb));
         }
 
-        // Each voter enforces its share of every capacity limit: a client
-        // spreading requests over the nodes gets the table's whole limit.
+        // Each front end enforces its share of every capacity limit: a
+        // client spreading requests over the gateways gets the table's whole
+        // limit. One over the voters unless KYTHIRA_DYNAMODB_FRONT_ENDS says
+        // how many front ends there are (Requirement 5.2).
         ddb::raft_backend_options options;
-        options.capacity_share = 1.0 / static_cast<double>(_spec.voters.size());
+        options.capacity_share = _cfg.cluster.front_ends != 0
+                                     ? _cfg.cluster.capacity_share()
+                                     : 1.0 / static_cast<double>(_spec.voters.size());
         _backend = std::make_unique<backend_type>(
             _local->host(),
             [this](const node_id& to, const std::string& op) {
@@ -617,6 +622,10 @@ public:
             options);
         _backend->set_change_log(_local->change_log());
         _local->set_fetch(_backend.get());
+        // What the routes this node answers a front end without the data
+        // role name each voter by: its gateway, where the forward listener
+        // is (task 4).
+        _backend->set_route_addresses([this](const node_id& n) { return gateway_address(n); });
 
         // The strong host's backend: its catalog group is the strong
         // catalog, and its ops reach leaders in other regions through their
@@ -756,6 +765,29 @@ public:
     [[nodiscard]] auto config() const -> const ddb::gateway_config& { return _cfg; }
 
 private:
+    /// Node `n`'s gateway as `host:port`: its `PEER_GATEWAYS` entry, or for
+    /// this node, when it lists none for itself, its advertised endpoint or
+    /// its listener when that is a reachable address.
+    [[nodiscard]] auto gateway_address(const node_id& n) const -> std::optional<std::string> {
+        const auto text = traits::to_text(n);
+        for (const auto& [id, peer] : _cfg.cluster.peer_gateways) {
+            if (traits::to_text(peer_id(id)) == text) {
+                return peer.host + ":" + std::to_string(peer.port);
+            }
+        }
+        if (text != traits::to_text(peer_id(_cfg.cluster.node_id))) {
+            return std::nullopt;
+        }
+        if (!_cfg.front.advertised_endpoint.empty()) {
+            return _cfg.front.advertised_endpoint;
+        }
+        const auto& bind = _cfg.http.bind_address;
+        if (bind.empty() || bind == "0.0.0.0" || bind == "::" || !_gateway) {
+            return std::nullopt;
+        }
+        return bind + ":" + std::to_string(_gateway->port());
+    }
+
     static auto forward_config(const ddb::gateway_config& cfg, const std::string& secret,
                                std::optional<std::string> path) -> ddb::forward_client_config {
         ddb::forward_client_config f{.secret = secret,
@@ -821,6 +853,108 @@ private:
     std::atomic<bool> _started{false};
     std::atomic<bool> _stopped{false};
 };
+
+/// A front end without the data role (.kiro/specs/dynamodb-independent-
+/// layers/ task 4, `KYTHIRA_DYNAMODB_ROLES=gateway,front_end`): no Raft, no
+/// replica and no leader-side workers. Its gateway's handlers run over a
+/// `remote_backend` that asks the data nodes in `KYTHIRA_DYNAMODB_DATA_NODES`
+/// for routes and sends each op, with its route's epoch, to the gateway of
+/// the data node the routes name, over the same authenticated forward
+/// channel voters use between themselves.
+class front_end_node {
+public:
+    using remote_type = ddb::remote_backend<node_id, std::uint64_t>;
+    using gateway_type = ddb::gateway<remote_type>;
+
+    front_end_node(ddb::gateway_config cfg, std::function<void(bool, std::string_view)> log)
+        : _cfg(std::move(cfg)),
+          _log(std::move(log)),
+          _forward(ddb::forward_client_config{.secret = _cfg.cluster.forward_secret,
+                                              .tls = !_cfg.http.insecure_plaintext,
+                                              .ca_path = _cfg.cluster.forward_ca_path,
+                                              .timeout = std::chrono::milliseconds{20000}},
+                   {}) {
+        if (_cfg.cluster.data_nodes.empty()) {
+            throw std::invalid_argument(
+                "a front end without the data role needs KYTHIRA_DYNAMODB_DATA_NODES");
+        }
+        std::vector<std::string> seeds;
+        for (const auto& p : _cfg.cluster.data_nodes) {
+            seeds.push_back(p.host + ":" + std::to_string(p.port));
+        }
+        ddb::raft_backend_options options;
+        options.capacity_share = _cfg.cluster.capacity_share();
+        _backend = std::make_unique<remote_type>(
+            std::move(seeds),
+            [this](const std::string& address,
+                   const std::string& op) -> std::optional<std::string> {
+                const auto peer = ddb::gateway_detail::parse_host_port(address);
+                if (!peer) {
+                    return std::nullopt;
+                }
+                return _forward.send_to(*peer, op);
+            },
+            options);
+    }
+
+    ~front_end_node() { stop(); }
+    front_end_node(const front_end_node&) = delete;
+    auto operator=(const front_end_node&) -> front_end_node& = delete;
+    front_end_node(front_end_node&&) = delete;
+    auto operator=(front_end_node&&) -> front_end_node& = delete;
+
+    auto start(ddb::kinesis_sink kinesis = {}, std::optional<ddb::iam_hooks> iam = {}) -> void {
+        if (kinesis.configured()) {
+            _cfg.kinesis = std::move(kinesis);
+        }
+        if (iam) {
+            _cfg.iam = std::move(iam);
+        }
+        _gateway = std::make_unique<gateway_type>(_cfg, *_backend, _log);
+        _gateway->start();
+        std::string data;
+        for (const auto& p : _cfg.cluster.data_nodes) {
+            data += (data.empty() ? "" : ",") + p.host + ":" + std::to_string(p.port);
+        }
+        _log(false, "serving " + std::string(_cfg.http.insecure_plaintext ? "http" : "https") +
+                        " on " + _cfg.http.bind_address + ":" + std::to_string(_gateway->port()) +
+                        ", no replica, data nodes " + data + ", one of " +
+                        std::to_string(_cfg.cluster.front_ends) + " front ends, roles " +
+                        _cfg.roles.to_string());
+    }
+
+    auto drain() -> void {
+        if (_gateway) {
+            _gateway->stop();
+        }
+    }
+
+    auto stop() -> void {
+        drain();
+        _gateway.reset();
+    }
+
+    [[nodiscard]] auto port() const -> std::uint16_t { return _gateway ? _gateway->port() : 0; }
+    /// The route cache, for tests and metrics.
+    [[nodiscard]] auto backend() -> remote_type& { return *_backend; }
+
+private:
+    ddb::gateway_config _cfg;
+    std::function<void(bool, std::string_view)> _log;
+    ddb::forward_client _forward;
+    std::unique_ptr<remote_type> _backend;
+    std::unique_ptr<gateway_type> _gateway;
+};
+
+/// A front end without the data role, run until `wait()` returns.
+inline auto run_front_end(const ddb::gateway_config& cfg,
+                          const std::function<void(bool, std::string_view)>& log,
+                          const std::function<void()>& wait) -> void {
+    front_end_node serving(cfg, log);
+    serving.start();
+    wait();
+    serving.stop();
+}
 
 /// The stand-alone daemon's cluster node: builds and runs the node until
 /// `wait()` returns, then shuts it down in the order that leaves no thread

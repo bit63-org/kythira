@@ -416,3 +416,173 @@ BOOST_AUTO_TEST_CASE(expired_items_are_swept_on_the_cluster) {
         BOOST_TEST(!c.failures.at(i), "node " << i + 1 << " stopped early");
     }
 }
+
+// .kiro/specs/dynamodb-independent-layers/ task 4: a front end without the
+// data role (KYTHIRA_DYNAMODB_ROLES=gateway,front_end) beside the three
+// voters. It holds no replica and runs no Raft: it learns the routes from
+// the data nodes it is given and sends each op to its group's leader over
+// the forward channel. Clients reach every table through it, it answers
+// DescribeEndpoints with its own endpoint, and it keeps serving when a data
+// node it was given goes away.
+BOOST_AUTO_TEST_CASE(a_front_end_without_the_data_role_serves_every_table) {
+    cluster c;
+    const auto port = kythira::testing::free_port();
+    const std::map<std::string, std::string> vars{
+        {"KYTHIRA_DYNAMODB_INSECURE_PLAINTEXT", "1"},
+        {"KYTHIRA_DYNAMODB_BIND", "127.0.0.1"},
+        {"KYTHIRA_DYNAMODB_PORT", std::to_string(port)},
+        {"KYTHIRA_DYNAMODB_ADVERTISED_ENDPOINT", "front.example:" + std::to_string(port)},
+        {"KYTHIRA_DYNAMODB_STATIC_KEYS",
+         "AKIDADMIN:" + std::string(k_secret) + ":111122223333:admin:admin"},
+        {"KYTHIRA_DYNAMODB_ROLES", "gateway,front_end"},
+        {"KYTHIRA_DYNAMODB_DATA_NODES", "127.0.0.1:" + std::to_string(c.gateway_ports.at(0)) +
+                                            ",127.0.0.1:" + std::to_string(c.gateway_ports.at(1))},
+        {"KYTHIRA_DYNAMODB_FORWARD_SECRET", "0123456789abcdef-cluster-test"},
+        {"KYTHIRA_DYNAMODB_FRONT_ENDS", "4"},
+    };
+    std::mutex mu;
+    std::condition_variable cv;
+    bool done = false;
+    std::vector<std::string> lines;
+    std::exception_ptr failure;
+    std::thread front([&] {
+        try {
+            dynamodb_gateway::run_front_end(
+                cluster::parse(vars),
+                [&](bool, std::string_view line) {
+                    const std::lock_guard lock(mu);
+                    lines.emplace_back(line);
+                },
+                [&] {
+                    std::unique_lock lock(mu);
+                    cv.wait(lock, [&] { return done; });
+                });
+        } catch (...) {
+            failure = std::current_exception();
+        }
+    });
+    struct stopper {
+        std::mutex& mu;
+        std::condition_variable& cv;
+        bool& done;
+        std::thread& t;
+        ~stopper() {
+            {
+                const std::lock_guard lock(mu);
+                done = true;
+            }
+            cv.notify_all();
+            t.join();
+        }
+    } stop_front{mu, cv, done, front};
+
+    const auto fe = [&](std::string_view op, const std::string& body) {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(60);
+        while (true) {
+            std::optional<answer> a;
+            try {
+                a = cluster::call_at(port, "us-east-1", op, body);
+            } catch (const std::exception&) {
+                // The listener is not up yet.
+            }
+            if ((a && a->status < 500U) || std::chrono::steady_clock::now() > deadline) {
+                return a.value_or(answer{});
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        }
+    };
+
+    const auto created =
+        fe("CreateTable", R"({"TableName":"orders","BillingMode":"PAY_PER_REQUEST",)"
+                          R"("AttributeDefinitions":[{"AttributeName":"pk","AttributeType":"S"},)"
+                          R"({"AttributeName":"sk","AttributeType":"N"}],)"
+                          R"("KeySchema":[{"AttributeName":"pk","KeyType":"HASH"},)"
+                          R"({"AttributeName":"sk","KeyType":"RANGE"}]})");
+    BOOST_REQUIRE_MESSAGE(created.status == 200U || created.type() == "ResourceInUseException",
+                          json::serialize(created.body));
+    {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(60);
+        std::string status;
+        while (status != "ACTIVE" && std::chrono::steady_clock::now() < deadline) {
+            const auto d = fe("DescribeTable", R"({"TableName":"orders"})");
+            if (d.status == 200U) {
+                status = std::string(d.body.at("Table").at("TableStatus").as_string());
+            }
+            if (status != "ACTIVE") {
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
+        }
+        BOOST_REQUIRE_MESSAGE(status == "ACTIVE", status);
+    }
+    const auto get_body = [](int sk) {
+        return R"({"TableName":"orders","ConsistentRead":true,"Key":{"pk":{"S":"p"},"sk":{"N":")" +
+               std::to_string(sk) + R"("}}})";
+    };
+    const auto put_body = [](int sk, int by) {
+        return R"({"TableName":"orders","Item":{"pk":{"S":"p"},"sk":{"N":")" + std::to_string(sk) +
+               R"("},"by":{"N":")" + std::to_string(by) + R"("}}})";
+    };
+    // What the front end writes the voters read, and the other way.
+    BOOST_REQUIRE(fe("PutItem", put_body(1, 10)).status == 200U);
+    for (int j = 0; j < k_nodes; ++j) {
+        const auto got = c.call_until_served(j, "GetItem", get_body(1));
+        BOOST_REQUIRE_MESSAGE(got.status == 200U, json::serialize(got.body));
+        BOOST_TEST(got.body.at("Item").at("by").at("N").as_string() == "10");
+    }
+    BOOST_REQUIRE(c.call_until_served(2, "PutItem", put_body(2, 20)).status == 200U);
+    const auto got = fe("GetItem", get_body(2));
+    BOOST_REQUIRE_MESSAGE(got.status == 200U, json::serialize(got.body));
+    BOOST_TEST(got.body.at("Item").at("by").at("N").as_string() == "20");
+
+    // A failed condition and a transaction come back as the client's.
+    const auto cond = fe("PutItem", R"({"TableName":"orders","Item":{"pk":{"S":"p"},)"
+                                    R"("sk":{"N":"1"}},"ConditionExpression":)"
+                                    R"x("attribute_not_exists(pk)"})x");
+    BOOST_TEST(cond.status == 400U);
+    BOOST_TEST(cond.type() == "ConditionalCheckFailedException");
+    const auto txn = fe("TransactWriteItems",
+                        R"({"TransactItems":[{"Put":{"TableName":"orders","Item":)"
+                        R"({"pk":{"S":"q"},"sk":{"N":"1"}}}},{"Update":{"TableName":"orders",)"
+                        R"("Key":{"pk":{"S":"p"},"sk":{"N":"1"}},"UpdateExpression":"SET #b = :b",)"
+                        R"("ExpressionAttributeNames":{"#b":"by"},)"
+                        R"("ExpressionAttributeValues":{":b":{"N":"11"}}}}]})");
+    BOOST_REQUIRE_MESSAGE(txn.status == 200U, json::serialize(txn.body));
+    BOOST_TEST(c.call_until_served(1, "GetItem", get_body(1))
+                   .body.at("Item")
+                   .at("by")
+                   .at("N")
+                   .as_string() == "11");
+    const auto counted =
+        fe("Scan", R"({"TableName":"orders","ConsistentRead":true,"Select":"COUNT"})");
+    BOOST_REQUIRE(counted.status == 200U);
+    BOOST_TEST(counted.body.at("Count").to_number<int>() == 3);
+
+    // DescribeEndpoints names this gateway, never a data node.
+    const auto endpoints = fe("DescribeEndpoints", "{}");
+    BOOST_REQUIRE(endpoints.status == 200U);
+    BOOST_TEST(endpoints.body.at("Endpoints").as_array()[0].at("Address").as_string() ==
+               "front.example:" + std::to_string(port));
+    const auto [health, roles, health_body] = raw_request(port, http::verb::get, "");
+    BOOST_TEST(health == 200U);
+    BOOST_TEST(roles == "gateway,front_end");
+    {
+        const std::lock_guard lock(mu);
+        BOOST_TEST(std::any_of(lines.begin(), lines.end(), [](const std::string& l) {
+            return l.find("no replica") != std::string::npos;
+        }));
+    }
+
+    // The first data node it was given goes away: the routes it learned
+    // name the others.
+    c.stop(0);
+    BOOST_REQUIRE(fe("PutItem", put_body(3, 30)).status == 200U);
+    const auto after = fe("GetItem", get_body(3));
+    BOOST_REQUIRE_MESSAGE(after.status == 200U, json::serialize(after.body));
+    BOOST_TEST(after.body.at("Item").at("by").at("N").as_string() == "30");
+    BOOST_TEST(c.call_until_served(2, "GetItem", get_body(3))
+                   .body.at("Item")
+                   .at("by")
+                   .at("N")
+                   .as_string() == "30");
+    BOOST_TEST(!failure);
+}

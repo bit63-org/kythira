@@ -1209,10 +1209,14 @@ BOOST_AUTO_TEST_CASE(a_role_set_the_node_cannot_serve_stops_it_naming_what_is_mi
     BOOST_TEST(has(error_for(cluster_env(), "data,segment"), "KYTHIRA_DYNAMODB_ROLES:"));
     BOOST_TEST(has(error_for(cluster_env(), "data,data,segments"), "KYTHIRA_DYNAMODB_ROLES:"));
     BOOST_TEST(has(error_for(cluster_env(), ""), "KYTHIRA_DYNAMODB_ROLES"));
-    // No data role: no remote backend yet.
-    for (const auto* roles :
-         {"gateway,front_end", "gateway,front_end,segments", "segments", "front_end", "gateway"}) {
-        BOOST_TEST(has(error_for(cluster_env(), roles), "without the data role"));
+    // No data role: a front end that is no voter (task 4), never with
+    // segments or a gateway apart from its front end.
+    BOOST_TEST(has(error_for(cluster_env(), "gateway,front_end"), "unset KYTHIRA_DYNAMODB_PEERS"));
+    for (const auto* roles : {"gateway,front_end,segments", "segments"}) {
+        BOOST_TEST(has(error_for(cluster_env(), roles), "drop segments or add data"));
+    }
+    for (const auto* roles : {"front_end", "gateway"}) {
+        BOOST_TEST(has(error_for(cluster_env(), roles), "run both or neither"));
     }
     // Data without segments: no remote volumes yet.
     BOOST_TEST(has(error_for(cluster_env(), "gateway,front_end,data"), "add segments"));
@@ -1258,6 +1262,63 @@ BOOST_AUTO_TEST_CASE(a_data_node_serves_forwarded_ops_and_refuses_clients) {
     BOOST_TEST(client_call.body().find("no DynamoDB gateway") != std::string::npos);
     BOOST_TEST(std::string(client_call[ddb::k_roles_header]) == "data,segments");
     BOOST_TEST(f.post("abc", t, ddb::forward_mac(k_forward_secret, t, "abd")).result_int() == 403U);
+}
+
+// .kiro/specs/dynamodb-independent-layers/ task 4: a front end without the
+// data role names the data nodes it asks for routes and how many front ends
+// share each capacity limit, and is no voter.
+BOOST_AUTO_TEST_CASE(a_front_end_without_the_data_role_is_configured_by_its_data_nodes) {
+    const auto front_env = [] {
+        auto vars = minimal_env();
+        vars["KYTHIRA_DYNAMODB_ROLES"] = "gateway, front_end";
+        vars["KYTHIRA_DYNAMODB_DATA_NODES"] = "10.0.0.1:8000, [fd00::2]:8443";
+        vars["KYTHIRA_DYNAMODB_FORWARD_SECRET"] = std::string(k_forward_secret);
+        vars["KYTHIRA_DYNAMODB_FRONT_ENDS"] = "4";
+        return vars;
+    };
+    auto r = ddb::gateway_config_from_env(env_of(front_env()));
+    BOOST_REQUIRE_MESSAGE(std::holds_alternative<ddb::gateway_config>(r),
+                          config_error(front_env()));
+    const auto& c = std::get<ddb::gateway_config>(r);
+    BOOST_TEST(c.roles.to_string() == "gateway,front_end");
+    BOOST_TEST(!c.cluster.enabled());
+    BOOST_REQUIRE_EQUAL(c.cluster.data_nodes.size(), 2U);
+    BOOST_TEST(c.cluster.data_nodes[0].host == "10.0.0.1");
+    BOOST_TEST(c.cluster.data_nodes[1].host == "fd00::2");
+    BOOST_TEST(c.cluster.data_nodes[1].port == 8443U);
+    BOOST_TEST(c.cluster.capacity_share() == 0.25);
+
+    const auto without = [&](const std::string& name) {
+        auto vars = front_env();
+        vars.erase(name);
+        return config_error(std::move(vars));
+    };
+    BOOST_TEST(without("KYTHIRA_DYNAMODB_DATA_NODES").find("set KYTHIRA_DYNAMODB_DATA_NODES") !=
+               std::string::npos);
+    BOOST_TEST(without("KYTHIRA_DYNAMODB_FORWARD_SECRET").find("KYTHIRA_DYNAMODB_FORWARD_SECRET") !=
+               std::string::npos);
+    BOOST_TEST(without("KYTHIRA_DYNAMODB_FRONT_ENDS").find("KYTHIRA_DYNAMODB_FRONT_ENDS") !=
+               std::string::npos);
+    auto bad = front_env();
+    bad["KYTHIRA_DYNAMODB_DATA_NODES"] = "10.0.0.1";
+    BOOST_TEST(config_error(bad).find("is not host:port") != std::string::npos);
+    bad = front_env();
+    bad["KYTHIRA_DYNAMODB_FRONT_ENDS"] = "0";
+    BOOST_TEST(config_error(bad).find("not a positive count") != std::string::npos);
+    // A node with the data role finds the others through PEERS.
+    auto data = cluster_env();
+    data["KYTHIRA_DYNAMODB_DATA_NODES"] = "10.0.0.2:8000";
+    BOOST_TEST(config_error(data).find("KYTHIRA_DYNAMODB_DATA_NODES is for a front end") !=
+               std::string::npos);
+    // FRONT_ENDS on a voter replaces one over the voters.
+    auto voter = cluster_env();
+    auto plain = ddb::gateway_config_from_env(env_of(voter));
+    BOOST_REQUIRE(std::holds_alternative<ddb::gateway_config>(plain));
+    BOOST_TEST(std::get<ddb::gateway_config>(plain).cluster.capacity_share() == 1.0 / 3.0);
+    voter["KYTHIRA_DYNAMODB_FRONT_ENDS"] = "5";
+    auto shared = ddb::gateway_config_from_env(env_of(voter));
+    BOOST_REQUIRE(std::holds_alternative<ddb::gateway_config>(shared));
+    BOOST_TEST(std::get<ddb::gateway_config>(shared).cluster.capacity_share() == 0.2);
 }
 
 // .kiro/specs/dynamodb-independent-layers/ task 2: the leader-side workers
