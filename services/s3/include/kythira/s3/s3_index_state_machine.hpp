@@ -184,6 +184,10 @@ struct index_command {
     std::vector<completed_part> parts;  ///< complete_upload
     std::uint64_t grace_ms = 0;         ///< collect_chunks
     std::uint32_t max = 0;              ///< collect_chunks
+    /// upload_part, complete_upload: the bucket's compatibility profile
+    /// limits (`kythira:compat:*` tags); 0 takes `index_options`.
+    std::uint64_t min_part_bytes = 0;
+    std::uint32_t max_parts = 0;
 
     friend auto operator==(const index_command&, const index_command&) -> bool = default;
 };
@@ -270,6 +274,7 @@ inline void write_opt_u64(detail::writer& w, const std::optional<std::uint64_t>&
     for (const auto& name : c.override_metadata) {
         w.str(name);
     }
+    w.u64(c.min_part_bytes).u32(c.max_parts);
     const auto s = w.take();
     std::vector<std::byte> out(s.size());
     std::memcpy(out.data(), s.data(), s.size());
@@ -324,6 +329,8 @@ inline void write_opt_u64(detail::writer& w, const std::optional<std::uint64_t>&
     for (auto& name : c.override_metadata) {
         name = r.str();
     }
+    c.min_part_bytes = r.u64();
+    c.max_parts = r.u32();
     r.done("command");
     return c;
 }
@@ -406,6 +413,30 @@ template<typename Engine = memory_kv_engine, typename LogIndex = std::uint64_t>
 requires kv_engine<Engine>
 class s3_index_state_machine {
 public:
+    /// S3's copy-source rules (public: UploadPartCopy checks them in the
+    /// front end, against the version it reads), including its two documented pairings:
+    /// if-match true with if-unmodified-since false copies, and
+    /// if-none-match false with if-modified-since true fails.
+    [[nodiscard]] static auto source_conditions_hold(const source_conditions& s,
+                                                     const object_version& v) -> bool {
+        const auto& etag = v.content.etag;
+        if (s.if_match) {
+            if (*s.if_match != "*" && unquote(*s.if_match) != etag) {
+                return false;
+            }
+        } else if (s.if_unmodified_since_ms && v.last_modified_ms > *s.if_unmodified_since_ms) {
+            return false;
+        }
+        if (s.if_none_match) {
+            if (*s.if_none_match == "*" || unquote(*s.if_none_match) == etag) {
+                return false;
+            }
+        } else if (s.if_modified_since_ms && v.last_modified_ms <= *s.if_modified_since_ms) {
+            return false;
+        }
+        return true;
+    }
+
     using engine_type = Engine;
 
     explicit s3_index_state_machine(index_options options = {}) : _options(options) {}
@@ -1218,29 +1249,6 @@ private:
         return write_version(t, c.target, c.key, std::move(v), index, c.now_ms);
     }
 
-    /// S3's copy-source rules, including its two documented pairings:
-    /// if-match true with if-unmodified-since false copies, and
-    /// if-none-match false with if-modified-since true fails.
-    [[nodiscard]] static auto source_conditions_hold(const source_conditions& s,
-                                                     const object_version& v) -> bool {
-        const auto& etag = v.content.etag;
-        if (s.if_match) {
-            if (*s.if_match != "*" && unquote(*s.if_match) != etag) {
-                return false;
-            }
-        } else if (s.if_unmodified_since_ms && v.last_modified_ms > *s.if_unmodified_since_ms) {
-            return false;
-        }
-        if (s.if_none_match) {
-            if (*s.if_none_match == "*" || unquote(*s.if_none_match) == etag) {
-                return false;
-            }
-        } else if (s.if_modified_since_ms && v.last_modified_ms <= *s.if_modified_since_ms) {
-            return false;
-        }
-        return true;
-    }
-
     // ---- uploads ------------------------------------------------------------
 
     auto create_upload(txn& t, const index_command& c, std::uint64_t index) -> index_result {
@@ -1276,7 +1284,8 @@ private:
     }
 
     auto upload_part(txn& t, const index_command& c) -> index_result {
-        if (c.part.number < 1 || c.part.number > _options.max_parts) {
+        const auto max_parts = c.max_parts != 0 ? c.max_parts : _options.max_parts;
+        if (c.part.number < 1 || c.part.number > max_parts) {
             return fail(400, "InvalidArgument",
                         "Part number must be an integer between 1 and 10000, inclusive");
         }
@@ -1328,8 +1337,9 @@ private:
             }
             chosen.push_back(&it->second);
         }
+        const auto min_part = c.min_part_bytes != 0 ? c.min_part_bytes : _options.min_part_bytes;
         for (std::size_t i = 0; i + 1 < chosen.size(); ++i) {
-            if (chosen[i]->size() < _options.min_part_bytes) {
+            if (chosen[i]->size() < min_part) {
                 return fail(
                     400, "EntityTooSmall",
                     "Your proposed upload is smaller than the minimum allowed object size.");
@@ -1350,6 +1360,16 @@ private:
             part_etags.push_back(p->etag);
         }
         v.content.etag = multipart_etag(part_etags);
+        // The front end's view of the finished object: its checksum,
+        // derived from the parts it read (their ETags were just checked).
+        // An empty value erases a key (the upload's open-state keys).
+        for (const auto& [k, val] : c.content.system_metadata) {
+            if (val.empty()) {
+                v.content.system_metadata.erase(k);
+            } else {
+                v.content.system_metadata[k] = val;
+            }
+        }
         // Every part gives up its references and the new version takes
         // the chosen parts' chunks: the net effect moves the chosen parts'
         // references to the object and drops the parts left out.

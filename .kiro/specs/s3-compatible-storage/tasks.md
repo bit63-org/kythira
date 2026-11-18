@@ -204,10 +204,30 @@ builds it to that design). Each task is one PR unless noted.
     (header, trailer, mismatch, checksum mode, range, copy, attributes,
     DeleteObjects).
 
-- [ ] 9. Multipart upload
+- [x] 9. Multipart upload
   - All operations, part copy, complete with checksums and conditions,
     abort and stale-upload sweep
   - _Requirements: 9.1-9.3_
+  - Done: `s3_multipart.hpp` serves CreateMultipartUpload, UploadPart,
+    UploadPartCopy, ListParts, ListMultipartUploads (delimiter, markers,
+    `encoding-type`), CompleteMultipartUpload and AbortMultipartUpload.
+    Parts are stored as chunks as they arrive and Complete commits one
+    manifest naming them (no bytes copied); UploadPartCopy streams the
+    source range into a new part (content addressing dedupes whole
+    chunks). Checksums follow S3 since 2025: CRC64NVME full-object by
+    default, a named algorithm COMPOSITE unless CRC64NVME; Complete
+    derives the object's value (CRC combination or `-N` composite),
+    checks a value the request names (`BadDigest`) and the parts'
+    checksums in its body (`InvalidPart`, and `InvalidRequest` when a
+    named algorithm's part checksum is missing), plus
+    `x-amz-mp-object-size` and `If-Match`/`If-None-Match`. The bucket's
+    profile sets part count, minimum part size (the index command now
+    carries both), part and object size. `sweep_stale_uploads` aborts
+    uploads past an age (9.3); lifecycle's abort rule is task 13 and
+    will call the same abort. The index's complete merges the front
+    end's checksum into the object (an empty value erases the upload's
+    open-state keys). Tests: two cases in `s3_service_test` and new
+    index assertions.
 
 - [ ] 10. Versioning and object lock
   - _Requirements: 8.1, 8.2_
