@@ -8,6 +8,9 @@ builds it to that spec's design. Each task is one PR unless noted.
 - [ ] 1. Roles and validation
   - `KYTHIRA_HSM_ROLES`; no vault, unseal or share without `crypto`; no
     engine or groups without `store`; start-time validation
+  - Role set, per-layer plan and start-time check in `hsm_roles.hpp`
+    (done); reading it in `hsm_config` and gating `hsm_module` follow the
+    open share-sealer stack
   - _Requirements: 1.1, 2.1-2.5_
 
 - [x] 2. Crypto member list
