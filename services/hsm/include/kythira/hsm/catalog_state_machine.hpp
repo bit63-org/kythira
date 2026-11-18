@@ -380,6 +380,24 @@ public:
         return this->get(binding_key(identity, token_id)).has_value();
     }
 
+    /// Every binding as (identity, token), in identity order: what a
+    /// crypto node outside the groups mirrors to answer may_open
+    /// (.kiro/specs/hsm-independent-layers/ Requirement 3.1).
+    [[nodiscard]] auto bindings() const -> std::vector<std::pair<std::string, std::uint64_t>> {
+        std::vector<std::pair<std::string, std::uint64_t>> out;
+        this->scan_prefix("b", [&](std::string_view k, std::string_view) {
+            // "b" identity 0x00 be64(token); identities hold no NUL.
+            const auto body = k.substr(1);
+            if (body.size() < 9 || body[body.size() - 9] != '\0') {
+                return true;
+            }
+            out.emplace_back(std::string(body.substr(0, body.size() - 9)),
+                             from_be64_key(body.substr(body.size() - 8)));
+            return true;
+        });
+        return out;
+    }
+
     /// Whether token `token_id` existed and was deleted.
     [[nodiscard]] auto deleted(std::uint64_t token_id) const -> bool {
         return this->get("x" + be64_key(token_id)).has_value();

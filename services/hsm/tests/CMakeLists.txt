@@ -76,6 +76,16 @@ target_link_libraries(hsm_host_test PRIVATE kythira_test_support)
 set_tests_properties(hsm_host_test PROPERTIES
     LABELS "integration;hsm;hsm-module" TIMEOUT 300)
 
+# hsm-independent-layers task 3 (Requirements 3, 4 and 7.2): a crypto
+# node outside the groups runs its session layer over remote_hsm_store
+# and the store API: keys used across it and a member, a destroy and a
+# seal committed between two uses, the idle watch, held objects not
+# fetched again, not_leader hints, and an unreachable store.
+kythira_hsm_test(hsm_remote_store_test hsm_remote_store_test.cpp)
+target_link_libraries(hsm_remote_store_test PRIVATE kythira_test_support)
+set_tests_properties(hsm_remote_store_test PROPERTIES
+    LABELS "integration;hsm;hsm-module" TIMEOUT 300)
+
 # Task 6d: forwarding between members over HTTPS with client certificates
 # (wire format, membership, refusals before the host is asked) and the
 # operator API.

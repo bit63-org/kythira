@@ -1439,6 +1439,14 @@ private:
         }
         if (kind != op_kind::digest) {
             auto o = lookup(*ctx, key);
+            if (!o && o.error() == CKR_OBJECT_HANDLE_INVALID && !is_session_object(key)) {
+                // Created through another node and not yet here (a lagging
+                // replica, or a crypto node's mirror): look again after a
+                // barrier before calling the handle invalid.
+                if (_store->read_barrier(ctx->token)) {
+                    o = lookup(*ctx, key);
+                }
+            }
             if (!o) {
                 return unexpected(o.error() == CKR_OBJECT_HANDLE_INVALID ? CKR_KEY_HANDLE_INVALID
                                                                          : o.error());

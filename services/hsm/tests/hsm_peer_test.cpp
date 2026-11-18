@@ -15,6 +15,7 @@
 
 #include <kythira/hsm/hsm_host.hpp>
 #include <kythira/hsm/hsm_peer.hpp>
+#include <kythira/hsm/store_api.hpp>
 
 #include <raft/beast_https_server.hpp>
 
@@ -24,6 +25,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -60,7 +62,36 @@ struct fake_host {
         return read_answer;
     }
 
+    // The store API's reads (store_api.hpp): a catalog with one token.
+    auto catalog_barrier() -> hsm::ck_result<void> {
+        const std::lock_guard lock(mutex);
+        ++store_reads;
+        return {};
+    }
+    auto read_barrier(std::uint64_t) -> hsm::ck_result<void> { return {}; }
+    [[nodiscard]] auto catalog() const -> std::optional<hsm::catalog_record> {
+        hsm::catalog_record c;
+        c.seal_epoch = 3;
+        return c;
+    }
+    [[nodiscard]] auto tokens() const -> std::vector<hsm::token_entry> {
+        return {hsm::token_entry{1, "alpha", 1, {}}};
+    }
+    [[nodiscard]] auto token(std::uint64_t id) const -> std::optional<hsm::token_entry> {
+        return id == 1 ? std::optional(tokens().front()) : std::nullopt;
+    }
+    [[nodiscard]] auto bindings() const -> std::vector<std::pair<std::string, std::uint64_t>> {
+        return {{"app-a", 1}};
+    }
+    [[nodiscard]] auto token_record_of(std::uint64_t) const -> std::optional<hsm::token_record> {
+        return hsm::token_record{};
+    }
+    [[nodiscard]] auto objects(std::uint64_t) const -> std::vector<hsm::object_record> {
+        return {};
+    }
+
     std::mutex mutex;
+    int store_reads = 0;
     reply propose_answer;
     reply read_answer;
     int proposals = 0;
@@ -227,6 +258,34 @@ BOOST_AUTO_TEST_CASE(a_member_forwards_over_mutual_tls) {
     BOOST_TEST((ri.result == wire::status::ok));
     BOOST_TEST(ri.index == 11U);
     BOOST_TEST(host.read_indexes == 1);
+}
+
+BOOST_AUTO_TEST_CASE(a_store_client_reads_and_proposes_but_is_no_member) {
+    hsm::test::test_pki pki;
+    const auto server_cert = pki.issue("node-2", k_server_sans);
+    const std::string crypto = "spiffe://hsm/crypto-1";
+    const auto crypto_cert = pki.issue("crypto-1", "URI:" + crypto);
+    fake_host host;
+    host.propose_answer.result = reply::status::ok;
+    auto p = policy();
+    p.store_clients.insert(crypto);
+    BOOST_TEST(!hsm::is_member(p, {true, true, {crypto}, {}}));
+    BOOST_TEST(hsm::may_use_store(p, {true, true, {crypto}, {}}));
+    listener l(host, p, server_cert, pki.ca_path());
+    const hsm::peer_client client({crypto_cert.cert, crypto_cert.key, pki.ca_path()});
+    const auto raw = client.store_read(l.url(), 0, hsm::store_read_request{}.encode());
+    BOOST_REQUIRE(raw.has_value());
+    const auto a = hsm::decode_store_read_answer(*raw);
+    BOOST_TEST((a.status == hsm::store_read_status::ok));
+    BOOST_TEST(a.seal_state.value_or(hsm::catalog_record{}).seal_epoch == 3U);
+    BOOST_TEST(a.catalog.tokens.size() == 1U);
+    BOOST_TEST((client.propose(l.url(), 1, bytes_of("cmd")).result == wire::status::ok));
+    // Without the store-client entry it is a stranger: refused before the
+    // host is asked.
+    listener closed(host, policy(), server_cert, pki.ca_path());
+    const auto before = host.store_reads;
+    BOOST_TEST(!client.store_read(closed.url(), 0, hsm::store_read_request{}.encode()));
+    BOOST_TEST(host.store_reads == before);
 }
 
 BOOST_AUTO_TEST_CASE(strangers_and_wrong_schemes_never_reach_the_host) {

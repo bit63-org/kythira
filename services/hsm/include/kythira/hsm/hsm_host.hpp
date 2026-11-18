@@ -61,6 +61,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <string>
 #include <string_view>
 #include <thread>
 #include <tuple>
@@ -266,6 +267,12 @@ public:
         -> bool override {
         const auto c = catalog_if_open();
         return c && c->may_open(identity, token_id);
+    }
+
+    /// Every binding of the catalog replica, as (identity, token).
+    [[nodiscard]] auto bindings() const -> std::vector<std::pair<std::string, std::uint64_t>> {
+        const auto c = catalog_if_open();
+        return c ? c->bindings() : std::vector<std::pair<std::string, std::uint64_t>>{};
     }
 
     [[nodiscard]] auto hosts(std::uint64_t token_id) const -> bool override {
