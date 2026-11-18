@@ -39,8 +39,8 @@ inline constexpr std::uint8_t ledger = 4;
 inline constexpr std::uint8_t iam = 5;
 inline constexpr std::uint8_t hsm = 6;
 inline constexpr std::uint8_t kms = 7;
-/// 8 and 9 are reserved for the S3 and SQS modules
-/// (.kiro/specs/s3-compatible-storage/, .kiro/specs/sqs-compatible-queues/).
+/// 8 is the S3 service's (.kiro/specs/s3-compatible-storage/).
+inline constexpr std::uint8_t sqs = 9;
 inline constexpr std::uint8_t sns = 10;
 /// The largest number a module may take: 255 would put the end of its
 /// range past 2^64.
