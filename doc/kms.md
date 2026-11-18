@@ -19,8 +19,9 @@ Check what that buys before you rely on it:
 A consumer's data is only as private as the consumer keeps it. Kinesis
 seals records before they reach its Raft log; DynamoDB seals item values
 when it applies a write, so its Raft log holds each write in the clear
-until the log is compacted, and item keys stay in the clear always (see
-[What reaches disk](#what-reaches-disk)).
+until the log is compacted, unless the node seals its Raft logs at rest
+(`KYTHIRA_RAFT_LOG_KMS`, [Raft logs at rest](#raft-logs-at-rest)). Item
+keys stay in the clear always (see [What reaches disk](#what-reaches-disk)).
 
 The module's design is in `services/kms/README.md` and
 `.kiro/specs/kms-compatible-api/`.
@@ -214,7 +215,7 @@ The consumers' own documents say how they use the keys:
 | KMS audit log | one CloudTrail-shaped line per request: caller, key ARN, encryption context keys (never values), outcome; no data |
 | Kinesis | records sealed before the gateway proposes them: the Raft log, segments and tiered objects hold ciphertext only |
 | DynamoDB engine | item values, LSI and GSI entries sealed; partition, sort and index key values in the clear |
-| DynamoDB Raft log, transaction intents | each write in the clear until the log is compacted and the transaction settles |
+| DynamoDB Raft log, transaction intents | each write in the clear until the log is compacted and the transaction settles; with `KYTHIRA_RAFT_LOG_KMS` set, the Raft log (every module's) is sealed at rest |
 | DynamoDB backups, archives, change records | sealed under the table's key |
 | DynamoDB exports | sealed under the KMS key `S3SseKmsKeyId` names when `S3SseAlgorithm=KMS`; otherwise as the bucket stores them (a Kythira bucket directory: in the clear) |
 
@@ -224,8 +225,34 @@ The container scenario that checks this
 and rootless Podman) writes to an encrypted table and stream and asks the
 KMS for data keys while one member is killed and another cut off, then
 searches every member's data directory: no data key or plaintext the KMS
-handled may appear anywhere, and no item or record value outside
-DynamoDB's Raft logs. It reports the Raft log files that hold values.
+handled may appear anywhere, and no item or record value in any file,
+Raft logs included (the layout sets `KYTHIRA_RAFT_LOG_KMS=local`).
+
+### Raft logs at rest
+
+Every module's Raft log segments and snapshot files can be sealed with
+AES-256-GCM under a per-node key ring (`.kiro/specs/raft-log-encryption/`,
+`include/raft/raft_log_kms.hpp`). Each data directory holds a
+`raft-log-keys` file with the data keys wrapped by the chosen provider;
+each is unwrapped once at start.
+
+| Variable | Meaning |
+|---|---|
+| `KYTHIRA_RAFT_LOG_KMS` | `off` (default), `local`, `aws`, or `kythira` (a KMS on another cluster only: a KMS cannot seal its own log) |
+| `KYTHIRA_RAFT_LOG_KMS_KEY_ID` | the KMS key that wraps the data keys (`aws`, `kythira`) |
+| `KYTHIRA_RAFT_LOG_PASSPHRASE` | `local`: every node's passphrase |
+| `KYTHIRA_RAFT_LOG_KMS_ENDPOINT`, `_REGION`, `_CA` | where the KMS is |
+| `KYTHIRA_RAFT_LOG_ENCRYPTION` | `seal` (default) or `decrypt_only` |
+
+Turning sealing on is a rolling restart: new records are sealed, old
+ones stay readable and age out with compaction. Turning it off is a
+restart with `KYTHIRA_RAFT_LOG_ENCRYPTION=decrypt_only` until compaction
+(or the engine's `rewrite_records()`) has removed the sealed records, then
+a restart with `KYTHIRA_RAFT_LOG_KMS=off`; a node refuses to load a log
+holding sealed records without its key ring. Nodes that seal and nodes
+that do not replicate with each other: sealing never changes the wire.
+DynamoDB, Kinesis, the KMS and the HSM read these settings; the ledger,
+IAM and Redis do not yet.
 
 ## Operating
 

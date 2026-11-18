@@ -790,6 +790,12 @@ if(FIU_FOUND)
     target_include_directories(raft_log_encryption_unit_test PRIVATE ${FIU_INCLUDE_DIRS})
 endif()
 
+# raft-log-encryption tasks 4 and 5: the key ring under the shared
+# kms_key_provider, the KYTHIRA_RAFT_LOG_* settings, one ring per data dir.
+add_raft_completion_test(raft_log_kms_test raft_log_kms_test.cpp)
+target_link_libraries(raft_log_kms_test PRIVATE OpenSSL::SSL OpenSSL::Crypto)
+set_tests_properties(raft_log_kms_test PROPERTIES LABELS "unit;persistence" TIMEOUT 120)
+
 # .kiro/specs/durable-append-barrier/ — the barrier-coverage, crash, group-commit
 # and ordering tests. Drives a real `node<Types>` over a file-backed engine, so
 # it is registered beside file_persistence_unit_test rather than with the

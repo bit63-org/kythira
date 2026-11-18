@@ -38,13 +38,13 @@
 // item and record must then read back, and once the members stop, no data
 // key the KMS returned and no plaintext the test encrypted may appear in
 // any member's data directory. Item and record values are searched for
-// too, everywhere but DynamoDB's Raft logs: Kinesis seals a record before
-// it proposes it, but DynamoDB seals a value when it applies the write (an
-// UpdateItem's result is known only then), so the log entry that carries
-// a write holds it in the clear until compaction removes it, which
-// doc/kms.md states. The test reports, without failing, which Raft log
-// files hold values. Item keys stay in the clear by design (the engine
-// orders by them), so only values carry the searched-for text.
+// too, in every file. DynamoDB seals a value only when it applies the
+// write (an UpdateItem's result is known only then), so this layout seals
+// every module's Raft logs at rest (KYTHIRA_RAFT_LOG_KMS=local,
+// .kiro/specs/raft-log-encryption/): without that, the log entry carrying
+// a write would hold its value in the clear until compaction. Item keys
+// stay in the clear by design (the engine orders by them), so only values
+// carry the searched-for text.
 //
 // Not registered in CTest: it needs Docker or rootless Podman and runs
 // through the docker-hsm-chaos-tests target.
@@ -77,7 +77,6 @@
 #include <initializer_list>
 #include <iostream>
 #include <iterator>
-#include <map>
 #include <mutex>
 #include <optional>
 #include <set>
@@ -461,14 +460,6 @@ auto files_under(const fs::path& root) -> std::vector<std::pair<fs::path, std::s
     return out;
 }
 
-/// A DynamoDB Raft log segment (`dynamodb/raft/<group>/log.<n>`), where a
-/// write's command sits as it was proposed.
-auto is_raft_log(const fs::path& p) -> bool {
-    const auto raft = p.parent_path().parent_path();
-    return raft.filename() == "raft" && raft.parent_path().filename() == "dynamodb" &&
-           p.filename().string().starts_with("log.");
-}
-
 void run_encrypted_writes(container_cluster& cl) {
     // A TLS write to a member killed mid-request must fail the call, not
     // end the test with SIGPIPE.
@@ -683,7 +674,6 @@ void run_encrypted_writes(container_cluster& cl) {
     BOOST_TEST(!files.empty());
     std::size_t leaked_secrets = 0;
     std::size_t leaked_values = 0;
-    std::map<std::string, std::size_t> logged_values;
     std::vector<std::string> needles;
     for (const std::string prefix : {"hsm-chaos-item-", "hsm-chaos-record-"}) {
         const auto value = prefix + tag;
@@ -705,17 +695,10 @@ void run_encrypted_writes(container_cluster& cl) {
             if (bytes.find(needle) == std::string::npos) {
                 continue;
             }
-            if (is_raft_log(path)) {
-                ++logged_values[fs::relative(path, scan).string()];
-            } else {
-                ++leaked_values;
-                BOOST_TEST_MESSAGE("a written value is in " << path);
-            }
+            ++leaked_values;
+            BOOST_TEST_MESSAGE("a written value is in " << path);
             break;
         }
-    }
-    for (const auto& entry : logged_values) {
-        BOOST_TEST_MESSAGE("Raft log with values in the clear: " << entry.first);
     }
     BOOST_TEST(leaked_secrets == 0U);
     BOOST_TEST(leaked_values == 0U);

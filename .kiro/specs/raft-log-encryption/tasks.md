@@ -25,19 +25,21 @@
     (with task 5, where a service node is the natural fixture)
   - _Requirements: 4.4-4.6, 5.1, 5.2_
 
-- [ ] 4. KMS adapter (needs the shared `kms_key_provider`, PR #837)
+- [x] 4. KMS adapter (needs the shared `kms_key_provider`, PR #837)
   - `include/raft/raft_log_kms.hpp`: `from_kms(key_provider, key_id, node)`
   - Tests with the local provider and a fake per-caller provider
   - _Requirements: 3.3_
 
 - [ ] 5. Service node wiring
-  - `KYTHIRA_RAFT_LOG_KMS` / `KYTHIRA_RAFT_LOG_KMS_KEY_ID` read once per
-    node; one key ring passed to every group's engine in each module
-  - Refuse a co-located `kythira` provider for the KMS's own groups
-  - Operator docs (`doc/`), CHANGELOG
+  - [x] `KYTHIRA_RAFT_LOG_KMS` / `KYTHIRA_RAFT_LOG_KMS_KEY_ID` read once
+    per node; one key ring per data directory passed to every group's
+    engine: DynamoDB, Kinesis, the KMS and the HSM
+  - [x] `kythira` needs an endpoint (a KMS cannot seal its own log)
+  - [x] Operator docs (`doc/kms.md`, "Raft logs at rest")
+  - [ ] The ledger, IAM and Redis modules
   - _Requirements: 6.1_
 
-- [ ] 6. Chaos scan without the Raft-log exception
+- [x] 6. Chaos scan without the Raft-log exception
   - Turn on log encryption in `encrypted_services_in_kythira_node`'s
     layouts and remove its `is_raft_log` exception, failing on any value
   - _Requirements: 6.2_
