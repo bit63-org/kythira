@@ -17,7 +17,7 @@ builds it to that spec's design. Each task is one PR unless noted.
     rekey in `hsm_ctl` and the admin API
   - _Requirements: 1.2, 5.1-5.5, 7.2_
 
-- [ ] 3. Remote store with seal-carrying barriers
+- [x] 3. Remote store with seal-carrying barriers
   - `remote_hsm_store` over an extended `hsm_peer` store API; reads with
     the barrier; seal state on every answer and an idle watch; proposals
     without onward forwarding

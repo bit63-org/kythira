@@ -6,5 +6,5 @@
 # (cmd/hsm_node) and tests that stand up an in-process cluster may be listed.
 #
 # file                                         allowed core *_impl.hpp       why
-tests/hsm_host_test.cpp                        multi_raft_impl.hpp           stands up in-process hosts
+tests/hsm_raft_cluster.hpp                     multi_raft_impl.hpp           in-process cluster for host and store tests
 cmd/hsm_node/hsm_module.hpp                    multi_raft_impl.hpp           instantiates the module's multi-raft host

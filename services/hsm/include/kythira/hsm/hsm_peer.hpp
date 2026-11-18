@@ -9,10 +9,19 @@
 //
 //   POST /v1/peer/propose/<local group>      body: the command
 //   POST /v1/peer/read-index/<local group>   body: empty
+//   POST /v1/peer/store-read/<local group>   body: a store_read_request
 //
-// Both answer 200 with an encoded forward_reply (status, applied index,
-// the known leader's id as text, the state machine's reply), or 403 to a
-// caller that is not a member, 400 to a malformed request.
+// The first two answer 200 with an encoded forward_reply (status, applied
+// index, the known leader's id as text, the state machine's reply); the
+// third, the store API for crypto nodes outside the groups
+// (store_api.hpp), answers an encoded store_read_answer. All answer 403
+// to a caller that is neither a member nor a store client, 400 to a
+// malformed request.
+//
+// Store clients (.kiro/specs/hsm-independent-layers/ Requirement 7.2) are
+// the crypto nodes that are not members: they may propose and read, as a
+// member's session layer does, but are not members, so the share routes
+// (node_unseal.hpp) stay closed to them.
 //
 // A peer's proposal can change any token (a PIN, an object), so only the
 // other members may send one: the listener asks for client certificates,
@@ -25,6 +34,7 @@
 #include <kythira/hsm/codec.hpp>
 #include <kythira/hsm/hsm_host.hpp>
 #include <kythira/hsm/mtls_client.hpp>
+#include <kythira/hsm/store_api.hpp>
 
 #include <boost/asio/connect.hpp>
 #include <boost/asio/io_context.hpp>
@@ -153,6 +163,10 @@ struct peer_policy {
     std::set<std::string> identities;
     /// Accept peer requests on a plaintext listener (tests only).
     bool allow_plaintext = false;
+    /// Crypto nodes outside the groups that may use the store API
+    /// (propose, read-index, store-read) but nothing else. Last, so the
+    /// existing aggregate initializers keep their meaning.
+    std::set<std::string> store_clients;
 };
 
 /// What the listener knows of a caller: the verified certificate's SANs.
@@ -163,8 +177,10 @@ struct peer_caller {
     std::vector<std::string> dns_sans;
 };
 
-/// Whether `caller` is a member under `policy`.
-[[nodiscard]] inline auto is_member(const peer_policy& policy, const peer_caller& caller) -> bool {
+/// Whether `caller` presents one of `identities` under `policy`.
+[[nodiscard]] inline auto presents_one_of(const peer_policy& policy,
+                                          const std::set<std::string>& identities,
+                                          const peer_caller& caller) -> bool {
     if (!caller.tls) {
         return policy.allow_plaintext;
     }
@@ -173,12 +189,23 @@ struct peer_caller {
     }
     for (const auto* sans : {&caller.uri_sans, &caller.dns_sans}) {
         for (const auto& san : *sans) {
-            if (policy.identities.contains(san)) {
+            if (identities.contains(san)) {
                 return true;
             }
         }
     }
     return false;
+}
+
+/// Whether `caller` is a member under `policy`.
+[[nodiscard]] inline auto is_member(const peer_policy& policy, const peer_caller& caller) -> bool {
+    return presents_one_of(policy, policy.identities, caller);
+}
+
+/// Whether `caller` may use the store API: a member or a store client.
+[[nodiscard]] inline auto may_use_store(const peer_policy& policy, const peer_caller& caller)
+    -> bool {
+    return is_member(policy, caller) || presents_one_of(policy, policy.store_clients, caller);
 }
 
 /// An answer to a peer request: the HTTP status and body.
@@ -195,15 +222,26 @@ template<typename HsmHost, typename ToText>
                               std::string_view body, ToText&& to_text)
     -> std::optional<peer_answer> {
     const bool propose = target.starts_with(peer_propose_path);
-    if (!propose && !target.starts_with(peer_read_index_path)) {
+    const bool store_read = target.starts_with(peer_store_read_path);
+    if (!propose && !store_read && !target.starts_with(peer_read_index_path)) {
         return std::nullopt;
     }
-    if (!is_member(policy, caller)) {
+    if (!may_use_store(policy, caller)) {
         return peer_answer{403, "not a member"};
     }
-    const auto group = peer_group_of(target, propose ? peer_propose_path : peer_read_index_path);
+    const auto prefix = propose      ? peer_propose_path
+                        : store_read ? peer_store_read_path
+                                     : peer_read_index_path;
+    const auto group = peer_group_of(target, prefix);
     if (method != "POST" || !group) {
         return peer_answer{400, "malformed peer request"};
+    }
+    if (store_read) {
+        const auto request = store_read_request::decode(body);
+        if (!request) {
+            return peer_answer{400, "malformed store read"};
+        }
+        return peer_answer{200, encode_store_read_answer(serve_store_read(host, *group, *request))};
     }
     if (propose) {
         std::vector<std::byte> cmd(body.size());
@@ -239,6 +277,20 @@ public:
     [[nodiscard]] auto read_index(std::string_view base_url, std::uint64_t group) const
         -> forward_reply<std::string> {
         return post(base_url, std::string(peer_read_index_path) + std::to_string(group), {});
+    }
+
+    /// A store read of local group `group` on the store member at
+    /// `base_url` (store_api.hpp): the encoded answer, or nothing when the
+    /// member is unreachable or refuses.
+    [[nodiscard]] auto store_read(std::string_view base_url, std::uint64_t group,
+                                  std::string request) const -> std::optional<std::string> {
+        auto res = _client.request(
+            "POST", base_url, std::string(peer_store_read_path) + std::to_string(group),
+            std::move(request), "application/octet-stream", "kythira-hsm-peer");
+        if (!res || res->first != 200) {
+            return std::nullopt;
+        }
+        return std::move(res->second);
     }
 
     /// Hands a node-mode share (binary form) to the member at `base_url`
