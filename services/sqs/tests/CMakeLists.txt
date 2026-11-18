@@ -66,4 +66,38 @@ set_tests_properties(
 # memory_kv_engine, with a seeded model check that rebuilds replicas mid-run.
 kythira_sqs_test(sqs_queue_state_machine_test sqs_queue_state_machine_test.cpp)
 
+# Task 3: both protocols (the recorded client traffic replayed through the
+# codec), errors in both, the action table, static roles and the
+# compatibility profile (Requirements 2.2, 2.3, 3.1, 3.3).
+kythira_sqs_test(sqs_codec_test sqs_codec_test.cpp)
+target_compile_definitions(sqs_codec_test PRIVATE
+    KYTHIRA_SQS_EVIDENCE_DIR="${_sqs_dir}tests/evidence/data")
+
+# Task 3: the checked-in model, query-name and action headers are what their
+# generators make of the pinned inputs, so an upgrade of any input carries
+# its regenerated header and diff.
+add_test(NAME sqs_model_header_fresh
+    COMMAND "${Python3_EXECUTABLE}" "${KYTHIRA_AWS_JSON_SHAPES_GENERATOR}"
+            model/service-2.json
+            include/kythira/sqs/model/sqs_model.hpp
+            --namespace kythira::sqs::sqs_model
+            --label services/sqs/model/service-2.json
+            --check
+    WORKING_DIRECTORY "${KYTHIRA_SQS_SOURCE_DIR}")
+add_test(NAME sqs_query_names_header_fresh
+    COMMAND "${Python3_EXECUTABLE}" tools/gen_query_names.py
+            model/service-2.json model/query/service-2.json
+            include/kythira/sqs/model/sqs_query_names.hpp --check
+    WORKING_DIRECTORY "${KYTHIRA_SQS_SOURCE_DIR}")
+add_test(NAME sqs_actions_header_fresh
+    COMMAND "${Python3_EXECUTABLE}" tools/gen_sqs_actions.py
+            tools/sqs-service-reference.json
+            include/kythira/sqs/sqs_actions.hpp --check
+    WORKING_DIRECTORY "${KYTHIRA_SQS_SOURCE_DIR}")
+set_tests_properties(
+    sqs_model_header_fresh
+    sqs_query_names_header_fresh
+    sqs_actions_header_fresh
+    PROPERTIES LABELS "unit;sqs;sqs-module" TIMEOUT 60)
+
 kythira_scale_test_timeouts()
