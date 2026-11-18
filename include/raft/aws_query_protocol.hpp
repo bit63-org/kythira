@@ -359,16 +359,17 @@ private:
 /// `<{Action}Response xmlns=ns><{Action}Result>result</{Action}Result>
 /// <ResponseMetadata><RequestId/></ResponseMetadata></{Action}Response>`.
 /// An empty `result` leaves the Result element out, as AWS does for
-/// actions that return nothing (DeleteUser and the like).
+/// actions that return nothing (DeleteUser and the like), unless
+/// `always_result` is set for an action whose output shape is merely empty.
 [[nodiscard]] inline auto response_xml(std::string_view action, std::string_view ns,
-                                       std::string_view result, std::string_view request_id)
-    -> std::string {
+                                       std::string_view result, std::string_view request_id,
+                                       bool always_result = false) -> std::string {
     std::string out = "<";
     out += action;
     out += "Response xmlns=\"";
     out += xml_escape(ns);
     out += "\">";
-    if (!result.empty()) {
+    if (always_result || !result.empty()) {
         out += "<";
         out += action;
         out += "Result>";
