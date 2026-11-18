@@ -125,9 +125,22 @@ PR unless noted.
     until task 12 makes cross-group moves transactions
   - _Requirements: 7.1-7.3_
 
-- [ ] 7. Encryption
+- [x] 7. Encryption
   - SSE-SQS default and SSE-KMS through `kms_key_provider`, sealing in the
     front end
+  - Done: `sqs_sse.hpp`. The front end seals body and attributes with
+    AES-256-GCM before proposing (digests and the dedup hash over the
+    plaintext first), so logs, engines and snapshots hold ciphertext.
+    Envelope data keys per queue, reused for
+    `KmsDataKeyReusePeriodSeconds`; each sealed message carries its
+    wrapped key, so it opens on any front end, after a move to another
+    queue, and after the queue's encryption changes. Provider failures
+    answer as `Kms*` errors. Providers: SSE-SQS wraps under a cluster
+    master key (`SQS_SSE_KEY_FILE`, else derived from
+    `SQS_FORWARD_SECRET`); SSE-KMS through `SQS_KMS=local` (passphrase).
+    The provider interface has the shape of the shared `kms_key_provider`;
+    the `kythira` and `aws` providers come when the KMS spec's task 16
+    moves that library out of Kinesis
   - _Requirements: 8.1, 8.2_
 
 - [ ] 8. Partitioning and throughput

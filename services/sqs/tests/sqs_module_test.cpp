@@ -364,6 +364,17 @@ BOOST_AUTO_TEST_CASE(a_durable_node_refuses_settings_that_would_break_handles) {
 
     std::ofstream(dir.path / "receipts") << "0 " << std::string(32, 'r') << "\n";
     env["SQS_RECEIPT_KEYS_FILE"] = (dir.path / "receipts").string();
+    // SSE-SQS is on by default: messages must open after a restart.
+    e = m.configure(lookup);
+    BOOST_TEST_REQUIRE(e.has_value());
+    BOOST_TEST(e->find("SQS_SSE_KEY_FILE or SQS_FORWARD_SECRET") != std::string::npos);
+    std::ofstream(dir.path / "sse") << std::string(32, 's') << "\n";
+    env["SQS_SSE_KEY_FILE"] = (dir.path / "sse").string();
+    env["SQS_KMS"] = "local";
+    e = m.configure(lookup);
+    BOOST_TEST_REQUIRE(e.has_value());
+    BOOST_TEST(e->find("SQS_KMS_PASSPHRASE_FILE") != std::string::npos);
+    env.erase("SQS_KMS");
     env["KYTHIRA_NODE_PEERS"] = "1=127.0.0.1:7400,2=127.0.0.1:7401";
     env["SQS_LISTEN"] = "127.0.0.1:9324";
     e = m.configure(lookup);

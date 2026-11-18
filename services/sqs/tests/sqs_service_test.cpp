@@ -18,6 +18,7 @@
 #include <kythira/sqs/sqs_front_end.hpp>
 #include <kythira/sqs/sqs_messages.hpp>
 #include <kythira/sqs/sqs_service.hpp>
+#include <kythira/sqs/sqs_sse.hpp>
 #include <kythira/sqs/sqs_workers.hpp>
 
 #include <raft/static_key_authorizer.hpp>
@@ -78,8 +79,34 @@ struct reply {
     }
 };
 
+/// SSE-KMS for tests: wraps like a real provider, but key ids under
+/// `alias/denied` are refused as a key policy would.
+struct test_kms {
+    sqs::wrapping_provider wrap{sqs::derived_key("test-kms", "master")};
+    auto generate_data_key(const std::string& id, const sqs::encryption_context& c)
+        -> sqs::generated_data_key {
+        refuse(id);
+        auto k = wrap.generate_data_key(id, c);
+        k._key_id = "arn:aws:kms:us-east-1:111122223333:key/" + id.substr(id.rfind('/') + 1);
+        return k;
+    }
+    auto decrypt_data_key(const std::string& id, const std::string& w,
+                          const sqs::encryption_context& c) -> sqs::data_key_bytes {
+        refuse(id);
+        return wrap.decrypt_data_key(id, w, c);
+    }
+    static void refuse(const std::string& id) {
+        if (id.starts_with("alias/denied")) {
+            throw sqs::kms_error(sqs::kms_failure::access_denied, "denied by key policy");
+        }
+    }
+};
+
 struct fixture {
     std::uint64_t now = 1'800'000'000'000;
+    std::shared_ptr<sqs::sse_keys> sse = std::make_shared<sqs::sse_keys>(
+        sqs::key_provider(sqs::wrapping_provider(sqs::derived_key("cluster", "sse"))),
+        sqs::key_provider(test_kms{}));
     sqs::local_queue_cluster cluster{[this] { return now; }};
     az::static_key_authorizer auth{std::vector<az::static_key>{
                                        {"AKIDADMIN", std::string(k_secret), std::string(k_account),
@@ -96,6 +123,7 @@ struct fixture {
             sqs::sqs_front_end_config{}, auth);
         sqs::sqs_service_config cfg;
         cfg._receipt_keys = sqs::derived_receipt_key("forwarding-secret");
+        cfg._sse = sse;
         service = std::make_unique<sqs::sqs_service<sqs::local_queue_cluster>>(cluster, cfg);
         service->register_with(*fe);
     }
@@ -802,4 +830,108 @@ BOOST_FIXTURE_TEST_CASE(a_move_task_fails_when_its_destination_is_gone, mover) {
     const auto listed = tasks("dlq");
     BOOST_TEST(listed[0].at("Status").as_string() == "FAILED");
     BOOST_TEST(!listed[0].at("FailureReason").as_string().empty());
+}
+
+// -- task 7: encryption -----------------------------------------------------------
+
+namespace {
+
+/// The stored bodies of a queue's visible messages, as the replica holds them.
+auto stored_bodies(fixture& f, const std::string& name) -> std::vector<std::string> {
+    const auto q = f.service->find(k_account, name);
+    BOOST_REQUIRE(q.has_value());
+    std::vector<std::string> out;
+    for (std::uint16_t p = 0; p < q->_partitions; ++p) {
+        const auto t = q->target(p);
+        (void)f.cluster.read(sqs::queue_keys::partition_prefix(t),
+                             [&](const sqs::local_queue_cluster::state_machine_type& sm) {
+                                 for (const auto& [seq, m] : sm.visible_messages(t, 100)) {
+                                     out.push_back(m.body + m.attributes);
+                                 }
+                             });
+    }
+    return out;
+}
+
+}  // namespace
+
+BOOST_FIXTURE_TEST_CASE(new_queues_hold_only_ciphertext, fixture) {
+    const auto url = create("secret");
+    BOOST_TEST(attributes(url).at("SqsManagedSseEnabled").as_string() == "true");
+    const json::object attrs{{"colour", {{"DataType", "String"}, {"StringValue", "plum-red"}}}};
+    const auto sent = send(url, "attack at dawn", {{"MessageAttributes", attrs}});
+    BOOST_TEST_REQUIRE(sent.status == 200U);
+    const auto stored = stored_bodies(*this, "secret");
+    BOOST_TEST_REQUIRE(stored.size() == 1U);
+    BOOST_TEST(sqs::is_sealed(stored[0]));
+    BOOST_TEST(stored[0].find("attack at dawn") == std::string::npos);
+    BOOST_TEST(stored[0].find("plum-red") == std::string::npos);
+    // The client sees plaintext and digests over it.
+    const auto got = receive(url, 10, {{"MessageAttributeNames", json::array{"All"}}});
+    BOOST_TEST_REQUIRE(got.size() == 1U);
+    BOOST_TEST(field(got[0], "Body") == "attack at dawn");
+    BOOST_TEST(field(got[0], "MD5OfBody") == sent.str("MD5OfMessageBody"));
+    BOOST_TEST(field(got[0], "MD5OfMessageAttributes") == sent.str("MD5OfMessageAttributes"));
+    BOOST_TEST(got[0].at("MessageAttributes").at("colour").at("StringValue").as_string() ==
+               "plum-red");
+}
+
+BOOST_FIXTURE_TEST_CASE(sse_can_be_off_and_changes_keep_messages_readable, fixture) {
+    const auto url = create("plain", {{"SqsManagedSseEnabled", "false"}});
+    BOOST_TEST_REQUIRE(send(url, "in the clear").status == 200U);
+    BOOST_TEST(stored_bodies(*this, "plain") == std::vector<std::string>{"in the clear"});
+    // Turned on, then to SSE-KMS: every message still opens.
+    BOOST_TEST_REQUIRE(call("SetQueueAttributes",
+                            {{"QueueUrl", url}, {"Attributes", {{"SqsManagedSseEnabled", "true"}}}})
+                           .status == 200U);
+    BOOST_TEST_REQUIRE(send(url, "managed").status == 200U);
+    BOOST_TEST_REQUIRE(call("SetQueueAttributes",
+                            {{"QueueUrl", url}, {"Attributes", {{"KmsMasterKeyId", "alias/app"}}}})
+                           .status == 200U);
+    BOOST_TEST_REQUIRE(send(url, "kms").status == 200U);
+    std::vector<std::string> bodies;
+    for (const auto& m : receive(url)) {
+        bodies.push_back(field(m, "Body"));
+    }
+    std::sort(bodies.begin(), bodies.end());
+    BOOST_TEST((bodies == std::vector<std::string>{"in the clear", "kms", "managed"}));
+}
+
+BOOST_FIXTURE_TEST_CASE(data_keys_are_reused_for_the_reuse_period, fixture) {
+    const auto url =
+        create("busy", {{"KmsMasterKeyId", "alias/app"}, {"KmsDataKeyReusePeriodSeconds", "60"}});
+    const auto before = sse->provider_calls();
+    for (int i = 0; i < 5; ++i) {
+        BOOST_TEST_REQUIRE(send(url, "m" + std::to_string(i)).status == 200U);
+    }
+    BOOST_TEST(receive(url).size() == 5U);
+    // One data key generated; opening needed no provider call.
+    BOOST_TEST(sse->provider_calls() - before == 1U);
+    now += 61'000;
+    BOOST_TEST_REQUIRE(send(url, "later").status == 200U);
+    BOOST_TEST(sse->provider_calls() - before == 2U);
+}
+
+BOOST_FIXTURE_TEST_CASE(kms_refusals_are_answered_as_sqs_kms_errors, fixture) {
+    const auto url = create("locked", {{"KmsMasterKeyId", "alias/denied"}});
+    const auto r = send(url, "nope");
+    BOOST_TEST(r.status == 400U);
+    BOOST_TEST(r.type() == "com.amazonaws.sqs#KmsAccessDenied");
+    const auto q = query("Action=SendMessage&QueueUrl=" + url + "&MessageBody=nope");
+    // The query-era model predates the Kms* errors, so the query code is
+    // the shape's name (task 13's recorded responses pin it).
+    BOOST_TEST(q.body.find("<Code>KmsAccessDenied</Code>") != std::string::npos);
+}
+
+BOOST_FIXTURE_TEST_CASE(sealed_messages_open_after_a_dead_letter_move, fixture) {
+    const auto dlq = create("vault-dlq", {{"KmsMasterKeyId", "alias/other"}});
+    const auto url = create("vault", {{"RedrivePolicy", redrive_to("vault-dlq", 1)}});
+    BOOST_TEST_REQUIRE(send(url, "kept secret").status == 200U);
+    BOOST_TEST_REQUIRE(receive(url, 10, {{"VisibilityTimeout", 1}}).size() == 1U);
+    now += 1500;
+    BOOST_TEST_REQUIRE(receive(url).empty());
+    BOOST_TEST(sqs::is_sealed(stored_bodies(*this, "vault-dlq").at(0)));
+    const auto moved = receive(dlq);
+    BOOST_TEST_REQUIRE(moved.size() == 1U);
+    BOOST_TEST(field(moved[0], "Body") == "kept secret");
 }
