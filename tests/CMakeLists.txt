@@ -5558,6 +5558,29 @@ else()
     message(STATUS "beast_https_server_test: skipped (requires certificate_authority)")
 endif()
 
+# Chunk reads and writes between nodes (chunk_service.hpp;
+# .kiro/specs/s3-compatible-storage/ task 2): the local access, the routes,
+# and the remote access over mutual TLS against a real listener, with
+# certificates from the test CA.
+if(TARGET certificate_authority)
+    add_executable(chunk_service_test chunk_service_test.cpp)
+    target_link_libraries(chunk_service_test PRIVATE
+        Boost::unit_test_framework
+        certificate_authority
+        OpenSSL::SSL
+        OpenSSL::Crypto
+        Threads::Threads
+    )
+    target_compile_features(chunk_service_test PRIVATE cxx_std_23)
+    add_test(NAME chunk_service_test COMMAND chunk_service_test)
+    set_tests_properties(chunk_service_test PROPERTIES
+        TIMEOUT 120
+        LABELS "unit;https;persistence;s3"
+    )
+else()
+    message(STATUS "chunk_service_test: skipped (requires certificate_authority)")
+endif()
+
 # HTTP/2 in the core HTTPS server (h2_server_session.hpp; Kinesis task 13):
 # h2c and h2 over TLS, multiplexing, streamed bodies, resets and shutdown,
 # driven by the nghttp2 client in h2_test_client.hpp.

@@ -47,6 +47,9 @@ on:
       - "Kconfig"
       - "CMakeLists.txt"
       - ".github/workflows/s3-module.yml"
+      # The core chunk store the service keeps object bytes in (task 2).
+      - "include/raft/chunk_store.hpp"
+      - "include/raft/chunk_service.hpp"
   pull_request:
     branches: ['**']
     # Keep in step with the push list above.
@@ -62,6 +65,9 @@ on:
       - "Kconfig"
       - "CMakeLists.txt"
       - ".github/workflows/s3-module.yml"
+      # The core chunk store the service keeps object bytes in (task 2).
+      - "include/raft/chunk_store.hpp"
+      - "include/raft/chunk_service.hpp"
   workflow_dispatch:
 
 permissions:
