@@ -45,6 +45,15 @@
 /// produces as one chunk, until `next` says the body is complete (Kinesis
 /// `SubscribeToShard` event streams). The connection closes after it.
 ///
+/// **Certificate rotation.** With `tls_source` set, the identity and the
+/// client trust bundle come from a `tls_material_source` instead of files,
+/// and every material it publishes builds a fresh TLS context that the next
+/// handshake uses; connections already open keep the context they started
+/// with. `reload_tls()` does the same on demand, re-reading the files when
+/// no source is set. A reload that fails (unreadable files, a key that does
+/// not match) keeps the current context and is logged as a warning
+/// (`.kiro/specs/kinesis-independent-layers/` Requirement 7.5).
+///
 /// **HTTP/2.** With `http2` set, and where the build has nghttp2
 /// (KYTHIRA_HAS_NGHTTP2), the server also speaks HTTP/2: over TLS when ALPN
 /// picks "h2" (offered before "http/1.1"), and in plaintext when a client
@@ -55,6 +64,7 @@
 
 #include <raft/asio_listeners.hpp>
 #include <raft/http_connection_gate.hpp>
+#include <raft/tls_material_source.hpp>
 
 #if defined(KYTHIRA_HAS_NGHTTP2)
 #include <raft/h2_server_session.hpp>
@@ -67,6 +77,8 @@
 #include <boost/beast/ssl.hpp>
 
 #include <openssl/bn.h>
+#include <openssl/err.h>
+#include <openssl/pem.h>
 #include <openssl/ssl.h>
 #include <openssl/x509v3.h>
 
@@ -103,6 +115,12 @@ struct server_config {
     std::string tls_key_path;
     /// When set, clients may present a certificate chained to this bundle.
     std::string client_ca_path;
+    /// When set, the server's identity and client trust bundle come from
+    /// here instead of `tls_cert_path`/`tls_key_path` (which may then be
+    /// empty), and rotate on every publish (see the file comment). The
+    /// material's roots, when not empty, are trusted for client
+    /// certificates alongside `client_ca_path`.
+    std::shared_ptr<kythira::tls_material_source> tls_source;
     /// Serve plaintext HTTP instead of HTTPS. For tests only; start() logs a
     /// warning every time.
     bool insecure_plaintext{false};
@@ -165,6 +183,9 @@ struct server_stats {
     std::atomic<std::uint64_t> connections_accepted{0};
     std::atomic<std::uint64_t> connections_rejected{0};
     std::atomic<std::uint64_t> handshake_failures{0};
+    /// TLS contexts built after the first: certificate rotations.
+    std::atomic<std::uint64_t> tls_reloads{0};
+    std::atomic<std::uint64_t> tls_reload_failures{0};
 };
 
 namespace detail {
@@ -288,35 +309,20 @@ public:
                 "https server: PLAINTEXT listener (--insecure-plaintext); credentials and "
                 "signatures cross the network unencrypted. For tests only.");
         } else {
-            if (_config.tls_cert_path.empty() || _config.tls_key_path.empty()) {
+            if (!_config.tls_source &&
+                (_config.tls_cert_path.empty() || _config.tls_key_path.empty())) {
                 throw std::invalid_argument("https server: a certificate and key are required");
             }
-            _ssl_ctx = std::make_shared<ssl::context>(ssl::context::tls_server);
-            _ssl_ctx->set_options(ssl::context::default_workarounds | ssl::context::no_sslv2 |
-                                  ssl::context::no_sslv3 | ssl::context::no_tlsv1 |
-                                  ssl::context::no_tlsv1_1);
-            SSL_CTX_set_min_proto_version(_ssl_ctx->native_handle(), TLS1_2_VERSION);
-#if defined(KYTHIRA_HAS_NGHTTP2)
-            if (_config.http2) {
-                SSL_CTX_set_alpn_select_cb(_ssl_ctx->native_handle(), &select_alpn, nullptr);
+            if (_config.tls_source && _config.tls_source->generation() == 0) {
+                throw std::invalid_argument(
+                    "https server: the TLS material source has published nothing yet");
             }
-#endif
-            _ssl_ctx->use_certificate_chain_file(_config.tls_cert_path);
-            _ssl_ctx->use_private_key_file(_config.tls_key_path, ssl::context::pem);
-            if (!_config.client_ca_path.empty()) {
-                _ssl_ctx->load_verify_file(_config.client_ca_path);
-                // Ask, do not require: verify_peer without
-                // verify_fail_if_no_peer_cert.
-                _ssl_ctx->set_verify_mode(ssl::verify_peer);
-                // Session resumption would skip the client-certificate
-                // check on a resumed connection's context: keep it simple
-                // and off.
-                SSL_CTX_set_session_cache_mode(_ssl_ctx->native_handle(), SSL_SESS_CACHE_OFF);
-                SSL_CTX_set_options(_ssl_ctx->native_handle(), SSL_OP_NO_TICKET);
-                static constexpr std::string_view sid = "kythira-https";
-                SSL_CTX_set_session_id_context(_ssl_ctx->native_handle(),
-                                               reinterpret_cast<const unsigned char*>(sid.data()),
-                                               static_cast<unsigned int>(sid.size()));
+            set_ssl_context(build_ssl_context());
+            if (_config.tls_source) {
+                _tls_subscription = _config.tls_source->subscribe(
+                    [this](const std::shared_ptr<const kythira::tls_material>&, std::uint64_t) {
+                        try_reload("material published");
+                    });
             }
         }
 #if !defined(KYTHIRA_HAS_NGHTTP2)
@@ -338,6 +344,7 @@ public:
 
     /// Stops accepting, ends every connection and joins every thread.
     void stop() {
+        _tls_subscription.reset();
         if (!_running.exchange(false)) {
             return;
         }
@@ -378,6 +385,23 @@ public:
     [[nodiscard]] auto port() const noexcept -> std::uint16_t { return _port; }
     [[nodiscard]] auto stats() const noexcept -> const server_stats& { return _stats; }
 
+    /// Rebuilds the TLS context from `tls_source`'s current material, or
+    /// from the certificate files when there is no source, for every later
+    /// handshake. Throws, keeping the current context, when the new
+    /// material does not load. A no-op on a plaintext server.
+    void reload_tls() {
+        if (_config.insecure_plaintext || !current_ssl_context()) {
+            return;
+        }
+        try {
+            set_ssl_context(build_ssl_context());
+            ++_stats.tls_reloads;
+        } catch (...) {
+            ++_stats.tls_reload_failures;
+            throw;
+        }
+    }
+
     /// Answers requests with a streaming body (see the file comment). Set
     /// before `start()`.
     void set_stream_handler(stream_handler h) { _stream_handler = std::move(h); }
@@ -395,6 +419,103 @@ private:
         int fd = -1;  // for stop(); -1 once the stream no longer owns it
         http_detail::connection_gate::slot slot;
     };
+
+    /// Builds a server context from the source's material or the files.
+    [[nodiscard]] auto build_ssl_context() const -> std::shared_ptr<boost::asio::ssl::context> {
+        namespace ssl = boost::asio::ssl;
+        auto ctx = std::make_shared<ssl::context>(ssl::context::tls_server);
+        ctx->set_options(ssl::context::default_workarounds | ssl::context::no_sslv2 |
+                         ssl::context::no_sslv3 | ssl::context::no_tlsv1 |
+                         ssl::context::no_tlsv1_1);
+        SSL_CTX_set_min_proto_version(ctx->native_handle(), TLS1_2_VERSION);
+#if defined(KYTHIRA_HAS_NGHTTP2)
+        if (_config.http2) {
+            SSL_CTX_set_alpn_select_cb(ctx->native_handle(), &select_alpn, nullptr);
+        }
+#endif
+        bool client_trust = false;
+        if (_config.tls_source) {
+            const auto m = _config.tls_source->current();
+            if (!m || m->certificate_chain_pem.empty() || m->private_key_pem.empty()) {
+                throw std::invalid_argument("https server: the TLS material has no identity");
+            }
+            ctx->use_certificate_chain(boost::asio::buffer(m->certificate_chain_pem.data(),
+                                                           m->certificate_chain_pem.size()));
+            ctx->use_private_key(
+                boost::asio::buffer(m->private_key_pem.data(), m->private_key_pem.size()),
+                ssl::context::pem);
+            if (!m->root_certificates_pem.empty()) {
+                add_trust_bundle(*ctx, m->root_certificates_pem);
+                client_trust = true;
+            }
+        } else {
+            ctx->use_certificate_chain_file(_config.tls_cert_path);
+            ctx->use_private_key_file(_config.tls_key_path, ssl::context::pem);
+        }
+        if (!_config.client_ca_path.empty()) {
+            ctx->load_verify_file(_config.client_ca_path);
+            client_trust = true;
+        }
+        if (client_trust) {
+            // Ask, do not require: verify_peer without
+            // verify_fail_if_no_peer_cert.
+            ctx->set_verify_mode(ssl::verify_peer);
+            // Session resumption would skip the client-certificate check on
+            // a resumed connection's context: keep it simple and off.
+            SSL_CTX_set_session_cache_mode(ctx->native_handle(), SSL_SESS_CACHE_OFF);
+            SSL_CTX_set_options(ctx->native_handle(), SSL_OP_NO_TICKET);
+            static constexpr std::string_view sid = "kythira-https";
+            SSL_CTX_set_session_id_context(ctx->native_handle(),
+                                           reinterpret_cast<const unsigned char*>(sid.data()),
+                                           static_cast<unsigned int>(sid.size()));
+        }
+        return ctx;
+    }
+
+    /// Adds every certificate in `pem` to the context's verify store.
+    /// `ssl::context::add_certificate_authority` takes only the first
+    /// certificate of a buffer, and a trust bundle may hold several roots.
+    static void add_trust_bundle(boost::asio::ssl::context& ctx, const std::string& pem) {
+        std::unique_ptr<BIO, kythira::tls_material_detail::bio_deleter> bio(
+            BIO_new_mem_buf(pem.data(), static_cast<int>(pem.size())));
+        if (!bio) {
+            throw std::runtime_error("https server: cannot read the trust bundle");
+        }
+        X509_STORE* store = SSL_CTX_get_cert_store(ctx.native_handle());
+        int added = 0;
+        while (X509* cert = PEM_read_bio_X509(bio.get(), nullptr, nullptr, nullptr)) {
+            const int ok = X509_STORE_add_cert(store, cert);
+            X509_free(cert);
+            if (ok != 1) {
+                throw std::runtime_error("https server: cannot trust a bundle certificate");
+            }
+            ++added;
+        }
+        ERR_clear_error();  // the loop ends on "no start line"
+        if (added == 0) {
+            throw std::invalid_argument("https server: the trust bundle holds no certificate");
+        }
+    }
+
+    void set_ssl_context(std::shared_ptr<boost::asio::ssl::context> ctx) {
+        const std::lock_guard lock(_ssl_mu);
+        _ssl_ctx = std::move(ctx);
+    }
+
+    [[nodiscard]] auto current_ssl_context() const -> std::shared_ptr<boost::asio::ssl::context> {
+        const std::lock_guard lock(_ssl_mu);
+        return _ssl_ctx;
+    }
+
+    void try_reload(std::string_view why) {
+        try {
+            reload_tls();
+            debug(std::string("https server: TLS context reloaded (") + std::string(why) + ")");
+        } catch (const std::exception& e) {
+            warn(std::string("https server: TLS reload failed, keeping the current certificate: ") +
+                 e.what());
+        }
+    }
 
     void warn(std::string_view m) const {
         if (_log) {
@@ -476,8 +597,8 @@ private:
                 c->fd = -1;
             };
             try {
-                if (_ssl_ctx) {
-                    tls_stream stream(plain_stream(std::move(mine)), *_ssl_ctx);
+                if (auto ctx = current_ssl_context()) {
+                    tls_stream stream(plain_stream(std::move(mine)), *ctx);
                     serve_stream(*c, stream);
                 } else {
                     plain_stream stream(std::move(mine));
@@ -794,7 +915,9 @@ private:
     std::atomic<bool> _running{false};
     std::uint16_t _port{0};
     boost::asio::io_context _accept_ioc;
+    mutable std::mutex _ssl_mu;
     std::shared_ptr<boost::asio::ssl::context> _ssl_ctx;
+    kythira::tls_material_source::subscription _tls_subscription;
     std::shared_ptr<http_detail::connection_gate> _gate;
     std::vector<std::shared_ptr<tcp::acceptor>> _acceptors;
     std::vector<std::thread> _accept_threads;
