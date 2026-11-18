@@ -45,8 +45,10 @@
 /// Encrypted queues (task 7): a send seals body and attributes after the
 /// digests are taken; a receive opens them (`sqs_sse.hpp`).
 ///
-/// Not yet here: partition growth, throttling and fair queues (task 8). FIFO `ReceiveRequestAttemptId` is accepted and
-/// not yet honoured.
+/// Throughput (task 8): FIFO request rates and in-flight limits as SQS
+/// keeps them; partitions grow through the grow worker
+/// (`sqs_workers.hpp`), fair receives are the state machine's. FIFO
+/// `ReceiveRequestAttemptId` is accepted and not yet honoured.
 
 #include <kythira/sqs/sqs_catalog.hpp>
 #include <kythira/sqs/sqs_cluster.hpp>
@@ -79,6 +81,7 @@
 #include <functional>
 #include <limits>
 #include <map>
+#include <mutex>
 #include <optional>
 #include <set>
 #include <span>
@@ -390,6 +393,13 @@ private:
     Cluster& _cluster;
     sqs_service_config _config;
     std::atomic<std::uint64_t> _rotation{0};
+    /// FIFO request-rate buckets, by queue id and operation family.
+    struct rate_bucket {
+        std::uint64_t _last_ms = 0;
+        double _tokens = 0;
+    };
+    std::mutex _throttle_mutex;
+    std::map<std::string, rate_bucket> _throttle;
 
     // -- plumbing ---------------------------------------------------------------
 
@@ -447,6 +457,43 @@ private:
 
     [[nodiscard]] auto next_rotation() -> std::uint64_t {
         return _rotation.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    /// SQS's FIFO request rates (Requirement 9.3), when the profile keeps
+    /// them: 300 requests a second per queue for each of send, receive and
+    /// delete (a batch is one request), and in high-throughput mode that
+    /// much per partition. Counted by each front end on its own: with
+    /// several, a queue takes that rate through each, so Kythira never
+    /// refuses a request SQS would take, but may take some SQS would
+    /// refuse.
+    [[nodiscard]] auto throttled(const queue_record& q, std::string_view family)
+        -> std::optional<aws_json::error> {
+        if (!q._settings._fifo || !profile_of(q)._fifo_throughput_limits) {
+            return std::nullopt;
+        }
+        const double rate =
+            300.0 *
+            (high_throughput_fifo(q._settings) ? std::max<std::uint16_t>(q._partitions, 1) : 1);
+        const auto now = _cluster.now_ms();
+        const std::scoped_lock lock(_throttle_mutex);
+        if (_throttle.size() > 65536) {
+            _throttle.clear();  // forgetting refills: only ever lenient
+        }
+        auto& b = _throttle[std::to_string(q._id) + "/" + std::string(family)];
+        b._tokens =
+            b._last_ms == 0
+                ? rate
+                : std::min(rate,
+                           b._tokens + rate * static_cast<double>(now - std::min(now, b._last_ms)) /
+                                           1000.0);
+        b._last_ms = now;
+        if (b._tokens < 1.0) {
+            return modeled_error("RequestThrottled",
+                                 "Request is throttled: the queue's request rate for this action "
+                                 "is exceeded.");
+        }
+        b._tokens -= 1.0;
+        return std::nullopt;
     }
 
     /// Checks a `RedrivePolicy`'s target: an existing queue of the same
@@ -1069,6 +1116,15 @@ private:
                 if (auto e = apply_attributes(s, attrs, false, profile_of(q))) {
                     return e;
                 }
+                // A high-throughput FIFO queue spans partitions, each with
+                // its own deduplication records: queue-wide deduplication
+                // would need them in one place (sqs_catalog.hpp).
+                if (s._fifo && q._partitions > 1 && s._dedup_scope != "messageGroup") {
+                    return service_detail::invalid_value(
+                        "DeduplicationScope", s._dedup_scope,
+                        "This queue was created for high throughput; its deduplication scope "
+                        "must stay messageGroup.");
+                }
                 if (attrs.contains("RedrivePolicy")) {
                     return check_redrive(s, q._account, ctx._queue->_arn);
                 }
@@ -1363,6 +1419,9 @@ private:
         if (!q) {
             return q.error();
         }
+        if (auto e = throttled(*q, "send")) {
+            return *e;
+        }
         auto prepared = prepare_send(ctx, *q, in);
         if (!prepared) {
             return prepared.error();
@@ -1442,6 +1501,9 @@ private:
         const auto q = queue_of(ctx);
         if (!q) {
             return q.error();
+        }
+        if (auto e = throttled(*q, "send")) {
+            return *e;
         }
         const auto entries = batch_entries(in, "SendMessageBatchRequestEntry", profile_of(*q));
         if (!entries) {
@@ -1567,6 +1629,33 @@ private:
         const auto q = queue_of(ctx);
         if (!q) {
             return q.error();
+        }
+        if (auto e = throttled(*q, "receive")) {
+            return *e;
+        }
+        // SQS's in-flight limits: a standard queue answers OverLimit, a
+        // FIFO queue no messages. Counted from this replica, so
+        // approximate, as SQS's own counts are.
+        {
+            const auto profile = profile_of(*q);
+            const auto limit =
+                q->_settings._fifo ? profile._max_inflight_fifo : profile._max_inflight_standard;
+            std::uint64_t in_flight = 0;
+            for (std::uint16_t p = 0; p < std::max<std::uint16_t>(q->_partitions, 1); ++p) {
+                const auto t = q->target(p);
+                (void)_cluster.read(
+                    queue_keys::partition_prefix(t),
+                    [&](const state_machine_type& sm) { in_flight += sm.counts(t).not_visible; });
+            }
+            if (in_flight >= limit) {
+                if (q->_settings._fifo) {
+                    return boost::json::object{};
+                }
+                return modeled_error("OverLimit",
+                                     "Too many messages in flight: the queue has reached its "
+                                     "limit of " +
+                                         std::to_string(limit) + " in-flight messages.");
+            }
         }
         const auto max = int_member(in, "MaxNumberOfMessages").value_or(1);
         if (max < 1 || max > 10) {
@@ -1785,6 +1874,11 @@ private:
         if (!q) {
             return q.error();
         }
+        if (op == queue_command::kind::delete_) {
+            if (auto e = throttled(*q, "delete")) {
+                return *e;
+            }
+        }
         receipt_request r;
         r._token = std::string(service_detail::string_member(in, "ReceiptHandle").value_or(""));
         if (r._token.empty()) {
@@ -1809,6 +1903,11 @@ private:
         const auto q = queue_of(ctx);
         if (!q) {
             return q.error();
+        }
+        if (op == queue_command::kind::delete_) {
+            if (auto e = throttled(*q, "delete")) {
+                return *e;
+            }
         }
         const auto entries = batch_entries(in, entry_shape, profile_of(*q));
         if (!entries) {

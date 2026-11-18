@@ -20,3 +20,10 @@ builds it.
 
 | Operation | Planned | Reason | Error |
 |---|---|---|---|
+
+## Behaviour that differs from SQS
+
+| Behaviour | SQS | Kythira | Why |
+|---|---|---|---|
+| `DeduplicationScope` back to `queue` on a high-throughput FIFO queue | allowed (with `FifoThroughputLimit` back to `perQueue`) | `InvalidAttributeValue` | A high-throughput queue spans 16 partitions, each with its own deduplication records, and a group always maps to one partition. Queue-wide deduplication would need the records in one place; moving groups would break their order. Create a new queue instead. |
+| FIFO request rates (300 a second per action, per partition in high-throughput mode) | per queue | per queue on each front end | Each front end counts its own requests, so Kythira never refuses a request SQS would take but may take some SQS would refuse. `kythira:compat:fifo-throughput=off` turns the limit off. |

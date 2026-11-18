@@ -232,6 +232,10 @@ auto serve() -> int {
         s::move_worker<s::local_queue_cluster> mover(
             cluster, [](const std::string&) { return true; }, s::sqs_arn_queue);
         mover.start();
+        // Standard queues' partitions grow with their send rates.
+        s::grow_worker<s::local_queue_cluster> grower(cluster,
+                                                      [](const std::string&) { return true; });
+        grower.start();
         s::sqs_service_config sc;
         sc._receipt_keys = receipt_keys(opt);
         sc._sse = s::node_sse_keys(

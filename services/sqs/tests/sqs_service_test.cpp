@@ -935,3 +935,142 @@ BOOST_FIXTURE_TEST_CASE(sealed_messages_open_after_a_dead_letter_move, fixture) 
     BOOST_TEST_REQUIRE(moved.size() == 1U);
     BOOST_TEST(field(moved[0], "Body") == "kept secret");
 }
+
+// -- task 8: partitioning and throughput ------------------------------------------
+
+BOOST_FIXTURE_TEST_CASE(fifo_queues_keep_sqs_request_rates, fixture) {
+    const auto url =
+        create("rated.fifo", {{"FifoQueue", "true"}, {"ContentBasedDeduplication", "true"}});
+    int accepted = 0;
+    int throttled = 0;
+    for (int i = 0; i < 310; ++i) {
+        const auto r = send(url, "m" + std::to_string(i), {{"MessageGroupId", "g"}});
+        if (r.status == 200U) {
+            ++accepted;
+        } else {
+            BOOST_TEST(r.type() == "com.amazonaws.sqs#RequestThrottled");
+            ++throttled;
+        }
+    }
+    BOOST_TEST(accepted == 300);
+    BOOST_TEST(throttled == 10);
+    // Receives have their own budget; the send budget refills with time.
+    BOOST_TEST(call("ReceiveMessage", {{"QueueUrl", url}}).status == 200U);
+    now += 100;
+    BOOST_TEST(send(url, "later", {{"MessageGroupId", "g"}}).status == 200U);
+    // A standard queue, and a FIFO queue with the limits switched off, are
+    // not throttled.
+    const auto plain = create("unrated");
+    const auto relaxed =
+        create("relaxed.fifo", {{"FifoQueue", "true"}, {"ContentBasedDeduplication", "true"}});
+    BOOST_TEST_REQUIRE(call("TagQueue", {{"QueueUrl", relaxed},
+                                         {"Tags", {{"kythira:compat:fifo-throughput", "off"}}}})
+                           .status == 200U);
+    for (int i = 0; i < 310; ++i) {
+        BOOST_TEST_REQUIRE(send(plain, "m").status == 200U);
+        BOOST_TEST_REQUIRE(
+            send(relaxed, "m" + std::to_string(i), {{"MessageGroupId", "g"}}).status == 200U);
+    }
+}
+
+BOOST_FIXTURE_TEST_CASE(in_flight_limits_answer_as_sqs_does, fixture) {
+    const auto url = create("busy");
+    const auto fifo =
+        create("busy.fifo", {{"FifoQueue", "true"}, {"ContentBasedDeduplication", "true"}});
+    for (const auto& u : {url, fifo}) {
+        BOOST_TEST_REQUIRE(call("TagQueue", {{"QueueUrl", u},
+                                             {"Tags",
+                                              {{"kythira:compat:inflight-standard", "2"},
+                                               {"kythira:compat:inflight-fifo", "2"}}}})
+                               .status == 200U);
+        for (int i = 0; i < 4; ++i) {
+            BOOST_TEST_REQUIRE(
+                send(u, "m" + std::to_string(i), {{"MessageGroupId", "g" + std::to_string(i)}})
+                    .status == 200U);
+        }
+        BOOST_TEST_REQUIRE(receive(u, 2).size() == 2U);
+    }
+    const auto r = call("ReceiveMessage", {{"QueueUrl", url}});
+    BOOST_TEST(r.status == 403U);  // the model's status for OverLimit
+    BOOST_TEST(r.type() == "com.amazonaws.sqs#OverLimit");
+    // FIFO: no error, no messages.
+    BOOST_TEST(receive(fifo).empty());
+}
+
+BOOST_FIXTURE_TEST_CASE(high_throughput_fifo_spans_partitions, fixture) {
+    const auto ht = create("ht.fifo", {{"FifoQueue", "true"},
+                                       {"ContentBasedDeduplication", "true"},
+                                       {"DeduplicationScope", "messageGroup"},
+                                       {"FifoThroughputLimit", "perMessageGroupId"}});
+    BOOST_TEST(service->find(k_account, "ht.fifo")->_partitions == 16U);
+    // SQS refuses perMessageGroupId without per-group deduplication.
+    BOOST_TEST(call("CreateQueue",
+                    {{"QueueName", "half.fifo"},
+                     {"Attributes",
+                      {{"FifoQueue", "true"}, {"FifoThroughputLimit", "perMessageGroupId"}}}})
+                   .status == 400U);
+    // Each group keeps its order across the partitions.
+    for (int i = 0; i < 3; ++i) {
+        for (const auto* g : {"a", "b", "c", "d"}) {
+            BOOST_TEST_REQUIRE(
+                send(ht, std::string(g) + std::to_string(i), {{"MessageGroupId", g}}).status ==
+                200U);
+        }
+    }
+    std::map<std::string, std::vector<std::string>> by_group;
+    for (int round = 0; round < 12; ++round) {
+        const auto got = receive(ht, 10, {{"VisibilityTimeout", 0}});
+        for (const auto& m : got) {
+            by_group[field(m, "Body").substr(0, 1)].push_back(field(m, "Body"));
+            BOOST_TEST_REQUIRE(call("DeleteMessage", {{"QueueUrl", ht},
+                                                      {"ReceiptHandle", field(m, "ReceiptHandle")}})
+                                   .status == 200U);
+        }
+    }
+    BOOST_TEST(by_group.size() == 4U);
+    for (const auto& [g, bodies] : by_group) {
+        BOOST_TEST((bodies == std::vector<std::string>{g + "0", g + "1", g + "2"}));
+    }
+    // Queue-wide deduplication cannot span its partitions, even with the
+    // throughput limit back to perQueue (which SQS would allow).
+    const auto r = call(
+        "SetQueueAttributes",
+        {{"QueueUrl", ht},
+         {"Attributes", {{"DeduplicationScope", "queue"}, {"FifoThroughputLimit", "perQueue"}}}});
+    BOOST_TEST(r.status == 400U);
+    BOOST_TEST(r.str("message").find("high throughput") != std::string::npos);
+}
+
+BOOST_FIXTURE_TEST_CASE(standard_queues_grow_with_their_send_rate, fixture) {
+    const auto url = create("growing");
+    const auto fifo =
+        create("fixed.fifo", {{"FifoQueue", "true"}, {"ContentBasedDeduplication", "true"}});
+    sqs::grow_worker<sqs::local_queue_cluster> grower(
+        cluster, [](const std::string&) { return true; }, {std::chrono::milliseconds(1000), 5.0});
+    BOOST_TEST(grower.run_once() == 0U);  // the first sample
+    for (int i = 0; i < 30; ++i) {
+        BOOST_TEST_REQUIRE(send(url, "m" + std::to_string(i)).status == 200U);
+        BOOST_TEST_REQUIRE(send(fifo, "m" + std::to_string(i), {{"MessageGroupId", "g"}}).status ==
+                           200U);
+    }
+    now += 1000;
+    // 30 sends in a second over 4 partitions is 7.5 a partition: grow.
+    BOOST_TEST(grower.run_once() == 1U);
+    BOOST_TEST(service->find(k_account, "growing")->_partitions == 8U);
+    BOOST_TEST(service->find(k_account, "fixed.fifo")->_partitions == 1U);
+    // The old messages are still received, and new sends reach the new
+    // partitions.
+    for (int i = 0; i < 16; ++i) {
+        BOOST_TEST_REQUIRE(send(url, "n" + std::to_string(i)).status == 200U);
+    }
+    std::size_t total = 0;
+    for (int i = 0; i < 10; ++i) {
+        total += receive(url).size();
+    }
+    BOOST_TEST(total == 46U);
+    // A quiet second does not grow it again.
+    now += 1000;
+    BOOST_TEST(grower.run_once() == 0U);
+    now += 1000;
+    BOOST_TEST(grower.run_once() == 0U);
+}
