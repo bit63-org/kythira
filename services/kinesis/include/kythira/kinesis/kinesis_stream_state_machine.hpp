@@ -1078,7 +1078,7 @@ public:
     using map_type = std::map<std::string, entry, std::less<>>;
 
     stream_state_machine() = default;
-    explicit stream_state_machine(record_segment_store* store, segment_fetcher fetch = {})
+    explicit stream_state_machine(segment_store* store, segment_fetcher fetch = {})
         : _store(store), _fetch(std::move(fetch)) {}
 
     // ---- kythira::state_machine -------------------------------------------
@@ -1294,7 +1294,7 @@ public:
     /// the fetcher that installs a segment from the group's peers. Readers
     /// copy a shard's state under the cluster's read and then read the
     /// store outside it, so `GetRecords` file I/O never holds up `apply()`.
-    [[nodiscard]] auto store() const noexcept -> record_segment_store* { return _store; }
+    [[nodiscard]] auto store() const noexcept -> segment_store* { return _store; }
     [[nodiscard]] auto fetcher() const -> const segment_fetcher& { return _fetch; }
 
     /// The id the next `CreateStream` gets.
@@ -1568,7 +1568,7 @@ private:
             } else {
                 payloads.push_back(encode_stored_record(r._partition_key, r._data));
             }
-            if (_store != nullptr && payloads.back().size() > _store->options()._max_record_bytes) {
+            if (_store != nullptr && payloads.back().size() > _store->max_record_bytes()) {
                 return {._status = apply_status::invalid};
             }
             bytes += payloads.back().size();
@@ -2102,7 +2102,7 @@ private:
     }
 
     map_type _map;
-    record_segment_store* _store = nullptr;
+    segment_store* _store = nullptr;
     segment_fetcher _fetch;
     LogIndex _last_applied_index{};
 };

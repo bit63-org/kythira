@@ -7,7 +7,7 @@ any order; 6 needs 2, 4 and 5; 7 needs 6; 8 needs 3 and 6; 9-11 need 1 and
 4; 12, 13, 15 and 16 need the rest of their layer; 14 needs 13 and
 every role (7, 8, 10).
 
-- [ ] 1. `segment_store` interface in core
+- [x] 1. `segment_store` interface in core
   - `include/raft/segment_store.hpp`: abstract class with the store's
     write and read sides; `record_segment_store` derives from it
   - Kinesis `stream_state_machine`, DynamoDB `item_state_machine`,

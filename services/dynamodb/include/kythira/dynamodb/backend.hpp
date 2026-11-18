@@ -145,7 +145,7 @@ public:
     /// go to `change_log` (task 15); without one, DynamoDB Streams list
     /// shards that never hold a record.
     explicit local_backend(Engine& engine, clock_fn clock = system_clock_ms(),
-                           kythira::record_segment_store* change_log = nullptr,
+                           kythira::segment_store* change_log = nullptr,
                            kythira::key_range items = prefix_range("t/"))
         : _clock(std::move(clock)) {
         _catalog.open(engine, catalog_range());

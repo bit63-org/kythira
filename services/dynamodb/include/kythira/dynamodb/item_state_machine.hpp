@@ -567,8 +567,7 @@ public:
     /// on the node, and how to fetch a segment from a peer. Without a store
     /// the group still keeps its change log state, so replicas agree, but
     /// keeps no records (unit tests that need none).
-    auto set_change_log(kythira::record_segment_store* store, change_log_fetcher fetch = {})
-        -> void {
+    auto set_change_log(kythira::segment_store* store, change_log_fetcher fetch = {}) -> void {
         _log = store;
         _fetch = std::move(fetch);
     }
@@ -2071,7 +2070,7 @@ private:
     };
     mutable size_cache _sizes;
     /// The node's change record store (task 15), or none.
-    kythira::record_segment_store* _log = nullptr;
+    kythira::segment_store* _log = nullptr;
     change_log_fetcher _fetch;
     std::optional<change_log_state> _log_state;
     /// The change records of the open batch, appended at commit.

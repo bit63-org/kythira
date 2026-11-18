@@ -80,7 +80,7 @@ template<typename Cluster>
 requires stream_cluster<Cluster> && leads_keys<Cluster>
 class stream_maintenance {
 public:
-    stream_maintenance(Cluster& cluster, record_segment_store& store, tier_store tier,
+    stream_maintenance(Cluster& cluster, segment_store& store, tier_store tier,
                        fetched_segments& fetched, maintenance_config config = {})
         : _cluster(cluster),
           _store(store),
@@ -110,7 +110,7 @@ private:
     };
 
     Cluster& _cluster;
-    record_segment_store& _store;
+    segment_store& _store;
     tier_store _tier;
     fetched_segments& _fetched;
     maintenance_config _config;
