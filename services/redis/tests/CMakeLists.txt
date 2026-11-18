@@ -152,6 +152,19 @@ if(folly_FOUND)
     kythira_redis_test(redis_gateway_snapshot_test redis_gateway_snapshot_test.cpp)
     target_link_libraries(redis_gateway_snapshot_test PRIVATE OpenSSL::SSL OpenSSL::Crypto)
     set_tests_properties(redis_gateway_snapshot_test PROPERTIES LABELS "multi-raft;redis;txn" TIMEOUT 600)
+    # The differential harness's recordings (redis-general-data-types
+    # task 14 scaffold) replayed against the same snapshot-isolation
+    # cluster, so a command change is checked against Redis 7.2 and
+    # Valkey 8 in plain CTest, with no containers.
+    kythira_redis_test(redis_differential_replay_test
+                       differential/redis_differential_replay_test.cpp)
+    target_include_directories(redis_differential_replay_test PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/differential")
+    target_compile_definitions(redis_differential_replay_test PRIVATE
+        KYTHIRA_REDIS_DIFF_RECS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/differential/recs")
+    target_link_libraries(redis_differential_replay_test PRIVATE OpenSSL::SSL OpenSSL::Crypto)
+    set_tests_properties(redis_differential_replay_test PROPERTIES
+        LABELS "multi-raft;redis;txn" TIMEOUT 600)
 else()
     message(STATUS "redis_gateway_integration_test: skipped (requires folly)")
 endif()
@@ -204,6 +217,18 @@ set_tests_properties(multi_raft_performance_report_persistence PROPERTIES
     TIMEOUT 900
     WORKING_DIRECTORY "${CMAKE_BINARY_DIR}/tests"
 )
+
+# The differential harness (.kiro/specs/redis-general-data-types/ task 14's
+# scaffold): its reply parser, seeded generator, comparison rules and the
+# committed Redis 7.2 / Valkey 8 recordings, checked without containers. The
+# container run against live servers is docker/'s
+# docker-redis-differential-tests.
+kythira_redis_test(redis_differential_unit_test differential/redis_differential_unit_test.cpp)
+target_include_directories(redis_differential_unit_test PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/differential")
+target_compile_definitions(redis_differential_unit_test PRIVATE
+    KYTHIRA_REDIS_DIFF_RECS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/differential/recs")
+set_tests_properties(redis_differential_unit_test PROPERTIES LABELS "unit;redis" TIMEOUT 120)
 
 # The container scenarios, under the guard tests/docker_chaos/ is entered with.
 if(TARGET Folly::folly AND Boost_FOUND AND httplib_FOUND)

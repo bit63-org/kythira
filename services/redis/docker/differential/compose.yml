@@ -1,0 +1,95 @@
+# Copyright (c) 2026 Clark Rawlins
+# SPDX-License-Identifier: Apache-2.0
+
+# The Redis differential suite's servers
+# (.kiro/specs/redis-general-data-types/ Requirement 23.2), for
+# services/redis/tests/differential/redis_differential_test.cpp: the two
+# reference servers and a three-node co-located Kythira gateway cluster.
+#
+# CLAUDE.md's container rules, as they apply here:
+#
+#   * **No static IPs.** Raft peers and gateway forwarding address each
+#     other by service name.
+#   * **No fixed host ports.** Each service publishes 6379 on the loopback
+#     port the test picked with tests/test_ports.hpp and passed in as
+#     KYTHIRA_DIFF_PORT_<SERVICE>; running this file by hand needs those
+#     variables set.
+#   * **No runtime named anywhere.** The test drives this file through
+#     `container_runtime()` / `compose_prefix()`.
+#   * **No capabilities, no privileged or host networking.**
+#
+# The Kythira image is kythira-txn-chaos:dev (redis_gateway_node_snapshot,
+# built with CONFIG_REDIS_GATEWAY_TRANSACTIONS), because the stream runs
+# MULTI/EXEC, WATCH, MSET and MGET. Shared gateway settings are in
+# kythira.env so other layouts can reuse them.
+#
+# Reference images are pinned by digest (the multi-arch index) like every
+# other upstream image here. KYTHIRA_DIFF_REGISTRY swaps the registry, e.g.
+# mirror.gcr.io/ where Docker Hub rate-limits library images.
+
+name: kythira-redis-differential
+
+x-reference-args: &reference-args
+  # No persistence, and the same `ops` user Kythira's acl.txt defines.
+  command: ["--save", "", "--appendonly", "no",
+            "--user", "ops", "on", ">ops-secret", "~*", "&*", "+@all"]
+
+x-gateway: &gateway
+  image: kythira-txn-chaos:dev
+  env_file: kythira.env
+  volumes:
+    - ./acl.txt:/etc/kythira/acl.txt:ro
+  networks:
+    - differential_net
+
+x-gateway-env: &gateway-env
+  KYTHIRA_PEERS: "1=http://kv1:7000,2=http://kv2:7000,3=http://kv3:7000"
+  KYTHIRA_REDIS_PEER_GATEWAYS: "1=kv1:6379,2=kv2:6379,3=kv3:6379"
+
+services:
+  redis:
+    <<: *reference-args
+    image: ${KYTHIRA_DIFF_REGISTRY:-docker.io/}library/redis:7.2@sha256:5b816bb37d9707a70f10ef5002ecf8ee431750d397010fc4314c93dca887962f
+    networks:
+      - differential_net
+    ports:
+      - "127.0.0.1:${KYTHIRA_DIFF_PORT_REDIS:?set by the test}:6379"
+
+  valkey:
+    <<: *reference-args
+    image: ${KYTHIRA_DIFF_REGISTRY:-docker.io/}valkey/valkey:8.0@sha256:04b9002ae24bbe66687fb025052ed9bcebb54f8da3937338eb718d98d362887f
+    networks:
+      - differential_net
+    ports:
+      - "127.0.0.1:${KYTHIRA_DIFF_PORT_VALKEY:?set by the test}:6379"
+
+  kv1:
+    <<: *gateway
+    hostname: kv1
+    environment:
+      <<: *gateway-env
+      KYTHIRA_NODE_ID: "1"
+    ports:
+      - "127.0.0.1:${KYTHIRA_DIFF_PORT_KV1:-0}:6379"
+
+  kv2:
+    <<: *gateway
+    hostname: kv2
+    environment:
+      <<: *gateway-env
+      KYTHIRA_NODE_ID: "2"
+    ports:
+      - "127.0.0.1:${KYTHIRA_DIFF_PORT_KV2:-0}:6379"
+
+  kv3:
+    <<: *gateway
+    hostname: kv3
+    environment:
+      <<: *gateway-env
+      KYTHIRA_NODE_ID: "3"
+    ports:
+      - "127.0.0.1:${KYTHIRA_DIFF_PORT_KV3:-0}:6379"
+
+networks:
+  differential_net:
+    driver: bridge

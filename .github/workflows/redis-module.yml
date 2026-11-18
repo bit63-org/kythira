@@ -540,6 +540,23 @@ jobs:
         if: success() || failure()
         run: cmake --build build --target docker-txn-chaos-tests -j"$(nproc)"
 
+      # The differential suite (redis-general-data-types task 14's
+      # scaffold): the same image as the step above, against Redis 7.2 and
+      # Valkey 8. The difference table and recordings are uploaded below
+      # whatever the verdict.
+      - name: docker-redis-differential-tests
+        id: differential
+        if: success() || failure()
+        run: cmake --build build --target docker-redis-differential-tests -j"$(nproc)"
+
+      - name: Upload the differential table and recordings
+        if: always() && steps.differential.outcome != 'skipped'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: redis-differential-${{ matrix.runtime }}
+          path: build/redis-differential-out/
+          if-no-files-found: ignore
+
       # Rolling upgrade (redis-gateway-module task 7): build the gateway
       # from the last commit before Redis moved into services/redis/ and
       # mix it with this tree's build in one cluster. The old tree is
