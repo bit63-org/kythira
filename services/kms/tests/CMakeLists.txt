@@ -214,6 +214,16 @@ else()
     message(STATUS "kms_backing_softhsm_test: no SoftHSM2, not registered")
 endif()
 
+# kms-independent-layers task 3, Requirements 1.1, 2.1-2.4 and 4.2:
+# KYTHIRA_KMS_ROLES and what follows from it (who is a catalog member, who
+# holds the HSM PIN, the bounded-staleness switch).
+if(TARGET kythira_kms_node_common)
+    kythira_kms_test(kms_node_config_test kms_node_config_test.cpp)
+    target_link_libraries(kms_node_config_test PRIVATE kythira_kms_node_common)
+    set_tests_properties(kms_node_config_test PROPERTIES
+        LABELS "unit;kms;kms-module" TIMEOUT 60)
+endif()
+
 # Task 1: kms_node links and checks its model.
 add_test(NAME kms_node_self_test COMMAND kms_node --self-test)
 set_tests_properties(kms_node_self_test PROPERTIES
@@ -234,6 +244,13 @@ if(KYTHIRA_KMS_NODE_DAEMON)
     set_tests_properties(kms_node_refuses_other_services PROPERTIES
         ENVIRONMENT "KYTHIRA_SERVICES=kms,redis;KYTHIRA_NODE_ID=1;KYTHIRA_NODE_DATA_DIR=${CMAKE_CURRENT_BINARY_DIR}/refuses;KYTHIRA_NODE_INSECURE_PLAINTEXT=1"
         PASS_REGULAR_EXPRESSION "kms_node runs kms, hsm and iam only"
+        LABELS "unit;kms;kms-module" TIMEOUT 30)
+    # kms-independent-layers Requirement 2.4: a role set the node cannot
+    # serve stops it at start with the reason.
+    add_test(NAME kms_node_refuses_a_lone_gateway COMMAND kms_node)
+    set_tests_properties(kms_node_refuses_a_lone_gateway PROPERTIES
+        ENVIRONMENT "KYTHIRA_SERVICES=kms;KYTHIRA_KMS_ROLES=gateway;KYTHIRA_NODE_ID=1;KYTHIRA_NODE_DATA_DIR=${CMAKE_CURRENT_BINARY_DIR}/lone-gateway;KYTHIRA_NODE_INSECURE_PLAINTEXT=1"
+        PASS_REGULAR_EXPRESSION "a gateway needs the front_end role"
         LABELS "unit;kms;kms-module" TIMEOUT 30)
     add_test(NAME kms_node_needs_kms COMMAND kms_node)
     set_tests_properties(kms_node_needs_kms PROPERTIES
