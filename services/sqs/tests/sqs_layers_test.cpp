@@ -152,6 +152,43 @@ struct data_node {
     }
 };
 
+/// One signed SQS JSON call to the listener on `port`; its body, after
+/// checking the status is `want`.
+auto api_call(std::uint16_t port, std::string_view op, const json::object& in, unsigned want = 200,
+              bool good_signature = true) -> json::object {
+    const auto body = json::serialize(in);
+    std::vector<std::pair<std::string, std::string>> headers{
+        {"Content-Type", "application/x-amz-json-1.0"},
+        {"Host", "localhost:9324"},
+        {"X-Amz-Date", "20261118T120000Z"},
+        {"X-Amz-Target", "AmazonSQS." + std::string(op)}};
+    auto all = headers;
+    auto auth = authorization("POST", "/", headers, body);
+    if (!good_signature) {
+        auth.back() = auth.back() == '0' ? '1' : '0';
+    }
+    all.emplace_back("Authorization", auth);
+    boost::asio::io_context io;
+    boost::beast::tcp_stream stream(io);
+    stream.connect(
+        boost::asio::ip::tcp::endpoint(boost::asio::ip::make_address("127.0.0.1"), port));
+    http::request<http::string_body> req{http::verb::post, "/", 11};
+    for (const auto& [k, v] : all) {
+        req.set(k, v);
+    }
+    req.body() = body;
+    req.prepare_payload();
+    http::write(stream, req);
+    boost::beast::flat_buffer buf;
+    http::response<http::string_body> res;
+    http::read(stream, buf, res);
+    BOOST_TEST_INFO(op << " -> " << res.body());
+    BOOST_TEST(res.result_int() == want);
+    boost::system::error_code ec;
+    auto v = json::parse(res.body(), ec);
+    return !ec && v.is_object() ? v.as_object() : json::object{};
+}
+
 /// A front end without the data role over `remote`.
 struct front_end_node {
     std::unique_ptr<az::static_key_authorizer> auth = make_auth();
@@ -160,15 +197,22 @@ struct front_end_node {
     std::unique_ptr<sqs::sqs_http_handler<front_end_t>> handler;
     std::unique_ptr<kythira::https::server> server;
 
+    /// @param behind_gateway Serve gateways' authenticated calls instead
+    ///        of the client API.
     explicit front_end_node(sqs::remote_queue_cluster& remote,
-                            sqs::availability_hub* waits = nullptr) {
+                            sqs::availability_hub* waits = nullptr, bool behind_gateway = false) {
         fe = std::make_unique<front_end_t>(sqs::sqs_front_end_config{}, *auth);
         sqs::sqs_service_config sc;
         sc._receipt_keys = sqs::derived_receipt_key(k_forward_secret);
         sc._waits = waits;
         service = std::make_unique<sqs::sqs_service<sqs::remote_queue_cluster>>(remote, sc);
         service->register_with(*fe);
-        handler = std::make_unique<sqs::sqs_http_handler<front_end_t>>(*fe, "", nullptr);
+        handler = std::make_unique<sqs::sqs_http_handler<front_end_t>>(
+            *fe, behind_gateway ? std::string(k_forward_secret) : std::string(), nullptr);
+        if (behind_gateway) {
+            handler->set_serve_calls(true);
+            handler->set_client_api(false);
+        }
         server = start_server(
             [this](const kythira::https::request& r, const kythira::https::request_context& c) {
                 return (*handler)(r, c);
@@ -181,32 +225,38 @@ struct front_end_node {
     auto operator=(front_end_node&&) -> front_end_node& = delete;
 
     auto call(std::string_view op, const json::object& in) -> json::object {
-        const auto body = json::serialize(in);
-        std::vector<std::pair<std::string, std::string>> headers{
-            {"Content-Type", "application/x-amz-json-1.0"},
-            {"Host", "localhost:9324"},
-            {"X-Amz-Date", "20261118T120000Z"},
-            {"X-Amz-Target", "AmazonSQS." + std::string(op)}};
-        auto all = headers;
-        all.emplace_back("Authorization", authorization("POST", "/", headers, body));
-        boost::asio::io_context io;
-        boost::beast::tcp_stream stream(io);
-        stream.connect(boost::asio::ip::tcp::endpoint(boost::asio::ip::make_address("127.0.0.1"),
-                                                      server->port()));
-        http::request<http::string_body> req{http::verb::post, "/", 11};
-        for (const auto& [k, v] : all) {
-            req.set(k, v);
-        }
-        req.body() = body;
-        req.prepare_payload();
-        http::write(stream, req);
-        boost::beast::flat_buffer buf;
-        http::response<http::string_body> res;
-        http::read(stream, buf, res);
-        BOOST_TEST_INFO(op << " -> " << res.body());
-        BOOST_TEST(res.result_int() == 200U);
-        auto v = json::parse(res.body());
-        return v.is_object() ? v.as_object() : json::object{};
+        return api_call(server->port(), op, in);
+    }
+};
+
+/// A gateway without the front-end role: SigV4 here, the rest on a front end.
+struct gateway_node {
+    std::unique_ptr<az::static_key_authorizer> auth = make_auth();
+    std::unique_ptr<front_end_t> fe;
+    std::unique_ptr<sqs::gateway_forwarder> forwarder;
+    std::unique_ptr<sqs::sqs_http_handler<front_end_t>> handler;
+    std::unique_ptr<kythira::https::server> server;
+
+    explicit gateway_node(std::vector<std::string> front_ends) {
+        fe = std::make_unique<front_end_t>(sqs::sqs_front_end_config{}, *auth);
+        forwarder = std::make_unique<sqs::gateway_forwarder>(
+            std::move(front_ends), std::string(k_forward_secret), plain_transport());
+        handler = std::make_unique<sqs::sqs_http_handler<front_end_t>>(*fe, "", nullptr);
+        handler->set_gateway(forwarder.get());
+        server = start_server(
+            [this](const kythira::https::request& r, const kythira::https::request_context& c) {
+                return (*handler)(r, c);
+            });
+    }
+    ~gateway_node() { server->stop(); }
+    gateway_node(const gateway_node&) = delete;
+    auto operator=(const gateway_node&) -> gateway_node& = delete;
+    gateway_node(gateway_node&&) = delete;
+    auto operator=(gateway_node&&) -> gateway_node& = delete;
+
+    auto call(std::string_view op, const json::object& in, unsigned want = 200,
+              bool good_signature = true) -> json::object {
+        return api_call(server->port(), op, in, want, good_signature);
     }
 };
 
@@ -473,6 +523,82 @@ BOOST_AUTO_TEST_CASE(batches_survive_the_wire) {
     BOOST_TEST(!d->_reset);
     BOOST_TEST((d->_keys == b._keys));
     BOOST_TEST(!sqs::decode_availability("{\"keys\": [1]}").has_value());
+}
+
+BOOST_AUTO_TEST_SUITE_END()
+
+BOOST_AUTO_TEST_SUITE(gateway)
+
+BOOST_AUTO_TEST_CASE(calls_survive_the_wire) {
+    sqs::authenticated_call c;
+    c._request = {"POST",
+                  "/",
+                  "a=b",
+                  {{"X-Amz-Target", "AmazonSQS.ListQueues"}},
+                  std::string("{\"x\":\"\0\"}", 10),
+                  "10.0.0.7",
+                  false};
+    c._principal.type = kythira::aws_auth::principal_type::assumed_role;
+    c._principal.account = "111122223333";
+    c._principal.arn = "arn:aws:sts::111122223333:assumed-role/r/s";
+    c._principal.tags = {{"team", "q"}};
+    c._principal.expires = std::chrono::system_clock::time_point(std::chrono::milliseconds(1234));
+    c._principal.session_policies = {"{}"};
+    const auto d = sqs::decode_call(sqs::encode_call(c));
+    BOOST_TEST_REQUIRE(d.has_value());
+    BOOST_TEST(d->_request._body == c._request._body);
+    BOOST_TEST(d->_request._query == "a=b");
+    BOOST_TEST(d->_request._source_ip == "10.0.0.7");
+    BOOST_TEST(!d->_request._secure);
+    BOOST_TEST((d->_request._headers == c._request._headers));
+    BOOST_TEST((d->_principal.type == c._principal.type));
+    BOOST_TEST(d->_principal.arn == c._principal.arn);
+    BOOST_TEST((d->_principal.tags == c._principal.tags));
+    BOOST_TEST((d->_principal.expires == c._principal.expires));
+    BOOST_TEST(!d->_principal.token_issue_time.has_value());
+    BOOST_TEST(!sqs::decode_call("{\"request\": {}}").has_value());
+
+    kythira::aws_json::http_response r;
+    r.status = 400;
+    r.headers = {{"x-amzn-query-error", "Q;Sender"}};
+    r.body = "{}";
+    const auto a = sqs::decode_call_answer(sqs::encode_call_answer(r));
+    BOOST_TEST_REQUIRE(a.has_value());
+    BOOST_TEST(a->status == 400U);
+    BOOST_TEST((a->headers == r.headers));
+    BOOST_TEST(!sqs::decode_call_answer("{\"status\": 42, \"body\": \"\"}").has_value());
+}
+
+// Three layers on three nodes: a gateway, a front end behind it, a data node.
+BOOST_AUTO_TEST_CASE(a_gateway_hands_calls_to_a_front_end) {
+    data_node data;
+    sqs::remote_queue_cluster remote({data.url()}, std::string(k_forward_secret),
+                                     plain_transport());
+    front_end_node front(remote, nullptr, true);
+    gateway_node gw({"http://127.0.0.1:" + std::to_string(front.server->port())});
+
+    const auto url = gw.call("CreateQueue", {{"QueueName", "via"}}).at("QueueUrl");
+    gw.call("SendMessage", {{"QueueUrl", url}, {"MessageBody", "hop"}});
+    const auto got = gw.call("ReceiveMessage", {{"QueueUrl", url}});
+    BOOST_TEST_REQUIRE(got.at("Messages").as_array().size() == 1U);
+    BOOST_TEST(got.at("Messages").as_array()[0].at("Body").as_string() == "hop");
+    // A modeled error comes back as the front end worded it.
+    const auto missing = gw.call("GetQueueUrl", {{"QueueName", "nope"}}, 400);
+    BOOST_TEST(missing.at("__type").as_string() == "com.amazonaws.sqs#QueueDoesNotExist");
+    // A bad signature stops at the gateway.
+    BOOST_TEST(gw.call("ListQueues", {}, 400, false).at("__type").as_string() ==
+               "InvalidSignatureException");
+    // The front end serves no client API of its own.
+    api_call(front.server->port(), "ListQueues", {}, 404);
+    BOOST_TEST(gw.forwarder->failures() == 0U);
+}
+
+BOOST_AUTO_TEST_CASE(an_unreachable_front_end_is_a_retryable_error) {
+    gateway_node gw({"http://127.0.0.1:1"});
+    const auto r = gw.call("ListQueues", {}, 503);
+    BOOST_TEST(r.at("__type").as_string() ==
+               "com.amazon.coral.availability#ServiceUnavailableException");
+    BOOST_TEST(gw.forwarder->failures() == 1U);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

@@ -301,7 +301,9 @@ BOOST_AUTO_TEST_CASE(every_node_of_three_answers_and_followers_forward) {
     std::uint64_t forwarded = 0;
     for (const auto& n : nodes) {
         for (const auto& m : n->module().metrics()) {
-            if (m.name == "proposals_forwarded") {
+            // A follower sends its writes and reads to the leader's
+            // internal endpoints, which count them.
+            if (m.name == "peer_requests") {
                 forwarded += static_cast<std::uint64_t>(m.value);
             }
         }

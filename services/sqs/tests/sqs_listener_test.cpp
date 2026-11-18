@@ -334,6 +334,7 @@ BOOST_AUTO_TEST_CASE(refusals_name_the_variable) {
 
 BOOST_AUTO_TEST_CASE(roles_and_data_endpoints) {
     using kythira::layers::role;
+    const std::string secret = "forwarding-secret-0123456789";
     const std::map<std::string, std::string> base{{"SQS_STATIC_KEYS_FILE", "/k"},
                                                   {"SQS_ALLOW_PLAINTEXT", "on"}};
     const auto parse = [&](std::map<std::string, std::string> extra) {
@@ -341,26 +342,36 @@ BOOST_AUTO_TEST_CASE(roles_and_data_endpoints) {
         m.merge(extra);
         return sqs::sqs_node_options_from_env(env_of(m));
     };
-    // Every layer by default.
+    // Every layer by default, and then no secret is needed.
     auto r = parse({});
     auto* o = std::get_if<sqs::sqs_node_options>(&r);
     BOOST_TEST_REQUIRE(o != nullptr);
     BOOST_TEST((o->has(role::gateway) && o->has(role::front_end) && o->has(role::data)));
     BOOST_TEST(o->_data_endpoints.empty());
 
-    // A front end without the data role names the data nodes and signs.
+    // A front end without the data role names the data nodes.
     r = parse({{"KYTHIRA_SQS_ROLES", "gateway,front_end"},
                {"SQS_DATA_ENDPOINTS", "http://d1:9324,https://d2:9324"},
-               {"SQS_FORWARD_SECRET", "forwarding-secret-0123456789"}});
+               {"SQS_FORWARD_SECRET", secret}});
     o = std::get_if<sqs::sqs_node_options>(&r);
     BOOST_TEST_REQUIRE(o != nullptr);
     BOOST_TEST(!o->has(role::data));
     BOOST_TEST(
         (o->_data_endpoints == std::vector<std::string>{"http://d1:9324", "https://d2:9324"}));
 
-    // A data node alone needs nothing more.
-    r = parse({{"KYTHIRA_SQS_ROLES", "data"}});
-    BOOST_TEST(std::holds_alternative<sqs::sqs_node_options>(r));
+    // A gateway alone names the front ends.
+    r = parse({{"KYTHIRA_SQS_ROLES", "gateway"},
+               {"SQS_FRONT_END_ENDPOINTS", "http://f1:9324"},
+               {"SQS_FORWARD_SECRET", secret}});
+    o = std::get_if<sqs::sqs_node_options>(&r);
+    BOOST_TEST_REQUIRE(o != nullptr);
+    BOOST_TEST((o->_front_end_endpoints == std::vector<std::string>{"http://f1:9324"}));
+
+    // A data node, and a front end with its data, need only the secret.
+    BOOST_TEST(std::holds_alternative<sqs::sqs_node_options>(
+        parse({{"KYTHIRA_SQS_ROLES", "data"}, {"SQS_FORWARD_SECRET", secret}})));
+    BOOST_TEST(std::holds_alternative<sqs::sqs_node_options>(
+        parse({{"KYTHIRA_SQS_ROLES", "front_end,data"}, {"SQS_FORWARD_SECRET", secret}})));
 
     const auto refused = [&](std::map<std::string, std::string> extra) {
         const auto x = parse(std::move(extra));
@@ -372,14 +383,12 @@ BOOST_AUTO_TEST_CASE(roles_and_data_endpoints) {
     BOOST_TEST(refused({{"KYTHIRA_SQS_ROLES", "segments"}}).find("not an SQS layer") !=
                std::string::npos);
     BOOST_TEST(refused({{"KYTHIRA_SQS_ROLES", ""}}).find("at least one") != std::string::npos);
-    BOOST_TEST(refused({{"KYTHIRA_SQS_ROLES", "front_end,data"}}).find("together") !=
+    BOOST_TEST(refused({{"KYTHIRA_SQS_ROLES", "data"}}).find("SQS_FORWARD_SECRET") !=
                std::string::npos);
-    BOOST_TEST(refused({{"KYTHIRA_SQS_ROLES", "gateway,front_end"},
-                        {"SQS_FORWARD_SECRET", "forwarding-secret-0123456789"}})
+    BOOST_TEST(refused({{"KYTHIRA_SQS_ROLES", "gateway,front_end"}, {"SQS_FORWARD_SECRET", secret}})
                    .find("SQS_DATA_ENDPOINTS") != std::string::npos);
-    BOOST_TEST(refused({{"KYTHIRA_SQS_ROLES", "gateway,front_end"},
-                        {"SQS_DATA_ENDPOINTS", "http://d1:9324"}})
-                   .find("SQS_FORWARD_SECRET") != std::string::npos);
+    BOOST_TEST(refused({{"KYTHIRA_SQS_ROLES", "gateway"}, {"SQS_FORWARD_SECRET", secret}})
+                   .find("SQS_FRONT_END_ENDPOINTS") != std::string::npos);
     BOOST_TEST(refused({{"SQS_DATA_ENDPOINTS", "d1:9324"}}).find("SQS_DATA_ENDPOINTS") !=
                std::string::npos);
 }

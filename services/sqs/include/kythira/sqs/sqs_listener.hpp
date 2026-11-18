@@ -22,12 +22,20 @@
 /// forwarding node reports to its client as retryable. A data node also
 /// answers front ends' named reads (`sqs_data_access.hpp`) at
 /// `/_kythira/sqs/v1/query`, authenticated the same way; 503 there means
-/// "no replica of that group here".
+/// "not the leader of that group here". It also streams long-poll wake-ups
+/// at `/_kythira/sqs/v1/availability` (`sqs_availability.hpp`).
+///
+/// A front end serves gateways' authenticated calls at
+/// `/_kythira/sqs/v1/call` (`sqs_gateway.hpp`). A gateway without the
+/// front-end role checks the client's signature here and hands the request
+/// to a front end (`set_gateway`); a node without the gateway role serves no
+/// client API (`set_client_api(false)`).
 
 #include <kythira/sqs/sqs_availability.hpp>
 #include <kythira/sqs/sqs_data_access.hpp>
 #include <kythira/sqs/sqs_forward.hpp>
 #include <kythira/sqs/sqs_front_end.hpp>
+#include <kythira/sqs/sqs_gateway.hpp>
 
 #include <raft/beast_https_server.hpp>
 
@@ -123,9 +131,12 @@ public:
         if (target == k_availability_path) {
             return availability(req);
         }
+        if (target == k_call_path) {
+            return called(req);
+        }
         if (!_client_api) {
-            return listener_detail::plain(404, "this node serves no SQS API (data role only)\n",
-                                          req.version());
+            return listener_detail::plain(
+                404, "this node serves no SQS client API (KYTHIRA_SQS_ROLES)\n", req.version());
         }
         if (_bridge && target.starts_with("/sns-bridge/")) {
             const auto method = req.method_string();
@@ -133,9 +144,21 @@ public:
                                                 target.substr(0, target.find('?')), req.body());
             return listener_detail::plain(status, body, req.version());
         }
-        return listener_detail::to_beast(
-            _front_end.handle(listener_detail::to_sqs_request(req, ctx)), req.version());
+        auto sreq = listener_detail::to_sqs_request(req, ctx);
+        if (_gateway != nullptr) {
+            return listener_detail::to_beast(via_gateway(sreq), req.version());
+        }
+        return listener_detail::to_beast(_front_end.handle(sreq), req.version());
     }
+
+    /// Serves the client API as a gateway without the front-end role:
+    /// SigV4 here, the rest on a front end through `gateway` (set before
+    /// serving; it outlives the handler).
+    void set_gateway(gateway_forwarder* gateway) { _gateway = gateway; }
+
+    /// Serves gateways' authenticated calls at `/_kythira/sqs/v1/call` (a
+    /// front end; set before serving).
+    void set_serve_calls(bool on) { _serve_calls = on; }
 
     /// Serves front ends' named reads (`sqs_data_access.hpp`) at
     /// `/_kythira/sqs/v1/query` (set before serving; a data node only).
@@ -166,7 +189,45 @@ private:
     availability_feed* _feed = nullptr;
     std::chrono::milliseconds _feed_wait{10000};
     bool _client_api = true;
+    gateway_forwarder* _gateway = nullptr;
+    bool _serve_calls = false;
     clock_fn _clock;
+
+    auto via_gateway(const sqs_request& req) -> aws_json::http_response {
+        auto admitted = _front_end.admit(req);
+        if (auto* refused = std::get_if<aws_json::http_response>(&admitted)) {
+            return std::move(*refused);
+        }
+        auto answer = _gateway->forward(
+            {._request = req, ._principal = std::get<aws_auth::principal_context>(admitted)});
+        if (!answer) {
+            return _front_end.refuse(req, make_error(k_service_unavailable_error,
+                                                     "No front end answered. Please try again."));
+        }
+        return std::move(*answer);
+    }
+
+    auto called(const https::request& req) -> https::response {
+        using listener_detail::plain;
+        if (_secret.empty() || !_serve_calls) {
+            return plain(404, "not found\n", req.version());
+        }
+        if (req.method() != boost::beast::http::verb::post) {
+            return plain(405, "POST only\n", req.version());
+        }
+        if (!signed_by_peer(req)) {
+            return plain(403, "bad or stale forwarding signature\n", req.version());
+        }
+        auto call = decode_call(req.body());
+        if (!call) {
+            return plain(400, "malformed call\n", req.version());
+        }
+        https::response out{boost::beast::http::status::ok, req.version()};
+        out.set(boost::beast::http::field::content_type, "application/json");
+        out.body() = encode_call_answer(_front_end.handle_as(call->_request, call->_principal));
+        out.prepare_payload();
+        return out;
+    }
 
     auto availability(const https::request& req) -> https::response {
         using listener_detail::plain;
