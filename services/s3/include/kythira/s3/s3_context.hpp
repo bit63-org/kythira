@@ -156,6 +156,12 @@ template<metadata_access M> struct handler_context {
         "A header you provided implies functionality that is not implemented");
 }
 
+/// S3's retryable "try again" (the metadata layer did not answer).
+[[nodiscard]] inline auto service_unavailable() -> aws_rest_xml::error {
+    return aws_rest_xml::errors::make(503, "ServiceUnavailable",
+                                      "Service is unable to handle request.");
+}
+
 [[nodiscard]] inline auto from_index(const index_result& r) -> aws_rest_xml::error {
     return aws_rest_xml::errors::make(r.status, r.error, r.message);
 }

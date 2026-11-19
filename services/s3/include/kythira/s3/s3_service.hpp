@@ -144,7 +144,14 @@ public:
     auto serve(http_request in) -> s3_response {
         const auto request_id = new_request_id();
         std::optional<cors_configuration> cors;
-        auto out = serve_inner(in, request_id, cors);
+        s3_response out;
+        try {
+            out = serve_inner(in, request_id, cors);
+        } catch (const metadata_unavailable&) {
+            // Requirement 14.2: a remote metadata layer that does not answer
+            // is S3's retryable 503, never a dropped connection.
+            out = error_response(service_unavailable(), request_id, in.method == "HEAD");
+        }
         if (auto origin = find_header(in.headers, "Origin"); origin && cors) {
             // Requirement 6.1: an answer from a bucket with CORS carries
             // the matching rule's headers, error answers included.
