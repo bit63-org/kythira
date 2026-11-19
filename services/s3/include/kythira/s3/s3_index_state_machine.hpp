@@ -111,6 +111,21 @@ namespace kythira::s3 {
 inline constexpr std::string_view lock_mode_metadata = "x-amz-object-lock-mode";
 inline constexpr std::string_view lock_until_metadata = "x-kythira-object-lock-until-ms";
 inline constexpr std::string_view legal_hold_metadata = "x-amz-object-lock-legal-hold";
+/// A version whose bytes live in this cloud tier (task 13): it holds no
+/// reference on the blob stores' chunks, unless restored.
+inline constexpr std::string_view tier_metadata = "x-kythira-tier";
+/// A tiered version's bytes are back on the blob stores for a restore,
+/// and hold references there until it ends.
+inline constexpr std::string_view restored_metadata = "x-kythira-restored";
+/// A restore asked of a tiered version, in days; listed under `s3/r/`
+/// until the tier worker has brought the bytes back.
+inline constexpr std::string_view restore_pending_metadata = "x-kythira-restore-pending";
+
+/// Whether `v`'s manifest counts references on the blob stores.
+[[nodiscard]] inline auto holds_local_chunks(const object_content& c) -> bool {
+    return !c.system_metadata.contains(std::string(tier_metadata)) ||
+           c.system_metadata.contains(std::string(restored_metadata));
+}
 
 /// A version's retention and legal hold, read from its stored headers.
 struct object_lock_state {
@@ -235,6 +250,9 @@ struct index_command {
         /// `content.system_metadata` or erased when absent there. The
         /// bytes, ETag and modification time stay as they are.
         set_object_state = 16,
+        /// The tier worker deleted the cloud copies under `garbage_keys`
+        /// (keys from `tier_garbage_list`).
+        drop_tier_garbage = 17,
     };
 
     kind op = kind::put_object;
@@ -284,6 +302,8 @@ struct index_command {
     /// check. Lifecycle passes the version it judged, so a write that
     /// lands meanwhile is never expired or transitioned in its place.
     std::uint64_t expect_stamp = 0;
+    /// drop_tier_garbage.
+    std::vector<std::string> garbage_keys;
     /// copy_object: stored headers taken from `content.system_metadata`
     /// whatever `replace_metadata` says (erased when absent there): the
     /// new object's ACL, which is never copied, and its tags under
@@ -390,6 +410,10 @@ inline void write_opt_u64(detail::writer& w, const std::optional<std::uint64_t>&
         w.sha(sha);
     }
     w.str(c.new_storage_class).u64(c.expect_stamp);
+    w.u32(static_cast<std::uint32_t>(c.garbage_keys.size()));
+    for (const auto& k : c.garbage_keys) {
+        w.str(k);
+    }
     const auto s = w.take();
     std::vector<std::byte> out(s.size());
     std::memcpy(out.data(), s.data(), s.size());
@@ -402,7 +426,7 @@ inline void write_opt_u64(detail::writer& w, const std::optional<std::uint64_t>&
     r.expect_format(command_format, "command");
     index_command c;
     const auto op = r.u8();
-    if (op < 1 || op > 16) {
+    if (op < 1 || op > 17) {
         throw index_format_error("s3 index: unknown command");
     }
     c.op = static_cast<index_command::kind>(op);
@@ -455,6 +479,10 @@ inline void write_opt_u64(detail::writer& w, const std::optional<std::uint64_t>&
     }
     c.new_storage_class = r.str();
     c.expect_stamp = r.u64();
+    c.garbage_keys.resize(r.u32());
+    for (auto& k : c.garbage_keys) {
+        k = r.str();
+    }
     r.done("command");
     return c;
 }
@@ -520,6 +548,23 @@ struct version_listing {
     bool truncated = false;
     std::string next_key_marker;
     std::string next_version_id_marker;
+};
+
+/// A restore asked of a version in a cloud tier.
+struct pending_restore {
+    std::uint64_t bucket_id = 0;
+    std::string key;
+    std::uint64_t stamp = 0;
+    std::uint32_t days = 0;
+};
+
+/// Cloud copies of a removed version, to delete.
+struct tier_garbage_entry {
+    std::string index_key;  ///< for drop_tier_garbage
+    std::string tier;
+    std::uint64_t bucket_id = 0;
+    std::uint64_t stamp = 0;
+    std::vector<chunk_sha> chunks;
 };
 
 struct index_options {
@@ -869,6 +914,64 @@ public:
         return out;
     }
 
+    /// Up to `max` restores waiting for the tier worker.
+    [[nodiscard]] auto pending_restores(std::size_t max) const -> std::vector<pending_restore> {
+        std::vector<pending_restore> out;
+        const std::string start(keys::restore_space);
+        engine().scan(column_family::data, key_range{start, keys::prefix_end(start)},
+                      scan_direction::forward, [&](std::string_view k, std::string_view v) {
+                          if (out.size() >= max) {
+                              return false;
+                          }
+                          if (k.size() < start.size() + 17 || k[k.size() - 9] != '\0') {
+                              return true;
+                          }
+                          pending_restore p;
+                          p.bucket_id = detail::get_be64(k.substr(start.size()));
+                          p.key.assign(k.substr(start.size() + 8, k.size() - start.size() - 17));
+                          p.stamp = detail::get_be64(k.substr(k.size() - 8));
+                          std::uint32_t days = 0;
+                          for (const char ch : v) {
+                              if (ch >= '0' && ch <= '9' && days < 100'000) {
+                                  days = days * 10 + static_cast<std::uint32_t>(ch - '0');
+                              }
+                          }
+                          p.days = days;
+                          out.push_back(std::move(p));
+                          return true;
+                      });
+        return out;
+    }
+
+    /// Up to `max` cloud copies of removed versions, to delete.
+    [[nodiscard]] auto tier_garbage_list(std::size_t max) const -> std::vector<tier_garbage_entry> {
+        std::vector<tier_garbage_entry> out;
+        const std::string start(keys::tier_garbage_space);
+        engine().scan(column_family::data, key_range{start, keys::prefix_end(start)},
+                      scan_direction::forward, [&](std::string_view k, std::string_view v) {
+                          if (out.size() >= max) {
+                              return false;
+                          }
+                          const auto nul = k.find('\0', start.size());
+                          if (nul == std::string_view::npos || k.size() != nul + 17) {
+                              return true;
+                          }
+                          tier_garbage_entry g;
+                          g.index_key.assign(k);
+                          g.tier.assign(k.substr(start.size(), nul - start.size()));
+                          g.bucket_id = detail::get_be64(k.substr(nul + 1));
+                          g.stamp = detail::get_be64(k.substr(nul + 9));
+                          for (std::size_t i = 0; i + 32 <= v.size(); i += 32) {
+                              chunk_sha sha{};
+                              std::memcpy(sha.data(), v.data() + i, sha.size());
+                              g.chunks.push_back(sha);
+                          }
+                          out.push_back(std::move(g));
+                          return true;
+                      });
+        return out;
+    }
+
     /// Every reference count, for audits and the property tests.
     [[nodiscard]] auto all_refcounts() const -> std::map<chunk_sha, refcount_record> {
         std::map<chunk_sha, refcount_record> out;
@@ -994,6 +1097,8 @@ private:
                 return chunks_deleted(t, c);
             case k::set_object_state:
                 return set_object_state(t, c);
+            case k::drop_tier_garbage:
+                return drop_tier_garbage(t, c);
         }
         return fail(400, "InvalidRequest", "Unknown index command");
     }
@@ -1237,7 +1342,25 @@ private:
     void remove_version(txn& t, std::uint64_t bucket_id, const object_version& v,
                         std::uint64_t now_ms) {
         t.erase(keys::versioned(keys::object_space, bucket_id, v.key, v.stamp));
-        ref(t, v.content.manifest, false, now_ms);
+        if (holds_local_chunks(v.content)) {
+            ref(t, v.content.manifest, false, now_ms);
+        }
+        const auto& m = v.content.system_metadata;
+        if (auto tier = m.find(std::string(tier_metadata)); tier != m.end()) {
+            t.put(keys::tier_garbage(tier->second, bucket_id, v.stamp),
+                  manifest_shas(v.content.manifest));
+        }
+        if (m.contains(std::string(restore_pending_metadata))) {
+            t.erase(keys::restore(bucket_id, v.key, v.stamp));
+        }
+    }
+
+    [[nodiscard]] static auto manifest_shas(const std::vector<chunk_ref>& manifest) -> std::string {
+        std::string out;
+        for (const auto& c : manifest) {
+            out.append(reinterpret_cast<const char*>(c.sha.data()), c.sha.size());
+        }
+        return out;
     }
 
     /// `If-Match` / `If-None-Match: *` against the key's current version.
@@ -1276,7 +1399,9 @@ private:
                 remove_version(t, b.id, *old, now_ms);
             }
         }
-        ref(t, v.content.manifest, true, now_ms);
+        if (holds_local_chunks(v.content)) {
+            ref(t, v.content.manifest, true, now_ms);
+        }
         t.put(keys::versioned(keys::object_space, b.id, key, v.stamp), codec::encode(v));
         index_result r;
         r.bucket_id = b.id;
@@ -1345,6 +1470,9 @@ private:
             return fail(405, "MethodNotAllowed",
                         "The specified method is not allowed against this resource.");
         }
+        const bool held = holds_local_chunks(v->content);
+        const bool pending =
+            v->content.system_metadata.contains(std::string(restore_pending_metadata));
         if (!c.new_storage_class.empty()) {
             v->content.storage_class = c.new_storage_class;
         }
@@ -1356,6 +1484,17 @@ private:
                 v->content.system_metadata.erase(name);
             }
         }
+        // Moving to or from a cloud tier (or a restore starting or ending)
+        // moves the manifest's references on the blob stores.
+        if (const bool holds = holds_local_chunks(v->content); holds != held) {
+            ref(t, v->content.manifest, holds, c.now_ms);
+        }
+        const auto& m = v->content.system_metadata;
+        if (auto it = m.find(std::string(restore_pending_metadata)); it != m.end()) {
+            t.put(keys::restore(b.id, c.key, v->stamp), it->second);
+        } else if (pending) {
+            t.erase(keys::restore(b.id, c.key, v->stamp));
+        }
         t.put(keys::versioned(keys::object_space, b.id, c.key, v->stamp), codec::encode(*v));
         index_result r;
         r.bucket_id = b.id;
@@ -1363,6 +1502,15 @@ private:
         r.etag = v->content.etag;
         r.last_modified_ms = v->last_modified_ms;
         return r;
+    }
+
+    auto drop_tier_garbage(txn& t, const index_command& c) -> index_result {
+        for (const auto& k : c.garbage_keys) {
+            if (k.starts_with(keys::tier_garbage_space)) {
+                t.erase(k);
+            }
+        }
+        return index_result{};
     }
 
     [[nodiscard]] static auto stale_version() -> index_result {
@@ -1518,9 +1666,16 @@ private:
         if (!source_conditions_hold(c.source_if, *src)) {
             return precondition_failed();
         }
+        if (!c.new_bytes && !holds_local_chunks(src->content)) {
+            // Its bytes are in a cloud tier and not restored: nothing on
+            // the blob stores to share.
+            return fail(403, "InvalidObjectState",
+                        "The operation is not valid for the object's storage class");
+        }
         if (c.source.id == c.target.id && c.source_key == c.key && !c.replace_metadata &&
             !c.version_id && !c.new_bytes &&
-            (c.new_storage_class.empty() || c.new_storage_class == src->content.storage_class)) {
+            (c.new_storage_class.empty() ? std::string("STANDARD") : c.new_storage_class) ==
+                src->content.storage_class) {
             return fail(400, "InvalidRequest",
                         "This copy request is illegal because it is trying to copy an object to "
                         "itself without changing the object's metadata, storage class, website "
@@ -1549,12 +1704,17 @@ private:
             v.content.system_metadata = c.content.system_metadata;
             v.content.system_metadata.insert(kept.begin(), kept.end());
             v.content.storage_class = c.content.storage_class;
-        } else if (!c.new_storage_class.empty()) {
-            v.content.storage_class = c.new_storage_class;
+        } else {
+            // S3 stores a copy in STANDARD unless the request names a class.
+            v.content.storage_class =
+                c.new_storage_class.empty() ? std::string("STANDARD") : c.new_storage_class;
         }
         // A copy never inherits the source's lock; the request's (or the
         // bucket's default) comes through override_metadata.
-        for (const auto name : {lock_mode_metadata, lock_until_metadata, legal_hold_metadata}) {
+        for (const auto name :
+             {lock_mode_metadata, lock_until_metadata, legal_hold_metadata, tier_metadata,
+              restored_metadata, restore_pending_metadata, std::string_view("x-amz-restore"),
+              std::string_view("x-kythira-restore-until")}) {
             v.content.system_metadata.erase(std::string(name));
         }
         for (const auto& name : c.override_metadata) {

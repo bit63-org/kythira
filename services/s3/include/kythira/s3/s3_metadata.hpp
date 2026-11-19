@@ -116,6 +116,15 @@ public:
         return _sm.pending_deletions(max);
     }
 
+    [[nodiscard]] auto pending_restores(std::size_t max) const -> std::vector<pending_restore> {
+        const std::scoped_lock lock(_mutex);
+        return _sm.pending_restores(max);
+    }
+    [[nodiscard]] auto tier_garbage_list(std::size_t max) const -> std::vector<tier_garbage_entry> {
+        const std::scoped_lock lock(_mutex);
+        return _sm.tier_garbage_list(max);
+    }
+
     /// The state machine, for tests that look underneath.
     [[nodiscard]] auto state_machine() const -> const s3_index_state_machine<>& { return _sm; }
 

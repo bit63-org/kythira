@@ -20,11 +20,14 @@
 /// **Archive classes.** An object in GLACIER or DEEP_ARCHIVE answers a
 /// GET (and a copy from it) with `403 InvalidObjectState` until
 /// `RestoreObject` makes a temporary copy readable for the requested
-/// days; HEAD shows the restore as `x-amz-restore`. Until task 13's cloud
-/// tier holds archived bytes, they stay on the blob stores, so a restore
-/// completes at once (`ongoing-request="false"`): the first request
-/// answers 202, a repeat while restored answers 200 and moves the expiry,
-/// as S3 does.
+/// days; HEAD shows the restore as `x-amz-restore`. An archived object
+/// whose bytes are still on the blob stores (its class maps to no cloud
+/// tier, or the tier worker has not moved it yet) is restored at once
+/// (`ongoing-request="false"`). One held in a cloud tier answers 202 with
+/// `ongoing-request="true"` and is listed for the tier worker
+/// (`s3_tiers.hpp`), which brings the bytes back; a repeat meanwhile is
+/// `409 RestoreAlreadyInProgress`. A repeat while restored answers 200 and
+/// moves the expiry, as S3 does.
 ///
 /// **The worker.** `lifecycle_worker::run` applies every enabled rule of
 /// every bucket once, which is S3's daily evaluation; the daemon runs it
@@ -195,6 +198,33 @@ template<metadata_access M>
     const auto now = ctx.now_ms();
     const bool restored = restore_until(v) > now;
     const auto until = due_after(now, *days, ctx.options.lifecycle_day_ms);
+    const auto& meta = v.content.system_metadata;
+    if (meta.contains(std::string(restore_pending_metadata))) {
+        return aws_rest_xml::errors::make(409, "RestoreAlreadyInProgress",
+                                          "Object restore is already in progress");
+    }
+    if (meta.contains(std::string(tier_metadata)) && !restored) {
+        // The bytes are in a cloud tier: the tier worker brings them back
+        // and then makes the copy readable (`s3_tiers.hpp`).
+        index_command c;
+        c.op = index_command::kind::set_object_state;
+        c.now_ms = now;
+        c.target = ref_of(b.desc);
+        c.key = req.resource.key;
+        c.version_id = v.version_id();
+        c.expect_stamp = v.stamp;
+        c.override_metadata = {std::string(restore_metadata),
+                               std::string(restore_pending_metadata)};
+        c.content.system_metadata[std::string(restore_metadata)] = "ongoing-request=\"true\"";
+        c.content.system_metadata[std::string(restore_pending_metadata)] = std::to_string(*days);
+        auto r = ctx.meta.propose(c);
+        if (!r.ok()) {
+            return from_index(r);
+        }
+        s3_response out;
+        out.status = 202;
+        return out;
+    }
 
     index_command c;
     c.op = index_command::kind::set_object_state;
@@ -505,7 +535,9 @@ private:
     void end_restore(const bucket_ref& ref, const object_version& v, std::uint64_t now,
                      lifecycle_report& r) {
         auto c = command(index_command::kind::set_object_state, ref, v, now);
-        c.override_metadata = {std::string(restore_metadata), std::string(restore_until_metadata)};
+        // A tiered version also gives back its chunks on the blob stores.
+        c.override_metadata = {std::string(restore_metadata), std::string(restore_until_metadata),
+                               std::string(restored_metadata)};
         count(_meta.propose(c), r, r.restores_ended);
     }
 
