@@ -47,7 +47,9 @@ module's consumers (Requirement 17.3).
 | `include/kythira/s3/s3_object_lock.hpp` | object lock on the write path: lock headers, default retention, the lock headers a read returns | 10 |
 | `include/kythira/s3/s3_versioning.hpp` | bucket versioning, ListObjectVersions, object lock configuration, retention and legal hold | 10 |
 | `include/kythira/s3/s3_chunk_cipher.hpp`, `s3_encryption.hpp`, `s3_kms_provider.hpp` | server-side encryption: AES-256-GCM chunk sealing with derived nonces (dedup within a data key), key providers (local passphrase-sealed; Kythira or AWS KMS over their JSON API), the SSE headers, bucket default encryption, per-object data keys for SSE-S3, SSE-KMS with bucket keys and SSE-C (salted HMAC only, never the key); `s3_encryption_test` | 11 |
-| `include/kythira/s3/s3_service.hpp` | the request pipeline and browser POST uploads; `s3_service_test` | 6-11 |
+| `include/kythira/s3/s3_rates.hpp` | per-prefix request rates: token buckets per bucket, prefix (key up to its last `/`) and reads or writes, `503 SlowDown` past the profile's rates, hot-prefix reports | 12 |
+| `include/kythira/s3/s3_sweeps.hpp` | the chunk sweeper: deletes collected chunks from every node, finds and deletes chunks no commit names (two sweeps a grace period apart), restores missing copies of live chunks; `s3_sweeps_test` | 12 |
+| `include/kythira/s3/s3_service.hpp` | the request pipeline and browser POST uploads; `s3_service_test` | 6-12 |
 | `include/kythira/s3/s3_routes.hpp` | the operation table as routes for core's REST-XML router, and `route_request` (addressing, query, operation); `s3_routing_test` routes every recorded client request | 3 |
 | `implemented-operations.txt` | operations the gateway implements | 1 onward |
 | `doc/unsupported.md` | every other operation, with its planned task, reason and the exact error it returns (`NotImplemented`, 501) | 1 onward |

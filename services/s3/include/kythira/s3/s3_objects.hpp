@@ -650,6 +650,7 @@ template<metadata_access M>
     }
     content->system_metadata.insert(sealed->metadata.begin(), sealed->metadata.end());
 
+    const auto started_ms = ctx.now_ms();
     auto w = ctx.data.writer(sealed->cipher ? &*sealed->cipher : nullptr);
     std::string buf;
     std::uint64_t size = 0;
@@ -696,9 +697,13 @@ template<metadata_access M>
     content->system_metadata[checksum_header(want->algorithm)] = checksum;
     content->system_metadata["x-amz-checksum-type"] = "FULL_OBJECT";
 
+    if (ctx.write_expired(started_ms)) {
+        return slow_down();
+    }
     index_command c;
     c.op = index_command::kind::put_object;
     c.now_ms = ctx.now_ms();
+    c.written_ms = started_ms;
     c.owner = owner;
     c.target = ref_of(b.desc);
     c.key = req.resource.key;
@@ -980,6 +985,7 @@ template<metadata_access M>
     if (!sealed) {
         return sealed.error();
     }
+    c.written_ms = ctx.now_ms();
     auto w = ctx.data.writer(sealed->cipher ? &*sealed->cipher : nullptr);
     std::optional<aws_rest_xml::error> failed;
     auto read = ctx.data.read_range(
@@ -1151,6 +1157,9 @@ template<metadata_access M>
                                        *source_customer, c);
     if (!sse_headers) {
         return sse_headers.error();
+    }
+    if (c.new_bytes && ctx.write_expired(c.written_ms)) {
+        return slow_down();
     }
     auto r = ctx.meta.propose(c);
     if (!r.ok()) {

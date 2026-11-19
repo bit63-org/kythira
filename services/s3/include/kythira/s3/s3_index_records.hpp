@@ -211,6 +211,11 @@ inline constexpr std::string_view object_space = "s3/o/";
 inline constexpr std::string_view upload_space = "s3/u/";
 inline constexpr std::string_view refcount_space = "s3/c/";
 inline constexpr std::string_view zero_space = "s3/z/";
+/// Tombstones of deleted chunks, by deletion time, for their purge.
+inline constexpr std::string_view tombstone_space = "s3/t/";
+/// Chunks marked collecting and not yet deleted from the blob stores, so a
+/// sweeper that stopped between the two picks them up again.
+inline constexpr std::string_view pending_space = "s3/p/";
 
 /// The smallest key above every key starting with `prefix`; nullopt when
 /// none exists (all 0xFF).
@@ -280,6 +285,19 @@ struct split_key {
 [[nodiscard]] inline auto zero(std::uint64_t since_ms, const chunk_sha& sha) -> std::string {
     std::string out(zero_space);
     detail::put_be64(out, since_ms);
+    out.append(reinterpret_cast<const char*>(sha.data()), sha.size());
+    return out;
+}
+
+[[nodiscard]] inline auto tombstone(std::uint64_t deleted_ms, const chunk_sha& sha) -> std::string {
+    std::string out(tombstone_space);
+    detail::put_be64(out, deleted_ms);
+    out.append(reinterpret_cast<const char*>(sha.data()), sha.size());
+    return out;
+}
+
+[[nodiscard]] inline auto pending(const chunk_sha& sha) -> std::string {
+    std::string out(pending_space);
     out.append(reinterpret_cast<const char*>(sha.data()), sha.size());
     return out;
 }
@@ -442,9 +460,21 @@ struct upload_record {
 
 /// How many manifests (object versions and upload parts) name a chunk, and
 /// since when the count has been zero.
+/// Where an unreferenced chunk is on its way out (Requirements 10.3, 10.4).
+enum class chunk_state : std::uint8_t {
+    live = 0,
+    /// Handed to a sweeper to delete: nothing may reference it now.
+    collecting = 1,
+    /// Deleted from the blob stores at `deleted_ms`: only a write that
+    /// stored its bytes after that may reference it again.
+    deleted = 2,
+};
+
 struct refcount_record {
     std::uint64_t count = 0;
     std::uint64_t zero_since_ms = 0;
+    chunk_state state = chunk_state::live;
+    std::uint64_t deleted_ms = 0;
 
     friend auto operator==(const refcount_record&, const refcount_record&) -> bool = default;
 };
@@ -587,7 +617,11 @@ inline void write_content(detail::writer& w, const object_content& c) {
 
 [[nodiscard]] inline auto encode(const refcount_record& c) -> std::string {
     detail::writer w;
-    w.u8(refcount_format).u64(c.count).u64(c.zero_since_ms);
+    w.u8(refcount_format)
+        .u64(c.count)
+        .u64(c.zero_since_ms)
+        .u8(static_cast<std::uint8_t>(c.state))
+        .u64(c.deleted_ms);
     return w.take();
 }
 
@@ -597,6 +631,12 @@ inline void write_content(detail::writer& w, const object_content& c) {
     refcount_record c;
     c.count = r.u64();
     c.zero_since_ms = r.u64();
+    const auto state = r.u8();
+    if (state > static_cast<std::uint8_t>(chunk_state::deleted)) {
+        throw index_format_error("s3 index: unknown chunk state");
+    }
+    c.state = static_cast<chunk_state>(state);
+    c.deleted_ms = r.u64();
     r.done("refcount");
     return c;
 }

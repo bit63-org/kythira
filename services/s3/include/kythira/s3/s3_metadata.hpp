@@ -107,6 +107,15 @@ public:
         return _sm.list_uploads(bucket_id, prefix, key_marker, upload_id_marker, max);
     }
 
+    [[nodiscard]] auto refcount(const chunk_sha& sha) const -> std::optional<refcount_record> {
+        const std::scoped_lock lock(_mutex);
+        return _sm.refcount(sha);
+    }
+    [[nodiscard]] auto pending_deletions(std::size_t max) const -> std::vector<chunk_sha> {
+        const std::scoped_lock lock(_mutex);
+        return _sm.pending_deletions(max);
+    }
+
     /// The state machine, for tests that look underneath.
     [[nodiscard]] auto state_machine() const -> const s3_index_state_machine<>& { return _sm; }
 

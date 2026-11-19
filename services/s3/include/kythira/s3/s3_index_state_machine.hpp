@@ -42,6 +42,17 @@
 ///   for longer than the grace period, which must exceed the longest
 ///   in-flight write, so a PUT racing a delete of the same bytes keeps
 ///   them.
+/// - **Collection states** (Requirements 10.3, 10.4; task 12). A chunk
+///   `collect_chunks` hands back, or a record-less one `claim_chunks`
+///   takes as an orphan, is kept as *collecting* (and listed under
+///   `s3/p/` until deleted) instead of being forgotten, and
+///   `chunks_deleted` turns it into a *deleted* tombstone (`s3/t/`, purged
+///   by `collect_chunks` a grace period later). A new reference to a
+///   collecting chunk, or to a deleted one from a write whose
+///   `written_ms` (when it began storing chunks) is earlier than the
+///   deletion plus `chunk_clock_skew_ms`, fails with `503 SlowDown`: that
+///   write may have skipped storing bytes the sweeper was deleting, and
+///   its retry stores them again. `s3_sweeps.hpp` has the whole argument.
 ///
 /// Entries carry everything they need: the proposer's clock (`now_ms`), and
 /// for object writes the bucket's id, versioning state and object lock
@@ -174,6 +185,10 @@ struct completed_part {
 };
 
 /// One Raft entry for the index. Fields not used by `kind` stay default.
+/// How far two nodes' clocks may disagree, for comparing a write's start
+/// (the front end's clock) with a chunk's deletion (the sweeper's).
+inline constexpr std::uint64_t chunk_clock_skew_ms = 5'000;
+
 struct index_command {
     enum class kind : std::uint8_t {
         create_bucket = 1,
@@ -207,6 +222,13 @@ struct index_command {
         /// `ON`/`OFF`. COMPLIANCE retention is never shortened, removed or
         /// weakened; GOVERNANCE only with `bypass_governance`.
         set_object_lock = 13,
+        /// Mark `chunks` that have no reference count at all (stored by a
+        /// write that never committed) as collecting, so the orphan sweep
+        /// may delete them; the result's `collected` names the ones taken.
+        claim_chunks = 14,
+        /// The sweeper deleted `chunks` (collecting ones) from the blob
+        /// stores at `now_ms`.
+        chunks_deleted = 15,
     };
 
     kind op = kind::put_object;
@@ -240,6 +262,13 @@ struct index_command {
     /// them instead of sharing the source's chunks; its key material comes
     /// through `override_metadata`.
     bool new_bytes = false;
+    /// put_object, copy_object with `new_bytes`, upload_part: when the
+    /// front end began writing the entry's chunks (its clock). An entry
+    /// naming a chunk deleted after that is refused (`503 SlowDown`), since
+    /// its bytes may have gone with the deletion; 0 means "long ago".
+    std::uint64_t written_ms = 0;
+    /// claim_chunks, chunks_deleted.
+    std::vector<chunk_sha> chunks;
     /// copy_object: stored headers taken from `content.system_metadata`
     /// whatever `replace_metadata` says (erased when absent there): the
     /// new object's ACL, which is never copied, and its tags under
@@ -341,6 +370,10 @@ inline void write_opt_u64(detail::writer& w, const std::optional<std::uint64_t>&
         w.str(name);
     }
     w.u64(c.min_part_bytes).u32(c.max_parts).boolean(c.bypass_governance).boolean(c.new_bytes);
+    w.u64(c.written_ms).u32(static_cast<std::uint32_t>(c.chunks.size()));
+    for (const auto& sha : c.chunks) {
+        w.sha(sha);
+    }
     const auto s = w.take();
     std::vector<std::byte> out(s.size());
     std::memcpy(out.data(), s.data(), s.size());
@@ -353,7 +386,7 @@ inline void write_opt_u64(detail::writer& w, const std::optional<std::uint64_t>&
     r.expect_format(command_format, "command");
     index_command c;
     const auto op = r.u8();
-    if (op < 1 || op > 13) {
+    if (op < 1 || op > 15) {
         throw index_format_error("s3 index: unknown command");
     }
     c.op = static_cast<index_command::kind>(op);
@@ -399,6 +432,11 @@ inline void write_opt_u64(detail::writer& w, const std::optional<std::uint64_t>&
     c.max_parts = r.u32();
     c.bypass_governance = r.boolean();
     c.new_bytes = r.boolean();
+    c.written_ms = r.u64();
+    c.chunks.resize(r.u32());
+    for (auto& sha : c.chunks) {
+        sha = r.sha();
+    }
     r.done("command");
     return c;
 }
@@ -535,6 +573,9 @@ public:
             t = txn(*this);  // nothing of a refused entry is written
             result =
                 fail(500, "InternalError", "The entry names a key outside this group's range.");
+        } catch (const chunk_gone&) {
+            t = txn(*this);
+            result = fail(503, "SlowDown", "Please reduce your request rate.");
         }
         if (!result.ok()) {
             t = txn(*this);  // a failed entry changes nothing but the applied index
@@ -792,6 +833,24 @@ public:
         return std::nullopt;
     }
 
+    /// Up to `max` chunks marked collecting whose deletion from the blob
+    /// stores has not been reported: a sweeper resumes with these.
+    [[nodiscard]] auto pending_deletions(std::size_t max) const -> std::vector<chunk_sha> {
+        std::vector<chunk_sha> out;
+        const std::string start(keys::pending_space);
+        engine().scan(column_family::data, key_range{start, keys::prefix_end(start)},
+                      scan_direction::forward, [&](std::string_view k, std::string_view) {
+                          if (out.size() >= max) {
+                              return false;
+                          }
+                          chunk_sha sha{};
+                          std::memcpy(sha.data(), k.data() + start.size(), sha.size());
+                          out.push_back(sha);
+                          return true;
+                      });
+        return out;
+    }
+
     /// Every reference count, for audits and the property tests.
     [[nodiscard]] auto all_refcounts() const -> std::map<chunk_sha, refcount_record> {
         std::map<chunk_sha, refcount_record> out;
@@ -819,6 +878,10 @@ public:
 
 private:
     struct out_of_range {};
+    /// An entry names a chunk a sweep is deleting or deleted after the
+    /// entry's bytes were written: retryable, and the retry writes them
+    /// again.
+    struct chunk_gone {};
 
     /// One entry's writes: a batch plus an overlay, so the entry reads its
     /// own writes (a manifest naming one chunk twice counts it twice).
@@ -879,6 +942,7 @@ private:
 
     auto dispatch(txn& t, const index_command& c, std::uint64_t index) -> index_result {
         using k = index_command::kind;
+        _written_ms = c.written_ms;
         switch (c.op) {
             case k::create_bucket:
                 return create_bucket(t, c);
@@ -906,6 +970,10 @@ private:
                 return set_object_metadata(t, c);
             case k::set_object_lock:
                 return set_object_lock(t, c);
+            case k::claim_chunks:
+                return claim_chunks(t, c);
+            case k::chunks_deleted:
+                return chunks_deleted(t, c);
         }
         return fail(400, "InvalidRequest", "Unknown index command");
     }
@@ -1115,7 +1183,19 @@ private:
                 rec = codec::decode_refcount(*existing);
             }
             if (add) {
-                if (existing && rec.count == 0) {
+                if (existing && rec.state == chunk_state::collecting) {
+                    throw chunk_gone{};
+                }
+                if (existing && rec.state == chunk_state::deleted) {
+                    // Bytes written before the deletion (allowing for the
+                    // clocks of two nodes) may be gone with it.
+                    if (_written_ms < rec.deleted_ms + chunk_clock_skew_ms) {
+                        throw chunk_gone{};
+                    }
+                    t.erase(keys::tombstone(rec.deleted_ms, c.sha));
+                    rec = refcount_record{};
+                }
+                if (existing && rec.count == 0 && rec.zero_since_ms != 0) {
                     t.erase(keys::zero(rec.zero_since_ms, c.sha));
                 }
                 ++rec.count;
@@ -1623,10 +1703,70 @@ private:
                       });
         for (const auto& [zkey, sha] : due) {
             t.erase(zkey);
+            refcount_record rec;
+            rec.state = chunk_state::collecting;
+            t.put(keys::refcount(sha), codec::encode(rec));
+            t.put(keys::pending(sha), {});
+            r.collected.push_back(sha);
+        }
+        // Tombstones older than the grace period: every write that could
+        // still name those bytes has committed or given up by now.
+        const std::string tstart(keys::tombstone_space);
+        std::vector<std::pair<std::string, chunk_sha>> old;
+        engine().scan(column_family::data, key_range{tstart, keys::prefix_end(tstart)},
+                      scan_direction::forward, [&](std::string_view k, std::string_view) {
+                          if (old.size() >= c.max) {
+                              return false;
+                          }
+                          const auto at = detail::get_be64(k.substr(tstart.size()));
+                          if (at + c.grace_ms > c.now_ms) {
+                              return false;
+                          }
+                          chunk_sha sha{};
+                          std::memcpy(sha.data(), k.data() + tstart.size() + 8, sha.size());
+                          old.emplace_back(std::string(k), sha);
+                          return true;
+                      });
+        for (const auto& [tkey, sha] : old) {
+            t.erase(tkey);
             t.erase(keys::refcount(sha));
+        }
+        return r;
+    }
+
+    auto claim_chunks(txn& t, const index_command& c) -> index_result {
+        index_result r;
+        for (const auto& sha : c.chunks) {
+            if (t.get(keys::refcount(sha))) {
+                continue;  // referenced, or already on its way out
+            }
+            refcount_record rec;
+            rec.state = chunk_state::collecting;
+            t.put(keys::refcount(sha), codec::encode(rec));
+            t.put(keys::pending(sha), {});
             r.collected.push_back(sha);
         }
         return r;
+    }
+
+    auto chunks_deleted(txn& t, const index_command& c) -> index_result {
+        for (const auto& sha : c.chunks) {
+            const auto key = keys::refcount(sha);
+            const auto existing = t.get(key);
+            if (!existing) {
+                continue;
+            }
+            auto rec = codec::decode_refcount(*existing);
+            if (rec.state != chunk_state::collecting) {
+                continue;
+            }
+            rec.state = chunk_state::deleted;
+            rec.deleted_ms = c.now_ms;
+            t.put(key, codec::encode(rec));
+            t.erase(keys::pending(sha));
+            t.put(keys::tombstone(c.now_ms, sha), {});
+        }
+        return index_result{};
     }
 
     // ---- helpers ------------------------------------------------------------
@@ -1686,6 +1826,8 @@ private:
     engine_type* _engine = nullptr;
     key_range _range;
     LogIndex _applied{};
+    /// The applying entry's `written_ms`.
+    std::uint64_t _written_ms = 0;
     LogIndex _durable_floor{};
     std::deque<std::pair<LogIndex, engine_sequence>> _ring;
 };

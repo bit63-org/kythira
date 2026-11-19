@@ -296,11 +296,15 @@ template<typename Produce>
 
 template<metadata_access M>
 [[nodiscard]] auto propose_part(handler_context<M>& ctx, const s3_request& req,
-                                const bucket_state& b, part_record part)
+                                const bucket_state& b, part_record part, std::uint64_t started_ms)
     -> aws_rest_xml::result<index_result> {
+    if (ctx.write_expired(started_ms)) {
+        return slow_down();
+    }
     index_command c;
     c.op = index_command::kind::upload_part;
     c.now_ms = ctx.now_ms();
+    c.written_ms = started_ms;
     c.target = ref_of(b.desc);
     c.key = req.resource.key;
     c.upload_id = req.query.get("uploadId").value_or("");
@@ -455,6 +459,7 @@ template<metadata_access M>
         }
         return std::nullopt;
     };
+    const auto started_ms = ctx.now_ms();
     auto stored =
         store_part(ctx.data, from_body, b.profile.max_put_bytes, kept, *want, req.trailers,
                    *cipher ? &**cipher : nullptr, hides_md5(stored_kind(sse_meta)));
@@ -477,7 +482,7 @@ template<metadata_access M>
         }
     }
     stored->part.number = *number;
-    auto r = propose_part(ctx, req, b, stored->part);
+    auto r = propose_part(ctx, req, b, stored->part, started_ms);
     if (!r) {
         return r.error();
     }
@@ -606,13 +611,14 @@ template<metadata_access M>
         }
         return std::nullopt;
     };
+    const auto started_ms = ctx.now_ms();
     auto stored = store_part(ctx.data, from_source, b.profile.max_put_bytes, kept, want, {},
                              *cipher ? &**cipher : nullptr, hides_md5(stored_kind(sse_meta)));
     if (!stored) {
         return stored.error();
     }
     stored->part.number = *number;
-    auto r = propose_part(ctx, req, b, stored->part);
+    auto r = propose_part(ctx, req, b, stored->part, started_ms);
     if (!r) {
         return r.error();
     }

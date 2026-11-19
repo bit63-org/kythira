@@ -105,6 +105,7 @@ public:
         : _options(std::move(options)),
           _authorizer(&authorizer),
           _ctx{meta, data, _options},
+          _rates(_options.rates, _options.on_hot_prefix),
           _rules(s3_rules({_options.region})) {}
 
     s3_service(const s3_service&) = delete;
@@ -114,6 +115,7 @@ public:
     ~s3_service() = default;
 
     [[nodiscard]] auto options() const -> const service_options& { return _options; }
+    [[nodiscard]] auto rates() const -> const prefix_rates& { return _rates; }
 
     auto serve(http_request in) -> s3_response {
         const auto request_id = new_request_id();
@@ -410,6 +412,9 @@ private:
         if (auto e = find_bucket(req.resource.bucket, auth, req, b)) {
             return *e;
         }
+        if (auto e = admit(req, b)) {
+            return *e;
+        }
         auto facts = facts_for(req, auth, &b);
 
         if (op == "PutObjectTagging" || op == "PutBucketTagging") {
@@ -554,6 +559,9 @@ private:
         if (auto e = find_bucket(resource->bucket, auth, req, b)) {
             return fail(*e);
         }
+        if (auto e = admit(req, b)) {
+            return fail(*e);
+        }
         auto facts = facts_for(req, auth, &b);
         facts.operation = "PutObject";
         facts.key = posted->key;
@@ -641,9 +649,25 @@ private:
         return out;
     }
 
+    /// Requirement 13: a request over its prefix's rate is `503 SlowDown`
+    /// before it is authorized or touches anything.
+    [[nodiscard]] auto admit(const s3_request& req, const bucket_state& b)
+        -> std::optional<aws_rest_xml::error> {
+        const bool write = req.method != "GET" && req.method != "HEAD";
+        const auto prefix = !req.resource.key.empty()
+                                ? rate_prefix(req.resource.key)
+                                : rate_prefix(req.query.get("prefix").value_or(""));
+        const auto rate = write ? b.profile.prefix_put_rate : b.profile.prefix_get_rate;
+        if (_rates.admit(b.desc.name, prefix, write, rate, _ctx.now_ms())) {
+            return std::nullopt;
+        }
+        return slow_down();
+    }
+
     service_options _options;
     A* _authorizer;
     handler_context<M> _ctx;
+    prefix_rates _rates;
     sigv4::service_rules _rules;
 };
 

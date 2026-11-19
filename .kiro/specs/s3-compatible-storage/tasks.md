@@ -274,10 +274,33 @@ builds it to that design). Each task is one PR unless noted.
     in `s3_service_test`, `a_re_encrypted_copy_takes_its_own_chunks_and_keys`
     in the index test.
 
-- [ ] 12. Orphan sweep, placement repair and request rates
+- [x] 12. Orphan sweep, placement repair and request rates
   - Sweep of uncommitted chunks; repair to the copy count; per-prefix
     rate buckets with `SlowDown`; hot-prefix splits
   - _Requirements: 10.4, 10.6, 13.1, 13.2_
+  - Done: `chunk_service` lists a node's chunks in hash order a page at a
+    time and deletes one (`GET /_kythira/chunks/v1/?after=&limit=`,
+    `DELETE .../<sha>`). `chunk_sweeper` (`s3_sweeps.hpp`) merges every
+    node's listing, deletes chunks whose count has been zero a grace
+    period, claims and deletes chunks with no index record that it saw a
+    grace period earlier (uncommitted writes), and copies live chunks to
+    reachable placement nodes that lack them. Deleting safely needed new
+    index states: collected and claimed chunks stay *collecting* until
+    every node has answered the delete, then keep a *deleted* tombstone
+    for a grace period, and a reference to either from a write that began
+    before the deletion (plus a 5 s clock allowance, `written_ms` on the
+    entry) is refused with `SlowDown`; the front end refuses writes that
+    take longer than `max_write_ms`, and the sweeper checks the grace
+    period exceeds it. Per-prefix token buckets (`s3_rates.hpp`) answer
+    `SlowDown` past the profile's `put-rate` / `get-rate` (bucket tags; 0
+    turns them off). Hot prefixes are reported once per window through
+    `on_hot_prefix` and counted; splitting a range has nothing to act on
+    while one metadata group holds a bucket (task 17 makes it real, with
+    prefix-affinity routing, so until then the limit is per front end).
+    The sweeper's daemon wiring is task 16's. Tests: `s3_sweeps_test`,
+    four collection cases in the index test, the listing and delete cases
+    in `chunk_service_test`, rate and slow-write cases in
+    `s3_service_test`.
 
 - [ ] 13. Lifecycle and storage classes
   - Rules, the worker, transitions to cloud tiers, restore
