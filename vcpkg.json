@@ -50,6 +50,9 @@
       "name": "hnswlib"
     },
     {
+      "name": "lua51"
+    },
+    {
       "name": "libcoap",
       "features": [
         "dtls"
