@@ -61,6 +61,17 @@ public:
     [[nodiscard]] virtual auto bucket(const std::string& bucket,
                                       const kinesis::channel_access& access) const
         -> std::optional<kinesis::channel_bucket> = 0;
+
+    /// The Iceberg REST catalog for an S3 Tables channel's table bucket,
+    /// calling as `access`'s role when the node assumes roles; nullopt when
+    /// this node has none.
+    [[nodiscard]] virtual auto tables(const std::string& table_bucket_arn,
+                                      const kinesis::channel_access& access) const
+        -> std::optional<kinesis::iceberg_catalog> {
+        (void)table_bucket_arn;
+        (void)access;
+        return std::nullopt;
+    }
 };
 
 /// S3 in `_channel_s3_region` at `_channel_s3_endpoint` (as each channel's

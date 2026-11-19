@@ -486,6 +486,10 @@ public:
                                         const std::string& b, const kinesis::channel_access& a) {
                 return d->bucket(b, a);
             };
+            channels._tables = [d = _channel_destinations.get()](const std::string& arn,
+                                                                 const kinesis::channel_access& a) {
+                return d->tables(arn, a);
+            };
         }
         _channels = std::make_unique<
             kinesis::channel_delivery<cluster_type, kinesis::kinesis_service<cluster_type>>>(

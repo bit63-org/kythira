@@ -6,12 +6,13 @@ general purpose S3 bucket, or to Apache Iceberg tables on S3 Tables
 five calls are `CreateChannel`, `DescribeChannel`, `ListChannels`,
 `UpdateChannel` and `DeleteChannel`, with the pinned model's shapes.
 
-**Status: delivery to general purpose S3 works; S3 Tables does not yet.**
-A channel can be created, described, listed, updated, tagged and deleted,
-and it keeps its source streams from being deleted. An S3 channel's
-records reach its bucket as described under [Delivery to S3](#delivery-to-s3).
-An S3 Tables channel is accepted and kept but delivers nothing until the
-Iceberg commit path lands; do not rely on one to move data yet.
+**Status: delivery to general purpose S3 and to S3 Tables (or any Iceberg
+REST catalog) works.** A channel can be created, described, listed,
+updated, tagged and deleted, and it keeps its source streams from being
+deleted. An S3 channel's records reach its bucket as described under
+[Delivery to S3](#delivery-to-s3); an S3 Tables channel's records are
+appended to its Iceberg table as described under
+[Delivery to S3 Tables](#delivery-to-s3-tables).
 
 ## What the API checks
 
@@ -131,7 +132,11 @@ naming it, rather than leaving it ACTIVE and silently idle.
 | `KINESIS_CHANNEL_MAX_DELAY_MS` | `0` | When set (1000 to 900000), write a batch once it is this old even inside the channel's freshness window: seconds-scale delivery for tests and demos |
 | `KINESIS_CHANNEL_ROLE` | `node` | `node` writes with this node's own credentials; `assume` writes each channel's objects as its `ServiceExecutionRoleARN` |
 | `KINESIS_CHANNEL_STS_ENDPOINT` | AWS's, in `KINESIS_CHANNEL_S3_REGION` | STS's URL for `assume` (Kythira's IAM service answers `AssumeRole` too) |
-| `KINESIS_CHANNEL_CA_FILE` | the system store | The CA bundle the STS endpoint's certificate chains to |
+| `KINESIS_CHANNEL_CA_FILE` | the system store | The CA bundle the STS and Iceberg catalog endpoints' certificates chain to |
+| `KINESIS_CHANNEL_ICEBERG_URI` | S3 Tables' Iceberg endpoint in the table bucket's region | The Iceberg REST catalog's base URL, e.g. a local catalog for tests |
+| `KINESIS_CHANNEL_ICEBERG_WAREHOUSE` | the table bucket ARN | The `warehouse` passed to `GET /v1/config` |
+| `KINESIS_CHANNEL_ICEBERG_SIGV4` | `true` | Sign catalog requests with SigV4 (service `s3tables`); `false` for a catalog that takes a bearer token or nothing |
+| `KINESIS_CHANNEL_ICEBERG_TOKEN` | none | A bearer token for a catalog that is not signed with SigV4 |
 
 The container scenario (`services/kinesis/tests/docker/`) delivers a
 channel to its S3 mock with a five-second delay while every node is
@@ -140,6 +145,69 @@ under each key within a shard.
 
 Credentials come from the AWS SDK's usual chain. A build without the AWS
 SDK's s3 component logs at start that it does not deliver channels.
+
+## Delivery to S3 Tables
+
+An S3 Tables channel is delivered by the same pass, with the same shard
+ownership, checkpoints, freshness rule and reshard ordering as an S3
+channel. What differs is where a batch goes: it is appended to the
+configured table as one Iceberg snapshot.
+
+- The node loads the table from the Iceberg REST catalog. For S3 Tables
+  that is `https://s3tables.<region>.amazonaws.com/iceberg` with the table
+  bucket ARN as the warehouse, signed with SigV4 as the node or, with
+  `KINESIS_CHANNEL_ROLE=assume`, as the channel's execution role.
+- Each record is parsed as JSON and mapped onto the table's current
+  schema by column name. The rows are grouped by the table's partition
+  spec and written as Parquet data files under the table's location
+  (`<location>/data/<partition path>/`), with the destination's
+  `CompressionType` (`NONE`, `SNAPPY`, or `ZSTD` when the build found
+  libzstd).
+- It writes a manifest and a manifest list (Avro, format version 2), then
+  commits `add-snapshot` and `set-snapshot-ref main`, requiring the
+  table's UUID and the `main` branch's current snapshot. The snapshot's
+  id is derived from the table and the batch, and its summary carries
+  `kythira.channel-batch` = `<ChannelId>/<shard>/<first>-<last>`.
+- If another writer committed first (409) or the catalog failed (5xx), the
+  node loads the table again. If the batch's snapshot is already there the
+  batch is done; otherwise it rebuilds the manifest list on the new parent
+  and commits again, up to four times a pass.
+- The node that delivers after a lost checkpoint usually reads further
+  than the one that committed, so its batch covers more records. Before
+  writing, it looks for any committed batch that starts at its first
+  sequence number, skips the records that batch holds, and repeats; only
+  what is left is committed. Delivery is therefore exactly once in the
+  table, even across a lost checkpoint or a node killed between commit
+  and checkpoint.
+
+**Column types.** `boolean`, `int`, `long`, `float`, `double`, `string`,
+`binary` (base64 in the record), `date` (days, or `yyyy-MM-dd`), `time`
+(microseconds, or `HH:mm:ss[.ffffff]`), `timestamp` and `timestamptz`
+(milliseconds since the epoch, or ISO 8601), `uuid`, and nested `struct`
+and `list` columns of those. A missing optional column is null; a missing
+required column refuses the record. A table with a `decimal`, `fixed` or
+`map` column, or a format version other than 2, sets the channel to
+FAILED with a reason naming the column.
+
+**Partition transforms.** `identity`, `year`, `month`, `day`, `hour`,
+`bucket[N]`, `truncate[W]` and `void`, computed as the Iceberg
+specification defines them. When the channel's `PartitionSpec` asks for
+`TIME_HOUR` on a column, the table's spec must have `hour(<column>)`, or
+the channel is set to FAILED.
+
+**Dead letters.** A record that is not JSON (`InvalidJson`), or that does
+not fit the table's schema (`SchemaMismatch`: a wrong type, a missing
+required column), goes to the destination's
+`DeadLetterQueueS3Configuration` in the same JSON-lines form as an S3
+channel's dead letters; the rest of the batch is committed.
+
+**The table must exist.** The node does not create the namespace or the
+table. While the catalog answers 404 (or refuses the role), the batch
+stays undelivered, the pass's log line says why (`last_failure=`), and the
+channel stays ACTIVE.
+
+The unit tests export a table that `services/kinesis/tests/iceberg/read_exported_table.py` reads
+back with pyiceberg, including partition pruning.
 
 ## Execution role
 
@@ -176,6 +244,10 @@ writes as it.
 - `aws:ResourceTag` conditions are not evaluated for channel ARNs.
 - Delivered objects are not yet encrypted with the channel's
   `EncryptionConfiguration`.
+- An S3 Tables channel validates records against the table's schema; the
+  `GSRSchemaARN` is checked to be present but its schema is not fetched
+  from Glue. Parquet files carry no column statistics yet, so engines
+  prune by partition but not by min/max.
 - A node writes with its own credentials unless `KINESIS_CHANNEL_ROLE`
   is `assume` (see [Execution role](#execution-role)). The default stays
   `node` so a deployment writing to MinIO or Kythira's own S3 with static
@@ -186,3 +258,6 @@ writes as it.
 The error type AWS returns for a provisioned
 source or a cross-account stream, and the exact ARN form have not been
 recorded against AWS; the differential test does not cover channels yet.
+S3 Tables delivery has been checked against pyiceberg and a local Iceberg
+REST catalog, not against S3 Tables itself: the SigV4 signing name and
+the warehouse prefix follow AWS's documentation.
