@@ -766,6 +766,10 @@ private:
         // every node with a membership change nobody proposed.
         obj["is_joint_consensus"] = false;
         obj.erase("old_nodes");
+        // Likewise the old cluster's learners: the seeded membership is exactly
+        // the ids supplied, and a learner carried across would name a node the
+        // new cluster never added.
+        obj.erase("learners");
         return boost::json::serialize(obj);
     }
 
