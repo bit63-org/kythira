@@ -93,6 +93,16 @@ public:
 
     [[nodiscard]] virtual auto subscriptions_of(std::uint64_t topic_id) const
         -> std::vector<subscription_record> = 0;
+
+    [[nodiscard]] virtual auto find_subscription(std::uint64_t id) const
+        -> std::optional<subscription_record> = 0;
+
+    [[nodiscard]] virtual auto topic_by_id(std::uint64_t id) const
+        -> std::optional<topic_record> = 0;
+
+    /// Every subscription by id, after `after_id`, at most `limit`.
+    [[nodiscard]] virtual auto subscriptions_after(std::uint64_t after_id, std::size_t limit) const
+        -> std::vector<subscription_record> = 0;
 };
 
 /// A store over one in-process topic state machine: a single-node cluster,
@@ -131,6 +141,26 @@ public:
         return out;
     }
 
+    [[nodiscard]] auto find_subscription(std::uint64_t id) const
+        -> std::optional<subscription_record> override {
+        const auto* sub = _sm.find_subscription(id);
+        return sub == nullptr ? std::nullopt : std::optional<subscription_record>(*sub);
+    }
+
+    [[nodiscard]] auto topic_by_id(std::uint64_t id) const -> std::optional<topic_record> override {
+        const auto* t = _sm.topic_by_id(id);
+        return t == nullptr ? std::nullopt : std::optional<topic_record>(*t);
+    }
+
+    [[nodiscard]] auto subscriptions_after(std::uint64_t after_id, std::size_t limit) const
+        -> std::vector<subscription_record> override {
+        std::vector<subscription_record> out;
+        for (const auto* sub : _sm.subscriptions_after(after_id, limit)) {
+            out.push_back(*sub);
+        }
+        return out;
+    }
+
     [[nodiscard]] auto machine() const -> const topic_state_machine<LogIndex>& { return _sm; }
 
 private:
@@ -142,6 +172,15 @@ private:
 
 /// The page size of ListTopics, as on SNS.
 inline constexpr std::size_t k_list_topics_page = 100;
+/// The page size of ListSubscriptions and ListSubscriptionsByTopic.
+inline constexpr std::size_t k_list_subscriptions_page = 100;
+/// What Subscribe answers for a subscription waiting for confirmation, and
+/// what the list operations show in place of its ARN, as on SNS.
+inline constexpr std::string_view k_pending_confirmation = "pending confirmation";
+inline constexpr std::string_view k_pending_arn = "PendingConfirmation";
+/// Confirmation tokens: random bytes, hex encoded (SNS's are 256 hex
+/// characters too).
+inline constexpr std::size_t k_token_bytes = 128;
 /// Tags per topic, and the lengths SNS allows.
 inline constexpr std::size_t k_max_tags = 50;
 inline constexpr std::size_t k_max_tag_key = 128;
@@ -281,6 +320,85 @@ inline constexpr std::string_view k_tracing_config = "TracingConfig";
     return out;
 }
 
+/// The protocols Kythira delivers to. SMS and mobile push (`sms`,
+/// `application`) are out of scope.
+[[nodiscard]] inline auto known_protocol(std::string_view p) -> bool {
+    return p == "http" || p == "https" || p == "email" || p == "email-json" || p == "sqs" ||
+           p == "lambda" || p == "firehose";
+}
+
+/// The settable subscription attributes, as the SNS API reference lists
+/// them for Subscribe and SetSubscriptionAttributes.
+[[nodiscard]] inline auto known_subscription_attribute(std::string_view a) -> bool {
+    return a == "DeliveryPolicy" || a == "FilterPolicy" || a == "FilterPolicyScope" ||
+           a == "RawMessageDelivery" || a == "RedrivePolicy" || a == "SubscriptionRoleArn" ||
+           a == "ReplayPolicy";
+}
+
+/// The account of an `arn:<partition>:<service>:<region>:<account>:...`
+/// ARN of `service`, or empty when `arn` is not one.
+[[nodiscard]] inline auto arn_account(std::string_view arn, std::string_view service)
+    -> std::string_view {
+    std::array<std::string_view, 5> parts{};
+    for (auto& part : parts) {
+        const auto colon = arn.find(':');
+        if (colon == std::string_view::npos) {
+            return {};
+        }
+        part = arn.substr(0, colon);
+        arn.remove_prefix(colon + 1);
+    }
+    if (parts[0] != "arn" || parts[2] != service || arn.empty()) {
+        return {};
+    }
+    return parts[4];
+}
+
+/// The suffix of a subscription's ARN: the topic and subscription ids in
+/// the shape of a UUID, so clients that parse SNS's ARNs accept it. Both
+/// counters only grow, so a suffix is never reused.
+[[nodiscard]] inline auto subscription_suffix(std::uint64_t topic_id, std::uint64_t id)
+    -> std::string {
+    static constexpr std::string_view k_hex = "0123456789abcdef";
+    const auto hex = [](std::uint64_t v, int digits) {
+        std::string out(static_cast<std::size_t>(digits), '0');
+        for (int i = digits - 1; i >= 0; --i) {
+            out[static_cast<std::size_t>(i)] = k_hex.at(v & 0xFU);
+            v >>= 4U;
+        }
+        return out;
+    };
+    return hex(topic_id, 8) + "-0000-4000-8000-" + hex(id, 12);
+}
+
+/// The subscription id inside a suffix `subscription_suffix` made, with the
+/// topic id's low 32 bits; nullopt for anything else.
+[[nodiscard]] inline auto parse_subscription_suffix(std::string_view suffix)
+    -> std::optional<std::pair<std::uint32_t, std::uint64_t>> {
+    if (suffix.size() != 36 || suffix.substr(8, 16) != "-0000-4000-8000-") {
+        return std::nullopt;
+    }
+    const auto parse = [](std::string_view hex) -> std::optional<std::uint64_t> {
+        std::uint64_t v = 0;
+        for (const char c : hex) {
+            const auto d = c >= '0' && c <= '9'   ? c - '0'
+                           : c >= 'a' && c <= 'f' ? c - 'a' + 10
+                                                  : -1;
+            if (d < 0) {
+                return std::nullopt;
+            }
+            v = (v << 4U) | static_cast<std::uint64_t>(d);
+        }
+        return v;
+    };
+    const auto topic = parse(suffix.substr(0, 8));
+    const auto id = parse(suffix.substr(24));
+    if (!topic || !id) {
+        return std::nullopt;
+    }
+    return std::pair{static_cast<std::uint32_t>(*topic), *id};
+}
+
 [[nodiscard]] inline auto system_now_ms() -> std::int64_t {
     return std::chrono::duration_cast<std::chrono::milliseconds>(
                std::chrono::system_clock::now().time_since_epoch())
@@ -333,6 +451,13 @@ public:
         bind("RemovePermission", &sns_service::remove_permission_op);
         bind("GetDataProtectionPolicy", &sns_service::get_data_protection_policy);
         bind("PutDataProtectionPolicy", &sns_service::put_data_protection_policy);
+        bind("Subscribe", &sns_service::subscribe);
+        bind("ConfirmSubscription", &sns_service::confirm_subscription);
+        bind("Unsubscribe", &sns_service::unsubscribe);
+        bind("GetSubscriptionAttributes", &sns_service::get_subscription_attributes);
+        bind("SetSubscriptionAttributes", &sns_service::set_subscription_attributes);
+        bind("ListSubscriptionsByTopic", &sns_service::list_subscriptions_by_topic);
+        bind("ListSubscriptions", &sns_service::list_subscriptions);
     }
 
     /// The facts authorization needs about a topic: its effective policy
@@ -648,6 +773,294 @@ public:
         return set_attribute(ctx, "Policy", *policy);
     }
 
+    // ---- subscriptions ----------------------------------------------------
+
+    /// Subscribe. HTTP, HTTPS and email endpoints wait for confirmation
+    /// with a fresh token, and so does an SQS queue in another account than
+    /// the caller's (Requirement 4.2); the confirmation message itself is
+    /// sent by delivery (task 6). Subscribing the same endpoint again with
+    /// the same attributes answers the same subscription, and a pending one
+    /// takes a new token, as SNS sends a new confirmation.
+    auto subscribe(call_context& ctx, const params& in) -> query_result<std::string> {
+        auto protocol = in.required("Protocol");
+        if (!protocol.has_value()) {
+            return protocol.error();
+        }
+        if (!service_detail::known_protocol(*protocol)) {
+            return invalid_parameter("Protocol");
+        }
+        const auto endpoint = std::string(in.get("Endpoint").value_or(""));
+        auto attrs = in.string_map("Attributes");
+        if (!attrs.has_value()) {
+            return attrs.error();
+        }
+        auto t = topic_of(ctx);
+        if (!t.has_value()) {
+            return t.error();
+        }
+        if (auto bad = check_endpoint(*t, *protocol, endpoint, *attrs)) {
+            return *bad;
+        }
+        string_map stored;
+        for (const auto& [k, v] : *attrs) {
+            if (auto bad = check_subscription_attribute(*protocol, k, v)) {
+                return *bad;
+            }
+            stored.insert_or_assign(k, v);
+        }
+        const auto& caller = ctx._principal.account;
+        if (const auto limit = limits(ctx).subscriptions_per_topic(t->_fifo); limit != 0) {
+            if (_store.subscriptions_of(t->_id).size() >= limit) {
+                return model_error("SubscriptionLimitExceededException",
+                                   "Subscription limit exceeded");
+            }
+        }
+        subscribe_command c;
+        c._account = t->_account;
+        c._name = t->_name;
+        c._protocol = std::string(*protocol);
+        c._endpoint = endpoint;
+        c._owner = caller;
+        c._attributes = std::move(stored);
+        c._needs_confirmation =
+            *protocol != "sqs" && *protocol != "lambda" && *protocol != "firehose"
+                ? true
+                : *protocol == "sqs" && service_detail::arn_account(endpoint, "sqs") != caller;
+        if (c._needs_confirmation) {
+            c._token = service_detail::random_hex(k_token_bytes);
+        }
+        c._now_ms = _config._now_ms();
+        const auto r = _store.submit(c);
+        if (!r) {
+            return internal_error();
+        }
+        if (r->_status == apply_status::topic_not_found) {
+            return topic_not_found();
+        }
+        if (r->_status == apply_status::subscription_exists_with_different_attributes) {
+            return invalid_parameter("Attributes",
+                                     "Subscription already exists with different attributes");
+        }
+        if (r->_status != apply_status::ok) {
+            return internal_error();
+        }
+        const auto sub = _store.find_subscription(r->_id);
+        if (!sub) {
+            return internal_error();
+        }
+        aws_query::xml_writer w;
+        if (sub->_confirmed ||
+            in.get("ReturnSubscriptionArn") == std::optional<std::string_view>("true")) {
+            w.element("SubscriptionArn", subscription_arn(ctx._topic_arn, *sub));
+        } else {
+            w.element("SubscriptionArn", k_pending_confirmation);
+        }
+        return w.str();
+    }
+
+    /// ConfirmSubscription: the token a confirmation message carried, while
+    /// it is valid (three days). Every call here is signed, so
+    /// `AuthenticateOnUnsubscribe` changes nothing: Unsubscribe always
+    /// needs a signed, authorized caller.
+    auto confirm_subscription(call_context& ctx, const params& in) -> query_result<std::string> {
+        auto token = in.required("Token");
+        if (!token.has_value()) {
+            return token.error();
+        }
+        auto t = topic_of(ctx);
+        if (!t.has_value()) {
+            return t.error();
+        }
+        confirm_subscription_command c;
+        c._account = t->_account;
+        c._name = t->_name;
+        c._token = std::string(*token);
+        c._now_ms = _config._now_ms();
+        const auto r = _store.submit(c);
+        if (!r) {
+            return internal_error();
+        }
+        if (r->_status == apply_status::topic_not_found) {
+            return topic_not_found();
+        }
+        if (r->_status == apply_status::invalid_token) {
+            return invalid_parameter("Token");
+        }
+        if (r->_status != apply_status::ok) {
+            return internal_error();
+        }
+        const auto sub = _store.find_subscription(r->_id);
+        if (!sub) {
+            return internal_error();
+        }
+        aws_query::xml_writer w;
+        w.element("SubscriptionArn", subscription_arn(ctx._topic_arn, *sub));
+        return w.str();
+    }
+
+    auto unsubscribe(call_context& ctx, const params& in) -> query_result<std::string> {
+        auto sub = subscription_of(ctx, in);
+        if (!sub.has_value()) {
+            return sub.error();
+        }
+        const auto r = _store.submit(unsubscribe_command{sub->_id});
+        if (!r) {
+            return internal_error();
+        }
+        if (r->_status == apply_status::subscription_not_found) {
+            return subscription_not_found();
+        }
+        return r->_status == apply_status::ok ? query_result<std::string>(std::string{})
+                                              : query_result<std::string>(internal_error());
+    }
+
+    auto get_subscription_attributes(call_context& ctx, const params& in)
+        -> query_result<std::string> {
+        auto sub = subscription_of(ctx, in);
+        if (!sub.has_value()) {
+            return sub.error();
+        }
+        const auto t = _store.topic_by_id(sub->_topic_id);
+        if (!t) {
+            return subscription_not_found();
+        }
+        string_map out = sub->_attributes;
+        out.insert_or_assign("SubscriptionArn", subscription_arn(ctx._topic_arn, *sub));
+        out.insert_or_assign("TopicArn", ctx._topic_arn);
+        out.insert_or_assign("Owner", sub->_owner);
+        out.insert_or_assign("Protocol", sub->_protocol);
+        out.insert_or_assign("Endpoint", sub->_endpoint);
+        out.insert_or_assign("PendingConfirmation", sub->_confirmed ? "false" : "true");
+        out.insert_or_assign("ConfirmationWasAuthenticated", sub->_confirmed ? "true" : "false");
+        out.try_emplace("RawMessageDelivery", "false");
+        if (sub->_protocol == "http" || sub->_protocol == "https") {
+            const auto own = sub->_attributes.find("DeliveryPolicy");
+            const auto topic = t->_attributes.find("DeliveryPolicy");
+            out.insert_or_assign("EffectiveDeliveryPolicy",
+                                 own != sub->_attributes.end() ? own->second
+                                 : topic != t->_attributes.end()
+                                     ? topic->second
+                                     : std::string(k_default_effective_delivery_policy));
+        }
+        aws_query::xml_writer w;
+        write_map(w, "Attributes", out);
+        return w.str();
+    }
+
+    auto set_subscription_attributes(call_context& ctx, const params& in)
+        -> query_result<std::string> {
+        auto name = in.required("AttributeName");
+        if (!name.has_value()) {
+            return name.error();
+        }
+        const auto value = std::string(in.get("AttributeValue").value_or(""));
+        auto sub = subscription_of(ctx, in);
+        if (!sub.has_value()) {
+            return sub.error();
+        }
+        if (!service_detail::known_subscription_attribute(*name)) {
+            return invalid_parameter("AttributeName");
+        }
+        if (auto bad = check_subscription_attribute(sub->_protocol, *name, value)) {
+            return *bad;
+        }
+        set_subscription_attribute_command c;
+        c._subscription_id = sub->_id;
+        c._key = std::string(*name);
+        c._value = value;
+        const auto r = _store.submit(c);
+        if (!r) {
+            return internal_error();
+        }
+        if (r->_status == apply_status::subscription_not_found) {
+            return subscription_not_found();
+        }
+        return r->_status == apply_status::ok ? query_result<std::string>(std::string{})
+                                              : query_result<std::string>(internal_error());
+    }
+
+    auto list_subscriptions_by_topic(call_context& ctx, const params& in)
+        -> query_result<std::string> {
+        auto t = topic_of(ctx);
+        if (!t.has_value()) {
+            return t.error();
+        }
+        const auto context = "ListSubscriptionsByTopic/" + ctx._topic_arn;
+        auto after = open_id_token(context, in);
+        if (!after.has_value()) {
+            return after.error();
+        }
+        std::vector<subscription_record> page;
+        bool more = false;
+        for (auto& sub : _store.subscriptions_of(t->_id)) {
+            if (sub._id <= *after) {
+                continue;
+            }
+            if (page.size() == k_list_subscriptions_page) {
+                more = true;
+                break;
+            }
+            page.push_back(std::move(sub));
+        }
+        aws_query::xml_writer w;
+        w.open("Subscriptions");
+        for (const auto& sub : page) {
+            write_subscription(w, ctx._topic_arn, sub);
+        }
+        w.close();
+        if (more) {
+            w.element("NextToken", _sealer.seal(context, std::to_string(page.back()._id)));
+        }
+        return w.str();
+    }
+
+    /// ListSubscriptions: the caller's account's subscriptions, on any
+    /// topic, by id.
+    auto list_subscriptions(call_context& ctx, const params& in) -> query_result<std::string> {
+        const std::string account = ctx._principal.account;
+        const auto context = "ListSubscriptions/" + account;
+        auto after = open_id_token(context, in);
+        if (!after.has_value()) {
+            return after.error();
+        }
+        std::vector<std::pair<std::string, subscription_record>> page;
+        bool more = false;
+        std::uint64_t cursor = *after;
+        while (!more) {
+            auto batch = _store.subscriptions_after(cursor, 1000);
+            for (auto& sub : batch) {
+                cursor = sub._id;
+                if (sub._owner != account) {
+                    continue;
+                }
+                if (page.size() == k_list_subscriptions_page) {
+                    more = true;
+                    break;
+                }
+                const auto t = _store.topic_by_id(sub._topic_id);
+                if (!t) {
+                    continue;
+                }
+                page.emplace_back("arn:" + ctx._partition + ":sns:" + ctx._region + ":" +
+                                      t->_account + ":" + t->_name,
+                                  std::move(sub));
+            }
+            if (batch.size() < 1000) {
+                break;
+            }
+        }
+        aws_query::xml_writer w;
+        w.open("Subscriptions");
+        for (const auto& [arn, sub] : page) {
+            write_subscription(w, arn, sub);
+        }
+        w.close();
+        if (more) {
+            w.element("NextToken", _sealer.seal(context, std::to_string(page.back().second._id)));
+        }
+        return w.str();
+    }
+
     // ---- data protection --------------------------------------------------
 
     auto get_data_protection_policy(call_context& ctx, const params&) -> query_result<std::string> {
@@ -803,6 +1216,159 @@ private:
         }
         return r->_status == apply_status::ok ? query_result<std::string>(std::string{})
                                               : query_result<std::string>(internal_error());
+    }
+
+    [[nodiscard]] static auto subscription_not_found() -> sns_error {
+        return not_found("Subscription does not exist");
+    }
+
+    [[nodiscard]] static auto subscription_arn(std::string_view topic_arn,
+                                               const subscription_record& sub) -> std::string {
+        return std::string(topic_arn) + ":" +
+               service_detail::subscription_suffix(sub._topic_id, sub._id);
+    }
+
+    /// The subscription a `SubscriptionArn` names: the front end found its
+    /// topic; the suffix must name a subscription of that topic.
+    [[nodiscard]] auto subscription_of(const call_context& ctx, const params& in) const
+        -> query_result<subscription_record> {
+        const auto arn = in.get("SubscriptionArn");
+        if (!arn || !ctx._topic) {
+            return invalid_parameter("SubscriptionArn");
+        }
+        if (!here(ctx)) {
+            return subscription_not_found();
+        }
+        const auto parsed =
+            service_detail::parse_subscription_suffix(arn->substr(arn->rfind(':') + 1));
+        if (!parsed) {
+            return invalid_parameter("SubscriptionArn");
+        }
+        const auto t = _store.find_topic(ctx._topic->_account, ctx._topic->_name);
+        auto sub = _store.find_subscription(parsed->second);
+        if (!t || !sub || sub->_topic_id != t->_id ||
+            static_cast<std::uint32_t>(t->_id) != parsed->first) {
+            return subscription_not_found();
+        }
+        return std::move(*sub);
+    }
+
+    /// Checks an endpoint against its protocol and the topic, as SNS does.
+    [[nodiscard]] static auto check_endpoint(const topic_record& t, std::string_view protocol,
+                                             std::string_view endpoint, const string_map& attrs)
+        -> std::optional<sns_error> {
+        if (t._fifo) {
+            if (protocol != "sqs") {
+                return invalid_parameter("Invalid protocol type: " + std::string(protocol));
+            }
+            if (!service_detail::ends_with(endpoint, ".fifo")) {
+                return invalid_parameter("Endpoint", "Please use FIFO SQS queue");
+            }
+        }
+        if (endpoint.empty()) {
+            return invalid_parameter("Endpoint");
+        }
+        bool ok = true;
+        if (protocol == "http") {
+            ok = endpoint.starts_with("http://");
+        } else if (protocol == "https") {
+            ok = endpoint.starts_with("https://");
+        } else if (protocol == "email" || protocol == "email-json") {
+            const auto at = endpoint.find('@');
+            ok = at != std::string_view::npos && at != 0 && at + 1 != endpoint.size();
+        } else if (protocol == "sqs") {
+            ok = !service_detail::arn_account(endpoint, "sqs").empty();
+        } else if (protocol == "lambda") {
+            ok = !service_detail::arn_account(endpoint, "lambda").empty();
+        } else if (protocol == "firehose") {
+            ok = !service_detail::arn_account(endpoint, "firehose").empty();
+            if (ok && !attrs.contains("SubscriptionRoleArn")) {
+                return invalid_parameter("Attributes",
+                                         "SubscriptionRoleArn is required for firehose");
+            }
+        }
+        if (!ok) {
+            return invalid_parameter("Endpoint");
+        }
+        return std::nullopt;
+    }
+
+    /// Checks one subscription attribute's name and value for a protocol.
+    [[nodiscard]] static auto check_subscription_attribute(std::string_view protocol,
+                                                           std::string_view name,
+                                                           std::string_view value)
+        -> std::optional<sns_error> {
+        if (!service_detail::known_subscription_attribute(name)) {
+            return invalid_parameter("Attributes", "Unknown attribute " + std::string(name));
+        }
+        const auto bad = [name] {
+            return invalid_parameter("Attributes", "Invalid value for " + std::string(name));
+        };
+        if (name == "RawMessageDelivery") {
+            if (value != "true" && value != "false") {
+                return bad();
+            }
+            if (protocol != "sqs" && protocol != "http" && protocol != "https" &&
+                protocol != "firehose") {
+                return invalid_parameter("Attributes", "Delivery protocol [" +
+                                                           std::string(protocol) +
+                                                           "] does not support raw message "
+                                                           "delivery.");
+            }
+        } else if (name == "FilterPolicyScope") {
+            if (value != "MessageAttributes" && value != "MessageBody") {
+                return bad();
+            }
+        } else if (name == "FilterPolicy" || name == "DeliveryPolicy" || name == "ReplayPolicy") {
+            // An empty FilterPolicy removes it, as on SNS; task 5 checks
+            // the policy's grammar.
+            if (!(name == "FilterPolicy" && value.empty()) &&
+                !service_detail::is_json_object(value)) {
+                return bad();
+            }
+        } else if (name == "RedrivePolicy") {
+            boost::system::error_code ec;
+            const auto v = boost::json::parse(value, ec);
+            const auto* target =
+                !ec && v.is_object() ? v.as_object().if_contains("deadLetterTargetArn") : nullptr;
+            if (target == nullptr || !target->is_string() ||
+                service_detail::arn_account(target->as_string(), "sqs").empty()) {
+                return bad();
+            }
+        } else if (name == "SubscriptionRoleArn") {
+            if (!value.starts_with("arn:") || value.find(":iam::") == std::string_view::npos) {
+                return bad();
+            }
+        }
+        return std::nullopt;
+    }
+
+    /// The id a list's `NextToken` was sealed over; 0 without a token.
+    [[nodiscard]] auto open_id_token(const std::string& context, const params& in) const
+        -> query_result<std::uint64_t> {
+        const auto token = in.get("NextToken");
+        if (!token || token->empty()) {
+            return std::uint64_t{0};
+        }
+        const auto opened = _sealer.open(context, *token);
+        if (!opened || opened->empty() ||
+            !std::all_of(opened->begin(), opened->end(),
+                         [](unsigned char c) { return std::isdigit(c) != 0; })) {
+            return invalid_parameter("NextToken");
+        }
+        return std::stoull(*opened);
+    }
+
+    static auto write_subscription(aws_query::xml_writer& w, std::string_view topic_arn,
+                                   const subscription_record& sub) -> void {
+        w.open("member");
+        w.element("SubscriptionArn",
+                  sub._confirmed ? subscription_arn(topic_arn, sub) : std::string(k_pending_arn));
+        w.element("Owner", sub._owner);
+        w.element("Protocol", sub._protocol);
+        w.element("Endpoint", sub._endpoint);
+        w.element("TopicArn", topic_arn);
+        w.close();
     }
 
     /// `<name><entry><key>k</key><value>v</value></entry>...</name>`.
