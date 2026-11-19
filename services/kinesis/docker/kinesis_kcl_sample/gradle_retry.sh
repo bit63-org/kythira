@@ -16,6 +16,12 @@
 #   and 160 s between attempts. Artifacts already downloaded stay in
 #   GRADLE_USER_HOME, so a retry only fetches what is still missing.
 #
+# Retries do not help when repo1 answers 404 for artifacts it holds,
+# which it did on every one of five attempts over five minutes on #840:
+# Gradle does not cache that miss between builds, repo1 just kept
+# answering it. The build.gradle files list Google's Maven Central mirror
+# first and repo1 after it for that case.
+#
 # For tasks that build, never for `test`: retrying the whole build would
 # also rerun a failing test until it happened to pass.
 #

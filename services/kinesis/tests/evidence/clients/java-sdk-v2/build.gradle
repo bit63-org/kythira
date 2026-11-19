@@ -11,7 +11,15 @@ plugins {
 }
 
 repositories {
-    // repo1 is the same Maven Central; the CI proxy rate-limits the other name less.
+    // Google's copy of Maven Central first. From GitHub's runners repo1 has
+    // answered 404 for files it holds, on every retry for minutes on end:
+    // POMs on #840 and, once POMs fell back here, JARs on #905. Gradle
+    // fetches a module's JAR only from the repository that gave its POM, so
+    // a fallback after repo1 can't cover a JAR miss; this mirror has to be
+    // the one that answers.
+    maven { url = 'https://maven-central.storage-download.googleapis.com/maven2' }
+    // repo1 (Maven Central itself) for anything the mirror doesn't have yet;
+    // Gradle asks it only when the mirror answers 404.
     maven { url = 'https://repo1.maven.org/maven2' }
 }
 
