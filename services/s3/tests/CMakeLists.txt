@@ -180,6 +180,13 @@ elseif(TARGET Boost::json)
     target_link_libraries(s3_notifications_test PRIVATE Boost::json)
 endif()
 
+# Task 15: CORS and website configurations (XML both ways, S3's checks,
+# rule matching, redirects, the website endpoint's HTML error pages). The
+# rules headers need only the REST-XML codec.
+add_executable(s3_website_rules_test s3_website_rules_test.cpp)
+target_link_libraries(s3_website_rules_test PRIVATE kythira_s3 Boost::unit_test_framework)
+add_test(NAME s3_website_rules_test COMMAND s3_website_rules_test)
+
 # Task 7: the request pipeline end to end (routing, SigV4, the access check,
 # bucket, object and listing handlers) over the in-process metadata layer.
 # It includes the persistent state machine contract, hence the shared test
@@ -212,6 +219,7 @@ set_tests_properties(
     s3_sweeps_test
     s3_lifecycle_test
     s3_notifications_test
+    s3_website_rules_test
     s3_service_test
     PROPERTIES LABELS "unit;s3;s3-module" TIMEOUT 60)
 
