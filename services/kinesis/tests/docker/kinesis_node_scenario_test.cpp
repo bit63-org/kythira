@@ -1052,6 +1052,11 @@ BOOST_AUTO_TEST_CASE(differential_replay_matches_the_aws_recordings) {
                                 "/usr/local/share/kinesis-diff/allow.json"});
     BOOST_TEST(replay.code == 0, "replay of the AWS recordings failed:\n" << replay.out);
     BOOST_TEST_MESSAGE("differential replay:\n" << replay.out);
+
+    // Task 19: the channel operations, every answer checked against the
+    // botocore model the client image pins (no AWS recording yet).
+    auto channels = differential({"channels", "--endpoint", endpoint(1)});
+    BOOST_TEST(channels.code == 0, "channel model check failed:\n" << channels.out);
 }
 
 // Task 17: tiering through leader kills and S3 faults. Runs last, since it

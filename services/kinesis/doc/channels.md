@@ -257,7 +257,9 @@ writes as it.
 
 The error type AWS returns for a provisioned
 source or a cross-account stream, and the exact ARN form have not been
-recorded against AWS; the differential test does not cover channels yet.
+recorded against AWS. The differential tool's `channels` suite checks every
+channel answer against the botocore model (doc/differential.md), but no
+AWS recording of it exists yet.
 S3 Tables delivery has been checked against pyiceberg and the Apache
 Iceberg REST catalog fixture, not against S3 Tables itself: the SigV4 signing name and
 the warehouse prefix follow AWS's documentation.

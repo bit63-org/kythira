@@ -14,6 +14,7 @@ against Kythira and compared step by step.
     kinesis_differential.py run --endpoint URL --seed N --steps M --out FILE
     kinesis_differential.py compare --endpoint URL --recording FILE|DIR [--allow FILE]
     kinesis_differential.py self-check --endpoints URL,URL --seed N --steps M
+    kinesis_differential.py channels --endpoint URL|--real-aws [--out FILE] [--recording FILE]
 
 The mix's choices depend only on the seed and on normalised answers, so two
 services that answer alike are sent the same requests. Normalising replaces
@@ -35,6 +36,17 @@ the end, even after a failure.
 
 --real-aws talks to AWS with the ambient credentials (AWS_PROFILE etc.) and
 costs a few cents per run. It needs Clark's go each time.
+
+`channels` (task 19) runs a fixed sequence of the five channel operations,
+with tags, DescribeStreamSummary's ChannelCount and the errors the model
+documents, on an on-demand stream of its own, and checks every answer
+against the botocore service model: each success's raw JSON body must fit
+the operation's output shape (required members present, no unknown
+members, enum values, types), and each error's `__type` must be one the
+operation declares. With --out it writes the normalised steps as a
+recording; with --recording it also compares against one (a run against
+real AWS needs Clark's go, a role and a bucket: --role-arn, --bucket). It
+deletes its channel and stream at the end, even after a failure.
 """
 
 import argparse
@@ -459,6 +471,216 @@ def _symbolic(req, n):
     return req
 
 
+# ---- checking answers against the service model ---------------------------
+
+
+def shape_problems(model, shape_name, value, path="$"):
+    """Where `value`, a raw awsJson body (or part of one), does not fit
+    `shape_name` in `model`, a botocore service model as loaded JSON."""
+    shape = model["shapes"][shape_name]
+    kind = shape["type"]
+    where = path
+
+    def bad(what):
+        return ["%s: %s (%s)" % (where, what, shape_name)]
+
+    if kind == "structure":
+        if not isinstance(value, dict):
+            return bad("expected an object, got %s" % type(value).__name__)
+        members = shape.get("members", {})
+        out = []
+        for k in shape.get("required", []):
+            if value.get(k) is None:
+                out.append("%s.%s: required, missing (%s)" % (where, k, shape_name))
+        for k, v in sorted(value.items()):
+            if k not in members:
+                out.append("%s.%s: not a member of %s" % (where, k, shape_name))
+            elif v is not None:
+                out += shape_problems(model, members[k]["shape"], v, where + "." + k)
+        return out
+    if kind == "list":
+        if not isinstance(value, list):
+            return bad("expected a list")
+        out = []
+        for i, v in enumerate(value):
+            out += shape_problems(model, shape["member"]["shape"], v, "%s[%d]" % (where, i))
+        return out
+    if kind == "map":
+        if not isinstance(value, dict):
+            return bad("expected a map")
+        out = []
+        for k, v in sorted(value.items()):
+            out += shape_problems(model, shape["key"]["shape"], k, where + "{key}")
+            out += shape_problems(model, shape["value"]["shape"], v, "%s[%s]" % (where, k))
+        return out
+    if kind == "string":
+        if not isinstance(value, str):
+            return bad("expected a string, got %r" % (value,))
+        if "enum" in shape and value not in shape["enum"]:
+            return bad("%r is not one of %s" % (value, shape["enum"]))
+        if len(value) < shape.get("min", 0) or len(value) > shape.get("max", len(value)):
+            return bad("length %d outside [%s, %s]" % (len(value), shape.get("min", 0),
+                                                       shape.get("max", "-")))
+        return []
+    if kind in ("integer", "long"):
+        if isinstance(value, bool) or not isinstance(value, int):
+            return bad("expected an integer, got %r" % (value,))
+        if value < shape.get("min", value) or value > shape.get("max", value):
+            return bad("%d outside [%s, %s]" % (value, shape.get("min", "-"), shape.get("max", "-")))
+        return []
+    if kind in ("double", "float"):
+        return [] if isinstance(value, (int, float)) and not isinstance(value, bool) else bad(
+            "expected a number")
+    if kind == "boolean":
+        return [] if isinstance(value, bool) else bad("expected a boolean")
+    if kind == "timestamp":
+        # awsJson sends epoch seconds as a number.
+        return [] if isinstance(value, (int, float)) and not isinstance(value, bool) else bad(
+            "expected epoch seconds, got %r" % (value,))
+    if kind == "blob":
+        if not isinstance(value, str):
+            return bad("expected base64 text")
+        try:
+            base64.b64decode(value, validate=True)
+        except Exception:  # noqa: BLE001 - binascii.Error
+            return bad("not base64")
+        return []
+    return bad("unknown shape type %s" % kind)
+
+
+def answer_problems(model, op, status, body):
+    """Where one raw answer to `op` does not fit the model."""
+    opm = model["operations"][op]
+    try:
+        doc = json.loads(body) if body else {}
+    except ValueError:
+        return ["%s: the body is not JSON" % op]
+    if status >= 300:
+        code = str(doc.get("__type", "")).split("#")[-1]
+        declared = [e["shape"] for e in opm.get("errors", [])]
+        if code not in declared:
+            return ["%s: error %r (HTTP %d) is not one the operation declares %s" % (
+                op, code, status, declared)]
+        return []
+    if "output" not in opm:
+        return [] if doc in ({}, None) else ["%s: answered a body where the model has none" % op]
+    return ["%s %s" % (op, p) for p in shape_problems(model, opm["output"]["shape"], doc)]
+
+
+class ChannelSuite(Mix):
+    """The fixed channel sequence, each raw answer checked against the
+    service model as well as recorded."""
+
+    def __init__(self, client, stream, channel, role_arn, bucket, model):
+        super().__init__(client, 0, 0, stream)
+        self.channel = channel
+        self.role_arn = role_arn
+        self.bucket = bucket
+        self.model = model
+        self.problems = []
+        self.raw = None
+        self.account = ""
+        self.n.learn(channel, "CHANNEL")
+        client.meta.events.register("before-parse.kinesis", self.capture)
+
+    def capture(self, operation_model=None, response_dict=None, **_):
+        self.raw = (operation_model.name, response_dict.get("status_code", 0),
+                    response_dict.get("body", b""))
+
+    def call(self, op, request, record=True):
+        self.raw = None
+        out, result = super().call(op, request, record)
+        if record and self.raw is not None and self.raw[0] == op:
+            body = self.raw[2]
+            if isinstance(body, bytes):
+                body = body.decode("utf-8", "replace")
+            for p in answer_problems(self.model, op, self.raw[1], body):
+                self.problems.append("step %d %s" % (len(self.steps) - 1, p))
+        return out, result
+
+    def s3(self, freshness=None):
+        dest = {"StorageConfiguration": {"BucketARN": "arn:aws:s3:::" + self.bucket,
+                                         "ExpectedBucketOwner": self.account,
+                                         "CompressionType": "GZIP"}}
+        if freshness is not None:
+            dest["DataFreshnessInSeconds"] = freshness
+        return dest
+
+    def run(self):
+        arn = None
+        try:
+            self.call("CreateStream", {"StreamName": self.stream,
+                                       "StreamModeDetails": {"StreamMode": "ON_DEMAND"}})
+            self.wait_active()
+            stream_arn = self.c.describe_stream_summary(StreamName=self.stream)[
+                "StreamDescriptionSummary"]["StreamARN"]
+            parts = stream_arn.split(":")
+            self.account = parts[4]
+            self.n.learn(parts[4], "ACCOUNT")
+            self.n.learn(parts[3], "REGION")
+            self.n.learn(self.role_arn, "ROLE")
+            self.n.learn(self.bucket, "BUCKET")
+            source = [{"StreamARN": stream_arn,
+                       "RecordConfiguration": {"RecordFormatType": "STRING"}}]
+            out, _ = self.call("CreateChannel", {
+                "ChannelName": self.channel, "ServiceExecutionRoleARN": self.role_arn,
+                "StreamConfigurationList": source, "S3DestinationConfiguration": self.s3(),
+                "Tags": {"suite": "channels"}})
+            if out is None:
+                self.problems.append("CreateChannel was refused, so nothing else was checked")
+                return self.steps
+            arn = out["ChannelDescription"]["ChannelARN"]
+            # Ids differ between runs: learn this one, then normalise the
+            # answer that carried it again.
+            self.n.learn(out["ChannelDescription"]["ChannelId"], "CHANNEL-ID")
+            self.steps[-1]["response"] = self.n.value(out)
+            self.call("DescribeChannel", {"ChannelARN": arn})
+            self.call("ListChannels", {"StreamFilter": [{"StreamARN": stream_arn}]})
+            self.call("DescribeStreamSummary", {"StreamName": self.stream})
+            self.call("UpdateChannel", {"ChannelARN": arn,
+                                        "S3DestinationConfiguration": {"DataFreshnessInSeconds": 600}})
+            self.call("DescribeChannel", {"ChannelARN": arn})
+            self.call("TagResource", {"ResourceARN": arn, "Tags": {"team": "streams"}})
+            self.call("ListTagsForResource", {"ResourceARN": arn})
+            self.call("UntagResource", {"ResourceARN": arn, "TagKeys": ["team"]})
+            # The errors the model's documentation describes.
+            self.call("CreateChannel", {
+                "ChannelName": self.channel, "ServiceExecutionRoleARN": self.role_arn,
+                "StreamConfigurationList": source, "S3DestinationConfiguration": self.s3()})
+            self.call("CreateChannel", {
+                "ChannelName": self.channel + "-gsr", "ServiceExecutionRoleARN": self.role_arn,
+                "StreamConfigurationList": [{"StreamARN": stream_arn, "RecordConfiguration": {
+                    "RecordFormatType": "GSR_JSON"}}],
+                "S3DestinationConfiguration": self.s3()})
+            self.call("CreateChannel", {
+                "ChannelName": self.channel + "-none", "ServiceExecutionRoleARN": self.role_arn,
+                "StreamConfigurationList": source})
+            self.call("DescribeChannel", {"ChannelARN": arn[:-12] + "ffffffffffff"})
+            self.call("DeleteStream", {"StreamName": self.stream})
+            self.call("DeleteChannel", {"ChannelARN": arn})
+            arn = None
+        finally:
+            if arn is not None:
+                try:
+                    self.c.delete_channel(ChannelARN=arn)
+                except Exception as e:  # noqa: BLE001
+                    print("DeleteChannel failed for %s: %s" % (arn, e), file=sys.stderr)
+            # A channel being deleted can still hold its source for a moment.
+            for _ in range(30):
+                try:
+                    self.c.delete_stream(StreamName=self.stream, EnforceConsumerDeletion=True)
+                    break
+                except Exception as e:  # noqa: BLE001
+                    code = getattr(e, "response", {}).get("Error", {}).get("Code")
+                    if code == "ResourceNotFoundException":
+                        break
+                    if code != "ResourceInUseException":
+                        print("DeleteStream failed for %s: %s" % (self.stream, e), file=sys.stderr)
+                        break
+                    time.sleep(2)
+        return self.steps
+
+
 # ---- comparing -----------------------------------------------------------
 
 
@@ -559,6 +781,15 @@ def main(argv=None):
     s.add_argument("--region", default="us-east-1")
     s.add_argument("--seed", type=int, default=7)
     s.add_argument("--steps", type=int, default=80)
+    ch = sub.add_parser("channels")
+    ch.add_argument("--endpoint")
+    ch.add_argument("--real-aws", action="store_true")
+    ch.add_argument("--region", default="us-east-1")
+    ch.add_argument("--role-arn", default="arn:aws:iam::111122223333:role/channel-delivery")
+    ch.add_argument("--bucket", default="kythira-diff-channels")
+    ch.add_argument("--out")
+    ch.add_argument("--recording")
+    ch.add_argument("--allow")
     a = p.parse_args(argv)
 
     if a.cmd == "run":
@@ -575,6 +806,40 @@ def main(argv=None):
             f.write("\n")
         print(json.dumps({"steps": len(steps), "out": a.out}))
         return 0
+    if a.cmd == "channels":
+        if bool(a.endpoint) == a.real_aws:
+            p.error("give exactly one of --endpoint or --real-aws")
+        import botocore
+        import botocore.session
+
+        model = botocore.session.get_session().get_service_data("kinesis")
+        suffix = os.urandom(3).hex()
+        suite = ChannelSuite(make_client(a.endpoint, a.region), "kythira-diff-chan-" + suffix,
+                             "kythira-diff-" + suffix, a.role_arn, a.bucket, model)
+        steps = suite.run()
+        failures, notes = ["model: " + x for x in suite.problems], []
+        if a.out:
+            rec = {"version": TOOL_VERSION, "suite": "channels",
+                   "target": "aws" if a.real_aws else "endpoint", "region": a.region,
+                   "botocore": botocore.__version__, "recorded_at": int(time.time()),
+                   "steps": steps}
+            with open(a.out, "w") as f:
+                json.dump(rec, f, indent=1, sort_keys=True)
+                f.write("\n")
+        if a.recording:
+            allow = []
+            if a.allow:
+                with open(a.allow) as f:
+                    allow = json.load(f)
+            with open(a.recording) as f:
+                fs, notes = compare(json.load(f)["steps"], steps, allow)
+            failures += fs
+        for n in notes:
+            print("note: " + n)
+        for f in failures:
+            print("FAIL: " + f, file=sys.stderr)
+        print(json.dumps({"steps": len(steps), "failures": len(failures), "notes": len(notes)}))
+        return 1 if failures else 0
     if a.cmd == "compare":
         allow = []
         if a.allow:

@@ -56,5 +56,37 @@ The container scenario's `differential_replay_matches_the_aws_recordings`
 case does both against the three-node cluster. `kinesis_differential_tool`
 in ctest unit-tests the normaliser and the comparison offline.
 
+## Channels against the service model
+
+`kinesis_differential.py channels --endpoint URL` (task 19) runs a fixed
+sequence on an on-demand stream of its own: `CreateChannel` with tags,
+`DescribeChannel`, `ListChannels` with a stream filter,
+`DescribeStreamSummary` (`ChannelCount`), `UpdateChannel`, the tag calls on
+the channel ARN, the errors the model documents (a name in use, `GSR_JSON`
+to S3, no destination, an unknown ARN, `DeleteStream` of a source) and
+`DeleteChannel`. It deletes the channel and the stream at the end, even
+after a failure.
+
+Every answer is checked against the botocore service model the client
+pins, from the raw JSON body rather than the parsed one (botocore's parser
+drops members it does not know):
+
+- A success must fit the operation's output shape: required members
+  present, no members the shape does not have, enum values, string
+  lengths, integer bounds, epoch-second timestamps and base64 blobs.
+- An error's `__type` must be one the operation declares.
+
+This check found that an S3 channel created without a dead-letter
+configuration was described without one, although the model's
+`S3DestinationDescription` requires it; it is now described as the
+destination bucket under `errors/`, where delivery writes dead letters.
+
+`--out FILE` writes the normalised steps (channel names and ids, the role
+and the bucket become placeholders) and `--recording FILE` compares a run
+with one, as `compare` does. There is no AWS recording of channels yet: one
+needs a role and a bucket (`--role-arn`, `--bucket`) and Clark's go. The
+container scenario's differential case runs the model check against the
+cluster.
+
 A new recording runs against real AWS and costs money, so it needs Clark's
 go each time. See `tests/differential/recordings/README.md`.
