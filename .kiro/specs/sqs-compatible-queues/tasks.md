@@ -223,7 +223,7 @@ PR unless noted.
     job. Kombu's evidence client now follows the endpoint's scheme.
   - _Requirements: 13.1, 13.2_
 
-- [ ] 13. Interoperability with real Amazon SQS
+- [x] 13. Interoperability with real Amazon SQS
   - CI (no spend): recorded SQS responses replayed as differential fixtures
   - Real-cloud bundle (dispatch-only, repo-variable switch): the client
     suite against SQS and Kythira compared; Extended Client with real S3
@@ -234,9 +234,16 @@ PR unless noted.
   - Progress (November 18, 2026): `services/sqs/tests/differential/`
     (`sqs_differential.py`, seeded mix, normaliser, comparison, offline
     test `sqs_differential_tool`, `run_replay.sh` in `sqs-module.yml`'s
-    client job), self-checked against `sqs_node` on several seeds. Left:
-    the first real-SQS recordings (Clark's go) and the real-cloud
-    bundle.
+    client job), self-checked against `sqs_node` on several seeds. Real
+    SQS recordings of three seeds checked in (November 18). The
+    real-cloud bundle is `services/sqs/tests/real_cloud/run_real_cloud.sh`
+    (compare, extended, sns), run from Clark's machine with his go.
+  - Done (November 19, 2026): run 20261119210540-15817 on Clark's
+    machine (us-east-1) passed every part: all ten clients against real
+    SQS and against Kythira, the Extended Client with a real S3 bucket,
+    and a real SNS topic through the bridge (wrapped and raw). Everything
+    it made was deleted; cost under $0.01. The CI dispatch switch is not
+    added (the real-cloud workflow is at GitHub's input cap).
 
 - [ ] 14. Measurement and documentation
   - _Requirements: 13.5, 14.1_

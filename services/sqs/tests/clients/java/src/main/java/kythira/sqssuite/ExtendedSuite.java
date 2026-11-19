@@ -7,6 +7,10 @@ import com.amazon.sqs.javamessaging.AmazonSQSExtendedClient;
 import com.amazon.sqs.javamessaging.ExtendedClientConfiguration;
 import java.net.URI;
 import java.util.List;
+import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
+import software.amazon.awssdk.auth.credentials.AwsCredentialsProvider;
+import software.amazon.awssdk.auth.credentials.DefaultCredentialsProvider;
+import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
 import software.amazon.awssdk.http.urlconnection.UrlConnectionHttpClient;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.s3.S3Client;
@@ -18,6 +22,10 @@ import software.amazon.awssdk.services.sqs.model.Message;
  * a body over the 256 KiB threshold goes to S3 and travels as a pointer, comes back whole
  * through the extended client, and its S3 object is removed when the message is deleted; a
  * small body stays inline. Usage: ExtendedSuite SQS_ENDPOINT S3_ENDPOINT
+ *
+ * <p>With S3_ENDPOINT {@code aws} the payloads go to real Amazon S3 (task 13's real-cloud
+ * bundle) in the bucket $SUITE_EXTENDED_BUCKET, with the default credentials, while the SQS
+ * client signs with $SUITE_SQS_ACCESS_KEY_ID / $SUITE_SQS_SECRET_ACCESS_KEY (Kythira's key).
  */
 public final class ExtendedSuite {
     private ExtendedSuite() {}
@@ -29,18 +37,27 @@ public final class ExtendedSuite {
     }
 
     public static void main(String[] args) {
-        String bucket = "suite-extended-payloads";
+        boolean realS3 = "aws".equals(args[1]);
+        String bucket = realS3 ? System.getenv("SUITE_EXTENDED_BUCKET") : "suite-extended-payloads";
+        check(bucket != null && !bucket.isEmpty(), "set SUITE_EXTENDED_BUCKET for real S3");
+        String sqsKey = System.getenv("SUITE_SQS_ACCESS_KEY_ID");
+        AwsCredentialsProvider sqsCredentials = sqsKey == null
+                ? DefaultCredentialsProvider.create()
+                : StaticCredentialsProvider.create(
+                        AwsBasicCredentials.create(sqsKey, System.getenv("SUITE_SQS_SECRET_ACCESS_KEY")));
+        var s3Builder = S3Client.builder()
+                .region(Region.US_EAST_1)
+                .httpClient(UrlConnectionHttpClient.create());
+        if (!realS3) {
+            s3Builder.endpointOverride(URI.create(args[1])).forcePathStyle(true);
+        }
         try (SqsClient raw = SqsClient.builder()
                         .endpointOverride(URI.create(args[0]))
                         .region(Region.US_EAST_1)
+                        .credentialsProvider(sqsCredentials)
                         .httpClient(UrlConnectionHttpClient.create())
                         .build();
-                S3Client s3 = S3Client.builder()
-                        .endpointOverride(URI.create(args[1]))
-                        .region(Region.US_EAST_1)
-                        .forcePathStyle(true)
-                        .httpClient(UrlConnectionHttpClient.create())
-                        .build()) {
+                S3Client s3 = s3Builder.build()) {
             s3.createBucket(b -> b.bucket(bucket));
             SqsClient sqs = new AmazonSQSExtendedClient(
                     raw, new ExtendedClientConfiguration().withPayloadSupportEnabled(s3, bucket));
