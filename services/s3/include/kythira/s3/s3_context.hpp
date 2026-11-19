@@ -32,6 +32,7 @@
 #include <kythira/s3/s3_compat.hpp>
 #include <kythira/s3/s3_data_path.hpp>
 #include <kythira/s3/s3_encryption.hpp>
+#include <kythira/s3/s3_lifecycle_rules.hpp>
 #include <kythira/s3/s3_rates.hpp>
 #include <kythira/s3/s3_http.hpp>
 #include <kythira/s3/s3_metadata.hpp>
@@ -78,6 +79,10 @@ struct service_options {
     /// index catches that only while their tombstones last, so the
     /// collector's grace period must exceed this (`s3_sweeps.hpp`).
     std::uint64_t max_write_ms = std::uint64_t{15} * 60 * 1000;
+    /// A lifecycle "day" (`s3_lifecycle_rules.hpp`): rule ages, restore
+    /// periods and the `x-amz-expiration` dates count in these. Tests
+    /// shorten it, as Requirement 12.1's faster test interval.
+    std::uint64_t lifecycle_day_ms = standard_day_ms;
 };
 
 /// The handlers' shared state.
@@ -194,6 +199,8 @@ struct bucket_state {
     std::vector<std::pair<std::string, std::string>> tags;
     /// Default encryption (`PutBucketEncryption`); SSE-S3 when none is set.
     bucket_encryption encryption;
+    /// `PutBucketLifecycleConfiguration`; none when not set.
+    std::optional<lifecycle_configuration> lifecycle;
     compat_profile profile;
     access_context access;  ///< for `authorize_check`; its `bucket_acl` points at `acl`
 
@@ -236,6 +243,9 @@ void load_bucket_state(const handler_context<M>& ctx, bucket_descriptor desc, bu
         if (auto e = parse_bucket_encryption(it->second)) {
             out.encryption = *e;
         }
+    }
+    if (auto it = cfg.find("lifecycle"); it != cfg.end()) {
+        out.lifecycle = load_lifecycle(it->second);
     }
     out.profile = for_bucket(ctx.options.profile, out.tags);
 

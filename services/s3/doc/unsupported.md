@@ -13,7 +13,7 @@ implement: the XML error `NotImplemented` ("A header you provided implies
 functionality that is not implemented") with HTTP status 501, which every
 SDK surfaces as a non-retryable service error (`s3_service.hpp`).
 
-The model has 116 operations. 56 are implemented; of the other 60, 19 are
+The model has 116 operations. 62 are implemented; of the other 54, 13 are
 planned in a spec task and 41 (`none`) are out of the spec's scope, or
 were added to S3 after the spec was written and wait on the owner's
 decision.
@@ -27,7 +27,6 @@ decision.
 | `DeleteBucketCors` | task 15 | Not built yet (CORS and website hosting). | `NotImplemented`, HTTP 501 |
 | `DeleteBucketIntelligentTieringConfiguration` | none | Not in the spec: the Intelligent-Tiering archive tiers. Storage classes map to Kythira tiers through lifecycle (task 13). | `NotImplemented`, HTTP 501 |
 | `DeleteBucketInventoryConfiguration` | none | Out of scope: S3 Inventory. | `NotImplemented`, HTTP 501 |
-| `DeleteBucketLifecycle` | task 13 | Not built yet (lifecycle and storage classes). | `NotImplemented`, HTTP 501 |
 | `DeleteBucketMetadataConfiguration` | none | Out of scope: S3 Metadata, which keeps its tables in S3 Tables. | `NotImplemented`, HTTP 501 |
 | `DeleteBucketMetadataTableConfiguration` | none | Out of scope: S3 Metadata, which keeps its tables in S3 Tables. | `NotImplemented`, HTTP 501 |
 | `DeleteBucketMetricsConfiguration` | none | Not in the spec: CloudWatch request-metrics filters. Kythira exports its own metrics instead. | `NotImplemented`, HTTP 501 |
@@ -40,8 +39,6 @@ decision.
 | `GetBucketCors` | task 15 | Not built yet (CORS and website hosting). | `NotImplemented`, HTTP 501 |
 | `GetBucketIntelligentTieringConfiguration` | none | Not in the spec: the Intelligent-Tiering archive tiers. Storage classes map to Kythira tiers through lifecycle (task 13). | `NotImplemented`, HTTP 501 |
 | `GetBucketInventoryConfiguration` | none | Out of scope: S3 Inventory. | `NotImplemented`, HTTP 501 |
-| `GetBucketLifecycle` | task 13 | Not built yet (lifecycle and storage classes). Deprecated in the model in favour of the `*Configuration` form; planned with it because old SDKs still send it. | `NotImplemented`, HTTP 501 |
-| `GetBucketLifecycleConfiguration` | task 13 | Not built yet (lifecycle and storage classes). | `NotImplemented`, HTTP 501 |
 | `GetBucketMetadataConfiguration` | none | Out of scope: S3 Metadata, which keeps its tables in S3 Tables. | `NotImplemented`, HTTP 501 |
 | `GetBucketMetadataTableConfiguration` | none | Out of scope: S3 Metadata, which keeps its tables in S3 Tables. | `NotImplemented`, HTTP 501 |
 | `GetBucketMetricsConfiguration` | none | Not in the spec: CloudWatch request-metrics filters. Kythira exports its own metrics instead. | `NotImplemented`, HTTP 501 |
@@ -63,8 +60,6 @@ decision.
 | `PutBucketCors` | task 15 | Not built yet (CORS and website hosting). | `NotImplemented`, HTTP 501 |
 | `PutBucketIntelligentTieringConfiguration` | none | Not in the spec: the Intelligent-Tiering archive tiers. Storage classes map to Kythira tiers through lifecycle (task 13). | `NotImplemented`, HTTP 501 |
 | `PutBucketInventoryConfiguration` | none | Out of scope: S3 Inventory. | `NotImplemented`, HTTP 501 |
-| `PutBucketLifecycle` | task 13 | Not built yet (lifecycle and storage classes). Deprecated in the model in favour of the `*Configuration` form; planned with it because old SDKs still send it. | `NotImplemented`, HTTP 501 |
-| `PutBucketLifecycleConfiguration` | task 13 | Not built yet (lifecycle and storage classes). | `NotImplemented`, HTTP 501 |
 | `PutBucketMetricsConfiguration` | none | Not in the spec: CloudWatch request-metrics filters. Kythira exports its own metrics instead. | `NotImplemented`, HTTP 501 |
 | `PutBucketNotification` | task 14 | Not built yet (change log, notifications and replication). Deprecated in the model in favour of the `*Configuration` form; planned with it because old SDKs still send it. | `NotImplemented`, HTTP 501 |
 | `PutBucketNotificationConfiguration` | task 14 | Not built yet (change log, notifications and replication). | `NotImplemented`, HTTP 501 |
@@ -73,7 +68,6 @@ decision.
 | `PutBucketWebsite` | task 15 | Not built yet (CORS and website hosting). | `NotImplemented`, HTTP 501 |
 | `PutObjectAnnotation` | none | Not in the spec: object annotations, added to S3 after the spec was written. Open question for the owner. | `NotImplemented`, HTTP 501 |
 | `RenameObject` | none | Out of scope: S3 Express One Zone directory buckets. | `NotImplemented`, HTTP 501 |
-| `RestoreObject` | task 13 | Not built yet (lifecycle and storage classes). | `NotImplemented`, HTTP 501 |
 | `SelectObjectContent` | none | Out of scope: S3 Select. | `NotImplemented`, HTTP 501 |
 | `UpdateBucketMetadataAnnotationTableConfiguration` | none | Out of scope: S3 Metadata, which keeps its tables in S3 Tables. | `NotImplemented`, HTTP 501 |
 | `UpdateBucketMetadataInventoryTableConfiguration` | none | Out of scope: S3 Metadata, which keeps its tables in S3 Tables. | `NotImplemented`, HTTP 501 |

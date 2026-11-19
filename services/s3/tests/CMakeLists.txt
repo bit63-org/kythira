@@ -157,6 +157,17 @@ elseif(TARGET Boost::json)
     target_link_libraries(s3_sweeps_test PRIVATE Boost::json)
 endif()
 
+# Task 13: lifecycle configurations (XML both ways, S3's checks, timing)
+# and the lifecycle worker over the in-process metadata layer. It includes
+# the persistent state machine contract, hence the shared test PCH target.
+add_raft_completion_test(s3_lifecycle_test s3_lifecycle_test.cpp)
+target_link_libraries(s3_lifecycle_test PRIVATE kythira_s3)
+if(TARGET boost_json)
+    target_link_libraries(s3_lifecycle_test PRIVATE boost_json)
+elseif(TARGET Boost::json)
+    target_link_libraries(s3_lifecycle_test PRIVATE Boost::json)
+endif()
+
 # Task 7: the request pipeline end to end (routing, SigV4, the access check,
 # bucket, object and listing handlers) over the in-process metadata layer.
 # It includes the persistent state machine contract, hence the shared test
@@ -187,6 +198,7 @@ set_tests_properties(
     s3_checksums_test
     s3_encryption_test
     s3_sweeps_test
+    s3_lifecycle_test
     s3_service_test
     PROPERTIES LABELS "unit;s3;s3-module" TIMEOUT 60)
 

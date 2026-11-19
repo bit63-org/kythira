@@ -960,7 +960,7 @@ BOOST_AUTO_TEST_CASE(authentication_failures_and_unbuilt_operations) {
     const auto r = f.send("GET", "/bkt?cors");
     BOOST_TEST(r.status == 501U);
     BOOST_TEST(r.code() == "NotImplemented");
-    BOOST_TEST(f.send("GET", "/bkt?lifecycle").status == 501U);
+    BOOST_TEST(f.send("GET", "/bkt?website").status == 501U);
 }
 
 BOOST_AUTO_TEST_CASE(versioned_buckets_answer_with_version_ids_and_delete_markers) {
@@ -1650,4 +1650,105 @@ BOOST_AUTO_TEST_CASE(prefix_buckets_refill_with_time_and_idle_ones_are_dropped) 
     BOOST_TEST(rates.admit("c", "p/", true, 10, 2'200));
     BOOST_TEST(rates.tracked() == 1U);
     BOOST_TEST(rates.refused() == 2U);
+}
+
+// ---- task 13: lifecycle, storage classes, restores ---------------------------
+
+namespace {
+
+auto lifecycle_doc(const std::string& rules) -> std::string {
+    return "<LifecycleConfiguration>" + rules + "</LifecycleConfiguration>";
+}
+
+auto md5_b64(const std::string& body) -> std::string {
+    return s3::sse_detail::b64(s3::sse_detail::md5_raw(body));
+}
+
+}  // namespace
+
+BOOST_AUTO_TEST_CASE(lifecycle_configurations_are_set_read_and_removed) {
+    fixture f;
+    f.make_bucket("bkt");
+    BOOST_TEST(f.send("GET", "/bkt?lifecycle").code() == "NoSuchLifecycleConfiguration");
+    const auto doc = lifecycle_doc(
+        "<Rule><ID>logs</ID><Filter><Prefix>logs/</Prefix></Filter><Status>Enabled</Status>"
+        "<Expiration><Days>3</Days></Expiration></Rule>");
+    BOOST_TEST(f.send("PUT", "/bkt?lifecycle", {}, doc).code() == "InvalidRequest");
+    const auto put = f.send("PUT", "/bkt?lifecycle", {{"Content-MD5", md5_b64(doc)}}, doc);
+    BOOST_TEST(put.status == 200U);
+    BOOST_TEST(put.header("x-amz-transition-default-minimum-object-size") ==
+               "all_storage_classes_128K");
+    const auto got = f.send("GET", "/bkt?lifecycle");
+    BOOST_TEST(got.status == 200U);
+    BOOST_TEST(contains(got.body, "<ID>logs</ID>"));
+    BOOST_TEST(contains(got.body, "<Days>3</Days>"));
+
+    // Objects under the rule say when they expire.
+    const auto written = f.send("PUT", "/bkt/logs/a", {}, "x");
+    const auto expected =
+        "expiry-date=\"" +
+        kythira::aws_rest_xml::http_date(
+            std::chrono::system_clock::time_point(std::chrono::milliseconds(s3::due_after(
+                static_cast<std::uint64_t>(
+                    std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::system_clock::time_point(k_now).time_since_epoch())
+                        .count()),
+                3, s3::standard_day_ms)))) +
+        "\", rule-id=\"logs\"";
+    BOOST_TEST(written.header("x-amz-expiration") == expected);
+    BOOST_TEST(f.send("HEAD", "/bkt/logs/a").header("x-amz-expiration") == expected);
+    BOOST_TEST(f.send("PUT", "/bkt/other", {}, "x").header("x-amz-expiration").empty());
+
+    const auto bad = lifecycle_doc("<Rule><Filter/><Status>Enabled</Status></Rule>");
+    BOOST_TEST(f.send("PUT", "/bkt?lifecycle", {{"Content-MD5", md5_b64(bad)}}, bad).code() ==
+               "InvalidRequest");
+    BOOST_TEST(f.send("DELETE", "/bkt?lifecycle").status == 204U);
+    BOOST_TEST(f.send("GET", "/bkt?lifecycle").code() == "NoSuchLifecycleConfiguration");
+}
+
+BOOST_AUTO_TEST_CASE(archived_objects_need_a_restore_before_a_read) {
+    fixture f;
+    f.make_bucket("bkt");
+    BOOST_TEST(f.send("PUT", "/bkt/cold", {{"x-amz-storage-class", "GLACIER"}}, "frozen").status ==
+               200U);
+    BOOST_TEST(f.send("PUT", "/bkt/warm", {}, "warm").status == 200U);
+    const auto head = f.send("HEAD", "/bkt/cold");
+    BOOST_TEST(head.status == 200U);
+    BOOST_TEST(head.header("x-amz-storage-class") == "GLACIER");
+    BOOST_TEST(f.send("GET", "/bkt/cold").code() == "InvalidObjectState");
+    BOOST_TEST(f.send("PUT", "/bkt/copy", {{"x-amz-copy-source", "/bkt/cold"}}).code() ==
+               "InvalidObjectState");
+
+    const std::string req =
+        "<RestoreRequest><Days>2</Days><GlacierJobParameters><Tier>Standard"
+        "</Tier></GlacierJobParameters></RestoreRequest>";
+    BOOST_TEST(f.send("POST", "/bkt/warm?restore", {}, req).code() == "InvalidObjectState");
+    BOOST_TEST(f.send("POST", "/bkt/cold?restore", {}, "<RestoreRequest/>").code() ==
+               "InvalidArgument");
+    BOOST_TEST(f.send("POST", "/bkt/cold?restore", {}, req).status == 202U);
+    BOOST_TEST(contains(f.send("HEAD", "/bkt/cold").header("x-amz-restore"),
+                        "ongoing-request=\"false\", expiry-date="));
+    const auto read = f.send("GET", "/bkt/cold");
+    BOOST_TEST(read.status == 200U);
+    BOOST_TEST(read.body == "frozen");
+    BOOST_TEST(f.send("POST", "/bkt/cold?restore", {}, req).status == 200U);  // extends it
+    BOOST_TEST(f.send("PUT", "/bkt/copy", {{"x-amz-copy-source", "/bkt/cold"}}).status == 200U);
+    BOOST_TEST(f.send("POST", "/bkt/cold?restore", {},
+                      "<RestoreRequest><Type>SELECT</Type></RestoreRequest>")
+                   .status == 501U);
+}
+
+BOOST_AUTO_TEST_CASE(a_copy_can_change_only_the_storage_class) {
+    fixture f;
+    f.make_bucket("bkt");
+    BOOST_TEST(f.send("PUT", "/bkt/k", {{"x-amz-meta-a", "1"}}, "body").status == 200U);
+    const auto moved = f.send(
+        "PUT", "/bkt/k", {{"x-amz-copy-source", "/bkt/k"}, {"x-amz-storage-class", "STANDARD_IA"}});
+    BOOST_TEST(moved.status == 200U, moved.body);
+    const auto head = f.send("HEAD", "/bkt/k");
+    BOOST_TEST(head.header("x-amz-storage-class") == "STANDARD_IA");
+    BOOST_TEST(head.header("x-amz-meta-a") == "1");
+    BOOST_TEST(
+        f.send("PUT", "/bkt/k", {{"x-amz-copy-source", "/bkt/k"}, {"x-amz-storage-class", "COLD"}})
+            .code() == "InvalidStorageClass");
 }
