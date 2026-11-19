@@ -129,6 +129,9 @@ naming it, rather than leaving it ACTIVE and silently idle.
 | `KINESIS_CHANNEL_S3_REGION` | `KINESIS_REGION` | Region of the destination buckets |
 | `KINESIS_CHANNEL_S3_ENDPOINT` | AWS's | An S3-compatible endpoint (MinIO, Kythira's own S3) |
 | `KINESIS_CHANNEL_MAX_DELAY_MS` | `0` | When set (1000 to 900000), write a batch once it is this old even inside the channel's freshness window: seconds-scale delivery for tests and demos |
+| `KINESIS_CHANNEL_ROLE` | `node` | `node` writes with this node's own credentials; `assume` writes each channel's objects as its `ServiceExecutionRoleARN` |
+| `KINESIS_CHANNEL_STS_ENDPOINT` | AWS's, in `KINESIS_CHANNEL_S3_REGION` | STS's URL for `assume` (Kythira's IAM service answers `AssumeRole` too) |
+| `KINESIS_CHANNEL_CA_FILE` | the system store | The CA bundle the STS endpoint's certificate chains to |
 
 The container scenario (`services/kinesis/tests/docker/`) delivers a
 channel to its S3 mock with a five-second delay while every node is
@@ -137,6 +140,30 @@ under each key within a shard.
 
 Credentials come from the AWS SDK's usual chain. A build without the AWS
 SDK's s3 component logs at start that it does not deliver channels.
+
+## Execution role
+
+AWS writes a channel's objects as the channel's `ServiceExecutionRoleARN`,
+so the role's policies and the bucket's policy decide what a channel can
+reach. With `KINESIS_CHANNEL_ROLE=assume` a node does the same:
+
+- Before writing for a channel it calls STS `AssumeRole` on the role, with
+  its own credentials from the AWS SDK's usual chain, as the session
+  `kythira-channel-<ChannelId>`, so CloudTrail and server access logs name
+  the channel. The role's trust policy must let the node's identity assume
+  it.
+- It keeps the temporary credentials (an hour) per role and channel, and
+  asks again five minutes before they expire. If STS refuses a refresh
+  while the old set is still valid, the old set is used.
+- A refusal (`AccessDenied`, an unknown role) leaves the batch undelivered:
+  the next pass retries it, STS is asked at most every 30 seconds per
+  channel, and the node's log line for the pass carries STS's code and the
+  role (`last_failure=`). The channel stays ACTIVE, as AWS's does while a
+  role is misconfigured.
+
+`CreateChannel` already checks `iam:PassRole` on the role for the caller,
+so only a caller allowed to hand the role over can create a channel that
+writes as it.
 
 ## Limits and differences
 
@@ -149,8 +176,10 @@ SDK's s3 component logs at start that it does not deliver channels.
 - `aws:ResourceTag` conditions are not evaluated for channel ARNs.
 - Delivered objects are not yet encrypted with the channel's
   `EncryptionConfiguration`.
-- The channel's service execution role is not assumed: the node writes
-  with its own credentials.
+- A node writes with its own credentials unless `KINESIS_CHANNEL_ROLE`
+  is `assume` (see [Execution role](#execution-role)). The default stays
+  `node` so a deployment writing to MinIO or Kythira's own S3 with static
+  keys, which has no STS to ask, keeps working.
 
 ## Not yet checked against AWS
 
