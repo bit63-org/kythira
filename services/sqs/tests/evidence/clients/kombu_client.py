@@ -12,6 +12,7 @@ kombu_client.py ENDPOINT
 """
 
 import itertools
+import os
 import sys
 import urllib.parse
 
@@ -22,7 +23,12 @@ _tags = itertools.count(1)
 base.Channel._next_delivery_tag = lambda self: f"delivery-tag-{next(_tags)}"
 
 endpoint = urllib.parse.urlsplit(sys.argv[1])
-url = f"sqs://AKIDEXAMPLE:{urllib.parse.quote('wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY', safe='')}@{endpoint.hostname}:{endpoint.port}"
+port = endpoint.port or (443 if endpoint.scheme == "https" else 80)
+# Against real SQS (run_suite.sh's SQS_SUITE_REAL) no key in the URL, so
+# boto3 takes the caller's own credentials.
+creds = "" if os.environ.get("SQS_SUITE_REAL") == "1" else \
+    f"AKIDEXAMPLE:{urllib.parse.quote('wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY', safe='')}"
+url = f"sqs://{creds}@{endpoint.hostname}:{port}"
 options = {"region": "us-east-1", "is_secure": endpoint.scheme == "https", "wait_time_seconds": 1,
            "polling_interval": 0.1, "queue_name_prefix": "evidence-"}
 exchange = Exchange("evidence", type="direct")

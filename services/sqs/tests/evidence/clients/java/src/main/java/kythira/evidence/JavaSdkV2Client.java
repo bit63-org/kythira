@@ -4,8 +4,10 @@
 package kythira.evidence;
 
 import java.net.URI;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import software.amazon.awssdk.core.SdkBytes;
 import software.amazon.awssdk.http.urlconnection.UrlConnectionHttpClient;
 import software.amazon.awssdk.regions.Region;
@@ -63,34 +65,58 @@ public final class JavaSdkV2Client {
                             .messageAttributes(Map.of("k", MessageAttributeValue.builder()
                                     .dataType("String").stringValue("v").build()))
                             .build()));
-            List<Message> got = sqs.receiveMessage(b -> b.queueUrl(url).maxNumberOfMessages(10)
-                    .waitTimeSeconds(1).visibilityTimeout(30).messageAttributeNames("All")
-                    .messageSystemAttributeNames(MessageSystemAttributeName.ALL)).messages();
-            if (got.size() != 3 || !"hello".equals(got.get(0).body())) {
+            // A standard queue promises neither order nor that one receive returns every
+            // message available (real SQS samples a subset of its servers), so receive until
+            // all three are back and find each by its body. Kythira returns all three at once.
+            Map<String, Message> got = new HashMap<>();
+            long deadline = System.nanoTime() + 30_000_000_000L;
+            while (got.size() < 3) {
+                if (System.nanoTime() > deadline) {
+                    throw new IllegalStateException("received only " + got.keySet());
+                }
+                for (Message m : sqs.receiveMessage(b -> b.queueUrl(url).maxNumberOfMessages(10)
+                        .waitTimeSeconds(1).visibilityTimeout(30).messageAttributeNames("All")
+                        .messageSystemAttributeNames(MessageSystemAttributeName.ALL))
+                        .messages()) {
+                    got.put(m.body(), m);
+                }
+            }
+            if (!got.keySet().equals(Set.of("hello", "one", "two"))) {
                 throw new IllegalStateException("unexpected receive: " + got);
             }
-            sqs.changeMessageVisibility(b -> b.queueUrl(url)
-                    .receiptHandle(got.get(0).receiptHandle()).visibilityTimeout(60));
+            String hello = got.get("hello").receiptHandle();
+            String one = got.get("one").receiptHandle();
+            String two = got.get("two").receiptHandle();
+            sqs.changeMessageVisibility(b -> b.queueUrl(url).receiptHandle(hello)
+                    .visibilityTimeout(60));
             sqs.changeMessageVisibilityBatch(b -> b.queueUrl(url).entries(
                     ChangeMessageVisibilityBatchRequestEntry.builder().id("one")
-                            .receiptHandle(got.get(1).receiptHandle()).visibilityTimeout(60)
-                            .build()));
-            sqs.deleteMessage(b -> b.queueUrl(url).receiptHandle(got.get(0).receiptHandle()));
+                            .receiptHandle(one).visibilityTimeout(60).build()));
+            sqs.deleteMessage(b -> b.queueUrl(url).receiptHandle(hello));
             sqs.deleteMessageBatch(b -> b.queueUrl(url).entries(
-                    DeleteMessageBatchRequestEntry.builder().id("one")
-                            .receiptHandle(got.get(1).receiptHandle()).build(),
-                    DeleteMessageBatchRequestEntry.builder().id("two")
-                            .receiptHandle(got.get(2).receiptHandle()).build()));
+                    DeleteMessageBatchRequestEntry.builder().id("one").receiptHandle(one).build(),
+                    DeleteMessageBatchRequestEntry.builder().id("two").receiptHandle(two)
+                            .build()));
             sqs.purgeQueue(b -> b.queueUrl(url));
             String fifo = sqs.createQueue(b -> b.queueName("evidence.fifo").attributes(Map.of(
                     QueueAttributeName.FIFO_QUEUE, "true",
                     QueueAttributeName.CONTENT_BASED_DEDUPLICATION, "false"))).queueUrl();
             sqs.sendMessage(b -> b.queueUrl(fifo).messageBody("first").messageGroupId("g1")
                     .messageDeduplicationId("d1"));
-            List<Message> fgot = sqs.receiveMessage(b -> b.queueUrl(fifo)
-                    .messageSystemAttributeNames(MessageSystemAttributeName.MESSAGE_GROUP_ID)
-                    .receiveRequestAttemptId("attempt-1")).messages();
-            sqs.deleteMessage(b -> b.queueUrl(fifo).receiptHandle(fgot.get(0).receiptHandle()));
+            // Real SQS may answer a first receive empty; Kythira does not.
+            List<Message> fgot = List.of();
+            long fifoDeadline = System.nanoTime() + 30_000_000_000L;
+            for (int attempt = 1; fgot.isEmpty(); ++attempt) {
+                if (System.nanoTime() > fifoDeadline) {
+                    throw new IllegalStateException("the FIFO message never came back");
+                }
+                String attemptId = "attempt-" + attempt;
+                fgot = sqs.receiveMessage(b -> b.queueUrl(fifo)
+                        .messageSystemAttributeNames(MessageSystemAttributeName.MESSAGE_GROUP_ID)
+                        .receiveRequestAttemptId(attemptId)).messages();
+            }
+            String first = fgot.get(0).receiptHandle();
+            sqs.deleteMessage(b -> b.queueUrl(fifo).receiptHandle(first));
             sqs.deleteQueue(b -> b.queueUrl(fifo));
             sqs.deleteQueue(b -> b.queueUrl(url));
             try {

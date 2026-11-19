@@ -11,6 +11,7 @@ checks every MD5 digest the stub returns, so a wrong digest fails here.
 """
 
 import sys
+import time
 
 import boto3
 
@@ -41,19 +42,28 @@ sqs.send_message_batch(QueueUrl=url, Entries=[
     {"Id": "two", "MessageBody": "two", "DelaySeconds": 0,
      "MessageAttributes": {"k": {"DataType": "String", "StringValue": "v"}}},
 ])
-got = sqs.receive_message(QueueUrl=url, MaxNumberOfMessages=10, WaitTimeSeconds=1,
-                          VisibilityTimeout=30, MessageAttributeNames=["All"],
-                          AttributeNames=["All"])["Messages"]
-assert [m["Body"] for m in got] == ["hello", "one", "two"], got
-assert got[0]["MessageAttributes"]["b"]["BinaryValue"] == b"\x00\x01\x02"
-sqs.change_message_visibility(QueueUrl=url, ReceiptHandle=got[0]["ReceiptHandle"],
+# A standard queue promises neither order nor that one receive returns
+# every message available (real SQS samples a subset of its servers), so
+# receive until all three are back and find each by its body. Kythira
+# returns all three at once, so its recording has the one receive.
+got = {}
+deadline = time.monotonic() + 30
+while len(got) < 3:
+    assert time.monotonic() < deadline, f"received only {sorted(got)}"
+    for m in sqs.receive_message(QueueUrl=url, MaxNumberOfMessages=10, WaitTimeSeconds=1,
+                                 VisibilityTimeout=30, MessageAttributeNames=["All"],
+                                 AttributeNames=["All"]).get("Messages", []):
+        got[m["Body"]] = m
+assert sorted(got) == ["hello", "one", "two"], got
+assert got["hello"]["MessageAttributes"]["b"]["BinaryValue"] == b"\x00\x01\x02"
+sqs.change_message_visibility(QueueUrl=url, ReceiptHandle=got["hello"]["ReceiptHandle"],
                               VisibilityTimeout=60)
 sqs.change_message_visibility_batch(QueueUrl=url, Entries=[
-    {"Id": "one", "ReceiptHandle": got[1]["ReceiptHandle"], "VisibilityTimeout": 60}])
-sqs.delete_message(QueueUrl=url, ReceiptHandle=got[0]["ReceiptHandle"])
+    {"Id": "one", "ReceiptHandle": got["one"]["ReceiptHandle"], "VisibilityTimeout": 60}])
+sqs.delete_message(QueueUrl=url, ReceiptHandle=got["hello"]["ReceiptHandle"])
 sqs.delete_message_batch(QueueUrl=url, Entries=[
-    {"Id": "one", "ReceiptHandle": got[1]["ReceiptHandle"]},
-    {"Id": "two", "ReceiptHandle": got[2]["ReceiptHandle"]}])
+    {"Id": "one", "ReceiptHandle": got["one"]["ReceiptHandle"]},
+    {"Id": "two", "ReceiptHandle": got["two"]["ReceiptHandle"]}])
 assert "Messages" not in sqs.receive_message(QueueUrl=url, WaitTimeSeconds=0)
 sqs.purge_queue(QueueUrl=url)
 
@@ -61,8 +71,13 @@ fifo = sqs.create_queue(QueueName="evidence.fifo", Attributes={
     "FifoQueue": "true", "ContentBasedDeduplication": "false"})["QueueUrl"]
 sqs.send_message(QueueUrl=fifo, MessageBody="first", MessageGroupId="g1",
                  MessageDeduplicationId="d1")
-fgot = sqs.receive_message(QueueUrl=fifo, AttributeNames=["MessageGroupId"],
-                           ReceiveRequestAttemptId="attempt-1")["Messages"]
+fgot, attempt = [], 0
+deadline = time.monotonic() + 30
+while not fgot:  # real SQS may answer a first receive empty; Kythira does not
+    assert time.monotonic() < deadline, "the FIFO message never came back"
+    attempt += 1
+    fgot = sqs.receive_message(QueueUrl=fifo, AttributeNames=["MessageGroupId"],
+                               ReceiveRequestAttemptId=f"attempt-{attempt}").get("Messages", [])
 sqs.delete_message(QueueUrl=fifo, ReceiptHandle=fgot[0]["ReceiptHandle"])
 
 sqs.delete_queue(QueueUrl=fifo)

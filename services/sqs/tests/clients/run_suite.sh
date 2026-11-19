@@ -21,6 +21,10 @@
 #                script makes with openssl; the clients trust that CA
 #   The split layouts need a durable sqs_node (built with RocksDB).
 #
+#   With SQS_SUITE_REAL=1 they talk to real Amazon SQS in us-east-1 with
+#   the caller's credentials, every client but the Extended Client
+#   (tests/real_cloud/run_real_cloud.sh runs this; each run needs Clark's go).
+#
 # Clients (all by default):
 #   awscli       AWS CLI v2                          $AWS_CLI (default aws)
 #   boto3        boto3, AWS JSON 1.0                 $SUITE_PYTHON with ../evidence/requirements.txt
@@ -43,9 +47,21 @@ py=${SUITE_PYTHON:-python3}
 clients=("$@")
 [ ${#clients[@]} -gt 0 ] || clients=(awscli boto3 boto3-query kombu go js java-sdk jms java-v1 spring extended)
 
-export AWS_ACCESS_KEY_ID=AKIDEXAMPLE AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY
 export AWS_DEFAULT_REGION=us-east-1 AWS_REGION=us-east-1
-unset AWS_SESSION_TOKEN AWS_PROFILE
+if [ "${SQS_SUITE_REAL:-}" = 1 ]; then
+  # Real Amazon SQS (task 13's real-cloud bundle, tests/real_cloud/): the
+  # caller's own credentials (AWS_PROFILE or the environment), us-east-1.
+  # The Extended Client is left out: the bundle runs it on Kythira SQS
+  # with real S3.
+  SQS_SUITE_ENDPOINT=https://sqs.us-east-1.amazonaws.com
+  for i in "${!clients[@]}"; do
+    [ "${clients[$i]}" != extended ] || unset 'clients[i]'
+  done
+  clients=("${clients[@]}")
+else
+  export AWS_ACCESS_KEY_ID=AKIDEXAMPLE AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY
+  unset AWS_SESSION_TOKEN AWS_PROFILE
+fi
 
 free_port() { "$py" -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1])'; }
 wait_port() {
@@ -202,7 +218,16 @@ run() {
 }
 
 failed=()
+first=1
 for c in "${clients[@]}"; do
+  # Real SQS refuses to recreate a queue name for 60 s after its deletion,
+  # and the evidence clients share theirs ("evidence"); Kythira's suite
+  # turns that cool-down off.
+  if [ "${SQS_SUITE_REAL:-}" = 1 ] && [ $first = 0 ]; then
+    echo "(waiting 61 s: SQS's queue-name cool-down)"
+    sleep 61
+  fi
+  first=0
   echo "== $c"
   start=$(date +%s)
   if run "$c"; then
