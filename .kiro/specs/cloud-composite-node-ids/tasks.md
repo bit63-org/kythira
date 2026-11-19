@@ -102,9 +102,14 @@ the audit and `design.md` for the types and per-component changes.
     json-serializer-input-validation work; the remaining `as_int64()` reads
     were the snapshot member lists in both persistence engines.
     `composite_node_id_wire_property_test` covers all four serializers.
-    Still open: persistence engines only handle numeric and `std::string`
-    ids (composite ids there belong with task 6.5's cluster test). (The ION
-    gap for numeric ids at or above 2^63 was closed separately.)
+    The persistence engines followed on November 19, 2026: the binary
+    engine already wrote composite ids as text, and the file and
+    object-store engines now store them as canonical text (the vote files,
+    the combined hard-state record, snapshot member lists) through
+    `include/raft/persistence_node_id.hpp`, reading them back through the
+    type's strict `parse`; numeric and `std::string` formats are unchanged
+    byte for byte. `persistence_composite_node_id_test`. (The ION gap for
+    numeric ids at or above 2^63 was closed separately.)
   - _Requirements: 8.1-8.6_
 
 - [x] 6. Transports

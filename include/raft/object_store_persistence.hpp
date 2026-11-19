@@ -385,6 +385,7 @@
 #include <raft/key_object_store.hpp>
 #include <raft/object_persistence_options.hpp>
 #include <raft/persistence.hpp>
+#include <raft/persistence_node_id.hpp>
 #include <raft/types.hpp>
 
 #include <boost/crc.hpp>
@@ -2084,10 +2085,10 @@ private:
     }
 
     [[nodiscard]] static auto render_vote(const NodeId& node) -> std::string {
-        if constexpr (std::is_same_v<NodeId, std::string>) {
-            return node;
-        } else {
+        if constexpr (std::unsigned_integral<NodeId>) {
             return std::to_string(static_cast<unsigned long long>(node));
+        } else {
+            return persistence_node_id::to_text(node);
         }
     }
 
@@ -2650,10 +2651,17 @@ private:
         if (body == "none" || body.empty()) {
             return std::nullopt;
         }
-        if constexpr (std::is_same_v<NodeId, std::string>) {
-            return body;
-        } else {
+        if constexpr (std::unsigned_integral<NodeId>) {
             return static_cast<NodeId>(parse_unsigned(body, key));
+        } else {
+            // Strict for a composite id, as `parse_unsigned` is for a number:
+            // a vote this binary cannot read is corruption, never "no vote".
+            auto id = persistence_node_id::from_text<NodeId>(body);
+            if (!id) {
+                throw std::runtime_error("object_store_persistence_engine: corrupt object " + key +
+                                         ": \"" + body + "\" is not a node id of this type");
+            }
+            return id;
         }
     }
 
@@ -2967,10 +2975,8 @@ private:
         obj["term"] = static_cast<std::uint64_t>(term);
         if (!vote) {
             obj["voted_for"] = nullptr;
-        } else if constexpr (std::is_same_v<NodeId, std::string>) {
-            obj["voted_for"] = boost::json::string(*vote);
         } else {
-            obj["voted_for"] = static_cast<std::uint64_t>(*vote);
+            obj["voted_for"] = persistence_node_id::to_json(*vote);
         }
         return boost::json::serialize(obj);
     }
@@ -2990,12 +2996,16 @@ private:
         if (vote.is_null()) {
             return out;
         }
-        if constexpr (std::is_same_v<NodeId, std::string>) {
+        if constexpr (!std::unsigned_integral<NodeId>) {
             if (!vote.is_string()) {
                 throw std::runtime_error(
                     "the combined hard-state record's voted_for is neither null nor a string");
             }
-            out.second = std::string(vote.as_string());
+            out.second = persistence_node_id::from_json<NodeId>(vote);
+            if (!out.second) {
+                throw std::runtime_error(
+                    "the combined hard-state record's voted_for is not a node id of this type");
+            }
         } else {
             if (!vote.is_int64() && !vote.is_uint64()) {
                 throw std::runtime_error(
@@ -3053,22 +3063,14 @@ private:
         obj["state"] = bytes_to_base64(snap.state_machine_state());
         boost::json::array nodes;
         for (const auto& n : snap.configuration().nodes()) {
-            if constexpr (std::is_same_v<NodeId, std::string>) {
-                nodes.push_back(boost::json::string(n));
-            } else {
-                nodes.push_back(static_cast<std::uint64_t>(n));
-            }
+            nodes.push_back(persistence_node_id::to_json(n));
         }
         obj["nodes"] = nodes;
         obj["is_joint_consensus"] = snap.configuration().is_joint_consensus();
         if (snap.configuration().is_joint_consensus() && snap.configuration().old_nodes()) {
             boost::json::array old_nodes;
             for (const auto& n : *snap.configuration().old_nodes()) {
-                if constexpr (std::is_same_v<NodeId, std::string>) {
-                    old_nodes.push_back(boost::json::string(n));
-                } else {
-                    old_nodes.push_back(static_cast<std::uint64_t>(n));
-                }
+                old_nodes.push_back(persistence_node_id::to_json(n));
             }
             obj["old_nodes"] = old_nodes;
         }
@@ -3090,6 +3092,18 @@ private:
         return rec;
     }
 
+    /// One snapshot member list entry, refused (throws) when it is the wrong
+    /// JSON type or text the id type cannot parse.
+    static auto snapshot_member(const boost::json::value& v) -> NodeId {
+        auto id = persistence_node_id::from_json<NodeId>(v);
+        if (!id) {
+            throw std::runtime_error("object_store_persistence_engine: snapshot member " +
+                                     boost::json::serialize(v) +
+                                     " is not a node id of this engine's type");
+        }
+        return std::move(*id);
+    }
+
     static auto json_to_snapshot(const std::string& s) -> snapshot_t {
         auto obj = boost::json::parse(s).as_object();
         snapshot_t snap;
@@ -3097,22 +3111,14 @@ private:
         snap._last_included_term = static_cast<TermId>(obj.at("last_included_term").as_int64());
         snap._state_machine_state = base64_to_bytes(std::string(obj.at("state").as_string()));
         for (const auto& n : obj.at("nodes").as_array()) {
-            if constexpr (std::is_same_v<NodeId, std::string>) {
-                snap._configuration._nodes.emplace_back(n.as_string());
-            } else {
-                snap._configuration._nodes.push_back(n.to_number<NodeId>());
-            }
+            snap._configuration._nodes.push_back(snapshot_member(n));
         }
         snap._configuration._is_joint_consensus =
             obj.contains("is_joint_consensus") && obj.at("is_joint_consensus").as_bool();
         if (snap._configuration._is_joint_consensus && obj.contains("old_nodes")) {
             std::vector<NodeId> old_nodes;
             for (const auto& n : obj.at("old_nodes").as_array()) {
-                if constexpr (std::is_same_v<NodeId, std::string>) {
-                    old_nodes.emplace_back(n.as_string());
-                } else {
-                    old_nodes.push_back(n.to_number<NodeId>());
-                }
+                old_nodes.push_back(snapshot_member(n));
             }
             snap._configuration._old_nodes = std::move(old_nodes);
         }
