@@ -416,6 +416,65 @@ BOOST_AUTO_TEST_CASE(forms_round_trip_and_bad_entries_stop_the_group) {
     BOOST_CHECK_THROW((void)f.catalog.apply(bytes_of("\x01"), 1), std::invalid_argument);
 }
 
+BOOST_AUTO_TEST_CASE(on_demand_maximums_round_trip_from_format_14_and_apply_at_once) {
+    ddb::table_descriptor d;
+    d.name = "orders";
+    d.table_id = 42;
+    d.schema = schema();
+    d.billing = ddb::billing_mode::pay_per_request;
+    d.revision = 3;
+    // Without maximums a descriptor keeps its older format.
+    BOOST_TEST(static_cast<int>(ddb::encode_table_descriptor(d)[0]) == 3);
+    d.on_demand = {{"", 500, -1}, {"byOwner", -1, 9000000000LL}};
+    const auto bytes = ddb::encode_table_descriptor(d);
+    BOOST_TEST(static_cast<int>(bytes[0]) == 14);
+    BOOST_TEST((ddb::decode_table_descriptor(bytes) == d));
+    for (std::size_t n = 0; n < bytes.size(); ++n) {
+        BOOST_TEST(!ddb::decode_table_descriptor(bytes.substr(0, n)).has_value());
+    }
+    // An encrypted table keeps its format 13 fields beside the maximums.
+    auto sealed = d;
+    sealed.sse.kind = ddb::sse_kind::kms;
+    sealed.sse.key_arn = "arn:aws:kms:us-east-1:111122223333:key/k";
+    sealed.sse.wrapped = "wrapped";
+    sealed.sse.provider = "kythira";
+    BOOST_TEST((ddb::decode_table_descriptor(ddb::encode_table_descriptor(sealed)) == sealed));
+
+    // A command that clears the last maximum is still written as 14, so
+    // the flag survives.
+    ddb::catalog_command c;
+    c.op = ddb::catalog_command::kind::update_table;
+    c.table = d;
+    c.table.on_demand.clear();
+    c.update_on_demand = true;
+    const auto cb = ddb::encode_catalog_command(c);
+    BOOST_TEST(static_cast<int>(cb[0]) == 14);
+    bool newer = false;
+    BOOST_TEST((ddb::decode_catalog_command(cb, newer) == c));
+    for (std::size_t n = 0; n < cb.size(); ++n) {
+        BOOST_TEST(!ddb::decode_catalog_command(cb.substr(0, n), newer).has_value());
+    }
+
+    // Applied: a new maximum takes effect at once, and the table stays
+    // ACTIVE.
+    fixture f;
+    f.activate("orders");
+    ddb::catalog_command u;
+    u.op = ddb::catalog_command::kind::update_table;
+    u.table.name = "orders";
+    u.table.on_demand = {{"", 100, 200}};
+    u.update_on_demand = true;
+    auto r = f.run(u);
+    BOOST_REQUIRE(r.ok());
+    BOOST_TEST((r.table->status == ddb::table_status::active));
+    BOOST_TEST((r.table->on_demand == u.table.on_demand));
+    // A command without the flag leaves them alone.
+    ddb::table_descriptor with;
+    with.deletion_protection = true;
+    r = f.update("orders", ddb::catalog_command::update_deletion_protection, with);
+    BOOST_TEST((r.table->on_demand == u.table.on_demand));
+}
+
 BOOST_AUTO_TEST_CASE(the_disk_guard_refuses_writes_below_the_floor) {
     std::optional<std::uintmax_t> free = 2048;
     const ddb::disk_guard guard("/data", 1024, [&](const std::filesystem::path&) { return free; });

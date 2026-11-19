@@ -53,6 +53,7 @@
 #include <deque>
 #include <filesystem>
 #include <iterator>
+#include <limits>
 #include <map>
 #include <optional>
 #include <stdexcept>
@@ -375,6 +376,18 @@ struct table_sse {
     friend auto operator==(const table_sse&, const table_sse&) -> bool = default;
 };
 
+/// `OnDemandThroughput` of an on-demand table or one of its GSIs: the most
+/// request units per second it may take. -1, AWS's own placeholder, means
+/// no maximum beyond the account's per-table quota.
+struct on_demand_limit {
+    /// The GSI it caps; empty for the table.
+    std::string index;
+    std::int64_t max_read = -1;
+    std::int64_t max_write = -1;
+
+    friend auto operator==(const on_demand_limit&, const on_demand_limit&) -> bool = default;
+};
+
 /// What the catalog knows about a table. Later tasks add replicas; each
 /// new field gets a new descriptor format version.
 struct table_descriptor {
@@ -440,6 +453,19 @@ struct table_descriptor {
     std::uint64_t salvage_after_ms = 0;
     /// Encryption at rest (KMS task 16).
     table_sse sse;
+    /// `OnDemandThroughput` maximums, one entry for the table and for each
+    /// GSI that was given one, only for those that were. Kept when the
+    /// table moves to provisioned and back, as AWS keeps them; enforced
+    /// and shown only while the table is on demand.
+    std::vector<on_demand_limit> on_demand;
+
+    /// The `OnDemandThroughput` given for the table (`index` empty) or the
+    /// GSI named `index`, or null.
+    [[nodiscard]] auto on_demand_for(std::string_view index) const -> const on_demand_limit* {
+        const auto it = std::find_if(on_demand.begin(), on_demand.end(),
+                                     [&](const on_demand_limit& l) { return l.index == index; });
+        return it == on_demand.end() ? nullptr : &*it;
+    }
 
     /// The witness in `name`, or null.
     [[nodiscard]] auto witness_in(std::string_view name) const -> const table_witness* {
@@ -702,6 +728,11 @@ struct catalog_command {
     /// settings; `set_status` and `job_progress`: name and `table_id`.
     table_descriptor table;
     std::uint8_t update_fields = 0;
+    /// `update_table`: `table.on_demand` replaces the stored maximums
+    /// (`OnDemandThroughput` on the table or a GSI). Takes effect at once,
+    /// so the table stays ACTIVE. Every bit of `update_fields` is taken, so
+    /// this is a field of its own, carried from format 14.
+    bool update_on_demand = false;
     /// `set_status`: the status to leave and the one to enter.
     table_status from = table_status::creating;
     table_status to = table_status::active;
@@ -764,13 +795,23 @@ namespace catalog_detail {
 /// only for an encrypted table, so a node that predates encryption
 /// refuses an encrypted table's forms rather than reading it as a clear
 /// one.
-inline constexpr std::uint8_t k_descriptor_format_version = 13;
+/// 14 added `on_demand` after `sse` and the replicas' `kms_key`
+/// (or after `salvage_after_ms` when unencrypted; 13's fields are
+/// always written at 14), with the command's
+/// `update_on_demand` flag after its TTL interval, only for a table given
+/// an `OnDemandThroughput` (and for a command that changes one), so a node
+/// that predates it refuses such a table's forms rather than dropping its
+/// maximums.
+inline constexpr std::uint8_t k_descriptor_format_version = 14;
 inline constexpr std::uint8_t k_job_format_version = 1;
-inline constexpr std::uint8_t k_command_format_version = 13;
-inline constexpr std::uint8_t k_result_format_version = 13;
+inline constexpr std::uint8_t k_command_format_version = 14;
+inline constexpr std::uint8_t k_result_format_version = 14;
 
 /// The version a form carrying `d` is written as.
 [[nodiscard]] inline auto version_for(const table_descriptor& d) -> std::uint8_t {
+    if (!d.on_demand.empty()) {
+        return 14;
+    }
     if (d.sse != table_sse{} || std::ranges::any_of(d.replicas, [](const table_replica& r) {
             return !r.kms_key.empty();
         })) {
@@ -969,6 +1010,15 @@ inline void put_descriptor_body(std::string& out, const table_descriptor& d, std
         detail::put_varint(out, d.sse.inaccessible_ms);
         for (const auto& r : d.replicas) {
             detail::put_bytes(out, r.kms_key);
+        }
+    }
+    if (version >= 14) {
+        // -1 (no maximum) is stored as 0, so every value is a varint.
+        detail::put_varint(out, d.on_demand.size());
+        for (const auto& l : d.on_demand) {
+            detail::put_bytes(out, l.index);
+            detail::put_varint(out, static_cast<std::uint64_t>(l.max_read + 1));
+            detail::put_varint(out, static_cast<std::uint64_t>(l.max_write + 1));
         }
     }
 }
@@ -1249,6 +1299,25 @@ inline void put_descriptor_body(std::string& out, const table_descriptor& d, std
             rep.kms_key = std::move(*replica_key);
         }
     }
+    if (version >= 14) {
+        const auto n = r.count();
+        if (!n || *n > k_max_global_indexes + 1) {
+            return std::nullopt;
+        }
+        for (std::size_t i = 0; i < *n; ++i) {
+            auto index = r.bytes();
+            const auto max_read = r.varint();
+            const auto max_write = r.varint();
+            constexpr auto k_top =
+                static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max());
+            if (!index || !max_read || !max_write || *max_read > k_top || *max_write > k_top) {
+                return std::nullopt;
+            }
+            d.on_demand.push_back(on_demand_limit{std::move(*index),
+                                                  static_cast<std::int64_t>(*max_read) - 1,
+                                                  static_cast<std::int64_t>(*max_write) - 1});
+        }
+    }
     d.name = std::move(*name);
     d.table_id = *id;
     d.schema = std::move(*schema);
@@ -1369,6 +1438,10 @@ inline void put_descriptor_body(std::string& out, const table_descriptor& d, std
     if ((c.update_fields & catalog_command::update_vectors) != 0) {
         version = std::max<std::uint8_t>(version, 9);
     }
+    // Likewise an on-demand update can leave the table no maximums.
+    if (c.update_on_demand) {
+        version = std::max<std::uint8_t>(version, 14);
+    }
     out.push_back(static_cast<char>(version));
     out.push_back(static_cast<char>(c.op));
     catalog_detail::put_descriptor_body(out, c.table, version);
@@ -1379,6 +1452,9 @@ inline void put_descriptor_body(std::string& out, const table_descriptor& d, std
     detail::put_varint(out, c.deleted);
     out.push_back(c.done ? '\1' : '\0');
     detail::put_varint(out, c.ttl_min_interval_ms);
+    if (version >= 14) {
+        out.push_back(c.update_on_demand ? '\1' : '\0');
+    }
     return out;
 }
 
@@ -1400,7 +1476,7 @@ inline void put_descriptor_body(std::string& out, const table_descriptor& d, std
     // set_ttl came in version 3, the destination commands in 5,
     // restore_done in 6, the point-in-time recovery commands in 7, the
     // resource policy and Contributor Insights commands in 8,
-    // qualify_tables in 12, set_sse in 13.
+    // qualify_tables in 12, set_sse in 13 (14 added no command).
     const std::uint8_t last_op = version >= 13   ? 26
                                  : version >= 12 ? 25
                                  : version >= 11 ? 24
@@ -1425,6 +1501,7 @@ inline void put_descriptor_body(std::string& out, const table_descriptor& d, std
     const auto deleted = r.varint();
     const auto done = catalog_detail::get_flag(r);
     const auto interval = version >= 3 ? r.varint() : std::optional<std::uint64_t>{0};
+    const auto on_demand = version >= 14 ? catalog_detail::get_flag(r) : std::optional<bool>{false};
     // update_gsis came with the descriptor's GSI list, in version 2, and
     // update_stream with its streams, in 4.
     // update_vectors with the vector indexes, in 9.
@@ -1433,10 +1510,11 @@ inline void put_descriptor_body(std::string& out, const table_descriptor& d, std
                                       : version >= 2 ? 0x3F
                                                      : 0x1F;
     if (!table || !fields || *fields > known_fields || !from || *from > 3 || !to || *to > 3 ||
-        !now || !deleted || !done || !interval || !r.done()) {
+        !now || !deleted || !done || !interval || !on_demand || !r.done()) {
         return std::nullopt;
     }
     c.table = std::move(*table);
+    c.update_on_demand = *on_demand;
     c.update_fields = *fields;
     c.from = static_cast<table_status>(*from);
     c.to = static_cast<table_status>(*to);
@@ -1952,6 +2030,10 @@ private:
             // Takes effect at once and needs no background work, so the
             // table stays ACTIVE.
             d->deletion_protection = c.table.deletion_protection;
+        }
+        if (c.update_on_demand) {
+            // Likewise: a new maximum applies to the next request.
+            d->on_demand = c.table.on_demand;
         }
         if (d->billing == billing_mode::pay_per_request) {
             d->read_capacity = 0;

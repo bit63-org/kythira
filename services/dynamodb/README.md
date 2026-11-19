@@ -128,7 +128,8 @@ Outside tests, serve TLS (`KYTHIRA_DYNAMODB_TLS_CERT`,
 (`KYTHIRA_DYNAMODB_STATIC_KEYS_FILE`), not in the environment.
 
 Tables are throttled as on AWS, provisioned ones at their capacity and
-on-demand ones at AWS's default limits. `KYTHIRA_DYNAMODB_COMPAT=throttling=off`
+on-demand ones at AWS's default limits or their `OnDemandThroughput`
+maximums. `KYTHIRA_DYNAMODB_COMPAT=throttling=off`
 turns that off for the cluster, and the tag `kythira:compat:throttling`
 sets it per table.
 

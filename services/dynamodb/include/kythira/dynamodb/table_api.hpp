@@ -327,6 +327,58 @@ inline constexpr std::uint64_t k_default_warm_write = 4000;
     return std::nullopt;
 }
 
+/// An `OnDemandThroughput` member (`in`) applied over `base`, the maximums
+/// in force before it: a member left out keeps its value. Each maximum is
+/// -1 (none) or at least 1, as AWS takes them.
+[[nodiscard]] inline auto on_demand_from(const boost::json::value& in, on_demand_limit base)
+    -> aws_json::result<on_demand_limit> {
+    if (!in.is_object()) {
+        return invalid("OnDemandThroughput must be a structure");
+    }
+    const auto& o = in.as_object();
+    for (const auto& [member, field] : {std::pair{"MaxReadRequestUnits", &base.max_read},
+                                        std::pair{"MaxWriteRequestUnits", &base.max_write}}) {
+        const auto* v = o.if_contains(member);
+        if (v == nullptr) {
+            continue;
+        }
+        const auto n = v->to_number<std::int64_t>();
+        if (n != -1 && n < 1) {
+            return invalid(std::string(member) + " must be -1 or a positive number");
+        }
+        *field = n;
+    }
+    return base;
+}
+
+/// Puts `l` into `all` in place of the entry for the same index. An entry
+/// with no maximum either way is dropped: AWS shows `OnDemandThroughput`
+/// only for a table or index given one.
+inline void set_on_demand(std::vector<on_demand_limit>& all, on_demand_limit l) {
+    std::erase_if(all, [&](const on_demand_limit& x) { return x.index == l.index; });
+    if (l.max_read != -1 || l.max_write != -1) {
+        all.push_back(std::move(l));
+    }
+}
+
+/// The `OnDemandThroughput` member `DescribeTable` shows for the table
+/// (`index` empty) or a GSI, or null: only while the table is on demand,
+/// and only for one that was given a maximum.
+[[nodiscard]] inline auto on_demand_description(const table_descriptor& d, std::string_view index)
+    -> std::optional<boost::json::object> {
+    const auto* l = d.on_demand_for(index);
+    if (l == nullptr || d.billing != billing_mode::pay_per_request) {
+        return std::nullopt;
+    }
+    return boost::json::object{{"MaxReadRequestUnits", l->max_read},
+                               {"MaxWriteRequestUnits", l->max_write}};
+}
+
+/// `OnDemandThroughput` refused on a provisioned table or index.
+[[nodiscard]] inline auto on_demand_needs_pay_per_request() -> aws_json::error {
+    return invalid("OnDemandThroughput can only be specified when BillingMode is PAY_PER_REQUEST");
+}
+
 }  // namespace table_api_detail
 
 /// A descriptor as a `TableDescription`.
@@ -582,6 +634,9 @@ template<typename TypeOf>
                 {"WriteCapacityUnits", g.write_capacity},
             };
         }
+        if (auto odt = table_api_detail::on_demand_description(d, g.name)) {
+            o["OnDemandThroughput"] = std::move(*odt);
+        }
         // `Backfilling` while CREATING (true, as AWS shows it; DynamoDB
         // Local shows false), the counts only once ACTIVE, as in Local.
         if (g.status == index_status::creating) {
@@ -738,6 +793,9 @@ template<typename TypeOf>
     out["TableId"] = table_uuid(d.table_id);
     if (d.billing == billing_mode::pay_per_request) {
         out["BillingModeSummary"] = boost::json::object{{"BillingMode", "PAY_PER_REQUEST"}};
+    }
+    if (auto odt = on_demand_description(d, "")) {
+        out["OnDemandThroughput"] = std::move(*odt);
     }
     if (d.storage_class == table_class::standard_infrequent_access) {
         out["TableClassSummary"] =
@@ -925,9 +983,6 @@ public:
         if (!valid_catalog_name(ctx, name)) {
             return bad_table_name();
         }
-        if (in.contains("OnDemandThroughput")) {
-            return unsupported("OnDemandThroughput");
-        }
         std::optional<table_stream> stream;
         if (const auto* s = in.if_contains("StreamSpecification")) {
             auto spec = stream_spec_from(s->as_object());
@@ -1079,6 +1134,36 @@ public:
                     return validation_error(
                         "No provisioned throughput specified for the global secondary index");
                 }
+            }
+        }
+        // `OnDemandThroughput` on the table and on each GSI.
+        if (const auto* odt = in.if_contains("OnDemandThroughput")) {
+            if (d.billing != billing_mode::pay_per_request) {
+                return on_demand_needs_pay_per_request();
+            }
+            auto l = on_demand_from(*odt, on_demand_limit{});
+            if (!l) {
+                return l.error();
+            }
+            set_on_demand(d.on_demand, std::move(*l));
+        }
+        if (gsi_list != nullptr) {
+            for (const auto& entry : gsi_list->as_array()) {
+                const auto& o = entry.as_object();
+                const auto* odt = o.if_contains("OnDemandThroughput");
+                if (odt == nullptr) {
+                    continue;
+                }
+                if (d.billing != billing_mode::pay_per_request) {
+                    return on_demand_needs_pay_per_request();
+                }
+                on_demand_limit base;
+                base.index = std::string(o.at("IndexName").as_string());
+                auto l = on_demand_from(*odt, std::move(base));
+                if (!l) {
+                    return l.error();
+                }
+                set_on_demand(d.on_demand, std::move(*l));
             }
         }
         if (const auto* cls = in.if_contains("TableClass")) {
@@ -1239,9 +1324,6 @@ public:
     auto update_table(call_context& ctx, boost::json::object& in) -> result {
         using namespace table_api_detail;
         const auto name = ctx.table_name(in.at("TableName").as_string());
-        if (in.contains("OnDemandThroughput")) {
-            return unsupported("OnDemandThroughput");
-        }
         if (const auto* sse = in.if_contains("SSESpecification")) {
             return update_sse(ctx, name, in, *sse);
         }
@@ -1263,9 +1345,9 @@ public:
         }
         if (const auto* updates = in.if_contains("ReplicaUpdates")) {
             for (const char* member :
-                 {"BillingMode", "ProvisionedThroughput", "TableClass", "DeletionProtectionEnabled",
-                  "WarmThroughput", "GlobalSecondaryIndexUpdates", "StreamSpecification",
-                  "VectorIndexUpdates"}) {
+                 {"BillingMode", "ProvisionedThroughput", "OnDemandThroughput", "TableClass",
+                  "DeletionProtectionEnabled", "WarmThroughput", "GlobalSecondaryIndexUpdates",
+                  "StreamSpecification", "VectorIndexUpdates"}) {
                 if (in.contains(member)) {
                     return validation_error(
                         "ReplicaUpdates cannot be combined with other table updates");
@@ -1274,9 +1356,10 @@ public:
             return replica_updates(ctx, name, *updates);
         }
         if (!in.contains("BillingMode") && !in.contains("ProvisionedThroughput") &&
-            !in.contains("TableClass") && !in.contains("DeletionProtectionEnabled") &&
-            !in.contains("WarmThroughput") && !in.contains("GlobalSecondaryIndexUpdates") &&
-            !in.contains("StreamSpecification") && !in.contains("VectorIndexUpdates")) {
+            !in.contains("OnDemandThroughput") && !in.contains("TableClass") &&
+            !in.contains("DeletionProtectionEnabled") && !in.contains("WarmThroughput") &&
+            !in.contains("GlobalSecondaryIndexUpdates") && !in.contains("StreamSpecification") &&
+            !in.contains("VectorIndexUpdates")) {
             return validation_error(
                 "At least one of ProvisionedThroughput, BillingMode, UpdateStreamEnabled, "
                 "GlobalSecondaryIndexUpdates or SSESpecification or ReplicaUpdates is required");
@@ -1353,6 +1436,21 @@ public:
             }
             c.table.gsis = std::move(*list);
             c.update_fields |= catalog_command::update_gsis;
+        }
+        if (in.contains("OnDemandThroughput") || in.contains("GlobalSecondaryIndexUpdates")) {
+            // Checked against the billing mode and GSIs the request leaves.
+            auto limits = on_demand_updates(in, c.table);
+            if (!limits) {
+                return limits.error();
+            }
+            if (*limits != current->on_demand) {
+                if (current->strong) {
+                    return unsupported(
+                        "OnDemandThroughput on a multi-region strongly consistent table");
+                }
+                c.table.on_demand = std::move(*limits);
+                c.update_on_demand = true;
+            }
         }
         if (const auto* updates = in.if_contains("VectorIndexUpdates")) {
             auto list = vector_index_updates(updates->as_array(), *current);
@@ -1686,8 +1784,12 @@ public:
                 out.erase(at);
                 continue;
             }
-            // Update: the index's provisioned throughput.
+            // Update: the index's provisioned throughput, or its on-demand
+            // maximums (`on_demand_updates`).
             const auto* t = body.if_contains("ProvisionedThroughput");
+            if (t == nullptr && body.contains("OnDemandThroughput")) {
+                continue;
+            }
             if (t == nullptr || table.billing != billing_mode::provisioned) {
                 return validation_error(
                     "One or more parameter values were invalid: ProvisionedThroughput can only "
@@ -1698,6 +1800,58 @@ public:
                 t->as_object().at("ReadCapacityUnits").to_number<std::int64_t>());
             at->write_capacity = static_cast<std::uint64_t>(
                 t->as_object().at("WriteCapacityUnits").to_number<std::int64_t>());
+        }
+        return out;
+    }
+
+    /// The on-demand maximums `table` (as the request leaves its billing
+    /// mode and GSIs) should have after `UpdateTable`'s `OnDemandThroughput`
+    /// and its GSI updates' `OnDemandThroughput`: a member left out keeps
+    /// its value, and a deleted index's maximums go with it.
+    static auto on_demand_updates(const boost::json::object& in, const table_descriptor& table)
+        -> aws_json::result<std::vector<on_demand_limit>> {
+        using namespace table_api_detail;
+        auto out = table.on_demand;
+        std::erase_if(out, [&](const on_demand_limit& l) {
+            return !l.index.empty() && std::ranges::none_of(table.gsis, [&](const global_index& g) {
+                return g.name == l.index && g.status != index_status::deleting;
+            });
+        });
+        const auto apply = [&](const boost::json::value& v,
+                               const std::string& index) -> std::optional<aws_json::error> {
+            if (table.billing != billing_mode::pay_per_request) {
+                return on_demand_needs_pay_per_request();
+            }
+            const auto* have = table.on_demand_for(index);
+            on_demand_limit base = have != nullptr ? *have : on_demand_limit{};
+            base.index = index;
+            auto l = on_demand_from(v, std::move(base));
+            if (!l) {
+                return l.error();
+            }
+            set_on_demand(out, std::move(*l));
+            return std::nullopt;
+        };
+        if (const auto* odt = in.if_contains("OnDemandThroughput")) {
+            if (auto e = apply(*odt, "")) {
+                return *e;
+            }
+        }
+        if (const auto* updates = in.if_contains("GlobalSecondaryIndexUpdates")) {
+            for (const auto& u : updates->as_array()) {
+                for (const char* action : {"Create", "Update"}) {
+                    const auto* body = u.as_object().if_contains(action);
+                    if (body == nullptr) {
+                        continue;
+                    }
+                    const auto& bo = body->as_object();
+                    if (const auto* odt = bo.if_contains("OnDemandThroughput")) {
+                        if (auto e = apply(*odt, std::string(bo.at("IndexName").as_string()))) {
+                            return *e;
+                        }
+                    }
+                }
+            }
         }
         return out;
     }
@@ -1854,9 +2008,9 @@ private:
             return unsupported(strong ? "MultiRegionConsistency" : "GlobalTableWitnessUpdates");
         } else {
             for (const char* member :
-                 {"BillingMode", "ProvisionedThroughput", "TableClass", "DeletionProtectionEnabled",
-                  "WarmThroughput", "GlobalSecondaryIndexUpdates", "StreamSpecification",
-                  "VectorIndexUpdates"}) {
+                 {"BillingMode", "ProvisionedThroughput", "OnDemandThroughput", "TableClass",
+                  "DeletionProtectionEnabled", "WarmThroughput", "GlobalSecondaryIndexUpdates",
+                  "StreamSpecification", "VectorIndexUpdates"}) {
                 if (in.contains(member)) {
                     return validation_error(
                         "ReplicaUpdates cannot be combined with other table updates");

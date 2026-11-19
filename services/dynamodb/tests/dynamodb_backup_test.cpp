@@ -226,6 +226,16 @@ BOOST_FIXTURE_TEST_CASE(capacity_overrides_apply, backup_fixture) {
                 R"(,"BillingModeOverride":"PAY_PER_REQUEST",)"
                 R"("ProvisionedThroughputOverride":{"ReadCapacityUnits":5,"WriteCapacityUnits":5})")
             .type() == "ValidationException");
+    // OnDemandThroughputOverride: only for an on-demand restore.
+    r = restore(arn, "capped",
+                R"(,"BillingModeOverride":"PAY_PER_REQUEST",)"
+                R"("OnDemandThroughputOverride":{"MaxWriteRequestUnits":30})");
+    BOOST_TEST_REQUIRE(r.status == 200U);
+    BOOST_TEST(json::serialize(r.body.at("TableDescription").at("OnDemandThroughput")) ==
+               R"({"MaxReadRequestUnits":-1,"MaxWriteRequestUnits":30})");
+    BOOST_TEST(
+        restore(arn, "notcapped", R"(,"OnDemandThroughputOverride":{"MaxWriteRequestUnits":30})")
+            .type() == "ValidationException");
 }
 
 BOOST_FIXTURE_TEST_CASE(refusals_follow_aws, backup_fixture) {

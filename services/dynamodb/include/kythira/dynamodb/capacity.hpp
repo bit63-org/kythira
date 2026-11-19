@@ -15,14 +15,16 @@
 /// | Bucket | Rate | Holds at most |
 /// |---|---|---|
 /// | provisioned table or GSI | its provisioned units per second | 300 s of rate (burst capacity) |
-/// | on-demand table or GSI | the per-table account quota (40,000) | 1 s of rate |
-/// | partition key | 3,000 read / 1,000 write units per second | 1 s of rate |
+/// | on-demand table or GSI | the per-table account quota (40,000), or its `OnDemandThroughput`
+/// maximum when lower | 1 s of rate | | partition key | 3,000 read / 1,000 write units per second |
+/// 1 s of rate |
 ///
 /// A throttle names the bucket that ran dry with AWS's `ThrottlingReason`
 /// (`<Table|Index><Read|Write><Limit>`), and is answered as AWS answers it:
 /// `ProvisionedThroughputExceededException` for a provisioned limit or a hot
 /// partition key, `ThrottlingException` for an on-demand table past its
-/// account quota.
+/// account quota or its own maximum (`<Table|Index><Read|Write>
+/// MaxOnDemandThroughputExceeded`).
 ///
 /// The throttler is per process. `local_backend` owns one, which is exact.
 /// Each `raft_backend` node owns one holding its share of every limit
@@ -122,16 +124,28 @@ inline constexpr std::string_view k_hot_message =
     "https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/"
     "bp-partition-key-design.html";
 
+inline constexpr std::string_view k_max_on_demand_message =
+    "Throughput exceeds the maximum OnDemandThroughput configured on the table or index.";
+
 /// A bucket's rate and size for a table or GSI.
 struct limits {
     double rate = 0.0;
     double max_tokens = 0.0;
     bool provisioned = true;
+    /// The rate is the table's or GSI's `OnDemandThroughput` maximum, below
+    /// the account quota.
+    bool on_demand_max = false;
 };
 
-[[nodiscard]] inline auto resource_limits(billing_mode billing, std::uint64_t provisioned_units)
-    -> limits {
+/// `max_units` is the on-demand maximum for the request's kind, -1 for
+/// none.
+[[nodiscard]] inline auto resource_limits(billing_mode billing, std::uint64_t provisioned_units,
+                                          std::int64_t max_units = -1) -> limits {
     if (billing == billing_mode::pay_per_request) {
+        if (max_units > 0 && static_cast<double>(max_units) < k_on_demand_table_units) {
+            const auto rate = static_cast<double>(max_units);
+            return {rate, rate, false, true};
+        }
         return {k_on_demand_table_units, k_on_demand_table_units, false};
     }
     const auto rate = static_cast<double>(std::max<std::uint64_t>(provisioned_units, 1));
@@ -188,6 +202,12 @@ public:
                     std::string(index ? capacity_detail::k_index_message
                                       : capacity_detail::k_table_message),
                     capacity_detail::reason(index, target.kind, "ProvisionedThroughputExceeded"),
+                    target.index};
+            }
+            if (lim->on_demand_max) {
+                return throttle{
+                    "ThrottlingException", std::string(capacity_detail::k_max_on_demand_message),
+                    capacity_detail::reason(index, target.kind, "MaxOnDemandThroughputExceeded"),
                     target.index};
             }
             return throttle{"ThrottlingException", std::string(capacity_detail::k_hot_message),
@@ -256,19 +276,22 @@ private:
 
     [[nodiscard]] auto limits_of(const table_descriptor& table, const capacity_target& target) const
         -> std::optional<capacity_detail::limits> {
+        const bool read = target.kind == capacity_kind::read;
+        std::int64_t max_units = -1;
+        if (const auto* odt = table.on_demand_for(target.index)) {
+            max_units = read ? odt->max_read : odt->max_write;
+        }
         capacity_detail::limits lim;
         if (target.index.empty()) {
-            lim = capacity_detail::resource_limits(table.billing, target.kind == capacity_kind::read
-                                                                      ? table.read_capacity
-                                                                      : table.write_capacity);
+            lim = capacity_detail::resource_limits(
+                table.billing, read ? table.read_capacity : table.write_capacity, max_units);
         } else {
             const auto it = std::ranges::find(table.gsis, target.index, &global_index::name);
             if (it == table.gsis.end()) {
                 return std::nullopt;
             }
-            lim = capacity_detail::resource_limits(table.billing, target.kind == capacity_kind::read
-                                                                      ? it->read_capacity
-                                                                      : it->write_capacity);
+            lim = capacity_detail::resource_limits(
+                table.billing, read ? it->read_capacity : it->write_capacity, max_units);
         }
         lim.rate *= _share;
         lim.max_tokens *= _share;
