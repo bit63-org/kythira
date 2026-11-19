@@ -1668,6 +1668,13 @@ private:
 
     // Replication helpers
     auto send_append_entries_to(node_id_type target) -> void;
+
+    /// @brief Log a send_append_entries_to() call that took a heartbeat
+    /// interval or more, split into lock wait, preparation and dispatch.
+    auto warn_if_slow_append_send(node_id_type target,
+                                  std::chrono::steady_clock::time_point entered,
+                                  std::chrono::steady_clock::time_point locked,
+                                  std::chrono::steady_clock::time_point dispatched) -> void;
     auto replicate_to_followers_impl(bool only_due) -> void;
     auto send_heartbeat_with_retry(node_id_type target) -> void;
     auto send_install_snapshot_to(node_id_type target) -> void;
@@ -8667,9 +8674,15 @@ auto node<Types>::send_append_entries_to(node_id_type target) -> void {
     std::chrono::milliseconds timeout;
     bool need_snapshot = false;
     bool heartbeat_only = false;  // a stand-in while a batch is in flight
+    // Timed because this runs on the thread that sends to EVERY follower in
+    // turn (see warn_if_slow_append_send): a send that stalls starves the
+    // followers after it of heartbeats.
+    const auto send_entered = std::chrono::steady_clock::now();
+    std::chrono::steady_clock::time_point lock_acquired;
 
     {
         std::lock_guard<std::mutex> lock(_mutex);
+        lock_acquired = std::chrono::steady_clock::now();
 
         if (_state != kythira::server_state::leader) {
             return;
@@ -8996,6 +9009,39 @@ auto node<Types>::send_append_entries_to(node_id_type target) -> void {
 
         _unresponsive_followers.insert(target);
     }
+    warn_if_slow_append_send(target, send_entered, lock_acquired, start_time);
+}
+
+template<raft_types Types>
+auto node<Types>::warn_if_slow_append_send(node_id_type target,
+                                           std::chrono::steady_clock::time_point entered,
+                                           std::chrono::steady_clock::time_point locked,
+                                           std::chrono::steady_clock::time_point dispatched)
+    -> void {
+    // Handing an AppendEntries to the transport is asynchronous and takes
+    // microseconds; the leader sends to its followers one after another on
+    // one thread (replicate_to_followers_impl), so a send that takes a
+    // heartbeat interval or more delays every follower after it, and enough
+    // of them hand a follower an election. Split by where the time went:
+    // waiting for _mutex, building the request under it, or dispatching the
+    // RPC (including any retry continuation the backend runs inline). Added
+    // for a leader whose heartbeats stopped for 430 ms right after it
+    // proposed a split (multi_raft_split_integration_test, 2026-11-18),
+    // where nothing in the log said which of the three it was.
+    const auto now = std::chrono::steady_clock::now();
+    if (now - entered < _heartbeat_interval) {
+        return;
+    }
+    const auto ms = [](std::chrono::steady_clock::duration d) {
+        return std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(d).count());
+    };
+    _logger.warning("Slow AppendEntries send: followers after this one wait",
+                    {{"node_id", node_id_to_string(_node_id)},
+                     {"target", node_id_to_string(target)},
+                     {"total_ms", ms(now - entered)},
+                     {"lock_wait_ms", ms(locked - entered)},
+                     {"prepare_ms", ms(dispatched - locked)},
+                     {"dispatch_ms", ms(now - dispatched)}});
 }
 
 template<raft_types Types>
