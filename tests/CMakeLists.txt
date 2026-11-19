@@ -867,6 +867,18 @@ if(FIU_FOUND)
     target_include_directories(object_store_persistence_unit_test PRIVATE ${FIU_INCLUDE_DIRS})
 endif()
 
+# .kiro/specs/cloud-composite-node-ids/ task 5.4's open item: composite cloud
+# node ids in the file and object-store engines (votes, the combined hard-state
+# record and snapshot member lists), plus byte-for-byte checks that the numeric
+# and std::string formats did not change. Provider-independent, like the suite
+# above: mock_object_store and a temp directory, no cloud gate.
+add_raft_completion_test(persistence_composite_node_id_test persistence_composite_node_id_test.cpp)
+target_include_directories(persistence_composite_node_id_test PRIVATE ${CMAKE_SOURCE_DIR}/tests)
+set_tests_properties(persistence_composite_node_id_test PROPERTIES
+    TIMEOUT 120
+    LABELS "unit;persistence;object-store"
+)
+
 # .kiro/specs/batched-durable-writes/: append_log_entries and save_hard_state on
 # the memory, file and object-store engines. Provider-independent, like the suite
 # above, so registered unconditionally.

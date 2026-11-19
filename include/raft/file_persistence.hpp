@@ -7,6 +7,7 @@
 #include <raft/fault_injection.hpp>
 #include <raft/json_serializer.hpp>
 #include <raft/persistence.hpp>
+#include <raft/persistence_node_id.hpp>
 #include <raft/types.hpp>
 
 #include <boost/json.hpp>
@@ -34,7 +35,7 @@ namespace kythira {
 //
 // Storage layout under DATA_DIR/:
 //   term        — decimal current term (plain text)
-//   voted_for   — decimal node ID or "none"
+//   voted_for   — decimal node ID, a textual id's text, or "none"
 //   log         — one JSON object per line, each with {term, index, command_b64}
 //   snapshot    — JSON snapshot (optional)
 //
@@ -109,11 +110,7 @@ public:
         fiu_do_on("raft/persistence/save_voted_for",
                   throw std::runtime_error("chaos: save_voted_for"););
         std::lock_guard lock(_mu);
-        if constexpr (std::is_same_v<NodeId, std::string>) {
-            atomic_write(_dir / "voted_for", node);
-        } else {
-            atomic_write(_dir / "voted_for", std::to_string(node));
-        }
+        atomic_write(_dir / "voted_for", vote_text(node));
         _voted_for = node;
     }
 
@@ -144,10 +141,8 @@ public:
         if (vote != _voted_for) {
             if (!vote) {
                 atomic_write(_dir / "voted_for", "none");
-            } else if constexpr (std::is_same_v<NodeId, std::string>) {
-                atomic_write(_dir / "voted_for", *vote);
             } else {
-                atomic_write(_dir / "voted_for", std::to_string(*vote));
+                atomic_write(_dir / "voted_for", vote_text(*vote));
             }
             _voted_for = std::move(vote);
         }
@@ -524,10 +519,10 @@ private:
         // voted_for
         if (auto s = read_file(_dir / "voted_for"); s && *s != "none" && !s->empty()) {
             try {
-                if constexpr (std::is_same_v<NodeId, std::string>) {
-                    _voted_for = *s;
-                } else {
+                if constexpr (std::unsigned_integral<NodeId>) {
                     _voted_for = static_cast<NodeId>(std::stoull(*s));
+                } else {
+                    _voted_for = persistence_node_id::from_text<NodeId>(*s);
                 }
             } catch (...) {
             }
@@ -688,6 +683,29 @@ private:
         return e;
     }
 
+    /// The `voted_for` file's body for @p node: decimal for an unsigned id,
+    /// the id's text otherwise (`persistence_node_id`).
+    static auto vote_text(const NodeId& node) -> std::string {
+        if constexpr (std::unsigned_integral<NodeId>) {
+            return std::to_string(node);
+        } else {
+            return persistence_node_id::to_text(node);
+        }
+    }
+
+    /// One snapshot member list entry. Throws on a value of the wrong JSON
+    /// type or text the id type refuses, as the integer and string readers
+    /// always threw on a value of the wrong type.
+    static auto snapshot_member(const boost::json::value& v) -> NodeId {
+        auto id = persistence_node_id::from_json<NodeId>(v);
+        if (!id) {
+            throw persistence_exception("file_persistence_engine: snapshot member " +
+                                        boost::json::serialize(v) +
+                                        " is not a node id of this engine's type");
+        }
+        return std::move(*id);
+    }
+
     static auto snapshot_to_json(const snapshot_t& snap) -> std::string {
         boost::json::object obj;
         obj["last_included_index"] = snap.last_included_index();
@@ -696,22 +714,14 @@ private:
         // primary (new) configuration nodes
         boost::json::array nodes;
         for (const auto& n : snap.configuration().nodes()) {
-            if constexpr (std::is_same_v<NodeId, std::string>) {
-                nodes.push_back(boost::json::string(n));
-            } else {
-                nodes.push_back(static_cast<std::uint64_t>(n));
-            }
+            nodes.push_back(persistence_node_id::to_json(n));
         }
         obj["nodes"] = nodes;
         obj["is_joint_consensus"] = snap.configuration().is_joint_consensus();
         if (snap.configuration().is_joint_consensus() && snap.configuration().old_nodes()) {
             boost::json::array old_nodes;
             for (const auto& n : *snap.configuration().old_nodes()) {
-                if constexpr (std::is_same_v<NodeId, std::string>) {
-                    old_nodes.push_back(boost::json::string(n));
-                } else {
-                    old_nodes.push_back(static_cast<std::uint64_t>(n));
-                }
+                old_nodes.push_back(persistence_node_id::to_json(n));
             }
             obj["old_nodes"] = old_nodes;
         }
@@ -725,22 +735,14 @@ private:
         snap._last_included_term = static_cast<TermId>(obj["last_included_term"].as_int64());
         snap._state_machine_state = base64_to_bytes(std::string(obj["state"].as_string()));
         for (const auto& n : obj["nodes"].as_array()) {
-            if constexpr (std::is_same_v<NodeId, std::string>) {
-                snap._configuration._nodes.emplace_back(n.as_string());
-            } else {
-                snap._configuration._nodes.push_back(n.to_number<NodeId>());
-            }
+            snap._configuration._nodes.push_back(snapshot_member(n));
         }
         snap._configuration._is_joint_consensus =
             obj.contains("is_joint_consensus") ? obj["is_joint_consensus"].as_bool() : false;
         if (snap._configuration._is_joint_consensus && obj.contains("old_nodes")) {
             std::vector<NodeId> old_nodes;
             for (const auto& n : obj["old_nodes"].as_array()) {
-                if constexpr (std::is_same_v<NodeId, std::string>) {
-                    old_nodes.emplace_back(n.as_string());
-                } else {
-                    old_nodes.push_back(n.to_number<NodeId>());
-                }
+                old_nodes.push_back(snapshot_member(n));
             }
             snap._configuration._old_nodes = std::move(old_nodes);
         }
