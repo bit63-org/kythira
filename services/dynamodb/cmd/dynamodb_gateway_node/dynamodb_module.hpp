@@ -13,7 +13,9 @@
 // memory engine), as the daemon always was. With them it is a cluster_node
 // (run_cluster.hpp): the cluster's host on the node's transport, its
 // bootstrap groups and each voter's split range placed in the module's
-// space, and the strong host (task 27) on its own listener.
+// space, and the strong host (task 27) on its own listener. Without the
+// data role (KYTHIRA_DYNAMODB_ROLES=gateway,front_end) it is a front_end_node:
+// no Raft, its ops sent to the data nodes' gateways.
 //
 // Kinesis streaming destinations (Requirement 7.4) publish through a
 // co-located Kinesis module's `kinesis.put_records` when there is one and
@@ -107,6 +109,24 @@ public:
 
 private:
     cluster_node<Storage, Host> _node;
+};
+
+/// A front end without the data role (task 4 of
+/// .kiro/specs/dynamodb-independent-layers/): no Raft, ops sent to the data
+/// nodes.
+class front_end_serving final : public serving {
+public:
+    front_end_serving(ddb::gateway_config cfg, std::function<void(bool, std::string_view)> log)
+        : _node(std::move(cfg), std::move(log)) {}
+    void start(ddb::kinesis_sink kinesis, std::optional<ddb::iam_hooks> iam) override {
+        _node.start(std::move(kinesis), std::move(iam));
+    }
+    void drain() override { _node.drain(); }
+    void stop() override { _node.stop(); }
+    [[nodiscard]] auto port() const -> std::uint16_t override { return _node.port(); }
+
+private:
+    front_end_node _node;
 };
 
 /// One node, no Raft: local_backend on the memory engine, nothing kept
@@ -285,6 +305,10 @@ public:
             std::cerr << (warning ? "[warn] " : "[info] ") << "dynamodb_gateway_node: " << m
                       << "\n";
         };
+        if (!_cfg.roles.has(kythira::layers::role::data)) {
+            _serving = std::make_unique<front_end_serving>(_cfg, log);
+            return;
+        }
         if (!_cfg.cluster.enabled()) {
             _serving = std::make_unique<local_serving>(_cfg, log);
             return;

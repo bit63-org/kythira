@@ -77,6 +77,8 @@ public:
     using descriptor_type = kythira::shard_descriptor<GroupId, std::string, NodeId>;
     using cache_type = kythira::route_cache<GroupId, std::string, NodeId>;
     using clock_fn = std::function<std::uint64_t()>;
+    /// It holds no replica: the gateway runs no leader-side workers on it.
+    static constexpr bool k_no_replica = true;
     /// Sends an op to the data node at `address` ("host:port") and returns
     /// its answer, or nothing when it cannot be reached. Blocking; must not
     /// throw.
