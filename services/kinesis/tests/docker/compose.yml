@@ -25,7 +25,8 @@
 #
 # The clients are in the `clients` profile, so `up` never starts them; the
 # scenario runs each with `compose --profile clients run --rm`. The KCL
-# workers are in the `kcl` profile, the S3 mock in `s3` and the DynamoDB
+# workers are in the `kcl` profile, the S3 mock in `s3`, the Iceberg REST
+# catalog in `tables` and the DynamoDB
 # lease stores with their workers in `leases`, for the same reason. Each node
 # keeps its Raft state and segments in its own named volume, so
 # `stop`/`start` resumes it and `down -v` is a clean slate.
@@ -71,6 +72,10 @@ x-env: &env
   # nodes.
   KINESIS_CHANNEL_S3_ENDPOINT: "${KINESIS_SCENARIO_CHANNEL_ENDPOINT:-}"
   KINESIS_CHANNEL_MAX_DELAY_MS: "${KINESIS_SCENARIO_CHANNEL_MAX_DELAY_MS:-0}"
+  # S3 Tables delivery (task 19's tables case) through the local Iceberg
+  # REST catalog below, unsigned, only when the scenario sets these.
+  KINESIS_CHANNEL_ICEBERG_URI: "${KINESIS_SCENARIO_ICEBERG_URI:-}"
+  KINESIS_CHANNEL_ICEBERG_SIGV4: "${KINESIS_SCENARIO_ICEBERG_SIGV4:-true}"
   AWS_ACCESS_KEY_ID: scenario-s3-key
   AWS_SECRET_ACCESS_KEY: scenario-s3-secret
   AWS_EC2_METADATA_DISABLED: "true"
@@ -113,6 +118,26 @@ services:
     entrypoint: ["/usr/local/bin/chaos_s3_mock"]
     networks:
       - kinesis_net
+
+  # Task 19's tables case: the Apache Iceberg REST catalog fixture (the
+  # reference implementation's catalog, an in-memory SQLite catalog behind
+  # the REST spec), in the `tables` profile, keeping table metadata in the
+  # S3 mock by service name. The nodes commit to it unsigned; S3 Tables
+  # itself is SigV4, which kinesis_iceberg_test covers. Like the mock it
+  # keeps state in memory, so the scenario never restarts it.
+  iceberg-rest:
+    image: docker.io/apache/iceberg-rest-fixture:1.10.0@sha256:df2e9dd421928b7aab01557678ce8e2bb73064d0e253baebd72adad3439ffc2e
+    profiles: ["tables"]
+    networks:
+      - kinesis_net
+    environment:
+      CATALOG_WAREHOUSE: s3://warehouse/
+      CATALOG_IO__IMPL: org.apache.iceberg.aws.s3.S3FileIO
+      CATALOG_S3_ENDPOINT: http://s3mock:9000
+      CATALOG_S3_PATH__STYLE__ACCESS: "true"
+      AWS_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: scenario-s3-key
+      AWS_SECRET_ACCESS_KEY: scenario-s3-secret
 
   # The AWS CLI v2, at the version the wire evidence pins
   # (services/kinesis/tests/evidence/README.md).

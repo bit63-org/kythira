@@ -79,6 +79,12 @@
 // to deliver channels to the same mock, five seconds after a batch's first
 // record, and writes through a channel while every node is killed in turn:
 // every record reaches the bucket, in order under each key within a shard.
+//
+// The tables case (task 19, Requirement 18.3) starts the Apache Iceberg REST
+// catalog fixture (the `tables` profile) over the same mock, recreates the
+// nodes to commit to it, and writes JSON records through an S3 Tables channel
+// while every node is killed in turn: pyiceberg reads every record back as a
+// row, and no batch was committed twice or overlaps another in its shard.
 
 #define BOOST_TEST_MODULE kinesis_node_scenario_test
 #include <boost/test/results_collector.hpp>
@@ -259,10 +265,11 @@ struct stack_fixture {
         }
     }
     ~stack_fixture() {
-        os::try_exec(os::real_exec,
-                     compose_cmd({"--profile", "clients", "--profile", "kcl", "--profile",
-                                  "kcl-efo", "--profile", "s3", "--profile", "leases", "--profile",
-                                  "aws-leases", "down", "-v", "--remove-orphans"}));
+        os::try_exec(
+            os::real_exec,
+            compose_cmd({"--profile", "clients", "--profile", "kcl", "--profile", "kcl-efo",
+                         "--profile", "s3", "--profile", "tables", "--profile", "leases",
+                         "--profile", "aws-leases", "down", "-v", "--remove-orphans"}));
     }
     stack_fixture(const stack_fixture&) = delete;
     stack_fixture& operator=(const stack_fixture&) = delete;
@@ -1195,4 +1202,70 @@ BOOST_AUTO_TEST_CASE(channel_delivers_every_record_through_node_kills) {
                     "--timeout", "240"});
     BOOST_TEST(c.code == 0, "channel-check failed:\n" << c.out);
     BOOST_TEST(c.out.find("\"delivered\": " + count) != std::string::npos, c.out);
+}
+
+// Task 19: S3 Tables delivery through node kills, into a real Iceberg REST
+// catalog. Runs after the channel case and reuses its S3 mock, which also
+// holds the table's metadata, data files and dead letters.
+BOOST_AUTO_TEST_CASE(tables_channel_commits_every_record_once_through_node_kills) {
+    const logs_on_failure logs;
+    os::checked_exec(os::real_exec, compose_cmd({"--profile", "s3", "--profile", "tables", "up",
+                                                 "-d", "s3mock", "iceberg-rest"}));
+    const std::string catalog = "http://iceberg-rest:8181";
+    const std::string s3 = "http://s3mock:9000";
+    {
+        // The table exists before the channel, as S3 Tables requires.
+        auto r = boto3({"tables-create", "--catalog", catalog, "--s3", s3, "--namespace", "chan",
+                        "--table", "events", "--timeout", "180"});
+        BOOST_REQUIRE_MESSAGE(r.code == 0, "boto3 tables-create failed:\n" << r.out);
+    }
+    ::setenv("KINESIS_SCENARIO_CHANNEL_ENDPOINT", s3.c_str(), 1);
+    ::setenv("KINESIS_SCENARIO_CHANNEL_MAX_DELAY_MS", "5000", 1);
+    ::setenv("KINESIS_SCENARIO_ICEBERG_URI", catalog.c_str(), 1);
+    ::setenv("KINESIS_SCENARIO_ICEBERG_SIGV4", "false", 1);
+    os::checked_exec(os::real_exec, compose_cmd({"up", "-d", "--force-recreate", "--no-deps",
+                                                 "kin-1", "kin-2", "kin-3"}));
+    for (int n : {1, 2, 3}) {
+        BOOST_REQUIRE_MESSAGE(
+            eventually([&] { return aws_cli(n, {"list-streams"}).code == 0; }, 180s),
+            service(n) << " never answered ListStreams with the Iceberg catalog set");
+    }
+    {
+        auto r = boto3({"create", "--endpoint", endpoint(1), "--stream", "tbl", "--on-demand"},
+                       k_admin_id, k_admin_secret);
+        BOOST_REQUIRE_MESSAGE(r.code == 0, "boto3 create failed:\n" << r.out);
+        r = boto3({"channel-create", "--endpoint", endpoint(1), "--stream", "tbl", "--channel",
+                   "to-tables", "--table-bucket",
+                   "arn:aws:s3tables:us-east-1:111122223333:bucket/warehouse", "--namespace",
+                   "chan", "--table", "events", "--bucket", "tables-dead"},
+                  k_admin_id, k_admin_secret);
+        BOOST_REQUIRE_MESSAGE(r.code == 0, "boto3 channel-create (tables) failed:\n" << r.out);
+    }
+
+    const std::string all = endpoint(1) + "," + endpoint(2) + "," + endpoint(3);
+    constexpr int k_records = 2000;
+    const auto count = std::to_string(k_records);
+    os::CmdResult produced;
+    std::thread producer([&] {
+        produced = boto3({"batch-produce", "--endpoints", all, "--stream", "tbl", "--count", count,
+                          "--keys", "8", "--tag", "tb", "--json", "--timeout", "600"});
+    });
+    for (int n : {1, 2, 3}) {
+        // Long enough for a batch to come due and be committed.
+        std::this_thread::sleep_for(8s);
+        os::checked_exec(os::real_exec, compose_cmd({"kill", service(n)}));
+        std::this_thread::sleep_for(std::chrono::milliseconds(k_failover_ms));
+        os::checked_exec(os::real_exec, compose_cmd({"start", service(n)}));
+        BOOST_REQUIRE_MESSAGE(
+            eventually([&] { return aws_cli(n, {"list-streams"}).code == 0; }, 120s),
+            service(n) << " never answered after restarting");
+    }
+    producer.join();
+    BOOST_REQUIRE_MESSAGE(produced.code == 0, "batch-produce failed:\n" << produced.out);
+
+    auto c = boto3({"tables-check", "--catalog", catalog, "--s3", s3, "--namespace", "chan",
+                    "--table", "events", "--count", count, "--tag", "tb", "--timeout", "240"});
+    BOOST_TEST(c.code == 0, "tables-check failed:\n" << c.out);
+    BOOST_TEST(c.out.find("\"delivered\": " + count) != std::string::npos, c.out);
+    BOOST_TEST_MESSAGE("tables case: " << c.out);
 }

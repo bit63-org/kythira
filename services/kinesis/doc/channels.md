@@ -206,7 +206,12 @@ table. While the catalog answers 404 (or refuses the role), the batch
 stays undelivered, the pass's log line says why (`last_failure=`), and the
 channel stays ACTIVE.
 
-The unit tests export a table that `services/kinesis/tests/iceberg/read_exported_table.py` reads
+The container scenario (`services/kinesis/tests/docker/`) runs the
+Apache Iceberg REST catalog fixture over its S3 mock, writes JSON records
+through an S3 Tables channel while every node is killed in turn, and reads
+the table back with pyiceberg: every record is a row, and no batch was
+committed twice or overlaps another in its shard. The unit tests export a
+table that `services/kinesis/tests/iceberg/read_exported_table.py` reads
 back with pyiceberg, including partition pruning.
 
 ## Execution role
@@ -258,6 +263,6 @@ writes as it.
 The error type AWS returns for a provisioned
 source or a cross-account stream, and the exact ARN form have not been
 recorded against AWS; the differential test does not cover channels yet.
-S3 Tables delivery has been checked against pyiceberg and a local Iceberg
-REST catalog, not against S3 Tables itself: the SigV4 signing name and
+S3 Tables delivery has been checked against pyiceberg and the Apache
+Iceberg REST catalog fixture, not against S3 Tables itself: the SigV4 signing name and
 the warehouse prefix follow AWS's documentation.

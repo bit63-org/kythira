@@ -17,7 +17,11 @@ kinesis_node_scenario_test, against the gateways by compose service name:
     kinesis_e2e.py fan-out-consume --endpoints URL,URL --stream S --count N --keys K --tag T
     kinesis_e2e.py s3-control --url URL [--put-delay MS] [--fail-puts N --prefix P]
     kinesis_e2e.py channel-create --endpoint URL --stream S --channel C --bucket B
+    kinesis_e2e.py channel-create --endpoint URL --stream S --channel C \
+        --table-bucket ARN --namespace NS --table T --bucket DLQ
     kinesis_e2e.py channel-check --s3 URL --bucket B --channel C --count N --keys K --tag T
+    kinesis_e2e.py tables-create --catalog URL --s3 URL --namespace NS --table T
+    kinesis_e2e.py tables-check --catalog URL --s3 URL --namespace NS --table T --count N --tag T
 
 `produce` writes records `T-0` .. `T-<N-1>` with PutRecords in batches of
 100, retrying records that fail, and prints how many went to each shard.
@@ -64,6 +68,19 @@ scenario's mock), until every record `T-0` .. `T-<N-1>` written by
 `batch-produce` has been delivered or the deadline passes, and fails
 unless, within each shard, a key's records were delivered in the order
 they were written.
+
+The S3 Tables case (task 19) runs `batch-produce --json`, whose records are
+JSON objects `{"id": i, "key": i mod K, "tag": T, "event_time": <ms>}`.
+`tables-create` makes namespace NS and table T (format version 2,
+partitioned by hour(event_time) and identity(key)) in the scenario's
+Iceberg REST catalog, through pyiceberg. `channel-create` with
+`--table-bucket` makes a GSR_JSON channel to that table instead of an S3
+bucket, with `--bucket` as its dead-letter bucket. `tables-check` reads
+the table back through the catalog and the S3 mock until every record
+`T-0` .. `T-<N-1>` is a row or the deadline passes, and fails unless each
+snapshot the channel committed covers its own sequence range: no two
+snapshots name the same batch or overlap within a shard, so a batch
+retried across a node kill was committed once.
 """
 
 import argparse
@@ -290,9 +307,15 @@ def batch_produce(args):
     turn = 0
     retries = 0
     deadline = time.time() + args.timeout
+    def data(i):
+        if not args.json:
+            return f"{args.tag}-{i}".encode()
+        row = {"id": i, "key": i % args.keys, "tag": args.tag, "event_time": int(time.time() * 1000)}
+        return json.dumps(row).encode()
+
     for start in range(0, args.count, args.keys):
         pending = [
-            {"Data": f"{args.tag}-{i}".encode(), "PartitionKey": f"pk-{args.tag}-{i % args.keys}"}
+            {"Data": data(i), "PartitionKey": f"pk-{args.tag}-{i % args.keys}"}
             for i in range(start, min(start + args.keys, args.count))
         ]
         while pending:
@@ -419,12 +442,46 @@ def s3_control(args):
 
 
 def channel_create(args):
-    """A GZIP S3 channel from on-demand stream S to bucket B."""
+    """A GZIP S3 channel from on-demand stream S to bucket B, or with
+    --table-bucket a GSR_JSON channel to an Iceberg table with B for dead
+    letters."""
     c = client(args.endpoint)
     arn = c.describe_stream_summary(StreamName=args.stream)["StreamDescriptionSummary"][
         "StreamARN"
     ]
     account = arn.split(":")[4]
+    if args.table_bucket:
+        out = c.create_channel(
+            ChannelName=args.channel,
+            ServiceExecutionRoleARN=f"arn:aws:iam::{account}:role/channel-delivery",
+            # An S3 Tables source names its Glue schema; Kythira checks it is
+            # there but validates records against the table's schema.
+            StreamConfigurationList=[
+                {
+                    "StreamARN": arn,
+                    "RecordConfiguration": {
+                        "RecordFormatType": "GSR_JSON",
+                        "GSRSchemaARN": f"arn:aws:glue:us-east-1:{account}:schema/scenario/events",
+                    },
+                }
+            ],
+            S3TablesDestinationConfiguration={
+                "DeadLetterQueueS3Configuration": {
+                    "BucketARN": f"arn:aws:s3:::{args.bucket}",
+                    "ExpectedBucketOwner": account,
+                },
+                "S3TablesConfigurationList": [
+                    {
+                        "TableBucketARN": args.table_bucket,
+                        "Namespace": args.namespace,
+                        "TableName": args.table,
+                        "CompressionType": "SNAPPY",
+                    }
+                ],
+            },
+        )
+        print(json.dumps({"channel": args.channel, "arn": out["ChannelDescription"]["ChannelARN"]}))
+        return
     out = c.create_channel(
         ChannelName=args.channel,
         ServiceExecutionRoleARN=f"arn:aws:iam::{account}:role/channel-delivery",
@@ -505,6 +562,128 @@ def channel_check(args):
     print(json.dumps({"delivered": len(seen), "lines": total, "objects": objects}))
 
 
+def iceberg_catalog(args):
+    """The scenario's Iceberg REST catalog, its data read through the S3
+    mock (path style; the mock checks no signature)."""
+    from pyiceberg.catalog import load_catalog
+
+    return load_catalog(
+        "scenario",
+        **{
+            "type": "rest",
+            "uri": args.catalog,
+            "s3.endpoint": args.s3,
+            "s3.access-key-id": "scenario-s3-key",
+            "s3.secret-access-key": "scenario-s3-secret",
+            "s3.region": "us-east-1",
+            "s3.force-virtual-addressing": "false",
+        },
+    )
+
+
+def tables_create(args):
+    from pyiceberg.exceptions import NamespaceAlreadyExistsError, TableAlreadyExistsError
+    from pyiceberg.partitioning import PartitionField, PartitionSpec
+    from pyiceberg.schema import Schema
+    from pyiceberg.transforms import HourTransform, IdentityTransform
+    from pyiceberg.types import IntegerType, LongType, NestedField, StringType, TimestamptzType
+
+    deadline = time.time() + args.timeout
+    while True:
+        try:
+            cat = iceberg_catalog(args)
+            try:
+                cat.create_namespace(args.namespace)
+            except NamespaceAlreadyExistsError:
+                pass
+            break
+        except Exception as e:  # noqa: BLE001 - the catalog may still be starting
+            if time.time() > deadline:
+                fail(f"the Iceberg REST catalog never answered: {e}")
+            time.sleep(2)
+    schema = Schema(
+        NestedField(1, "id", LongType(), required=True),
+        NestedField(2, "key", IntegerType(), required=False),
+        NestedField(3, "tag", StringType(), required=False),
+        NestedField(4, "event_time", TimestamptzType(), required=True),
+    )
+    spec = PartitionSpec(
+        PartitionField(source_id=4, field_id=1000, transform=HourTransform(), name="event_time_hour"),
+        PartitionField(source_id=2, field_id=1001, transform=IdentityTransform(), name="key"),
+    )
+    try:
+        t = cat.create_table(
+            f"{args.namespace}.{args.table}",
+            schema=schema,
+            partition_spec=spec,
+            properties={"format-version": "2"},
+        )
+    except TableAlreadyExistsError:
+        t = cat.load_table(f"{args.namespace}.{args.table}")
+    print(json.dumps({"table": f"{args.namespace}.{args.table}", "location": t.location()}))
+
+
+BATCH_ID = re.compile(r"^(?P<channel>[^/]+)/(?P<shard>[^/]+)/(?P<first>\d+)-(?P<last>\d+)$")
+
+
+def tables_pass(args):
+    t = iceberg_catalog(args).load_table(f"{args.namespace}.{args.table}")
+    batches = []
+    for snap in t.snapshots():
+        props = snap.summary.additional_properties if snap.summary else {}
+        b = props.get("kythira.channel-batch")
+        if b:
+            m = BATCH_ID.match(b)
+            if not m:
+                fail(f"snapshot {snap.snapshot_id} names a malformed batch {b!r}")
+            batches.append((m["shard"], int(m["first"]), int(m["last"]), b))
+    rows = t.scan(row_filter=f"tag = '{args.tag}'", selected_fields=("id",)).to_arrow()
+    return batches, rows.column("id").to_pylist()
+
+
+def tables_check(args):
+    deadline = time.time() + args.timeout
+    while True:
+        try:
+            batches, ids = tables_pass(args)
+        except Exception as e:  # noqa: BLE001 - not there yet: try again
+            if time.time() > deadline:
+                fail(f"cannot read {args.namespace}.{args.table}: {e}")
+            time.sleep(3)
+            continue
+        missing = sorted(set(range(args.count)) - set(ids))
+        if not missing:
+            break
+        if time.time() > deadline:
+            fail(
+                f"{len(missing)} of {args.count} records never committed "
+                f"({len(batches)} snapshots), first {missing[0]}"
+            )
+        time.sleep(3)
+    # Each batch was committed once, even when its node was killed between
+    # the commit and the checkpoint: no repeated batch, no overlap in a shard.
+    names = [b[3] for b in batches]
+    if len(names) != len(set(names)):
+        fail(f"a batch was committed twice: {sorted(n for n in names if names.count(n) > 1)[0]}")
+    by_shard = {}
+    for shard, first, last, _ in batches:
+        by_shard.setdefault(shard, []).append((first, last))
+    for shard, ranges in by_shard.items():
+        ranges.sort()
+        for (a0, a1), (b0, b1) in zip(ranges, ranges[1:]):
+            if b0 <= a1:
+                fail(f"{shard}: batches {a0}-{a1} and {b0}-{b1} overlap")
+    # Only the producer's own retries (a PutRecords answer lost to a kill)
+    # may repeat a record.
+    duplicates = len(ids) - len(set(ids))
+    print(
+        json.dumps(
+            {"delivered": len(set(ids)), "rows": len(ids), "snapshots": len(batches),
+             "duplicates": duplicates}
+        )
+    )
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = p.add_subparsers(dest="command", required=True)
@@ -534,6 +713,8 @@ def main():
         o.add_argument("--tag", required=True)
         o.add_argument("--limit", type=int, default=100)
         o.add_argument("--timeout", type=int, default=600)
+        if name == "batch-produce":
+            o.add_argument("--json", action="store_true")
     s3 = sub.add_parser("s3-control")
     s3.add_argument("--url", required=True)
     s3.add_argument("--put-delay", type=int)
@@ -544,6 +725,9 @@ def main():
     cc.add_argument("--stream", required=True)
     cc.add_argument("--channel", required=True)
     cc.add_argument("--bucket", required=True)
+    cc.add_argument("--table-bucket")
+    cc.add_argument("--namespace")
+    cc.add_argument("--table")
     ck = sub.add_parser("channel-check")
     ck.add_argument("--s3", required=True)
     ck.add_argument("--bucket", required=True)
@@ -552,6 +736,16 @@ def main():
     ck.add_argument("--keys", type=int, required=True)
     ck.add_argument("--tag", required=True)
     ck.add_argument("--timeout", type=int, default=300)
+    for name in ("tables-create", "tables-check"):
+        t = sub.add_parser(name)
+        t.add_argument("--catalog", required=True)
+        t.add_argument("--s3", required=True)
+        t.add_argument("--namespace", required=True)
+        t.add_argument("--table", required=True)
+        t.add_argument("--timeout", type=int, default=120 if name == "tables-create" else 300)
+        if name == "tables-check":
+            t.add_argument("--count", type=int, required=True)
+            t.add_argument("--tag", required=True)
     args = p.parse_args()
     {
         "create": create,
@@ -564,6 +758,8 @@ def main():
         "s3-control": s3_control,
         "channel-create": channel_create,
         "channel-check": channel_check,
+        "tables-create": tables_create,
+        "tables-check": tables_check,
     }[args.command](args)
 
 
