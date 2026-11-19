@@ -196,6 +196,77 @@ class RetryTest(unittest.TestCase):
             "Code": "LimitExceededException", "Message": "UPDATING"}))
 
 
+MODEL = {
+    "operations": {
+        "DescribeThing": {"output": {"shape": "Out"}, "errors": [{"shape": "NotFound"}]},
+        "DeleteThing": {"errors": [{"shape": "NotFound"}]},
+    },
+    "shapes": {
+        "Out": {"type": "structure", "required": ["Thing"], "members": {
+            "Thing": {"shape": "Thing"}}},
+        "Thing": {"type": "structure", "required": ["Name", "Status", "Created"], "members": {
+            "Name": {"shape": "Name"}, "Status": {"shape": "Status"},
+            "Created": {"shape": "Time"}, "Size": {"shape": "Size"},
+            "Tags": {"shape": "Tags"}, "Labels": {"shape": "Labels"},
+            "Data": {"shape": "Data"}, "On": {"shape": "Flag"}}},
+        "Name": {"type": "string", "min": 1, "max": 8},
+        "Status": {"type": "string", "enum": ["ACTIVE", "FAILED"]},
+        "Time": {"type": "timestamp"},
+        "Size": {"type": "integer", "min": 0},
+        "Tags": {"type": "map", "key": {"shape": "Name"}, "value": {"shape": "Name"}},
+        "Labels": {"type": "list", "member": {"shape": "Name"}},
+        "Data": {"type": "blob"},
+        "Flag": {"type": "boolean"},
+        "NotFound": {"type": "structure", "members": {}},
+    },
+}
+
+
+class ModelCheckTest(unittest.TestCase):
+    def good(self):
+        return {"Thing": {"Name": "a", "Status": "ACTIVE", "Created": 1.5, "Size": 3,
+                          "Tags": {"k": "v"}, "Labels": ["x"], "Data": "AAE=", "On": True}}
+
+    def test_an_answer_that_fits_has_no_problems(self):
+        self.assertEqual(kd.answer_problems(MODEL, "DescribeThing", 200,
+                                            kd.json.dumps(self.good())), [])
+
+    def test_missing_required_unknown_members_and_bad_values_are_reported(self):
+        body = self.good()
+        del body["Thing"]["Created"]
+        body["Thing"]["Status"] = "GONE"
+        body["Thing"]["Extra"] = 1
+        body["Thing"]["Size"] = True
+        body["Thing"]["Labels"] = ["toolongname"]
+        body["Thing"]["Data"] = "not base64!"
+        got = kd.answer_problems(MODEL, "DescribeThing", 200, kd.json.dumps(body))
+        joined = "\n".join(got)
+        for needle in ("$.Thing.Created: required, missing", "$.Thing.Extra: not a member",
+                       "'GONE' is not one of", "$.Thing.Size: expected an integer",
+                       "$.Thing.Labels[0]: length 11", "$.Thing.Data: not base64"):
+            self.assertIn(needle, joined)
+        self.assertEqual(len(got), 6)
+
+    def test_timestamps_are_epoch_numbers_in_aws_json(self):
+        body = self.good()
+        body["Thing"]["Created"] = "2026-11-19T00:00:00Z"
+        got = kd.answer_problems(MODEL, "DescribeThing", 200, kd.json.dumps(body))
+        self.assertEqual(len(got), 1)
+        self.assertIn("expected epoch seconds", got[0])
+
+    def test_errors_must_be_declared_by_the_operation(self):
+        self.assertEqual(kd.answer_problems(
+            MODEL, "DescribeThing", 400, '{"__type":"com.amazonaws#NotFound","message":"x"}'), [])
+        got = kd.answer_problems(MODEL, "DescribeThing", 400, '{"__type":"Throttled"}')
+        self.assertEqual(len(got), 1)
+        self.assertIn("'Throttled'", got[0])
+
+    def test_an_operation_without_output_answers_an_empty_body(self):
+        self.assertEqual(kd.answer_problems(MODEL, "DeleteThing", 200, ""), [])
+        self.assertEqual(kd.answer_problems(MODEL, "DeleteThing", 200, "{}"), [])
+        self.assertEqual(len(kd.answer_problems(MODEL, "DeleteThing", 200, '{"a":1}')), 1)
+
+
 class RecordingsTest(unittest.TestCase):
     def test_a_directory_yields_its_seed_recordings_in_order(self):
         with tempfile.TemporaryDirectory() as d:
