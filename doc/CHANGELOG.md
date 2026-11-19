@@ -3,6 +3,17 @@
 Chronological log of notable changes to Kythira, newest first. For the
 current list of outstanding work, see [TODO.md](TODO.md).
 
+### What Changed (November 18, 2026)
+
+- **DynamoDB takes `OnDemandThroughput`.** `CreateTable`, `UpdateTable`
+  (on the table and in GSI `Create` and `Update`) and restores
+  (`OnDemandThroughputOverride`) accept a maximum read and write rate for
+  an on-demand table or GSI, which `DescribeTable` shows and the
+  throttler enforces with AWS's `ThrottlingException` reasons. Before,
+  these requests were refused, which broke Terraform configurations with
+  an `on_demand_throughput` block. The catalog's format moves to 14 for
+  tables that have a maximum.
+
 ### What Changed (November 17, 2026)
 
 - **cpp-httplib name lookups no longer crash under concurrency.** Two glibc

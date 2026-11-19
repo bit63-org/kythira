@@ -343,3 +343,141 @@ BOOST_FIXTURE_TEST_CASE(a_write_is_charged_the_larger_of_the_item_before_and_aft
     BOOST_TEST(units(ok("DeleteItem", R"({"TableName":"odt","Key":{"pk":{"S":"a"}},)"
                                       R"("ReturnConsumedCapacity":"TOTAL"})")) == 1.0);
 }
+
+BOOST_AUTO_TEST_CASE(an_on_demand_maximum_below_the_quota_throttles_at_that_rate) {
+    ddb::capacity_throttler th;
+    auto t = on_demand();
+    ddb::global_index g;
+    g.name = "byOwner";
+    t.gsis.push_back(g);
+    t.on_demand = {{"", 10, -1}, {"byOwner", -1, 5}};
+    th.charge(t, k_table_read, 10.0, k_t0);
+    auto refused = th.admit(t, k_table_read, k_t0);
+    BOOST_TEST_REQUIRE(refused.has_value());
+    BOOST_TEST(refused->exception == "ThrottlingException");
+    BOOST_TEST(refused->reason == "TableReadMaxOnDemandThroughputExceeded");
+    // One second refills the bucket at the maximum.
+    BOOST_TEST(!th.admit(t, k_table_read, k_t0 + 1000).has_value());
+    // Writes have no maximum (-1): the account quota applies.
+    th.charge(t, k_table_write, 1000.0, k_t0);
+    BOOST_TEST(!th.admit(t, k_table_write, k_t0).has_value());
+    // The GSI's own maximum.
+    const ddb::capacity_target index_write{"byOwner", ddb::capacity_kind::write, ""};
+    th.charge(t, index_write, 5.0, k_t0);
+    refused = th.admit(t, index_write, k_t0);
+    BOOST_TEST_REQUIRE(refused.has_value());
+    BOOST_TEST(refused->reason == "IndexWriteMaxOnDemandThroughputExceeded");
+    BOOST_TEST(refused->index == "byOwner");
+    // A maximum above the quota leaves the quota in force.
+    t.on_demand = {{"", 100000, -1}};
+    ddb::capacity_throttler wide;
+    wide.charge(t, k_table_read, ddb::k_on_demand_table_units, k_t0);
+    refused = wide.admit(t, k_table_read, k_t0);
+    BOOST_TEST_REQUIRE(refused.has_value());
+    BOOST_TEST(refused->reason == "TableReadAccountLimitExceeded");
+    // A provisioned table ignores a maximum it kept from being on demand.
+    auto p = provisioned(1, 1);
+    p.on_demand = {{"", 1, 1}};
+    ddb::capacity_throttler prov;
+    prov.charge(p, k_table_read, 2.0, k_t0);
+    BOOST_TEST(!prov.admit(p, k_table_read, k_t0).has_value());
+}
+
+BOOST_FIXTURE_TEST_CASE(on_demand_throughput_is_set_shown_and_enforced, capacity_fixture) {
+    const std::string defs =
+        R"("AttributeDefinitions":[{"AttributeName":"pk","AttributeType":"S"},)"
+        R"({"AttributeName":"o","AttributeType":"S"}],)"
+        R"("KeySchema":[{"AttributeName":"pk","KeyType":"HASH"}],)";
+    const std::string gsi =
+        R"("GlobalSecondaryIndexes":[{"IndexName":"byOwner","KeySchema":[{"AttributeName":"o","KeyType":"HASH"}],)"
+        R"("Projection":{"ProjectionType":"KEYS_ONLY"},"OnDemandThroughput":{"MaxWriteRequestUnits":7}}])";
+    // Only on an on-demand table, and only -1 or a positive number.
+    auto r = call("CreateTable",
+                  R"({"TableName":"pro",)" + defs +
+                      R"("ProvisionedThroughput":{"ReadCapacityUnits":1,"WriteCapacityUnits":1},)"
+                      R"("OnDemandThroughput":{"MaxReadRequestUnits":5}})");
+    BOOST_TEST(r.status == 400U);
+    BOOST_TEST(r.type() == "ValidationException");
+    r = call(
+        "CreateTable",
+        R"({"TableName":"bad",)" + defs +
+            R"("BillingMode":"PAY_PER_REQUEST","OnDemandThroughput":{"MaxReadRequestUnits":0}})");
+    BOOST_TEST(r.type() == "ValidationException");
+
+    auto out = ok("CreateTable", R"({"TableName":"odt",)" + defs +
+                                     R"("BillingMode":"PAY_PER_REQUEST",)"
+                                     R"("OnDemandThroughput":{"MaxReadRequestUnits":20},)" +
+                                     gsi + "}");
+    const auto& td = out.at("TableDescription").as_object();
+    BOOST_TEST(json::serialize(td.at("OnDemandThroughput")) ==
+               R"({"MaxReadRequestUnits":20,"MaxWriteRequestUnits":-1})");
+    BOOST_TEST(json::serialize(td.at("GlobalSecondaryIndexes").at(0).at("OnDemandThroughput")) ==
+               R"({"MaxReadRequestUnits":-1,"MaxWriteRequestUnits":7})");
+
+    // Enforced: a consistent read of a 30 KB item is 8 units; 20 units a
+    // second admits three, the third into debt.
+    clock_ms = k_t0;
+    BOOST_TEST_REQUIRE(put("odt", "a", 30).status == 200U);
+    int admitted = 0;
+    reply last;
+    for (int i = 0; i < 10; ++i) {
+        last = get("odt", "a");
+        if (last.status != 200U) {
+            break;
+        }
+        ++admitted;
+    }
+    BOOST_TEST(admitted == 3);
+    require_throttle(last, "ThrottlingException", "TableReadMaxOnDemandThroughputExceeded",
+                     std::string(k_arn) + "odt");
+
+    // UpdateTable: a member left out keeps its value; -1 both ways drops
+    // the member from the description.
+    out = ok("UpdateTable",
+             R"({"TableName":"odt","OnDemandThroughput":{"MaxWriteRequestUnits":50}})");
+    BOOST_TEST(json::serialize(out.at("TableDescription").at("OnDemandThroughput")) ==
+               R"({"MaxReadRequestUnits":20,"MaxWriteRequestUnits":50})");
+    BOOST_TEST(out.at("TableDescription").at("TableStatus").as_string() == "ACTIVE");
+    out =
+        ok("UpdateTable",
+           R"({"TableName":"odt","GlobalSecondaryIndexUpdates":[{"Update":{"IndexName":"byOwner",)"
+           R"("OnDemandThroughput":{"MaxReadRequestUnits":3}}}]})");
+    BOOST_TEST(json::serialize(out.at("TableDescription")
+                                   .at("GlobalSecondaryIndexes")
+                                   .at(0)
+                                   .at("OnDemandThroughput")) ==
+               R"({"MaxReadRequestUnits":3,"MaxWriteRequestUnits":7})");
+    out = ok("UpdateTable", R"({"TableName":"odt","OnDemandThroughput":)"
+                            R"({"MaxReadRequestUnits":-1,"MaxWriteRequestUnits":-1}})");
+    BOOST_TEST(!out.at("TableDescription").as_object().contains("OnDemandThroughput"));
+
+    // A provisioned table shows none and refuses them; back on demand, the
+    // kept maximums return.
+    ok("UpdateTable",
+       R"({"TableName":"odt","BillingMode":"PROVISIONED",)"
+       R"("ProvisionedThroughput":{"ReadCapacityUnits":5,"WriteCapacityUnits":5},)"
+       R"("GlobalSecondaryIndexUpdates":[{"Update":{"IndexName":"byOwner",)"
+       R"("ProvisionedThroughput":{"ReadCapacityUnits":5,"WriteCapacityUnits":5}}}]})");
+    out = ok("DescribeTable", R"({"TableName":"odt"})");
+    BOOST_TEST(!out.at("Table")
+                    .at("GlobalSecondaryIndexes")
+                    .at(0)
+                    .as_object()
+                    .contains("OnDemandThroughput"));
+    r = call("UpdateTable",
+             R"({"TableName":"odt","OnDemandThroughput":{"MaxReadRequestUnits":5}})");
+    BOOST_TEST(r.type() == "ValidationException");
+}
+
+BOOST_FIXTURE_TEST_CASE(a_deleted_gsi_takes_its_on_demand_maximums_with_it, capacity_fixture) {
+    ok("CreateTable",
+       R"({"TableName":"odg","AttributeDefinitions":[{"AttributeName":"pk","AttributeType":"S"},)"
+       R"({"AttributeName":"o","AttributeType":"S"}],)"
+       R"("KeySchema":[{"AttributeName":"pk","KeyType":"HASH"}],"BillingMode":"PAY_PER_REQUEST",)"
+       R"("GlobalSecondaryIndexes":[{"IndexName":"byOwner","KeySchema":[{"AttributeName":"o","KeyType":"HASH"}],)"
+       R"("Projection":{"ProjectionType":"ALL"},"OnDemandThroughput":{"MaxReadRequestUnits":4}}]})");
+    BOOST_TEST_REQUIRE(backend.describe("odg")->on_demand.size() == 1U);
+    ok("UpdateTable", R"({"TableName":"odg","GlobalSecondaryIndexUpdates":)"
+                      R"([{"Delete":{"IndexName":"byOwner"}}]})");
+    BOOST_TEST(backend.describe("odg")->on_demand.empty());
+}

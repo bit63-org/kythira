@@ -484,6 +484,7 @@ inline constexpr std::size_t k_object_bytes = std::size_t{16} << 20U;
     d.storage_class = source.storage_class;
     d.warm_read = source.warm_read;
     d.warm_write = source.warm_write;
+    d.on_demand = source.on_demand;
     d.lsis = source.lsis;
     for (const auto& g : maintained_indexes(source.gsis)) {
         d.gsis.push_back(g);
@@ -548,6 +549,24 @@ inline auto apply_overrides(const boost::json::object& in, table_descriptor& d)
         std::erase_if(d.gsis, [&](const global_index& g) {
             return std::ranges::find(*keep, g.name) == keep->end();
         });
+    }
+    // An index the restore leaves out takes its maximums with it.
+    std::erase_if(d.on_demand, [&](const on_demand_limit& l) {
+        return !l.index.empty() && std::ranges::none_of(d.gsis, [&](const global_index& g) {
+            return g.name == l.index;
+        });
+    });
+    // `OnDemandThroughputOverride`: the table's maximums, over the source's.
+    if (const auto* o = in.if_contains("OnDemandThroughputOverride")) {
+        if (d.billing != billing_mode::pay_per_request) {
+            return table_api_detail::on_demand_needs_pay_per_request();
+        }
+        const auto* have = d.on_demand_for("");
+        auto l = table_api_detail::on_demand_from(*o, have != nullptr ? *have : on_demand_limit{});
+        if (!l) {
+            return l.error();
+        }
+        table_api_detail::set_on_demand(d.on_demand, std::move(*l));
     }
     if (const auto keep = names("LocalSecondaryIndexOverride")) {
         for (const auto& n : *keep) {

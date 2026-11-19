@@ -179,8 +179,13 @@ table, and nesting up to 32 levels. Every rule this module checks is listed
 with its AWS source page and its test in
 `services/dynamodb/doc/invariants.md`; the expectations were also run
 against DynamoDB Local 3.3.2. Throttling is on, at a provisioned table's
-capacity and at AWS's on-demand defaults; each gateway node enforces its
-share (one over the number of voters).
+capacity and at AWS's on-demand defaults, or at an on-demand table's or
+GSI's `OnDemandThroughput` maximum when one is set (`ThrottlingException`
+with `<Table|Index><Read|Write>MaxOnDemandThroughputExceeded`); each
+gateway node enforces its share (one over the number of voters). A
+maximum is kept while a table is provisioned, and applies again when it
+returns to on demand. Changing one on a multi-region strongly consistent
+table is not supported yet.
 
 ## Operations
 

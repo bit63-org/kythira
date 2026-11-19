@@ -211,6 +211,7 @@ all fixed with it:
 | A GSI reflects every write once propagated, wherever its entries live, and a lost leader's changes are carried by the next one | Indexes | `dynamodb_gsi_test`, `dynamodb_raft_backend_test` |
 | With `gsi-consistency=sync`, a GSI read after a write sees it (Kythira switch, Requirement 3) | — | `dynamodb_raft_backend_test` |
 | Reads and writes are charged in 4 KB and 1 KB units (a write the larger of the item before and after, a transaction twice), and over-capacity requests are throttled per table, index and partition with AWS's errors and reasons | Limits | `dynamodb_capacity_test` |
+| `OnDemandThroughput` is accepted only on an on-demand table or GSI, each maximum -1 or at least 1; a member left out keeps its value, a maximum below the per-table quota throttles at that rate with `ThrottlingException` and `MaxOnDemandThroughputExceeded`, and the description shows it only while the table is on demand | Limits | `dynamodb_capacity_test`, `dynamodb_catalog_test`, `dynamodb_backup_test` |
 | With `throttling=off`, per cluster or per table tag, nothing is throttled (Kythira switch, Requirement 3) | — | `dynamodb_capacity_test` |
 | Time to live can be changed at most once an hour (*Local differs*: no limit) | Limits | `dynamodb_ttl_test` |
 | An expired item stays readable until it is deleted, an item rewritten since the sweeper read it is kept, and values that are not numbers or are over five years old never expire | TTL | `dynamodb_ttl_test`, `dynamodb_gateway_cluster_test` |
