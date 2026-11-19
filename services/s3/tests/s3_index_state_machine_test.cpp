@@ -189,6 +189,7 @@ BOOST_AUTO_TEST_CASE(records_and_commands_round_trip) {
     c.min_part_bytes = 1234;
     c.max_parts = 17;
     c.bypass_governance = true;
+    c.new_bytes = true;
     BOOST_TEST((codec::decode_command(codec::encode(c)) == c));
 
     index_result r;
@@ -538,6 +539,59 @@ BOOST_AUTO_TEST_CASE(a_copy_takes_named_headers_from_the_request_even_when_copyi
     BOOST_TEST(meta.at("x-amz-tagging") == "b=2");
     BOOST_TEST(!meta.contains("x-kythira-acl"));         // never copied
     BOOST_TEST(meta.at("cache-control") == "no-cache");  // COPY keeps the rest
+}
+
+BOOST_AUTO_TEST_CASE(a_re_encrypted_copy_takes_its_own_chunks_and_keys) {
+    replica r;
+    r.create("b1");
+    auto src = content_of({1, 2}, "srcetag");
+    src.system_metadata = {{"x-amz-server-side-encryption", "AES256"},
+                           {"x-kythira-sse-wrapped", "old-key"},
+                           {"x-amz-checksum-crc32", "AAAAAA=="},
+                           {"cache-control", "no-cache"}};
+    r.put("b1", "src", src);
+    const auto id = r.ref("b1").id;
+
+    // REPLACE without new bytes keeps the bytes' keys and checksums.
+    index_command replace;
+    replace.op = kind::copy_object;
+    replace.target = r.ref("b1");
+    replace.source = r.ref("b1");
+    replace.key = "same-bytes";
+    replace.source_key = "src";
+    replace.replace_metadata = true;
+    replace.content.system_metadata = {{"content-language", "en"}};
+    BOOST_TEST_REQUIRE(r.apply(replace).ok());
+    const auto kept = r.sm.version(id, "same-bytes")->content.system_metadata;
+    BOOST_TEST(kept.at("x-kythira-sse-wrapped") == "old-key");
+    BOOST_TEST(kept.at("x-amz-server-side-encryption") == "AES256");
+    BOOST_TEST(kept.at("x-amz-checksum-crc32") == "AAAAAA==");
+    BOOST_TEST(!kept.contains("cache-control"));
+    BOOST_TEST(r.count(1) == 2U);
+
+    // New bytes: their own manifest, ETag and keys; the rest copied.
+    index_command c;
+    c.op = kind::copy_object;
+    c.target = r.ref("b1");
+    c.source = r.ref("b1");
+    c.key = "src";  // onto itself is fine when the bytes change
+    c.source_key = "src";
+    c.new_bytes = true;
+    c.content.manifest = {{sha_of(7), 5}, {sha_of(8), 5}};
+    c.content.etag = "newetag";
+    c.override_metadata = {"x-amz-server-side-encryption", "x-kythira-sse-wrapped",
+                           "x-kythira-sse-c-hmac"};
+    c.content.system_metadata = {{"x-kythira-sse-c-hmac", "mac"}};
+    BOOST_TEST_REQUIRE(r.apply(c).ok());
+    const auto v = r.sm.version(id, "src");
+    BOOST_TEST(v->content.etag == "newetag");
+    BOOST_TEST(v->content.manifest.size() == 2U);
+    BOOST_TEST(v->content.system_metadata.at("x-kythira-sse-c-hmac") == "mac");
+    BOOST_TEST(!v->content.system_metadata.contains("x-kythira-sse-wrapped"));
+    BOOST_TEST(!v->content.system_metadata.contains("x-amz-server-side-encryption"));
+    BOOST_TEST(v->content.system_metadata.at("cache-control") == "no-cache");
+    BOOST_TEST(r.count(7) == 1U);
+    BOOST_TEST(r.count(1) == 1U);  // the old src no longer names it; same-bytes does
 }
 
 BOOST_AUTO_TEST_CASE(a_copy_of_a_delete_marker_version_is_refused) {

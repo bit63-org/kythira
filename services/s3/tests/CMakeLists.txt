@@ -131,6 +131,20 @@ elseif(TARGET Boost::json)
 endif()
 add_test(NAME s3_checksums_test COMMAND s3_checksums_test)
 
+# Task 11: server-side encryption: chunk sealing, the data path over sealed
+# chunks, the local key provider, the SSE headers, bucket default
+# encryption, and object keys for SSE-S3, SSE-KMS with bucket keys and
+# SSE-C.
+add_executable(s3_encryption_test s3_encryption_test.cpp)
+target_link_libraries(s3_encryption_test PRIVATE
+    kythira_s3 Boost::unit_test_framework Threads::Threads)
+if(TARGET boost_json)
+    target_link_libraries(s3_encryption_test PRIVATE boost_json)
+elseif(TARGET Boost::json)
+    target_link_libraries(s3_encryption_test PRIVATE Boost::json)
+endif()
+add_test(NAME s3_encryption_test COMMAND s3_encryption_test)
+
 # Task 7: the request pipeline end to end (routing, SigV4, the access check,
 # bucket, object and listing handlers) over the in-process metadata layer.
 # It includes the persistent state machine contract, hence the shared test
@@ -159,6 +173,7 @@ set_tests_properties(
     s3_access_test
     s3_post_policy_test
     s3_checksums_test
+    s3_encryption_test
     s3_service_test
     PROPERTIES LABELS "unit;s3;s3-module" TIMEOUT 60)
 

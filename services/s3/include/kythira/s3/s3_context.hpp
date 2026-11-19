@@ -31,6 +31,7 @@
 #include <kythira/s3/s3_access.hpp>
 #include <kythira/s3/s3_compat.hpp>
 #include <kythira/s3/s3_data_path.hpp>
+#include <kythira/s3/s3_encryption.hpp>
 #include <kythira/s3/s3_http.hpp>
 #include <kythira/s3/s3_metadata.hpp>
 
@@ -39,6 +40,7 @@
 #include <chrono>
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <optional>
 #include <random>
 #include <string>
@@ -61,6 +63,10 @@ struct service_options {
     std::size_t max_document_bytes = std::size_t{2} * 1024 * 1024;
     /// The clock, for tests; the system clock when empty.
     std::function<std::chrono::system_clock::time_point()> clock;
+    /// Server-side encryption's key providers and bucket-key cache
+    /// (`s3_encryption.hpp`). None: SSE-S3 objects are stored unencrypted,
+    /// SSE-KMS is refused, SSE-C works (it needs no provider).
+    std::shared_ptr<sse_keys> encryption;
 };
 
 /// The handlers' shared state.
@@ -68,6 +74,12 @@ template<metadata_access M> struct handler_context {
     M& meta;
     data_path& data;
     const service_options& options;
+
+    /// The encryption keys; an empty set when none are configured.
+    [[nodiscard]] auto keys() const -> sse_keys& {
+        static sse_keys none;
+        return options.encryption ? *options.encryption : none;
+    }
 
     [[nodiscard]] auto now() const -> std::chrono::system_clock::time_point {
         return options.clock ? options.clock() : std::chrono::system_clock::now();
@@ -164,6 +176,8 @@ struct bucket_state {
     public_access_block bucket_public_access_block{false, false, false, false};
     access_control_list acl;
     std::vector<std::pair<std::string, std::string>> tags;
+    /// Default encryption (`PutBucketEncryption`); SSE-S3 when none is set.
+    bucket_encryption encryption;
     compat_profile profile;
     access_context access;  ///< for `authorize_check`; its `bucket_acl` points at `acl`
 
@@ -200,6 +214,11 @@ void load_bucket_state(const handler_context<M>& ctx, bucket_descriptor desc, bu
     if (auto it = cfg.find("tagging"); it != cfg.end()) {
         if (auto t = parse_tagging(it->second)) {
             out.tags = std::move(*t);
+        }
+    }
+    if (auto it = cfg.find("encryption"); it != cfg.end()) {
+        if (auto e = parse_bucket_encryption(it->second)) {
+            out.encryption = *e;
         }
     }
     out.profile = for_bucket(ctx.options.profile, out.tags);

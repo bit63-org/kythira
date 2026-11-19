@@ -39,14 +39,15 @@ module's consumers (Requirement 17.3).
 | `include/kythira/s3/s3_metadata.hpp` | `metadata_access`, what handlers need of the metadata layer, and `local_metadata` in process | 7 |
 | `include/kythira/s3/s3_compat.hpp` | the compatibility profile and its `kythira:compat:*` bucket tags | 7 |
 | `include/kythira/s3/s3_context.hpp` | service options, handler context, a bucket's access state from its stored config | 7 |
-| `include/kythira/s3/s3_buckets.hpp` | bucket operations and the access, tagging and logging sub-resources | 6, 7 |
-| `include/kythira/s3/s3_objects.hpp` | object put, get/head (ranges, `partNumber`, overrides, conditions), delete, copy, attributes, tagging, ACLs, stored checksums | 6, 7, 8 |
+| `include/kythira/s3/s3_buckets.hpp` | bucket operations and the access, tagging, logging and default-encryption sub-resources | 6, 7, 11 |
+| `include/kythira/s3/s3_objects.hpp` | object put, get/head (ranges, `partNumber`, overrides, conditions), delete, copy (re-encrypting when keys differ), attributes, tagging, ACLs, stored checksums, SSE | 6, 7, 8, 11 |
 | `include/kythira/s3/s3_listings.hpp` | ListObjects V1/V2 and DeleteObjects | 7, 8 |
 | `include/kythira/s3/s3_checksums.hpp` | additional checksums (CRC32, CRC32C, CRC64NVME, SHA-1, SHA-256): streaming, CRC combination for full-object multipart checksums, composite checksums, what a request asks for and its verification against a header or trailer; `s3_checksums_test` | 8 |
 | `include/kythira/s3/s3_multipart.hpp` | multipart upload: create, parts and part copies, listings, complete with checksums and conditions, abort, and the stale-upload sweep | 9 |
 | `include/kythira/s3/s3_object_lock.hpp` | object lock on the write path: lock headers, default retention, the lock headers a read returns | 10 |
 | `include/kythira/s3/s3_versioning.hpp` | bucket versioning, ListObjectVersions, object lock configuration, retention and legal hold | 10 |
-| `include/kythira/s3/s3_service.hpp` | the request pipeline and browser POST uploads; `s3_service_test` | 6-10 |
+| `include/kythira/s3/s3_chunk_cipher.hpp`, `s3_encryption.hpp`, `s3_kms_provider.hpp` | server-side encryption: AES-256-GCM chunk sealing with derived nonces (dedup within a data key), key providers (local passphrase-sealed; Kythira or AWS KMS over their JSON API), the SSE headers, bucket default encryption, per-object data keys for SSE-S3, SSE-KMS with bucket keys and SSE-C (salted HMAC only, never the key); `s3_encryption_test` | 11 |
+| `include/kythira/s3/s3_service.hpp` | the request pipeline and browser POST uploads; `s3_service_test` | 6-11 |
 | `include/kythira/s3/s3_routes.hpp` | the operation table as routes for core's REST-XML router, and `route_request` (addressing, query, operation); `s3_routing_test` routes every recorded client request | 3 |
 | `implemented-operations.txt` | operations the gateway implements | 1 onward |
 | `doc/unsupported.md` | every other operation, with its planned task, reason and the exact error it returns (`NotImplemented`, 501) | 1 onward |
@@ -65,7 +66,7 @@ package to export.
 | `OpenSSL::SSL`, `OpenSSL::Crypto` | SigV4, chunk digests and server-side encryption, through `kythira_s3` |
 | `Python3_EXECUTABLE` | the coverage and generated-header tests |
 | `kythira_test_pch` | the guard the tests are entered under |
-| `Boost::unit_test_framework`, `boost_json` (or `Boost::json`) | `s3_routing_test`, which reads the evidence files |
+| `Boost::unit_test_framework`, `boost_json` (or `Boost::json`) | `s3_routing_test`, which reads the evidence files, and the tests of headers that parse JSON (bucket policies, KMS encryption contexts) |
 | `include/raft/aws_rest_xml_protocol.hpp` (and `aws_query_protocol.hpp`, its XML writer) | routing, addressing, request XML and response documents |
 | `include/raft/chunk_store.hpp`, `chunk_service.hpp` | object bytes and chunk reads and writes between nodes (used from task 5); the index's `chunk_sha` |
 | `include/raft/persistent_state_machine.hpp`, `memory_kv_engine.hpp` | the index's state machine contract and its test engine |

@@ -13,7 +13,7 @@ implement: the XML error `NotImplemented` ("A header you provided implies
 functionality that is not implemented") with HTTP status 501, which every
 SDK surfaces as a non-retryable service error (`s3_service.hpp`).
 
-The model has 116 operations. 53 are implemented; of the other 63, 22 are
+The model has 116 operations. 56 are implemented; of the other 60, 19 are
 planned in a spec task and 41 (`none`) are out of the spec's scope, or
 were added to S3 after the spec was written and wait on the owner's
 decision.
@@ -25,7 +25,6 @@ decision.
 | `CreateSession` | none | Out of scope: S3 Express One Zone directory buckets. | `NotImplemented`, HTTP 501 |
 | `DeleteBucketAnalyticsConfiguration` | none | Out of scope: S3 Analytics (storage class analysis). | `NotImplemented`, HTTP 501 |
 | `DeleteBucketCors` | task 15 | Not built yet (CORS and website hosting). | `NotImplemented`, HTTP 501 |
-| `DeleteBucketEncryption` | task 11 | Not built yet (encryption). | `NotImplemented`, HTTP 501 |
 | `DeleteBucketIntelligentTieringConfiguration` | none | Not in the spec: the Intelligent-Tiering archive tiers. Storage classes map to Kythira tiers through lifecycle (task 13). | `NotImplemented`, HTTP 501 |
 | `DeleteBucketInventoryConfiguration` | none | Out of scope: S3 Inventory. | `NotImplemented`, HTTP 501 |
 | `DeleteBucketLifecycle` | task 13 | Not built yet (lifecycle and storage classes). | `NotImplemented`, HTTP 501 |
@@ -39,7 +38,6 @@ decision.
 | `GetBucketAccelerateConfiguration` | none | Out of scope: Transfer Acceleration. | `NotImplemented`, HTTP 501 |
 | `GetBucketAnalyticsConfiguration` | none | Out of scope: S3 Analytics (storage class analysis). | `NotImplemented`, HTTP 501 |
 | `GetBucketCors` | task 15 | Not built yet (CORS and website hosting). | `NotImplemented`, HTTP 501 |
-| `GetBucketEncryption` | task 11 | Not built yet (encryption). | `NotImplemented`, HTTP 501 |
 | `GetBucketIntelligentTieringConfiguration` | none | Not in the spec: the Intelligent-Tiering archive tiers. Storage classes map to Kythira tiers through lifecycle (task 13). | `NotImplemented`, HTTP 501 |
 | `GetBucketInventoryConfiguration` | none | Out of scope: S3 Inventory. | `NotImplemented`, HTTP 501 |
 | `GetBucketLifecycle` | task 13 | Not built yet (lifecycle and storage classes). Deprecated in the model in favour of the `*Configuration` form; planned with it because old SDKs still send it. | `NotImplemented`, HTTP 501 |
@@ -63,7 +61,6 @@ decision.
 | `PutBucketAccelerateConfiguration` | none | Out of scope: Transfer Acceleration. | `NotImplemented`, HTTP 501 |
 | `PutBucketAnalyticsConfiguration` | none | Out of scope: S3 Analytics (storage class analysis). | `NotImplemented`, HTTP 501 |
 | `PutBucketCors` | task 15 | Not built yet (CORS and website hosting). | `NotImplemented`, HTTP 501 |
-| `PutBucketEncryption` | task 11 | Not built yet (encryption). | `NotImplemented`, HTTP 501 |
 | `PutBucketIntelligentTieringConfiguration` | none | Not in the spec: the Intelligent-Tiering archive tiers. Storage classes map to Kythira tiers through lifecycle (task 13). | `NotImplemented`, HTTP 501 |
 | `PutBucketInventoryConfiguration` | none | Out of scope: S3 Inventory. | `NotImplemented`, HTTP 501 |
 | `PutBucketLifecycle` | task 13 | Not built yet (lifecycle and storage classes). Deprecated in the model in favour of the `*Configuration` form; planned with it because old SDKs still send it. | `NotImplemented`, HTTP 501 |

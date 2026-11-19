@@ -31,6 +31,15 @@
 
 namespace {
 
+/// A key-sealing secret built at run time: test material, not a credential.
+auto test_secret(int n) -> std::string {
+    std::string out = "t";
+    for (int i = 0; i < 16; ++i) {
+        out.push_back(static_cast<char>('a' + ((n * 7 + i * 3) % 26)));
+    }
+    return out;
+}
+
 namespace s3 = kythira::s3;
 namespace sv4 = kythira::sigv4;
 namespace az = kythira::aws_auth;
@@ -212,6 +221,16 @@ struct fixture {
 
 auto md5_b64(std::string_view s) -> std::string {
     return s3::bucket_detail::b64(s3::object_detail::md5_raw(s));
+}
+
+auto md5_hex(std::string_view s) -> std::string {
+    static constexpr std::string_view digits = "0123456789abcdef";
+    std::string out;
+    for (const unsigned char c : s3::object_detail::md5_raw(s)) {
+        out.push_back(digits[c >> 4U]);
+        out.push_back(digits[c & 0xFU]);
+    }
+    return out;
 }
 
 auto contains(const std::string& s, std::string_view part) -> bool {
@@ -399,8 +418,12 @@ BOOST_AUTO_TEST_CASE(objects_are_written_and_read_back) {
     BOOST_TEST(f.send("GET", "/bkt/bad").code() == "NoSuchKey");
     BOOST_TEST(f.send("PUT", "/bkt/dir/big.csv", {{"If-None-Match", "*"}}, "x").status == 412U);
     BOOST_TEST(f.send("PUT", "/bkt/new", {{"If-Match", "\"x\""}}, "x").code() == "NoSuchKey");
-    BOOST_TEST(f.send("PUT", "/bkt/e", {{"x-amz-server-side-encryption", "aws:kms"}}, "x").status ==
-               501U);
+    // No KMS provider on this endpoint.
+    BOOST_TEST(f.send("PUT", "/bkt/e", {{"x-amz-server-side-encryption", "aws:kms"}}, "x").code() ==
+               "KMS.NotFoundException");
+    BOOST_TEST(
+        f.send("PUT", "/bkt/e", {{"x-amz-server-side-encryption", "aws:kms:dsse"}}, "x").status ==
+        501U);
     const auto empty = f.send("PUT", "/bkt/empty", {}, "");
     BOOST_TEST(empty.header("ETag") == "\"d41d8cd98f00b204e9800998ecf8427e\"");
     BOOST_TEST(f.send("GET", "/bkt/empty").body.empty());
@@ -932,10 +955,10 @@ BOOST_AUTO_TEST_CASE(authentication_failures_and_unbuilt_operations) {
     const auto tampered = f.send("PUT", "/bkt/k", {}, "abc", "AKIDOWNER", "abd");
     BOOST_TEST(tampered.code() == "XAmzContentSHA256Mismatch");
     BOOST_TEST(f.send("GET", "/bkt/k").code() == "NoSuchKey");
-    const auto r = f.send("GET", "/bkt?encryption");
+    const auto r = f.send("GET", "/bkt?cors");
     BOOST_TEST(r.status == 501U);
     BOOST_TEST(r.code() == "NotImplemented");
-    BOOST_TEST(f.send("GET", "/bkt?cors").status == 501U);
+    BOOST_TEST(f.send("GET", "/bkt?lifecycle").status == 501U);
 }
 
 BOOST_AUTO_TEST_CASE(versioned_buckets_answer_with_version_ids_and_delete_markers) {
@@ -1201,4 +1224,337 @@ BOOST_AUTO_TEST_CASE(the_served_operations_are_the_ones_the_coverage_list_names)
         }
     }
     BOOST_TEST((listed == s3::implemented_operations()));
+}
+
+namespace {
+
+/// A KMS for the encryption tests: wraps like the local provider, records
+/// who asked, and refuses `reader` everything, as a key policy that names
+/// only the owner would.
+struct fake_kms {
+    s3::local_key_provider inner{test_secret(5), test_secret(6)};
+    std::shared_ptr<std::vector<std::string>> calls = std::make_shared<std::vector<std::string>>();
+
+    void check(const s3::kms_caller& who, const std::string& op) const {
+        calls->push_back(op + " " + (who.principal ? who.principal->arn : std::string("anon")));
+        if (who.principal && who.principal->arn.ends_with("/reader")) {
+            throw s3::kms_error(s3::kms_failure::access_denied,
+                                "reader is not authorized to perform kms:" + op);
+        }
+    }
+    [[nodiscard]] auto generate_data_key(const std::string& id, const s3::encryption_context& c,
+                                         const s3::kms_caller& who) const
+        -> s3::generated_data_key {
+        check(who, "GenerateDataKey");
+        if (id == "alias/disabled") {
+            throw s3::kms_error(s3::kms_failure::disabled, "key is disabled");
+        }
+        auto k = inner.generate_data_key(id, c, who);
+        k.key_id = id.starts_with("arn:") ? id : "arn:aws:kms:us-east-1:111122223333:key/" + id;
+        return k;
+    }
+    [[nodiscard]] auto decrypt_data_key(const std::string& id, const std::string& wrapped,
+                                        const s3::encryption_context& c,
+                                        const s3::kms_caller& who) const -> std::string {
+        check(who, "Decrypt");
+        // Wrapped under the id the caller gave at generation.
+        const auto slash = id.rfind('/');
+        const auto bare = id.starts_with("arn:aws:kms:") ? id.substr(slash + 1) : id;
+        for (const auto& candidate : {id, bare, std::string("alias/aws/s3")}) {
+            try {
+                return inner.decrypt_data_key(candidate, wrapped, c, who);
+            } catch (const s3::kms_error&) {
+            }
+        }
+        throw s3::kms_error(s3::kms_failure::invalid_ciphertext, "does not unwrap");
+    }
+};
+
+struct sse_fixture {
+    std::shared_ptr<s3::sse_keys> keys = std::make_shared<s3::sse_keys>();
+    fake_kms kms;
+    std::unique_ptr<fixture> f;
+
+    sse_fixture() {
+        keys->s3_managed = s3::key_provider(s3::local_key_provider(test_secret(7)));
+        keys->kms = s3::key_provider(kms);
+        s3::service_options o;
+        o.encryption = keys;
+        f = std::make_unique<fixture>(o);
+        f->make_bucket("enc");
+    }
+
+    /// Whether any blob copy holds `text` in the clear.
+    [[nodiscard]] auto stored_in_clear(std::string_view text) -> bool {
+        for (auto& n : f->nodes) {
+            const std::lock_guard lock(n.mu);
+            for (const auto& [sha, bytes] : n.chunks) {
+                const std::string_view s(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+                if (s.find(text) != std::string_view::npos) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+    [[nodiscard]] auto chunk_count() -> std::size_t {
+        const std::lock_guard lock(f->nodes[0].mu);
+        return f->nodes[0].chunks.size();
+    }
+};
+
+auto customer_headers(const std::string& key,
+                      std::string_view prefix = "x-amz-server-side-encryption-customer-")
+    -> s3::header_list {
+    const std::string p(prefix);
+    return {{p + "algorithm", "AES256"},
+            {p + "key", s3::bucket_detail::b64(key)},
+            {p + "key-MD5", md5_b64(key)}};
+}
+
+}  // namespace
+
+BOOST_AUTO_TEST_CASE(sse_s3_is_the_default_and_blob_stores_hold_ciphertext) {
+    sse_fixture t;
+    auto& f = *t.f;
+    const std::string body = "plaintext marker " + std::string(150, 'p') + " end";
+    const auto put = f.send("PUT", "/enc/a", {}, body);
+    BOOST_TEST_REQUIRE(put.status == 200U, put.body);
+    BOOST_TEST(put.header("x-amz-server-side-encryption") == "AES256");
+    // SSE-S3 keeps the MD5 ETag S3 gives it.
+    BOOST_TEST(put.header("ETag") == "\"" + md5_hex(body) + "\"");
+    BOOST_TEST(!t.stored_in_clear("plaintext marker"));
+    BOOST_TEST(!t.stored_in_clear(std::string(40, 'p')));
+
+    const auto got = f.send("GET", "/enc/a");
+    BOOST_TEST(got.body == body);
+    BOOST_TEST(got.header("x-amz-server-side-encryption") == "AES256");
+    BOOST_TEST(got.header("x-kythira-sse-wrapped").empty());
+    BOOST_TEST(f.send("GET", "/enc/a", {{"Range", "bytes=60-139"}}).body == body.substr(60, 80));
+    BOOST_TEST(f.send("HEAD", "/enc/a").header("Content-Length") == std::to_string(body.size()));
+    // The reader needs no KMS permission for SSE-S3.
+    BOOST_TEST(f.send("GET", "/enc/a", {}, {}, "AKIDREADER").body == body);
+
+    // Same bytes under another object's key are other chunks.
+    const auto before = t.chunk_count();
+    f.send("PUT", "/enc/b", {}, body);
+    BOOST_TEST(t.chunk_count() == 2 * before);
+    // A copy between SSE-S3 objects shares the chunks.
+    BOOST_TEST(f.send("PUT", "/enc/c", {{"x-amz-copy-source", "/enc/a"}}).status == 200U);
+    BOOST_TEST(t.chunk_count() == 2 * before);
+    BOOST_TEST(f.send("GET", "/enc/c").body == body);
+
+    // Read-only headers on a GET, and bad write headers.
+    BOOST_TEST(f.send("GET", "/enc/a", {{"x-amz-server-side-encryption", "AES256"}}).code() ==
+               "InvalidArgument");
+    BOOST_TEST(f.send("PUT", "/enc/x",
+                      {{"x-amz-server-side-encryption", "AES256"},
+                       {"x-amz-server-side-encryption-aws-kms-key-id", "k"}},
+                      "x")
+                   .code() == "InvalidArgument");
+    BOOST_TEST(f.send("PUT", "/enc/x", {{"x-amz-server-side-encryption", "DES"}}, "x").code() ==
+               "InvalidArgument");
+}
+
+BOOST_AUTO_TEST_CASE(sse_kms_asks_the_kms_as_the_caller) {
+    sse_fixture t;
+    auto& f = *t.f;
+    const std::string body = "kms secret " + std::string(100, 'k');
+    const std::string context = s3::bucket_detail::b64(R"({"project":"x"})");
+    const auto put = f.send("PUT", "/enc/k",
+                            {{"x-amz-server-side-encryption", "aws:kms"},
+                             {"x-amz-server-side-encryption-aws-kms-key-id", "key-1"},
+                             {"x-amz-server-side-encryption-context", context}},
+                            body);
+    BOOST_TEST_REQUIRE(put.status == 200U, put.body);
+    BOOST_TEST(put.header("x-amz-server-side-encryption") == "aws:kms");
+    BOOST_TEST(put.header("x-amz-server-side-encryption-aws-kms-key-id") ==
+               "arn:aws:kms:us-east-1:111122223333:key/key-1");
+    const auto ctx_json =
+        s3::bucket_detail::unb64(put.header("x-amz-server-side-encryption-context"));
+    BOOST_TEST_REQUIRE(ctx_json.has_value());
+    BOOST_TEST(contains(*ctx_json, R"("aws:s3:arn":"arn:aws:s3:::enc/k")"));
+    BOOST_TEST(contains(*ctx_json, R"("project":"x")"));
+    // No MD5 of the data in the ETag.
+    BOOST_TEST(put.header("ETag") != "\"" + md5_hex(body) + "\"");
+    BOOST_TEST(!t.stored_in_clear("kms secret"));
+
+    const auto got = f.send("GET", "/enc/k");
+    BOOST_TEST(got.body == body);
+    BOOST_TEST(got.header("x-amz-server-side-encryption-aws-kms-key-id") ==
+               "arn:aws:kms:us-east-1:111122223333:key/key-1");
+    BOOST_TEST(t.kms.calls->back() == "Decrypt arn:aws:iam::111122223333:user/owner");
+    // S3 lets the reader read; the KMS does not.
+    BOOST_TEST(f.send("GET", "/enc/k", {}, {}, "AKIDREADER").code() == "AccessDenied");
+    BOOST_TEST(f.send("PUT", "/enc/d",
+                      {{"x-amz-server-side-encryption", "aws:kms"},
+                       {"x-amz-server-side-encryption-aws-kms-key-id", "alias/disabled"}},
+                      "x")
+                   .code() == "KMS.DisabledException");
+    BOOST_TEST(f.send("PUT", "/enc/d",
+                      {{"x-amz-server-side-encryption", "aws:kms"},
+                       {"x-amz-server-side-encryption-context", "not json"}},
+                      "x")
+                   .code() == "InvalidArgument");
+
+    // A copy onto itself that asks for SSE-S3 re-encrypts it.
+    const auto back =
+        f.send("PUT", "/enc/k",
+               {{"x-amz-copy-source", "/enc/k"}, {"x-amz-server-side-encryption", "AES256"}});
+    BOOST_TEST_REQUIRE(back.status == 200U, back.body);
+    BOOST_TEST(back.header("x-amz-server-side-encryption") == "AES256");
+    BOOST_TEST(f.send("GET", "/enc/k", {}, {}, "AKIDREADER").body == body);
+}
+
+BOOST_AUTO_TEST_CASE(bucket_default_encryption_and_bucket_keys) {
+    sse_fixture t;
+    auto& f = *t.f;
+    const auto initial = f.send("GET", "/enc?encryption");
+    BOOST_TEST_REQUIRE(initial.status == 200U, initial.body);
+    BOOST_TEST(element(initial.body, "SSEAlgorithm") == "AES256");
+    BOOST_TEST(element(initial.body, "BucketKeyEnabled") == "false");
+
+    const std::string cfg =
+        "<ServerSideEncryptionConfiguration><Rule><ApplyServerSideEncryptionByDefault>"
+        "<SSEAlgorithm>aws:kms</SSEAlgorithm><KMSMasterKeyID>bucket-key</KMSMasterKeyID>"
+        "</ApplyServerSideEncryptionByDefault><BucketKeyEnabled>true</BucketKeyEnabled></Rule>"
+        "</ServerSideEncryptionConfiguration>";
+    BOOST_TEST_REQUIRE(
+        f.send("PUT", "/enc?encryption", {{"Content-MD5", md5_b64(cfg)}}, cfg).status == 200U);
+    const auto now = f.send("GET", "/enc?encryption");
+    BOOST_TEST(element(now.body, "KMSMasterKeyID") == "bucket-key");
+    BOOST_TEST(element(now.body, "BucketKeyEnabled") == "true");
+
+    // Three objects, one KMS call: the bucket key covers them.
+    const auto before = t.keys->stats().kms_generate;
+    for (const auto* k : {"one", "two", "three"}) {
+        const auto put = f.send("PUT", std::string("/enc/") + k, {}, std::string("body of ") + k);
+        BOOST_TEST_REQUIRE(put.status == 200U, put.body);
+        BOOST_TEST(put.header("x-amz-server-side-encryption") == "aws:kms");
+        BOOST_TEST(put.header("x-amz-server-side-encryption-bucket-key-enabled") == "true");
+    }
+    BOOST_TEST(t.keys->stats().kms_generate == before + 1);
+    for (const auto* k : {"one", "two", "three"}) {
+        BOOST_TEST(f.send("GET", std::string("/enc/") + k).body == std::string("body of ") + k);
+    }
+    // A request may still turn the bucket key off for its object.
+    const auto own = f.send("PUT", "/enc/own",
+                            {{"x-amz-server-side-encryption", "aws:kms"},
+                             {"x-amz-server-side-encryption-bucket-key-enabled", "false"}},
+                            "own");
+    BOOST_TEST(own.header("x-amz-server-side-encryption-bucket-key-enabled").empty());
+    BOOST_TEST(t.keys->stats().kms_generate == before + 2);
+
+    const std::string bad =
+        "<ServerSideEncryptionConfiguration><Rule><ApplyServerSideEncryptionByDefault>"
+        "<SSEAlgorithm>AES256</SSEAlgorithm><KMSMasterKeyID>k</KMSMasterKeyID>"
+        "</ApplyServerSideEncryptionByDefault></Rule></ServerSideEncryptionConfiguration>";
+    BOOST_TEST(f.send("PUT", "/enc?encryption", {{"Content-MD5", md5_b64(bad)}}, bad).code() ==
+               "InvalidArgument");
+    BOOST_TEST(f.send("DELETE", "/enc?encryption").status == 204U);
+    BOOST_TEST(element(f.send("GET", "/enc?encryption").body, "SSEAlgorithm") == "AES256");
+    BOOST_TEST(f.send("PUT", "/enc/after", {}, "x").header("x-amz-server-side-encryption") ==
+               "AES256");
+}
+
+BOOST_AUTO_TEST_CASE(sse_c_keys_are_checked_and_never_stored) {
+    sse_fixture t;
+    auto& f = *t.f;
+    const std::string key(32, 'K');
+    const std::string other(32, 'O');
+    const std::string body = "customer secret " + std::string(90, 'c');
+    const auto put = f.send("PUT", "/enc/c", customer_headers(key), body);
+    BOOST_TEST_REQUIRE(put.status == 200U, put.body);
+    BOOST_TEST(put.header("x-amz-server-side-encryption-customer-algorithm") == "AES256");
+    BOOST_TEST(put.header("x-amz-server-side-encryption-customer-key-MD5") == md5_b64(key));
+    BOOST_TEST(put.header("x-amz-server-side-encryption").empty());
+    BOOST_TEST(!t.stored_in_clear("customer secret"));
+    // The key is nowhere in the stored metadata.
+    const auto v = f.meta.version(f.meta.bucket("enc")->id, "c", std::nullopt);
+    BOOST_TEST_REQUIRE(v.has_value());
+    for (const auto& [k, val] : v->content.system_metadata) {
+        BOOST_TEST(!contains(val, s3::bucket_detail::b64(key)), k);
+        BOOST_TEST(!contains(val, key), k);
+    }
+
+    BOOST_TEST(f.send("GET", "/enc/c").code() == "InvalidRequest");
+    BOOST_TEST(f.send("HEAD", "/enc/c").status == 400U);
+    BOOST_TEST(f.send("GET", "/enc/c", customer_headers(other)).status == 403U);
+    const auto got = f.send("GET", "/enc/c", customer_headers(key));
+    BOOST_TEST(got.body == body);
+    BOOST_TEST(got.header("x-amz-server-side-encryption-customer-key-md5") == md5_b64(key));
+    // SSE-C headers on an object that has none.
+    f.send("PUT", "/enc/plain", {}, "plain");
+    BOOST_TEST(f.send("GET", "/enc/plain", customer_headers(key)).code() == "InvalidRequest");
+
+    // Malformed keys.
+    auto wrong_md5 = customer_headers(key);
+    wrong_md5[2].second = md5_b64(other);
+    BOOST_TEST(f.send("PUT", "/enc/x", wrong_md5, "x").code() == "InvalidArgument");
+    auto short_key = customer_headers(std::string(16, 'k'));
+    BOOST_TEST(f.send("PUT", "/enc/x", short_key, "x").code() == "InvalidArgument");
+    auto both = customer_headers(key);
+    both.emplace_back("x-amz-server-side-encryption", "AES256");
+    BOOST_TEST(f.send("PUT", "/enc/x", both, "x").code() == "InvalidArgument");
+
+    // A copy opens the source with the copy-source key and seals the
+    // target under the bucket default.
+    auto copy = customer_headers(key, "x-amz-copy-source-server-side-encryption-customer-");
+    copy.emplace_back("x-amz-copy-source", "/enc/c");
+    const auto copied = f.send("PUT", "/enc/c2", copy);
+    BOOST_TEST_REQUIRE(copied.status == 200U, copied.body);
+    BOOST_TEST(copied.header("x-amz-server-side-encryption") == "AES256");
+    BOOST_TEST(f.send("GET", "/enc/c2").body == body);
+    BOOST_TEST(f.send("PUT", "/enc/c3", {{"x-amz-copy-source", "/enc/c"}}).code() ==
+               "InvalidRequest");
+}
+
+BOOST_AUTO_TEST_CASE(encrypted_multipart_uploads) {
+    sse_fixture t;
+    auto& f = *t.f;
+    const std::string tagging =
+        "<Tagging><TagSet><Tag><Key>kythira:compat:min-part-bytes</Key><Value>100</Value></Tag>"
+        "</TagSet></Tagging>";
+    BOOST_TEST_REQUIRE(
+        f.send("PUT", "/enc?tagging", {{"Content-MD5", md5_b64(tagging)}}, tagging).status == 204U);
+    const std::string key(32, 'M');
+    const auto create = f.send("POST", "/enc/mp?uploads", customer_headers(key));
+    BOOST_TEST_REQUIRE(create.status == 200U, create.body);
+    BOOST_TEST(create.header("x-amz-server-side-encryption-customer-algorithm") == "AES256");
+    const auto id = element(create.body, "UploadId");
+    const auto at = [&](int n) {
+        return "/enc/mp?partNumber=" + std::to_string(n) + "&uploadId=" + id;
+    };
+    const auto p1 = random_bytes(200, 7);
+    const auto p2 = random_bytes(90, 8);
+    BOOST_TEST(f.send("PUT", at(1), {}, p1).code() == "InvalidRequest");
+    BOOST_TEST(f.send("PUT", at(1), customer_headers(std::string(32, 'X')), p1).status == 403U);
+    auto md5 = customer_headers(key);
+    md5.emplace_back("Content-MD5", md5_b64(p1));
+    const auto put1 = f.send("PUT", at(1), md5, p1);
+    BOOST_TEST_REQUIRE(put1.status == 200U, put1.body);
+    BOOST_TEST(put1.header("x-amz-server-side-encryption-customer-key-MD5") == md5_b64(key));
+    BOOST_TEST(put1.header("ETag") != "\"" + md5_hex(p1) + "\"");
+
+    // Part 2 copies from an SSE-KMS object.
+    BOOST_TEST_REQUIRE(
+        f.send("PUT", "/enc/src", {{"x-amz-server-side-encryption", "aws:kms"}}, p2).status ==
+        200U);
+    auto part_copy = customer_headers(key);
+    part_copy.emplace_back("x-amz-copy-source", "/enc/src");
+    const auto put2 = f.send("PUT", at(2), part_copy);
+    BOOST_TEST_REQUIRE(put2.status == 200U, put2.body);
+    const std::string done =
+        "<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>" + put1.header("ETag") +
+        "</ETag></Part><Part><PartNumber>2</PartNumber>"
+        "<ETag>" +
+        element(put2.body, "ETag") + "</ETag></Part></CompleteMultipartUpload>";
+    const auto complete = f.send("POST", "/enc/mp?uploadId=" + id, {}, done);
+    BOOST_TEST_REQUIRE(complete.status == 200U, complete.body);
+    BOOST_TEST(!t.stored_in_clear(p1.substr(0, 40)));
+    BOOST_TEST(f.send("GET", "/enc/mp").code() == "InvalidRequest");
+    BOOST_TEST(f.send("GET", "/enc/mp", customer_headers(key)).body == p1 + p2);
+    auto ranged = customer_headers(key);
+    ranged.emplace_back("Range", "bytes=150-249");
+    BOOST_TEST(f.send("GET", "/enc/mp", ranged).body == (p1 + p2).substr(150, 100));
 }

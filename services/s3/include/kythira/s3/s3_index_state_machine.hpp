@@ -235,6 +235,11 @@ struct index_command {
     /// `x-amz-bypass-governance-retention: true`, already authorized
     /// (`s3:BypassGovernanceRetention`) by the front end.
     bool bypass_governance = false;
+    /// copy_object: the front end re-encrypted the source's bytes for the
+    /// new object (`content.manifest`, `content.etag`), so the copy takes
+    /// them instead of sharing the source's chunks; its key material comes
+    /// through `override_metadata`.
+    bool new_bytes = false;
     /// copy_object: stored headers taken from `content.system_metadata`
     /// whatever `replace_metadata` says (erased when absent there): the
     /// new object's ACL, which is never copied, and its tags under
@@ -335,7 +340,7 @@ inline void write_opt_u64(detail::writer& w, const std::optional<std::uint64_t>&
     for (const auto& name : c.override_metadata) {
         w.str(name);
     }
-    w.u64(c.min_part_bytes).u32(c.max_parts).boolean(c.bypass_governance);
+    w.u64(c.min_part_bytes).u32(c.max_parts).boolean(c.bypass_governance).boolean(c.new_bytes);
     const auto s = w.take();
     std::vector<std::byte> out(s.size());
     std::memcpy(out.data(), s.data(), s.size());
@@ -393,6 +398,7 @@ inline void write_opt_u64(detail::writer& w, const std::optional<std::uint64_t>&
     c.min_part_bytes = r.u64();
     c.max_parts = r.u32();
     c.bypass_governance = r.boolean();
+    c.new_bytes = r.boolean();
     r.done("command");
     return c;
 }
@@ -1360,7 +1366,7 @@ private:
             return precondition_failed();
         }
         if (c.source.id == c.target.id && c.source_key == c.key && !c.replace_metadata &&
-            !c.version_id) {
+            !c.version_id && !c.new_bytes) {
             return fail(400, "InvalidRequest",
                         "This copy request is illegal because it is trying to copy an object to "
                         "itself without changing the object's metadata, storage class, website "
@@ -1374,10 +1380,13 @@ private:
         v.owner = c.owner;
         v.content = src->content;
         if (c.replace_metadata) {
-            // Checksums describe the bytes, which a copy does not change.
+            // Checksums describe the bytes, which a copy does not change,
+            // and the encryption keys are the bytes' too.
             std::map<std::string, std::string> kept;
             for (const auto& [k, val] : v.content.system_metadata) {
-                if (k.starts_with("x-amz-checksum-")) {
+                if (k.starts_with("x-amz-checksum-") ||
+                    k.starts_with("x-amz-server-side-encryption") ||
+                    k.starts_with("x-kythira-sse-")) {
                     kept.emplace(k, val);
                 }
             }
@@ -1399,6 +1408,9 @@ private:
             } else {
                 v.content.system_metadata.erase(name);
             }
+        }
+        if (c.new_bytes) {
+            v.content.manifest = c.content.manifest;
         }
         if (!c.content.etag.empty()) {
             v.content.etag = c.content.etag;

@@ -231,22 +231,28 @@ inline void part_checksums(aws_query::xml_writer& w, const part_record& p) {
 struct stored_part {
     part_record part;
     std::string checksum;
+    /// Of the plaintext, for `Content-MD5`; the part's ETag unless the
+    /// upload hides MD5s (SSE-KMS, SSE-C).
+    std::string md5_hex;
 };
 
 /// Store the bytes `produce` hands over (it calls its argument once per
 /// piece and returns an error or nothing), hashing them with the upload's
-/// algorithm and verifying what the request names against `trailers`.
+/// algorithm and verifying what the request names against `trailers`. An
+/// encrypted upload's parts are sealed with `cipher`; `hide_md5` gives the
+/// part a `sealed_etag` instead of the MD5 of its bytes.
 template<typename Produce>
 [[nodiscard]] auto store_part(data_path& data, Produce&& produce, std::uint64_t max_bytes,
                               const upload_checksum& kept, const requested_checksum& want,
-                              const std::function<header_list()>& trailers)
+                              const std::function<header_list()>& trailers,
+                              const chunk_cipher* cipher = nullptr, bool hide_md5 = false)
     -> aws_rest_xml::result<stored_part> {
     checksummer sum(kept.algorithm);
     std::optional<checksummer> other;
     if (want.algorithm != kept.algorithm) {
         other.emplace(want.algorithm);
     }
-    auto w = data.writer();
+    auto w = data.writer(cipher);
     std::uint64_t size = 0;
     std::optional<aws_rest_xml::error> failed;
     const auto consume = [&](std::string_view piece) {
@@ -280,8 +286,9 @@ template<typename Produce>
         return written.error();
     }
     stored_part out;
-    out.part.etag = written->md5_hex;
+    out.md5_hex = written->md5_hex;
     out.part.manifest = std::move(written->manifest);
+    out.part.etag = hide_md5 ? sealed_etag(out.part.manifest) : written->md5_hex;
     out.part.checksums[checksum_header(kept.algorithm)] = value;
     out.checksum = value;
     return out;
@@ -321,8 +328,9 @@ template<metadata_access M>
     -> handler_result {
     using namespace object_detail;
     using namespace multipart_detail;
-    if (auto e = refuse_encryption(req.headers)) {
-        return *e;
+    auto sse = parse_sse_request(req.headers, req.secure_transport);
+    if (!sse) {
+        return sse.error();
     }
     auto checksum = checksum_from_headers(req.headers);
     if (!checksum) {
@@ -350,6 +358,14 @@ template<metadata_access M>
         content->system_metadata[std::string(algorithm_key)] = to_string(checksum->algorithm);
         content->system_metadata[std::string(type_key)] = checksum->type();
     }
+    // The upload's data key is made now and kept wrapped with the upload;
+    // each part opens it again (SSE-C: checks the part's key against it).
+    auto sealed = ctx.keys().seal(plan_for(std::move(*sse), b.encryption), b.client_name,
+                                  req.resource.key, caller_of(auth.who, req));
+    if (!sealed) {
+        return sealed.error();
+    }
+    content->system_metadata.insert(sealed->metadata.begin(), sealed->metadata.end());
     index_command c;
     c.op = index_command::kind::create_upload;
     c.now_ms = ctx.now_ms();
@@ -369,6 +385,9 @@ template<metadata_access M>
     auto out = xml_response(w.str());
     out.set("x-amz-checksum-algorithm", std::string(to_string(checksum->algorithm)));
     out.set("x-amz-checksum-type", std::string(checksum->type()));
+    for (auto& h : sealed->response) {
+        out.headers.push_back(std::move(h));
+    }
     return out;
 }
 
@@ -378,10 +397,14 @@ template<metadata_access M>
 
 template<metadata_access M>
 [[nodiscard]] auto upload_part(handler_context<M>& ctx, const s3_request& req,
-                               const authenticated& /*auth*/, bucket_state& b) -> handler_result {
+                               const authenticated& auth, bucket_state& b) -> handler_result {
     using namespace multipart_detail;
-    if (auto e = object_detail::refuse_encryption(req.headers)) {
+    if (auto e = refuse_write_headers_on_read(req.headers)) {
         return *e;
+    }
+    auto customer = parse_customer_key(req.headers, customer_prefix, req.secure_transport);
+    if (!customer) {
+        return customer.error();
     }
     auto number = part_number(req);
     if (!number) {
@@ -391,6 +414,11 @@ template<metadata_access M>
     auto u = find_upload(ctx, b, req);
     if (!u) {
         return u.error();
+    }
+    const auto& sse_meta = u->content.system_metadata;
+    auto cipher = ctx.keys().open(sse_meta, *customer, caller_of(auth.who, req));
+    if (!cipher) {
+        return cipher.error();
     }
     const auto kept = checksum_of_upload(*u);
     auto want = requested(req.headers);
@@ -428,11 +456,12 @@ template<metadata_access M>
         return std::nullopt;
     };
     auto stored =
-        store_part(ctx.data, from_body, b.profile.max_put_bytes, kept, *want, req.trailers);
+        store_part(ctx.data, from_body, b.profile.max_put_bytes, kept, *want, req.trailers,
+                   *cipher ? &**cipher : nullptr, hides_md5(stored_kind(sse_meta)));
     if (!stored) {
         return stored.error();
     }
-    if (want_md5 && *want_md5 != stored->part.etag) {
+    if (want_md5 && *want_md5 != stored->md5_hex) {
         return aws_rest_xml::errors::make(
             400, "BadDigest", "The Content-MD5 you specified did not match what we received.");
     }
@@ -455,6 +484,9 @@ template<metadata_access M>
     s3_response out;
     out.set("ETag", object_detail::quote(r->etag));
     out.set(checksum_header(kept.algorithm), stored->checksum);
+    for (auto& h : sse_response_headers(sse_meta)) {
+        out.headers.push_back(std::move(h));
+    }
     return out;
 }
 
@@ -493,11 +525,23 @@ template<metadata_access M>
 
 template<metadata_access M>
 [[nodiscard]] auto upload_part_copy(handler_context<M>& ctx, const s3_request& req,
-                                    const authenticated& /*auth*/, bucket_state& b,
+                                    const authenticated& auth, bucket_state& b,
                                     const bucket_state& source, const copy_source& src)
     -> handler_result {
     using namespace multipart_detail;
     using object_detail::parse_http_date;
+    if (auto e = refuse_write_headers_on_read(req.headers)) {
+        return *e;
+    }
+    auto customer = parse_customer_key(req.headers, customer_prefix, req.secure_transport);
+    if (!customer) {
+        return customer.error();
+    }
+    auto source_customer =
+        parse_customer_key(req.headers, copy_source_customer_prefix, req.secure_transport);
+    if (!source_customer) {
+        return source_customer.error();
+    }
     auto number = part_number(req);
     if (!number) {
         return number.error();
@@ -527,6 +571,16 @@ template<metadata_access M>
     if (!s3_index_state_machine<>::source_conditions_hold(cond, v)) {
         return object_detail::precondition_failed("x-amz-copy-source-If");
     }
+    const auto who = caller_of(auth.who, req);
+    auto source_cipher = ctx.keys().open(v.content.system_metadata, *source_customer, who);
+    if (!source_cipher) {
+        return source_cipher.error();
+    }
+    const auto& sse_meta = u->content.system_metadata;
+    auto cipher = ctx.keys().open(sse_meta, *customer, who);
+    if (!cipher) {
+        return cipher.error();
+    }
     auto range = parse_copy_range(req.header("x-amz-copy-source-range"), v.content.size());
     if (!range) {
         return range.error();
@@ -541,16 +595,19 @@ template<metadata_access M>
     // The range streams from the source's chunks into the part writer.
     const auto from_source = [&](const auto& consume) -> std::optional<aws_rest_xml::error> {
         auto r = ctx.data.read_range(
-            v.content, range->first, range->second, [&](std::span<const std::byte> bytes) {
+            v.content, range->first, range->second,
+            [&](std::span<const std::byte> bytes) {
                 consume(std::string_view(reinterpret_cast<const char*>(bytes.data()),  // NOLINT
                                          bytes.size()));
-            });
+            },
+            *source_cipher ? &**source_cipher : nullptr);
         if (!r) {
             return r.error();
         }
         return std::nullopt;
     };
-    auto stored = store_part(ctx.data, from_source, b.profile.max_put_bytes, kept, want, {});
+    auto stored = store_part(ctx.data, from_source, b.profile.max_put_bytes, kept, want, {},
+                             *cipher ? &**cipher : nullptr, hides_md5(stored_kind(sse_meta)));
     if (!stored) {
         return stored.error();
     }
@@ -569,6 +626,9 @@ template<metadata_access M>
         out.set("x-amz-copy-source-version-id", *src.version_id);
     } else if (source.desc.versioning != versioning_state::unversioned) {
         out.set("x-amz-copy-source-version-id", v.version_id());
+    }
+    for (auto& h : sse_response_headers(sse_meta)) {
+        out.headers.push_back(std::move(h));
     }
     return out;
 }
@@ -919,6 +979,11 @@ template<metadata_access M>
     auto out = xml_response(w.str());
     if (auto v = object_detail::version_header(b, r)) {
         out.set("x-amz-version-id", *v);
+    }
+    for (auto& h : sse_response_headers(u->content.system_metadata)) {
+        if (!h.first.starts_with("x-amz-server-side-encryption-customer")) {
+            out.headers.push_back(std::move(h));
+        }
     }
     return out;
 }
