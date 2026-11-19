@@ -30,6 +30,16 @@
 // user or role ARN is authorized by IAM's policies with hsm: actions on
 // the token's ARN instead of by the bindings (hsm_iam.hpp, task 14b).
 //
+// Layers (.kiro/specs/hsm-independent-layers/, KYTHIRA_HSM_ROLES): a node
+// runs any of endpoint, crypto and store, all three by default. Without
+// crypto it builds no session layer, serves no PKCS#11 client, publishes
+// nothing for co-located consumers, holds no share and refuses init,
+// unseal and rekey: a store-only member keeps ciphertext and is never
+// unsealed. Without store it opens no engine and joins no group. An
+// endpoint without crypto runs only the layer-4 relay (endpoint_relay.hpp)
+// on the client listener, in front of KYTHIRA_HSM_RELAY_BACKENDS. A crypto
+// node without store (remote_hsm_store) is refused at configure for now.
+//
 // The node starts sealed: until an operator unseals it (task 7), every
 // cryptographic call answers CKR_DEVICE_ERROR, and health() says so while
 // staying healthy, since a sealed HSM is up and waiting for its operators.
@@ -37,11 +47,13 @@
 #include "hsm_audit.hpp"
 #include "hsm_config.hpp"
 
+#include <kythira/hsm/endpoint_relay.hpp>
 #include <kythira/hsm/hsm_admin.hpp>
 #include <kythira/hsm/hsm_group_state_machine.hpp>
 #include <kythira/hsm/hsm_host.hpp>
 #include <kythira/hsm/hsm_iam.hpp>
 #include <kythira/hsm/hsm_peer.hpp>
+#include <kythira/hsm/hsm_roles.hpp>
 #include <kythira/hsm/key_vault.hpp>
 #include <kythira/hsm/node_unseal.hpp>
 #include <kythira/hsm/pkcs11_native_backend.hpp>
@@ -225,12 +237,18 @@ public:
         -> std::optional<std::string> override {
         try {
             _opt = from_env(composite_env(service_node::module_tuning(env, "KYTHIRA_HSM_")));
+            _plan = kythira::hsm::hsm_role_plan{_opt.roles};
             // Key memory and the process before anything holds a key:
             // locked pages, no core dumps (Requirement 13.3).
-            if (auto r = kythira::hsm::prepare_key_memory(_opt.allow_unlocked_memory); !r) {
-                return "hsm: key memory: " +
-                       std::string(kythira::hsm::secure_memory_error_message(r.error())) +
-                       " (KYTHIRA_HSM_ALLOW_UNLOCKED_MEMORY=true starts anyway, for development)";
+            // A node without the crypto role never holds a key and needs
+            // neither (a store member keeps only ciphertext).
+            if (_plan.runs_crypto()) {
+                if (auto r = kythira::hsm::prepare_key_memory(_opt.allow_unlocked_memory); !r) {
+                    return "hsm: key memory: " +
+                           std::string(kythira::hsm::secure_memory_error_message(r.error())) +
+                           " (KYTHIRA_HSM_ALLOW_UNLOCKED_MEMORY=true starts anyway, for "
+                           "development)";
+                }
             }
             if (_opt.iam && !service_node::co_located(env, "iam")) {
                 return std::string(
@@ -243,6 +261,9 @@ public:
     }
 
     void register_groups(Host& host, const service_node::group_space& space) override {
+        if (!_plan.runs_store()) {
+            return;  // an endpoint only: no engine, no group, no key (Requirement 2.3)
+        }
         for (const auto* sub : {"engine", "raft", "snapshots"}) {
             std::filesystem::create_directories(_opt.data_dir / sub);
         }
@@ -304,18 +325,41 @@ public:
                 return (*authz)(identity, token, action);
             };
         }
-        _layer = std::make_shared<kythira::hsm::session_layer>(*_host, _vault, so);
+        if (_plan.runs_crypto()) {
+            _layer = std::make_shared<kythira::hsm::session_layer>(*_host, _vault, so);
+        }
         kythira::hsm::admin_policy policy;
         policy.operators = _opt.operators;
+        // What POST /v1/crypto-members/seed writes: the crypto nodes named
+        // in KYTHIRA_HSM_CRYPTO_URLS, else the members, as when every
+        // member was a crypto node.
+        if (!_opt.crypto_urls.empty()) {
+            for (const auto& [identity, url] : _opt.crypto_urls) {
+                policy.store_members.push_back(identity);
+            }
+        } else {
+            policy.store_members.assign(_opt.peer_identities.begin(), _opt.peer_identities.end());
+        }
         policy.allow_single_share = _opt.allow_single_share;
         policy.unseal_timeout = _opt.unseal_timeout;
         _admin = std::make_unique<admin_type>(*_host, _vault, std::move(policy));
-        _admin->set_seal_hook([layer = _layer] { layer->seal(); });
+        _admin->set_seal_hook([layer = _layer] {
+            if (layer) {
+                layer->seal();
+            }
+        });
         _admin->set_audit_hook(audit);
         _peer_policy.identities = _opt.peer_identities;
         _peer_policy.allow_plaintext = _opt.insecure_plaintext;
+        _peer_policy.store_clients = _opt.store_clients;
+        if (!_plan.runs_crypto()) {
+            _host->bootstrap();  // a store member only: no share, no unseal
+            return;
+        }
         // Node unseal (task 8): this node's share at rest, and init and
-        // rekey handing share i to the i-th member in id order.
+        // rekey handing share i to the i-th member in id order, or, once
+        // the catalog's crypto member list is seeded, to the i-th listed
+        // crypto node (hsm-independent-layers task 2).
         _sealer = make_share_sealer(_opt);
         _shares = std::make_unique<kythira::hsm::share_store>(_opt.data_dir / "shares", *_sealer);
         _node_unseal = std::make_unique<kythira::hsm::node_unseal>(_vault, *_shares);
@@ -325,28 +369,32 @@ public:
             auto it = _opt.api_urls.begin();
             std::advance(it, static_cast<std::ptrdiff_t>(index));
             if (it->first == _opt.node_id) {
-                try {
-                    return _shares->put(share);
-                } catch (const std::exception& e) {
-                    // A KMS that refuses or is away (task 8b): nothing is
-                    // committed, and the operator retries.
-                    kythira::console_logger{_opt.log_level}.error(
-                        std::string("node unseal: this member's share sealer refused: ") +
-                        e.what());
-                    return false;
-                }
+                return keep_share(share);
             }
-            const auto bin = kythira::hsm::shamir_encode_binary(share);
-            std::string body(reinterpret_cast<const char*>(bin.data()), bin.size());
-            const bool stored = _peers->deliver_share(it->second, body);
-            OPENSSL_cleanse(body.data(), body.size());
-            return stored;
+            return send_share(it->second, share);
+        };
+        delivery.deliver_to = [this](const std::string& identity,
+                                     const kythira::hsm::shamir_share& share) {
+            const auto it = _opt.crypto_urls.find(identity);
+            if (it == _opt.crypto_urls.end()) {
+                log(kythira::log_level::error,
+                    "node unseal: crypto member " + identity +
+                        " has no URL in KYTHIRA_HSM_CRYPTO_URLS; its share was not delivered");
+                return false;
+            }
+            if (it->second == url_of(_opt.node_id)) {
+                return keep_share(share);
+            }
+            return send_share(it->second, share);
         };
         _admin->set_node_share_delivery(std::move(delivery));
         _host->bootstrap();
     }
 
     void publish(service_node::module_registry& registry) override {
+        if (!_layer) {
+            return;  // no crypto layer: co-located consumers find no HSM here
+        }
         registry.publish<kythira::hsm::session_layer>(std::string(session_layer_interface), _layer);
         registry.publish<service_node::pkcs11_provider>(
             std::string(service_node::interface_names::hsm_pkcs11),
@@ -354,6 +402,17 @@ public:
     }
 
     void start(service_node::module_registry& registry) override {
+        if (_plan.relays_clients()) {
+            start_relay();
+        }
+        if (!_plan.runs_store()) {
+            _started = true;
+            std::cout << "hsm " << kythira::host_node_id_text(_opt.node_id)
+                      << " ready: roles=" << kythira::hsm::hsm_role_names(_opt.roles)
+                      << " relay=" << _relay->port() << " backends=" << _opt.relay_backends.size()
+                      << std::endl;
+            return;
+        }
         // Requirement 12.2: no one should mistake this for a hardware
         // boundary.
         log(kythira::log_level::warning,
@@ -398,7 +457,9 @@ public:
                         e.identity = "catalog";
                         _audit->record(e);
                     }
-                    try_node_unseal();
+                    if (_plan.runs_crypto()) {
+                        try_node_unseal();
+                    }
                 } catch (const std::exception& e) {
                     log(kythira::log_level::error, std::string("hsm: warden: ") + e.what());
                 }
@@ -426,6 +487,26 @@ public:
             });
         _server->start();
 
+        if (_plan.runs_crypto()) {
+            start_clients();
+        }
+        _started = true;
+        std::cout << "hsm " << kythira::host_node_id_text(_opt.node_id)
+                  << " ready: api=" << _server->port() << " clients="
+                  << (_clients && _opt.client_listen ? std::to_string(_clients->tls_port())
+                      : _relay                       ? "relay:" + std::to_string(_relay->port())
+                                                     : std::string("off"))
+                  << (_opt.socket_path.empty() ? "" : " socket=" + _opt.socket_path.string())
+                  << (_opt.insecure_plaintext ? " (PLAINTEXT)" : " (mutual TLS)")
+                  << " members=" << _opt.api_urls.size()
+                  << (_plan.co_located() ? ""
+                                         : " roles=" + kythira::hsm::hsm_role_names(_opt.roles))
+                  << (_plan.runs_crypto() ? " sealed" : " (never unsealed: no crypto role)")
+                  << std::endl;
+    }
+
+    /// The PKCS#11 client listeners (task 9): this node's crypto layer.
+    void start_clients() {
         kythira::hsm::wire_server_config wc;
         if (_opt.client_listen) {
             wc.bind_address = _opt.client_listen->first;
@@ -446,16 +527,27 @@ public:
                     std::string(message));
             });
         _clients->start();
-        _started = true;
-        std::cout << "hsm " << kythira::host_node_id_text(_opt.node_id)
-                  << " ready: api=" << _server->port() << " clients="
-                  << (_opt.client_listen ? std::to_string(_clients->tls_port()) : "off")
-                  << (_opt.socket_path.empty() ? "" : " socket=" + _opt.socket_path.string())
-                  << (_opt.insecure_plaintext ? " (PLAINTEXT)" : " (mutual TLS)")
-                  << " members=" << _opt.api_urls.size() << " sealed" << std::endl;
+    }
+
+    /// An endpoint without crypto (Requirement 6): the client listener
+    /// relays at layer 4 to the crypto nodes. A crypto node that refuses
+    /// the connection is skipped until the next check.
+    void start_relay() {
+        kythira::hsm::endpoint_relay_config rc;
+        rc.bind_address = _opt.client_listen->first;
+        rc.port = _opt.client_listen->second;
+        for (const auto& [host, port] : _opt.relay_backends) {
+            rc.backends.push_back(kythira::hsm::relay_backend{host, port});
+        }
+        rc.max_connections = static_cast<std::size_t>(_opt.client_max_connections);
+        _relay = std::make_unique<kythira::hsm::endpoint_relay>(std::move(rc));
+        _relay->start();
     }
 
     void drain() override {
+        if (_relay) {
+            _relay->stop();
+        }
         if (_clients) {
             _clients->stop();
         }
@@ -488,6 +580,7 @@ public:
         }
         _vault.seal();
         _clients.reset();
+        _relay.reset();
         _admin.reset();
         _layer.reset();
         if (_audit) {
@@ -503,6 +596,20 @@ public:
         if (!_started) {
             return {false, "not started"};
         }
+        if (!_host) {  // an endpoint only
+            std::size_t up = 0;
+            for (std::size_t i = 0; i < _opt.relay_backends.size(); ++i) {
+                up += _relay->healthy(i) ? 1U : 0U;
+            }
+            if (up == 0) {
+                return {false, "no crypto node answers"};
+            }
+            return {true, "relaying to " + std::to_string(up) + " of " +
+                              std::to_string(_opt.relay_backends.size()) + " crypto nodes"};
+        }
+        if (!_plan.runs_crypto()) {
+            return {true, _host->catalog() ? "store only" : "store only, not initialized"};
+        }
         if (!_host->catalog()) {
             return {true, "not initialized"};
         }
@@ -510,8 +617,17 @@ public:
     }
 
     [[nodiscard]] auto metrics() const -> std::vector<service_node::module_metric> override {
+        std::vector<service_node::module_metric> relayed;
+        if (_relay) {
+            const auto r = _relay->stats();
+            relayed = {{"relay_accepted", static_cast<double>(r.accepted), {}},
+                       {"relay_refused", static_cast<double>(r.refused), {}},
+                       {"relay_closed_unhealthy", static_cast<double>(r.closed_unhealthy), {}},
+                       {"relay_bytes_to_backends", static_cast<double>(r.bytes_to_backends), {}},
+                       {"relay_bytes_to_clients", static_cast<double>(r.bytes_to_clients), {}}};
+        }
         if (!_host) {
-            return {};
+            return relayed;
         }
         const auto s = _host->stats();
         auto out = std::vector<service_node::module_metric>{
@@ -534,6 +650,7 @@ public:
             {"raft_term_sum", service_node::raft_term_sum(*_raft), {}},
             {"replica_lag_entries", static_cast<double>(s.replica_lag_entries), {}},
             {"replica_wait_seconds_total", static_cast<double>(s.replica_wait_us) / 1e6, {}}};
+        out.insert(out.end(), relayed.begin(), relayed.end());
         if (_audit) {
             auto more = _audit->metrics();
             out.insert(out.end(), std::make_move_iterator(more.begin()),
@@ -546,10 +663,32 @@ public:
     [[nodiscard]] auto api_port() const -> std::uint16_t { return _server ? _server->port() : 0; }
     /// The client listener's port once started.
     [[nodiscard]] auto client_port() const -> std::uint16_t {
-        return _clients ? _clients->tls_port() : 0;
+        return _clients ? _clients->tls_port() : _relay ? _relay->port() : 0;
     }
 
 private:
+    /// This node's own share, sealed at rest; false when the sealer refuses.
+    auto keep_share(const kythira::hsm::shamir_share& share) -> bool {
+        try {
+            return _shares->put(share);
+        } catch (const std::exception& e) {
+            // A KMS that refuses or is away (task 8b): nothing is
+            // committed, and the operator retries.
+            kythira::console_logger{_opt.log_level}.error(
+                std::string("node unseal: this member's share sealer refused: ") + e.what());
+            return false;
+        }
+    }
+
+    /// A share to another crypto node's share route.
+    auto send_share(const std::string& url, const kythira::hsm::shamir_share& share) -> bool {
+        const auto bin = kythira::hsm::shamir_encode_binary(share);
+        std::string body(reinterpret_cast<const char*>(bin.data()), bin.size());
+        const bool stored = _peers->deliver_share(url, body);
+        OPENSSL_cleanse(body.data(), body.size());
+        return stored;
+    }
+
     /// This node's share sealer (task 8): the key file, or (task 8b) a key
     /// the node's disk does not hold: a KMS key, a PKCS#11 token's, the
     /// TPM's.
@@ -662,10 +801,7 @@ private:
             return;  // the check value must be current, or old shares would be asked for
         }
         std::vector<kythira::hsm::node_unseal::fetch_fn> peers;
-        for (const auto& [id, url] : _opt.api_urls) {
-            if (id == _opt.node_id) {
-                continue;
-            }
+        for (const auto& url : share_holders()) {
             peers.emplace_back([this, url](std::span<const std::uint8_t, 8> check)
                                    -> std::optional<kythira::hsm::secret_bytes> {
                 auto body = _peers->request_share(url, check);
@@ -702,6 +838,29 @@ private:
         _last_node_unseal = outcome;
     }
 
+    /// The other nodes that hold shares: the catalog's crypto member list
+    /// once seeded (their KYTHIRA_HSM_CRYPTO_URLS), else the members.
+    [[nodiscard]] auto share_holders() const -> std::vector<std::string> {
+        std::vector<std::string> out;
+        const auto own = url_of(_opt.node_id);
+        const auto listed = _host->crypto_members();
+        if (listed.empty()) {
+            for (const auto& [id, url] : _opt.api_urls) {
+                if (id != _opt.node_id) {
+                    out.push_back(url);
+                }
+            }
+            return out;
+        }
+        for (const auto& identity : listed) {
+            const auto it = _opt.crypto_urls.find(identity);
+            if (it != _opt.crypto_urls.end() && it->second != own) {
+                out.push_back(it->second);
+            }
+        }
+        return out;
+    }
+
     [[nodiscard]] auto url_of(const kythira::host_node_id& id) const -> std::string {
         const auto it = _opt.api_urls.find(id);
         return it == _opt.api_urls.end() ? std::string() : it->second;
@@ -726,9 +885,27 @@ private:
         res.set(http::field::server, "kythira-hsm");
         const kythira::hsm::peer_caller caller{ctx.tls, ctx.client_verified, ctx.client_uri_sans,
                                                ctx.client_dns_sans};
-        if (auto share = kythira::hsm::serve_share_peer(*_shares, _peer_policy, caller,
-                                                        std::string_view(req.method_string()),
-                                                        target, req.body())) {
+        if (!_plan.runs_crypto()) {
+            // Requirement 2.2: no share is held here, and nothing that
+            // would put a master key in this node's memory is taken.
+            const std::string_view method = req.method_string();
+            const bool share_route = target == kythira::hsm::peer_share_route ||
+                                     target == kythira::hsm::peer_share_request_route;
+            const bool crypto_route =
+                (method == "POST" && (target == "/v1/init" || target == "/v1/rekey")) ||
+                target == "/v1/unseal";
+            if (share_route || crypto_route) {
+                res.result(share_route ? http::status::not_found : http::status::conflict);
+                res.set(http::field::content_type, "application/json");
+                res.body() = R"({"error":"no_crypto_role","message":"KYTHIRA_HSM_ROLES=)" +
+                             kythira::hsm::hsm_role_names(_opt.roles) +
+                             R"(: this node is never unsealed and holds no share"})";
+                res.prepare_payload();
+                return res;
+            }
+        } else if (auto share = kythira::hsm::serve_share_peer(
+                       *_shares, _peer_policy, caller, std::string_view(req.method_string()),
+                       target, req.body(), _host->crypto_members())) {
             res.result(share->status);
             res.set(http::field::content_type, "application/octet-stream");
             res.body() = std::move(share->body);
@@ -768,6 +945,7 @@ private:
     }
 
     hsm_options _opt;
+    kythira::hsm::hsm_role_plan _plan;
     kythira::hsm::key_vault _vault;
     std::unique_ptr<kythira::hsm::share_sealer> _sealer;
     std::unique_ptr<kythira::hsm::share_store> _shares;
@@ -785,6 +963,7 @@ private:
     kythira::hsm::peer_policy _peer_policy;
     std::unique_ptr<kythira::https::server> _server;
     std::unique_ptr<kythira::hsm::wire_server> _clients;
+    std::unique_ptr<kythira::hsm::endpoint_relay> _relay;
     std::atomic<bool> _driving{false};
     std::thread _driver;
     std::mutex _warden_mutex;

@@ -8,6 +8,8 @@
 // the Raft tuning names module_tuning() maps. usage_text() documents every
 // variable.
 
+#include <kythira/hsm/hsm_roles.hpp>
+
 #include <raft/console_logger.hpp>
 #include <raft/host_node_id.hpp>
 
@@ -21,16 +23,33 @@
 #include <string>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 namespace kythira::hsm_node {
 
 struct hsm_options {
     kythira::host_node_id node_id{kythira::host_node_id_from_number(1)};
 
+    // -- Layers (hsm-independent-layers task 1) --------------------------------
+    /// KYTHIRA_HSM_ROLES: the layers this node runs (hsm_roles.hpp); all
+    /// three unless set.
+    kythira::layers::role_set roles{kythira::hsm::all_hsm_roles()};
+    /// KYTHIRA_HSM_RELAY_BACKENDS: the crypto nodes' client listeners an
+    /// endpoint without the crypto role relays to.
+    std::vector<std::pair<std::string, std::uint16_t>> relay_backends;
+    /// KYTHIRA_HSM_STORE_CLIENTS: crypto identities that may use this
+    /// store member's store API without being members (peer_policy).
+    std::set<std::string> store_clients;
+    /// KYTHIRA_HSM_CRYPTO_URLS: identity -> HSM listener URL of every crypto
+    /// node, for init and rekey to hand shares to the catalog's crypto
+    /// member list and for node unseal to ask them; when unset the members
+    /// (KYTHIRA_HSM_API_URLS) are the crypto nodes, as before.
+    std::map<std::string, std::string> crypto_urls;
+
     // -- Members and the listener ---------------------------------------------
     /// Every member's HSM listener ("https://host:port"), this node
-    /// included: the voters of every HSM group, and where a follower
-    /// forwards to.
+    /// included when it has the store role: the voters of every HSM
+    /// group, and where a follower forwards to.
     std::map<kythira::host_node_id, std::string> api_urls;
     std::string api_bind{"0.0.0.0"};
     std::uint16_t api_port{9443};

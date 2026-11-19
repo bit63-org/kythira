@@ -87,6 +87,7 @@ ion services/hsm/cmd/hsm_node/hsm_config.cpp
 ion services/hsm/cmd/hsm_node/hsm_module_registrar.cpp
 ion services/hsm/cmd/hsm_node/main.cpp
 ion services/hsm/tests/hsm_node_cluster_test.cpp
+ion services/hsm/tests/hsm_node_config_test.cpp
 ion services/hsm/tests/docker/hsm_chaos_test.cpp
 ion services/hsm/tests/hsm_pkcs11_consumers_test.cpp
 ion services/hsm/tests/hsm_ca_cluster_test.cpp

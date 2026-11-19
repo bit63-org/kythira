@@ -143,6 +143,9 @@ public:
     virtual void kill(std::size_t i) = 0;
     virtual void start(std::size_t i) = 0;
     [[nodiscard]] virtual auto running(std::size_t i) const -> bool = 0;
+    /// Whether member i has the crypto role (hsm-independent-layers): a
+    /// store-only member is never unsealed and serves no client.
+    [[nodiscard]] virtual auto crypto(std::size_t /*i*/) const -> bool { return true; }
 
     /// One operator request to member i; nothing when the exchange failed.
     [[nodiscard]] auto admin(std::size_t i, std::string_view method, const std::string& target,
@@ -261,8 +264,9 @@ public:
     }
 
     /// With every member running: initializes the HSM in operator mode
-    /// (k = 2, n = 3), unseals every member, creates token 1 for the
-    /// application and sets its PINs. The shares are kept in `current`.
+    /// (k = 2, n = 3) through member 0, unseals every crypto member, creates
+    /// token 1 for the application and sets its PINs. The shares are kept
+    /// in `current`.
     void initialize(std::chrono::seconds timeout = std::chrono::seconds{120}) {
         for (std::size_t i = 0; i < size(); ++i) {
             BOOST_REQUIRE_MESSAGE(eventually([&] { return status(i).has_value(); }, timeout),
@@ -281,7 +285,9 @@ public:
             timeout));
         current = *shares;
         for (std::size_t i = 0; i < size(); ++i) {
-            BOOST_REQUIRE_MESSAGE(unseal(i, current), "member " << i + 1 << " stayed sealed");
+            if (crypto(i)) {
+                BOOST_REQUIRE_MESSAGE(unseal(i, current), "member " << i + 1 << " stayed sealed");
+            }
         }
         BOOST_REQUIRE(eventually(
             [&] {
@@ -435,34 +441,41 @@ inline auto ids_of(const std::map<std::string, CK_OBJECT_HANDLE>& m) -> std::set
     return out;
 }
 
-/// Checks that every member lists the same whole pairs, that `confirmed`
-/// are all among them, and that each pair signs on one member and
-/// verifies on the next. Returns the number of pairs.
+/// Checks that every crypto member lists the same whole pairs, that
+/// `confirmed` are all among them, and that each pair signs on one crypto
+/// member and verifies on the next. Returns the number of pairs.
 inline auto check_keys(const cluster_driver& cl, const std::set<std::string>& confirmed)
     -> std::size_t {
     struct view {
         std::map<std::string, CK_OBJECT_HANDLE> priv;
         std::map<std::string, CK_OBJECT_HANDLE> pub;
     };
-    std::vector<view> views(cl.size());
-    std::vector<std::optional<user_session>> sessions(cl.size());
+    std::vector<std::size_t> members;  // the ones that answer PKCS#11 calls
+    for (std::size_t i = 0; i < cl.size(); ++i) {
+        if (cl.crypto(i)) {
+            members.push_back(i);
+        }
+    }
+    BOOST_REQUIRE(!members.empty());
+    std::vector<view> views(members.size());
+    std::vector<std::optional<user_session>> sessions(members.size());
     const bool agreed = eventually(
         [&] {
-            for (std::size_t i = 0; i < cl.size(); ++i) {
-                sessions[i] = user_session::open(cl, i);
-                if (!sessions[i]) {
+            for (std::size_t m = 0; m < members.size(); ++m) {
+                sessions[m] = user_session::open(cl, members[m]);
+                if (!sessions[m]) {
                     return false;
                 }
-                auto priv = sessions[i]->by_id(CKO_PRIVATE_KEY);
-                auto pub = sessions[i]->by_id(CKO_PUBLIC_KEY);
+                auto priv = sessions[m]->by_id(CKO_PRIVATE_KEY);
+                auto pub = sessions[m]->by_id(CKO_PUBLIC_KEY);
                 if (!priv || !pub) {
                     return false;
                 }
-                views[i] = {std::move(*priv), std::move(*pub)};
+                views[m] = {std::move(*priv), std::move(*pub)};
             }
-            for (std::size_t i = 1; i < views.size(); ++i) {
-                if (ids_of(views[i].priv) != ids_of(views[0].priv) ||
-                    ids_of(views[i].pub) != ids_of(views[0].pub)) {
+            for (std::size_t m = 1; m < views.size(); ++m) {
+                if (ids_of(views[m].priv) != ids_of(views[0].priv) ||
+                    ids_of(views[m].pub) != ids_of(views[0].pub)) {
                     return false;
                 }
             }
@@ -477,15 +490,15 @@ inline auto check_keys(const cluster_driver& cl, const std::set<std::string>& co
     }
     std::size_t n = 0;
     for (const auto& id : priv_ids) {
-        const auto a = n % cl.size();
-        const auto b = (n + 1) % cl.size();
+        const auto a = n % members.size();
+        const auto b = (n + 1) % members.size();
         const std::string text = "signed by " + id;
         const std::vector<std::uint8_t> data(text.begin(), text.end());
         const auto sig = sessions[a]->sign(views[a].priv.at(id), data);
-        BOOST_TEST(sig.has_value(), "key " << id << " signs on member " << a + 1);
+        BOOST_TEST(sig.has_value(), "key " << id << " signs on member " << members[a] + 1);
         if (sig) {
             BOOST_TEST(sessions[b]->verify(views[b].pub.at(id), data, *sig) == CKR_OK,
-                       "key " << id << "'s signature verifies on member " << b + 1);
+                       "key " << id << "'s signature verifies on member " << members[b] + 1);
         }
         ++n;
     }
