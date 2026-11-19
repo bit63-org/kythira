@@ -95,6 +95,10 @@ kythira_sns_test(sns_front_end_test sns_front_end_test.cpp)
 # Publish and PublishBatch with FIFO deduplication).
 kythira_sns_test(sns_service_test sns_service_test.cpp)
 
+# Task 5, Requirement 6.2: filter policies, every operator in both scopes,
+# $or, arrays, attribute data types, and the grammar and limit errors.
+kythira_sns_test(sns_filter_policy_test sns_filter_policy_test.cpp)
+
 # Task 3: the checked-in action table is what tools/gen_sns_actions.py makes
 # of the pinned service reference.
 add_test(NAME sns_actions_up_to_date
