@@ -15,7 +15,11 @@
 ///   `If-None-Match: *` and `If-Match` are honoured with 412
 ///   `PreconditionFailed`; a `Content-MD5` that does not match the body is 400
 ///   `BadDigest`. PUT `/<bucket>` creates the bucket.
-/// - GET `/<bucket>/<key>`: the body and its ETag, or 404 `NoSuchKey`.
+/// - GET `/<bucket>/<key>`: the body and its ETag, or 404 `NoSuchKey`
+///   (cpp-httplib answers HEAD and `Range` from the same handler).
+/// - Bodies in `aws-chunked` encoding (the Java SDK v2's default for
+///   PutObject, e.g. from the Iceberg REST catalog's S3FileIO) are decoded
+///   before they are stored.
 /// - DELETE `/<bucket>/<key>`, with `If-Match`.
 /// - GET `/<bucket>?list-type=2`: ListObjectsV2 with `prefix`, `max-keys` and
 ///   `continuation-token`.
@@ -47,6 +51,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <exception>
 #include <map>
 #include <mutex>
 #include <optional>
@@ -282,7 +287,16 @@ private:
 
         const std::string bucket = req.matches[1];
         const std::string key = req.matches[2];
-        const auto hex = kythira::object_store_persistence_detail::md5_hex(req.body);
+        std::string body = req.body;
+        if (is_aws_chunked(req)) {
+            auto decoded = decode_aws_chunked(req.body);
+            if (!decoded) {
+                error(res, 400, "IncompleteBody", "The aws-chunked body is malformed");
+                return;
+            }
+            body = std::move(*decoded);
+        }
+        const auto hex = kythira::object_store_persistence_detail::md5_hex(body);
         if (req.has_header("Content-MD5") &&
             req.get_header_value("Content-MD5") != md5_hex_to_base64(hex)) {
             error(res, 400, "BadDigest", "The Content-MD5 you specified did not match");
@@ -309,11 +323,53 @@ private:
                 return;
             }
         }
-        stored_object stored{req.body, "\"" + hex + "\""};
+        stored_object stored{std::move(body), "\"" + hex + "\""};
         res.set_header("ETag", stored.etag);
         objects[key] = std::move(stored);
         _put_log.push_back(key);
         res.status = 200;
+    }
+
+    /// The AWS SDKs for Java v2 (and others, over plain HTTP or with
+    /// flexible checksums) send PutObject bodies in `aws-chunked` encoding:
+    /// `<hex size>[;chunk-signature=...]\r\n<bytes>\r\n` repeated, a zero
+    /// chunk, then optional trailers such as `x-amz-checksum-crc32`.
+    [[nodiscard]] static auto is_aws_chunked(const httplib::Request& req) -> bool {
+        return req.get_header_value("x-amz-content-sha256").starts_with("STREAMING-") ||
+               req.get_header_value("Content-Encoding").find("aws-chunked") != std::string::npos;
+    }
+
+    [[nodiscard]] static auto decode_aws_chunked(std::string_view in)
+        -> std::optional<std::string> {
+        std::string out;
+        std::size_t pos = 0;
+        while (true) {
+            const auto eol = in.find("\r\n", pos);
+            if (eol == std::string_view::npos) {
+                return std::nullopt;
+            }
+            const auto header = in.substr(pos, eol - pos);
+            const auto hex = header.substr(0, header.find(';'));
+            std::size_t size = 0;
+            try {
+                std::size_t used = 0;
+                size = std::stoull(std::string(hex), &used, 16);
+                if (used != hex.size()) {
+                    return std::nullopt;
+                }
+            } catch (const std::exception&) {
+                return std::nullopt;
+            }
+            pos = eol + 2;
+            if (size == 0) {
+                return out;  // trailers, if any, follow; nothing to keep
+            }
+            if (in.size() < pos + size + 2 || in.substr(pos + size, 2) != "\r\n") {
+                return std::nullopt;
+            }
+            out.append(in.substr(pos, size));
+            pos += size + 2;
+        }
     }
 
     auto handle_get(const httplib::Request& req, httplib::Response& res) -> void {
