@@ -16,9 +16,9 @@ SNS's `ErrorResponse` XML, with the message `Could not find operation
 unsigned caller gets SigV4's error instead. Task 12's recorded SNS
 responses pin the exact message.
 
-The pinned model has 42 operations. 12 are implemented (the topic,
-attribute, tag, permission and data protection operations of task 4).
-9 more are planned in task 4: the subscription operations and publishing.
+The pinned model has 42 operations. 19 are implemented (the topic,
+attribute, tag, permission, data protection and subscription operations
+of task 4). 2 more are planned in task 4: Publish and PublishBatch.
 The other 21 are SMS (11) and mobile push (10), which the spec leaves out
 of scope: they stay here for good, with the same error.
 
@@ -29,7 +29,6 @@ Kythira does not enforce it (no message is audited, masked or denied).
 | Operation | Planned | Reason | Error |
 |---|---|---|---|
 | `CheckIfPhoneNumberIsOptedOut` | none (out of scope) | SMS has no Kythira counterpart. | `InvalidAction`, HTTP 400 |
-| `ConfirmSubscription` | task 4 | Not built yet (topic and subscription API). | `InvalidAction`, HTTP 400 |
 | `CreatePlatformApplication` | none (out of scope) | Mobile push (platform applications and endpoints) has no Kythira counterpart. | `InvalidAction`, HTTP 400 |
 | `CreatePlatformEndpoint` | none (out of scope) | Mobile push (platform applications and endpoints) has no Kythira counterpart. | `InvalidAction`, HTTP 400 |
 | `CreateSMSSandboxPhoneNumber` | none (out of scope) | SMS has no Kythira counterpart. | `InvalidAction`, HTTP 400 |
@@ -40,21 +39,15 @@ Kythira does not enforce it (no message is audited, masked or denied).
 | `GetPlatformApplicationAttributes` | none (out of scope) | Mobile push (platform applications and endpoints) has no Kythira counterpart. | `InvalidAction`, HTTP 400 |
 | `GetSMSAttributes` | none (out of scope) | SMS has no Kythira counterpart. | `InvalidAction`, HTTP 400 |
 | `GetSMSSandboxAccountStatus` | none (out of scope) | SMS has no Kythira counterpart. | `InvalidAction`, HTTP 400 |
-| `GetSubscriptionAttributes` | task 4 | Not built yet (topic and subscription API). | `InvalidAction`, HTTP 400 |
 | `ListEndpointsByPlatformApplication` | none (out of scope) | Mobile push (platform applications and endpoints) has no Kythira counterpart. | `InvalidAction`, HTTP 400 |
 | `ListOriginationNumbers` | none (out of scope) | SMS has no Kythira counterpart. | `InvalidAction`, HTTP 400 |
 | `ListPhoneNumbersOptedOut` | none (out of scope) | SMS has no Kythira counterpart. | `InvalidAction`, HTTP 400 |
 | `ListPlatformApplications` | none (out of scope) | Mobile push (platform applications and endpoints) has no Kythira counterpart. | `InvalidAction`, HTTP 400 |
 | `ListSMSSandboxPhoneNumbers` | none (out of scope) | SMS has no Kythira counterpart. | `InvalidAction`, HTTP 400 |
-| `ListSubscriptions` | task 4 | Not built yet (topic and subscription API). | `InvalidAction`, HTTP 400 |
-| `ListSubscriptionsByTopic` | task 4 | Not built yet (topic and subscription API). | `InvalidAction`, HTTP 400 |
 | `OptInPhoneNumber` | none (out of scope) | SMS has no Kythira counterpart. | `InvalidAction`, HTTP 400 |
 | `Publish` | task 4 | Not built yet (publishing). | `InvalidAction`, HTTP 400 |
 | `PublishBatch` | task 4 | Not built yet (publishing). | `InvalidAction`, HTTP 400 |
 | `SetEndpointAttributes` | none (out of scope) | Mobile push (platform applications and endpoints) has no Kythira counterpart. | `InvalidAction`, HTTP 400 |
 | `SetPlatformApplicationAttributes` | none (out of scope) | Mobile push (platform applications and endpoints) has no Kythira counterpart. | `InvalidAction`, HTTP 400 |
 | `SetSMSAttributes` | none (out of scope) | SMS has no Kythira counterpart. | `InvalidAction`, HTTP 400 |
-| `SetSubscriptionAttributes` | task 4 | Not built yet (topic and subscription API). | `InvalidAction`, HTTP 400 |
-| `Subscribe` | task 4 | Not built yet (topic and subscription API). | `InvalidAction`, HTTP 400 |
-| `Unsubscribe` | task 4 | Not built yet (topic and subscription API). | `InvalidAction`, HTTP 400 |
 | `VerifySMSSandboxPhoneNumber` | none (out of scope) | SMS has no Kythira counterpart. | `InvalidAction`, HTTP 400 |

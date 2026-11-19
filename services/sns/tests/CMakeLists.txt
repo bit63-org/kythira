@@ -88,9 +88,10 @@ kythira_sns_test(sns_topic_state_machine_test sns_topic_state_machine_test.cpp)
 kythira_sns_test(sns_gateway_inputs_test sns_gateway_inputs_test.cpp)
 kythira_sns_test(sns_front_end_test sns_front_end_test.cpp)
 
-# Task 4, Requirement 4.1: the topic operations end to end through the front
-# end and a local topic store (attributes, policies, tags, pages, data
-# protection, deletion and ids that are never reused).
+# Task 4, Requirements 4.1 and 4.2: the topic and subscription operations
+# end to end through the front end and a local topic store (attributes,
+# policies, tags, pages, data protection, deletion and ids that are never
+# reused, confirmation tokens, endpoints and subscription attributes).
 kythira_sns_test(sns_service_test sns_service_test.cpp)
 
 # Task 3: the checked-in action table is what tools/gen_sns_actions.py makes

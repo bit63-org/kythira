@@ -8,7 +8,11 @@
 // default and edited topic policy (AddPermission, RemovePermission, and
 // what authorization sees), ListTopics pages and tokens, tags and their
 // limits, data protection policies, deletion and ids that are never
-// reused, and a cross-account caller acting on the owner's topic.
+// reused, and a cross-account caller acting on the owner's topic. Then the
+// subscription operations (Requirement 4.2): which protocols wait for a
+// confirmation token, tokens that work once and expire, endpoints checked
+// against their protocol and FIFO topics, subscription attributes, ARNs
+// that name their own topic, and both list operations' pages.
 
 #define BOOST_TEST_MODULE sns_service_test
 #include <boost/test/unit_test.hpp>
@@ -483,6 +487,210 @@ BOOST_FIXTURE_TEST_CASE(delete_then_recreate_takes_a_new_id, fixture) {
     BOOST_TEST(call("DeleteTopic", {{"TopicArn", arn}})._status == 200U);
     create("orders");
     BOOST_TEST(store.find_topic(k_account, "orders")->_id > first);
+}
+
+BOOST_AUTO_TEST_SUITE_END()
+
+// ---- subscriptions (Requirements 4.1 and 4.2) ------------------------------
+
+namespace {
+
+constexpr std::string_view k_queue = "arn:aws:sqs:us-east-1:111122223333:orders-queue";
+
+struct subscription_fixture : fixture {
+    std::string arn = create("orders");
+
+    auto subscribe(std::string protocol, std::string endpoint,
+                   std::vector<std::pair<std::string, std::string>> extra = {})
+        -> sns::front_end_response {
+        extra.insert(extra.begin(), {{"TopicArn", arn},
+                                     {"Protocol", std::move(protocol)},
+                                     {"Endpoint", std::move(endpoint)}});
+        return call("Subscribe", extra);
+    }
+
+    /// The pending token of the topic's only (or last) subscription.
+    auto token() -> std::string {
+        const auto subs = store.subscriptions_of(store.find_topic(k_account, "orders")->_id);
+        BOOST_REQUIRE(!subs.empty());
+        return subs.back()._token;
+    }
+};
+
+}  // namespace
+
+BOOST_AUTO_TEST_SUITE(subscriptions)
+
+BOOST_FIXTURE_TEST_CASE(an_sqs_queue_in_the_same_account_needs_no_confirmation,
+                        subscription_fixture) {
+    const auto r = subscribe("sqs", std::string(k_queue));
+    BOOST_TEST_REQUIRE(r._status == 200U, r._body);
+    const auto sub = element(r._body, "SubscriptionArn");
+    BOOST_TEST(sub.starts_with(arn + ":"));
+    BOOST_TEST(sub.size() == arn.size() + 37U);
+
+    const auto attrs = call("GetSubscriptionAttributes", {{"SubscriptionArn", sub}});
+    BOOST_TEST_REQUIRE(attrs._status == 200U, attrs._body);
+    BOOST_TEST(entry(attrs._body, "SubscriptionArn") == sub);
+    BOOST_TEST(entry(attrs._body, "TopicArn") == arn);
+    BOOST_TEST(entry(attrs._body, "Protocol") == "sqs");
+    BOOST_TEST(entry(attrs._body, "Endpoint") == k_queue);
+    BOOST_TEST(entry(attrs._body, "Owner") == k_account);
+    BOOST_TEST(entry(attrs._body, "PendingConfirmation") == "false");
+    BOOST_TEST(entry(attrs._body, "RawMessageDelivery") == "false");
+    BOOST_TEST(entry(attrs._body, "EffectiveDeliveryPolicy") == "<absent>");
+    BOOST_TEST(entry(attributes(arn), "SubscriptionsConfirmed") == "1");
+
+    // The same endpoint again is the same subscription.
+    BOOST_TEST(element(subscribe("sqs", std::string(k_queue))._body, "SubscriptionArn") == sub);
+    const auto different = subscribe(
+        "sqs", std::string(k_queue),
+        {{"Attributes.entry.1.key", "RawMessageDelivery"}, {"Attributes.entry.1.value", "true"}});
+    BOOST_TEST(code(different) == "InvalidParameter");
+}
+
+BOOST_FIXTURE_TEST_CASE(http_waits_for_its_token, subscription_fixture) {
+    const auto r = subscribe("https", "https://example.com/hook");
+    BOOST_TEST(element(r._body, "SubscriptionArn") == "pending confirmation");
+    BOOST_TEST(entry(attributes(arn), "SubscriptionsPending") == "1");
+    const auto t = token();
+    BOOST_TEST(t.size() == 256U);
+
+    auto listed = call("ListSubscriptionsByTopic", {{"TopicArn", arn}});
+    BOOST_TEST(element(listed._body, "SubscriptionArn") == "PendingConfirmation");
+
+    BOOST_TEST(code(call("ConfirmSubscription", {{"TopicArn", arn}, {"Token", "nope"}})) ==
+               "InvalidParameter");
+    const auto confirmed = call("ConfirmSubscription", {{"TopicArn", arn}, {"Token", t}});
+    BOOST_TEST_REQUIRE(confirmed._status == 200U, confirmed._body);
+    const auto sub = element(confirmed._body, "SubscriptionArn");
+    BOOST_TEST(sub.starts_with(arn + ":"));
+    listed = call("ListSubscriptionsByTopic", {{"TopicArn", arn}});
+    BOOST_TEST(element(listed._body, "SubscriptionArn") == sub);
+    const auto attrs = call("GetSubscriptionAttributes", {{"SubscriptionArn", sub}});
+    BOOST_TEST(entry(attrs._body, "PendingConfirmation") == "false");
+    BOOST_TEST(entry(attrs._body, "ConfirmationWasAuthenticated") == "true");
+    BOOST_TEST(unescape(entry(attrs._body, "EffectiveDeliveryPolicy")) ==
+               sns::k_default_effective_delivery_policy);
+    // A token works once.
+    BOOST_TEST(code(call("ConfirmSubscription", {{"TopicArn", arn}, {"Token", t}})) ==
+               "InvalidParameter");
+}
+
+BOOST_FIXTURE_TEST_CASE(a_token_expires_after_three_days, subscription_fixture) {
+    subscribe("email", "ops@example.com");
+    const auto t = token();
+    now += sns::k_confirmation_window_ms;
+    BOOST_TEST(code(call("ConfirmSubscription", {{"TopicArn", arn}, {"Token", t}})) ==
+               "InvalidParameter");
+}
+
+BOOST_FIXTURE_TEST_CASE(return_subscription_arn_and_cross_account_queues, subscription_fixture) {
+    const auto r = subscribe("sqs", "arn:aws:sqs:us-east-1:444455556666:theirs",
+                             {{"ReturnSubscriptionArn", "true"}});
+    const auto sub = element(r._body, "SubscriptionArn");
+    BOOST_TEST(sub.starts_with(arn + ":"));
+    const auto attrs = call("GetSubscriptionAttributes", {{"SubscriptionArn", sub}});
+    BOOST_TEST(entry(attrs._body, "PendingConfirmation") == "true");
+}
+
+BOOST_FIXTURE_TEST_CASE(endpoints_must_match_their_protocol, subscription_fixture) {
+    BOOST_TEST(code(subscribe("http", "https://example.com/")) == "InvalidParameter");
+    BOOST_TEST(code(subscribe("https", "ftp://example.com/")) == "InvalidParameter");
+    BOOST_TEST(code(subscribe("email", "nobody")) == "InvalidParameter");
+    BOOST_TEST(code(subscribe("sqs", "my-queue")) == "InvalidParameter");
+    BOOST_TEST(code(subscribe("sms", "+15555550100")) == "InvalidParameter");
+    BOOST_TEST(code(subscribe("firehose", "arn:aws:firehose:us-east-1:111122223333:stream/s")) ==
+               "InvalidParameter");
+    BOOST_TEST(code(subscribe("email", "ops@example.com",
+                              {{"Attributes.entry.1.key", "RawMessageDelivery"},
+                               {"Attributes.entry.1.value", "true"}})) == "InvalidParameter");
+    BOOST_TEST(code(subscribe("sqs", std::string(k_queue),
+                              {{"Attributes.entry.1.key", "RedrivePolicy"},
+                               {"Attributes.entry.1.value", "{}"}})) == "InvalidParameter");
+    BOOST_TEST(store.machine().subscription_count() == 0U);
+}
+
+BOOST_FIXTURE_TEST_CASE(a_fifo_topic_takes_only_fifo_queues, fixture) {
+    const auto fifo = create("jobs.fifo", {{"Attributes.entry.1.key", "FifoTopic"},
+                                           {"Attributes.entry.1.value", "true"}});
+    const auto sub = [&](std::string protocol, std::string endpoint) {
+        return call("Subscribe",
+                    {{"TopicArn", fifo}, {"Protocol", protocol}, {"Endpoint", endpoint}});
+    };
+    BOOST_TEST(message(sub("https", "https://example.com/")) ==
+               "Invalid parameter: Invalid protocol type: https");
+    BOOST_TEST(message(sub("sqs", std::string(k_queue))) ==
+               "Invalid parameter: Endpoint Reason: Please use FIFO SQS queue");
+    BOOST_TEST(sub("sqs", std::string(k_queue) + ".fifo")._status == 200U);
+}
+
+BOOST_FIXTURE_TEST_CASE(set_attributes_and_unsubscribe, subscription_fixture) {
+    const auto sub = element(subscribe("sqs", std::string(k_queue))._body, "SubscriptionArn");
+    BOOST_TEST(call("SetSubscriptionAttributes", {{"SubscriptionArn", sub},
+                                                  {"AttributeName", "RawMessageDelivery"},
+                                                  {"AttributeValue", "true"}})
+                   ._status == 200U);
+    const std::string policy = R"({"store":["example_corp"]})";
+    BOOST_TEST(call("SetSubscriptionAttributes", {{"SubscriptionArn", sub},
+                                                  {"AttributeName", "FilterPolicy"},
+                                                  {"AttributeValue", policy}})
+                   ._status == 200U);
+    const auto attrs = call("GetSubscriptionAttributes", {{"SubscriptionArn", sub}});
+    BOOST_TEST(entry(attrs._body, "RawMessageDelivery") == "true");
+    BOOST_TEST(unescape(entry(attrs._body, "FilterPolicy")) == policy);
+    BOOST_TEST(code(call("SetSubscriptionAttributes", {{"SubscriptionArn", sub},
+                                                       {"AttributeName", "Colour"},
+                                                       {"AttributeValue", "red"}})) ==
+               "InvalidParameter");
+
+    BOOST_TEST(call("Unsubscribe", {{"SubscriptionArn", sub}})._status == 200U);
+    const auto gone = call("GetSubscriptionAttributes", {{"SubscriptionArn", sub}});
+    BOOST_TEST(gone._status == 404U);
+    BOOST_TEST(message(gone) == "Subscription does not exist");
+    BOOST_TEST(code(call("Unsubscribe", {{"SubscriptionArn", sub}})) == "NotFound");
+    BOOST_TEST(code(call("Unsubscribe", {{"SubscriptionArn", arn + ":not-a-uuid"}})) ==
+               "InvalidParameter");
+}
+
+BOOST_FIXTURE_TEST_CASE(a_subscription_arn_names_its_own_topic, subscription_fixture) {
+    const auto sub = element(subscribe("sqs", std::string(k_queue))._body, "SubscriptionArn");
+    const auto other = create("other");
+    const auto moved = other + sub.substr(arn.size());
+    BOOST_TEST(code(call("GetSubscriptionAttributes", {{"SubscriptionArn", moved}})) == "NotFound");
+}
+
+BOOST_FIXTURE_TEST_CASE(list_subscriptions_pages_the_callers_own, subscription_fixture) {
+    for (int i = 0; i < 120; ++i) {
+        subscribe("sqs", std::string(k_queue) + std::to_string(i));
+    }
+    auth.as(k_other);
+    call("Subscribe", {{"TopicArn", arn},
+                       {"Protocol", "sqs"},
+                       {"Endpoint", "arn:aws:sqs:us-east-1:444455556666:theirs"}});
+    auth.as(k_account);
+
+    const auto first = call("ListSubscriptions");
+    BOOST_TEST(count(first._body, "<member>") == 100U);
+    const auto token = element(first._body, "NextToken");
+    BOOST_TEST(!token.empty());
+    const auto second = call("ListSubscriptions", {{"NextToken", token}});
+    BOOST_TEST(count(second._body, "<member>") == 20U);
+    BOOST_TEST(element(second._body, "NextToken").empty());
+    BOOST_TEST(second._body.find("theirs") == std::string::npos);
+
+    // By topic shows everyone's.
+    const auto by_topic = call("ListSubscriptionsByTopic", {{"TopicArn", arn}});
+    const auto rest =
+        call("ListSubscriptionsByTopic",
+             {{"TopicArn", arn}, {"NextToken", element(by_topic._body, "NextToken")}});
+    BOOST_TEST(count(rest._body, "<member>") == 21U);
+    BOOST_TEST(code(call("ListSubscriptionsByTopic", {{"TopicArn", arn}, {"NextToken", token}})) ==
+               "InvalidParameter");
+
+    // Deleting the topic drops its subscriptions.
+    call("DeleteTopic", {{"TopicArn", arn}});
+    BOOST_TEST(count(call("ListSubscriptions")._body, "<member>") == 0U);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

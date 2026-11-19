@@ -90,8 +90,14 @@ first builds it to that design). Each task is one PR unless noted.
     ListTopics, Tag/Untag/ListTagsForResource, Add/RemovePermission,
     Get/PutDataProtectionPolicy) over a `topic_store` (a local one over a
     single state machine; routing topics to groups is task 9), and
-    `sns_service_test` through the front end. Still open: the subscription
-    operations with confirmation tokens, and Publish/PublishBatch.
+    `sns_service_test` through the front end.
+  - Part done (November 19, 2026): the 7 subscription operations.
+    HTTP/HTTPS, email and cross-account SQS subscriptions wait for a
+    256-hex-character token valid three days; same-account SQS, Lambda
+    and Firehose do not (Requirement 4.2). Sending the confirmation
+    message is delivery's (task 6). Subscription ARNs end in the topic and
+    subscription ids in UUID form, so they are never reused. Still open:
+    Publish and PublishBatch.
 
 - [ ] 5. Filter policies
   - _Requirements: 6.2_
