@@ -761,6 +761,17 @@ auto multi_raft<Types, Key, GroupId>::tick() -> tick_report {
     using clock = std::chrono::steady_clock;
 
     tick_report report;
+    // How long the caller left this host unticked. A gap and a slow phase
+    // both starve every leader here of heartbeats, and they have opposite
+    // culprits (the driver versus this host's own work), so both are timed;
+    // see warn_if_slow_tick().
+    const auto tick_started = clock::now();
+    const auto previous_tick_ns = _last_tick_started_ns.exchange(
+        tick_started.time_since_epoch().count(), std::memory_order_relaxed);
+    if (previous_tick_ns != 0) {
+        report._gap_since_last_tick =
+            tick_started - clock::time_point(clock::duration(previous_tick_ns));
+    }
     std::vector<group_ptr> hibernating;
     auto ready = select_ready(hibernating);
 
@@ -951,7 +962,37 @@ auto multi_raft<Types, Key, GroupId>::tick() -> tick_report {
     maybe_heartbeat();
 
     evaluate_hibernation(ready);
+    warn_if_slow_tick(report);
     return report;
+}
+
+template<raft_types Types, shard_key Key, raft_group_id GroupId>
+auto multi_raft<Types, Key, GroupId>::warn_if_slow_tick(const tick_report& report) -> void {
+    // Half the shortest election timeout: a leader whose host goes that long
+    // without driving it is already close to being voted out by followers
+    // that stopped hearing from it. A healthy tick takes microseconds, so this
+    // never fires on a merely busy machine, only on a stall worth explaining
+    // (multi_raft_split_integration_test, 2026-11-18: a leader's tick went
+    // silent for 430 ms right after it proposed a split, a follower won the
+    // next election, and nothing in the log said where the time went).
+    const auto threshold =
+        std::chrono::duration_cast<std::chrono::nanoseconds>(_cfg.config.election_timeout_min()) /
+        2;
+    if (report.total_duration() < threshold && report._gap_since_last_tick < threshold) {
+        return;
+    }
+    const auto ms = [](std::chrono::nanoseconds d) {
+        return std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(d).count());
+    };
+    _slow_ticks.fetch_add(1, std::memory_order_relaxed);
+    _cfg.logger.warning("Slow tick: leaders on this host went without heartbeats",
+                        {{"gap_since_last_tick_ms", ms(report._gap_since_last_tick)},
+                         {"persist_ms", ms(report._persist_duration)},
+                         {"send_ms", ms(report._send_duration)},
+                         {"apply_ms", ms(report._apply_duration)},
+                         {"policy_ms", ms(report._policy_duration)},
+                         {"threshold_ms", ms(threshold)},
+                         {"groups", std::to_string(report._ready_count)}});
 }
 
 template<raft_types Types, shard_key Key, raft_group_id GroupId>
