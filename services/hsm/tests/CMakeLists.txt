@@ -91,6 +91,13 @@ set_tests_properties(hsm_remote_store_test PROPERTIES
 kythira_hsm_test(hsm_roles_test hsm_roles_test.cpp)
 set_tests_properties(hsm_roles_test PROPERTIES
     LABELS "unit;hsm;hsm-module" TIMEOUT 60)
+# ... and the module's configuration for each role set (hsm_config.cpp).
+if(TARGET kythira_hsm_node_common)
+    kythira_hsm_test(hsm_node_config_test hsm_node_config_test.cpp)
+    target_link_libraries(hsm_node_config_test PRIVATE kythira_hsm_node_common)
+    set_tests_properties(hsm_node_config_test PROPERTIES
+        LABELS "unit;hsm;hsm-module" TIMEOUT 60)
+endif()
 
 # Task 6d: forwarding between members over HTTPS with client certificates
 # (wire format, membership, refusals before the host is asked) and the

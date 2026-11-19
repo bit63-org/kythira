@@ -178,6 +178,34 @@ auto socket_allow_of(const char* name, const std::string& text)
     return out;
 }
 
+/// `host:port,host:port,...`
+auto endpoints_of(const char* name, const std::string& text)
+    -> std::vector<std::pair<std::string, std::uint16_t>> {
+    std::vector<std::pair<std::string, std::uint16_t>> out;
+    for (const auto& item : list_of(text)) {
+        out.push_back(split_listen(name, item));
+    }
+    return out;
+}
+
+/// `identity=url,...`. An identity (a URI SAN) may itself hold '=', so the
+/// split is at the "=http" that starts the URL.
+auto identity_urls_of(const char* name, const std::string& text)
+    -> std::map<std::string, std::string> {
+    std::map<std::string, std::string> out;
+    for (const auto& item : list_of(text)) {
+        const auto eq = item.rfind("=http");
+        if (eq == std::string::npos || eq == 0) {
+            throw fail(std::string(name) + " expects identity=https://host:port[,...], got '" +
+                       item + "'");
+        }
+        if (!out.emplace(item.substr(0, eq), item.substr(eq + 1)).second) {
+            throw fail(std::string(name) + " names " + item.substr(0, eq) + " twice");
+        }
+    }
+    return out;
+}
+
 }  // namespace
 
 auto composite_env(env_fn env) -> env_fn {
@@ -283,16 +311,42 @@ auto from_env(const env_fn& env) -> hsm_options {
     }
 
     o.insecure_plaintext = bool_opt(env, "KYTHIRA_HSM_INSECURE_PLAINTEXT", false);
+    if (const auto roles = env("KYTHIRA_HSM_ROLES")) {
+        o.roles = kythira::hsm::parse_hsm_roles(*roles);
+    }
+    const kythira::hsm::hsm_role_plan plan{o.roles};
     o.api_urls = id_map("KYTHIRA_HSM_API_URLS", get_required(env, "KYTHIRA_HSM_API_URLS"));
-    if (!o.api_urls.contains(o.node_id)) {
+    if (plan.runs_store() && !o.api_urls.contains(o.node_id)) {
         throw fail("KYTHIRA_HSM_API_URLS must include this node's own id " +
                    kythira::host_node_id_text(o.node_id));
+    }
+    if (!plan.runs_store() && o.api_urls.contains(o.node_id)) {
+        throw fail(
+            "KYTHIRA_HSM_API_URLS lists this node, but without the store role it is "
+            "no member of the HSM's groups (KYTHIRA_HSM_ROLES=" +
+            kythira::hsm::hsm_role_names(o.roles) + ")");
     }
     const std::string scheme = o.insecure_plaintext ? "http://" : "https://";
     for (const auto& [id, url] : o.api_urls) {
         if (!url.starts_with(scheme)) {
             throw fail("KYTHIRA_HSM_API_URLS: " + url + " is not an " + scheme +
                        " URL (plaintext only with KYTHIRA_HSM_INSECURE_PLAINTEXT)");
+        }
+    }
+    o.relay_backends =
+        endpoints_of("KYTHIRA_HSM_RELAY_BACKENDS", get_opt(env, "KYTHIRA_HSM_RELAY_BACKENDS"));
+    if (!o.relay_backends.empty() && !plan.relays_clients()) {
+        throw fail(
+            "KYTHIRA_HSM_RELAY_BACKENDS is set, but only an endpoint without the crypto "
+            "role relays (KYTHIRA_HSM_ROLES=" +
+            kythira::hsm::hsm_role_names(o.roles) + ")");
+    }
+    o.store_clients = list_of(get_opt(env, "KYTHIRA_HSM_STORE_CLIENTS"));
+    o.crypto_urls =
+        identity_urls_of("KYTHIRA_HSM_CRYPTO_URLS", get_opt(env, "KYTHIRA_HSM_CRYPTO_URLS"));
+    for (const auto& [identity, url] : o.crypto_urls) {
+        if (!url.starts_with(scheme)) {
+            throw fail("KYTHIRA_HSM_CRYPTO_URLS: " + url + " is not an " + scheme + " URL");
         }
     }
     const auto listen = split_listen("KYTHIRA_HSM_API_LISTEN",
@@ -325,7 +379,17 @@ auto from_env(const env_fn& env) -> hsm_options {
     }
 
     const auto client_listen = get_opt(env, "KYTHIRA_HSM_CLIENT_LISTEN", "0.0.0.0:9444");
-    if (client_listen == "off" || o.insecure_plaintext) {
+    if (plan.relays_clients()) {
+        // An endpoint without crypto relays this listener at layer 4 and
+        // never sees the TLS inside, plaintext or not (hsm-independent-
+        // layers Requirement 6).
+        if (client_listen == "off") {
+            throw fail(
+                "KYTHIRA_HSM_CLIENT_LISTEN is off, but an endpoint without the crypto "
+                "role relays clients on it");
+        }
+        o.client_listen = split_listen("KYTHIRA_HSM_CLIENT_LISTEN", client_listen);
+    } else if (client_listen == "off" || o.insecure_plaintext) {
         // Plaintext has no client identity to bind tokens to: the socket
         // is the only way in then.
         o.client_listen.reset();
@@ -334,6 +398,12 @@ auto from_env(const env_fn& env) -> hsm_options {
     }
     o.app_ca = get_opt(env, "KYTHIRA_HSM_APP_CA", o.client_ca);
     o.socket_path = get_opt(env, "KYTHIRA_HSM_SOCKET");
+    if (!o.socket_path.empty() && !plan.runs_crypto()) {
+        throw fail(
+            "KYTHIRA_HSM_SOCKET: the Unix socket serves clients on this host from its "
+            "own crypto layer, and KYTHIRA_HSM_ROLES=" +
+            kythira::hsm::hsm_role_names(o.roles) + " has none");
+    }
     o.socket_allow =
         socket_allow_of("KYTHIRA_HSM_SOCKET_ALLOW", get_opt(env, "KYTHIRA_HSM_SOCKET_ALLOW"));
     if (!o.socket_path.empty() && o.socket_allow.empty()) {
@@ -432,6 +502,23 @@ auto from_env(const env_fn& env) -> hsm_options {
         throw fail("KYTHIRA_LOG_LEVEL must be trace, debug, info, warning, error or critical");
     }
     o.log_level = it->second;
+
+    kythira::hsm::hsm_role_inputs in;
+    in.roles = o.roles;
+    in.has_store_urls = !o.api_urls.empty();
+    in.has_relay_backends = !o.relay_backends.empty();
+    // The TLS files are required above unless KYTHIRA_HSM_INSECURE_PLAINTEXT
+    // (tests), which covers every listener.
+    in.has_peer_tls = true;
+    in.has_raft_peers = plan.runs_store();  // checked above: this node is among them
+    if (auto why = kythira::hsm::check_hsm_roles(in)) {
+        throw fail(*why);
+    }
+    if (plan.uses_remote_store()) {
+        throw fail("KYTHIRA_HSM_ROLES=" + kythira::hsm::hsm_role_names(o.roles) +
+                   ": a crypto node without the store role (remote_hsm_store) is not wired "
+                   "into hsm_node yet; add store");
+    }
     return o;
 }
 
@@ -439,9 +526,26 @@ auto usage_text() -> std::string_view {
     return R"(The HSM module (KYTHIRA_SERVICES=hsm):
 
   KYTHIRA_NODE_ID                    this node's id (required)
+  KYTHIRA_HSM_ROLES                  the layers this node runs: endpoint,
+                                     crypto, store (all three). Without crypto
+                                     it is never unsealed, holds no share and
+                                     serves no PKCS#11 client; without store
+                                     it is no group member
   KYTHIRA_HSM_API_URLS               id=https://host:port for every member, this
-                                     node included (required): the voters of
-                                     every HSM group and where followers forward
+                                     node included when it has the store role
+                                     (required): the voters of every HSM group
+                                     and where followers forward
+  KYTHIRA_HSM_RELAY_BACKENDS         host:port,... : the crypto nodes' client
+                                     listeners an endpoint without crypto
+                                     relays KYTHIRA_HSM_CLIENT_LISTEN to
+  KYTHIRA_HSM_STORE_CLIENTS          crypto identities that may use this
+                                     member's store API without membership
+  KYTHIRA_HSM_CRYPTO_URLS            identity=https://host:port,... for every
+                                     crypto node, once the catalog's crypto
+                                     member list is seeded: where init and
+                                     rekey deliver shares and node unseal
+                                     asks for them; the seed is these
+                                     identities (else the members')
   KYTHIRA_HSM_API_LISTEN             host:port of the HSM listener (0.0.0.0:9443)
   KYTHIRA_HSM_TLS_CERT, _TLS_KEY     the listener's certificate and key, also
                                      presented when forwarding (default: the
