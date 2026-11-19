@@ -99,6 +99,13 @@ kythira_sns_test(sns_service_test sns_service_test.cpp)
 # $or, arrays, attribute data types, and the grammar and limit errors.
 kythira_sns_test(sns_filter_policy_test sns_filter_policy_test.cpp)
 
+# Task 6, Requirements 6.3 and 6.4: delivery documents rebuilt byte for byte
+# from the recorded SNS deliveries, the headers SNS sends, per-protocol
+# bodies, and the retry phases and DeliveryPolicy grammar.
+kythira_sns_test(sns_delivery_format_test sns_delivery_format_test.cpp)
+target_compile_definitions(sns_delivery_format_test PRIVATE
+    SNS_DELIVERIES_JSON="${CMAKE_CURRENT_SOURCE_DIR}/evidence/deliveries/deliveries.json")
+
 # Task 3: the checked-in action table is what tools/gen_sns_actions.py makes
 # of the pinned service reference.
 add_test(NAME sns_actions_up_to_date
