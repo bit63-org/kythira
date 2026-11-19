@@ -12,7 +12,11 @@
 // subscription operations (Requirement 4.2): which protocols wait for a
 // confirmation token, tokens that work once and expire, endpoints checked
 // against their protocol and FIFO topics, subscription attributes, ARNs
-// that name their own topic, and both list operations' pages.
+// that name their own topic, and both list operations' pages. Then
+// publishing (Requirements 5.1 to 5.4): message, subject, structure and
+// attribute checks, sizes, FIFO groups and deduplication (explicit and
+// content-based, five minutes), PublishBatch's per-entry results and
+// request rules, and the published message's encoding.
 
 #define BOOST_TEST_MODULE sns_service_test
 #include <boost/test/unit_test.hpp>
@@ -691,6 +695,221 @@ BOOST_FIXTURE_TEST_CASE(list_subscriptions_pages_the_callers_own, subscription_f
     // Deleting the topic drops its subscriptions.
     call("DeleteTopic", {{"TopicArn", arn}});
     BOOST_TEST(count(call("ListSubscriptions")._body, "<member>") == 0U);
+}
+
+BOOST_AUTO_TEST_SUITE_END()
+
+// ---- publishing (Requirements 5.1 to 5.4) ----------------------------------
+
+namespace {
+
+struct publish_fixture : fixture {
+    std::string arn = create("orders");
+    std::string fifo = create("jobs.fifo", {{"Attributes.entry.1.key", "FifoTopic"},
+                                            {"Attributes.entry.1.value", "true"}});
+
+    auto publish(std::string topic_arn, std::vector<std::pair<std::string, std::string>> extra)
+        -> sns::front_end_response {
+        extra.insert(extra.begin(), {"TopicArn", std::move(topic_arn)});
+        return call("Publish", extra);
+    }
+
+    auto last_seq(std::string_view name, std::uint32_t partition = 0) -> std::uint64_t {
+        const auto id = store.find_topic(k_account, name)->_id;
+        return store.machine().partition(id, partition)->_last_seq;
+    }
+};
+
+auto is_uuid(const std::string& s) -> bool {
+    return s.size() == 36U && s[8] == '-' && s[13] == '-' && s[14] == '4' && s[18] == '-' &&
+           s[23] == '-';
+}
+
+}  // namespace
+
+BOOST_AUTO_TEST_SUITE(publishing)
+
+BOOST_FIXTURE_TEST_CASE(publish_commits_and_answers_a_message_id, publish_fixture) {
+    const auto r = publish(arn, {{"Message", "hello"}, {"Subject", "greeting"}});
+    BOOST_TEST_REQUIRE(r._status == 200U, r._body);
+    BOOST_TEST(is_uuid(element(r._body, "MessageId")));
+    BOOST_TEST(element(r._body, "SequenceNumber").empty());
+    BOOST_TEST(last_seq("orders") == 1U);
+
+    // TargetArn names a topic too.
+    BOOST_TEST(call("Publish", {{"TargetArn", arn}, {"Message", "again"}})._status == 200U);
+    BOOST_TEST(last_seq("orders") == 2U);
+
+    BOOST_TEST(code(publish(topic("nope"), {{"Message", "x"}})) == "NotFound");
+    const auto none = call("Publish", {{"Message", "x"}});
+    BOOST_TEST(message(none) ==
+               "Invalid parameter: TopicArn or TargetArn Reason: no value for required parameter");
+    BOOST_TEST(code(call("Publish", {{"PhoneNumber", "+15555550100"}, {"Message", "x"}})) ==
+               "InvalidParameter");
+}
+
+BOOST_FIXTURE_TEST_CASE(messages_are_checked_as_sns_checks_them, publish_fixture) {
+    BOOST_TEST(message(publish(arn, {{"Message", ""}})) == "Invalid parameter: Empty message");
+    BOOST_TEST(code(publish(arn, {{"Message", "x"}, {"Subject", std::string(101, 's')}})) ==
+               "InvalidParameter");
+    BOOST_TEST(code(publish(arn, {{"Message", "x"}, {"Subject", "two\nlines"}})) ==
+               "InvalidParameter");
+    BOOST_TEST(
+        message(publish(arn, {{"Message", R"({"sqs":"q"})"}, {"MessageStructure", "json"}})) ==
+        "Invalid parameter: Message Structure - No default entry in JSON message body");
+    BOOST_TEST(message(publish(arn, {{"Message", "not json"}, {"MessageStructure", "json"}})) ==
+               "Invalid parameter: Message Structure - JSON message body failed to parse");
+    BOOST_TEST(
+        publish(arn, {{"Message", R"({"default":"d","sqs":"q"})"}, {"MessageStructure", "json"}})
+            ._status == 200U);
+    BOOST_TEST(message(publish(arn, {{"Message", std::string(262'145, 'm')}})) ==
+               "Invalid parameter: Message too long");
+    BOOST_TEST(publish(arn, {{"Message", std::string(262'144, 'm')}})._status == 200U);
+    BOOST_TEST(message(publish(arn, {{"Message", "x"}, {"MessageDeduplicationId", "d"}})) ==
+               "Invalid parameter: MessageDeduplicationId Reason: The request includes "
+               "MessageDeduplicationId parameter that is not valid for this topic type");
+    BOOST_TEST(last_seq("orders") == 2U);
+}
+
+BOOST_FIXTURE_TEST_CASE(message_attributes_are_checked, publish_fixture) {
+    const auto attr = [&](std::string name, std::string type, std::string field,
+                          std::string value) {
+        return publish(arn, {{"Message", "x"},
+                             {"MessageAttributes.entry.1.Name", name},
+                             {"MessageAttributes.entry.1.Value.DataType", type},
+                             {"MessageAttributes.entry.1.Value." + field, value}});
+    };
+    BOOST_TEST(attr("price", "Number", "StringValue", "-1.5e3")._status == 200U);
+    BOOST_TEST(attr("blob", "Binary", "BinaryValue", "AAEC")._status == 200U);
+    BOOST_TEST(attr("store", "String.custom", "StringValue", "a")._status == 200U);
+    BOOST_TEST(code(attr("price", "Number", "StringValue", "1.2.3")) == "ParameterValueInvalid");
+    BOOST_TEST(code(attr("AWS.trace", "String", "StringValue", "x")) == "ParameterValueInvalid");
+    BOOST_TEST(code(attr("a..b", "String", "StringValue", "x")) == "ParameterValueInvalid");
+    BOOST_TEST(code(attr("empty", "String", "StringValue", "")) == "ParameterValueInvalid");
+}
+
+BOOST_FIXTURE_TEST_CASE(a_published_message_round_trips, publish_fixture) {
+    sns::published_message m;
+    m._message = R"({"default":"d"})";
+    m._json_structure = true;
+    m._subject = "s";
+    m._timestamp_ms = now;
+    m._publisher = std::string(k_account);
+    m._attributes.emplace("price", sns::message_attribute{"Number", "1", std::nullopt});
+    m._attributes.emplace("blob",
+                          sns::message_attribute{"Binary", std::nullopt, std::string("\0\1", 2)});
+    BOOST_TEST((sns::decode_published_message(sns::encode_published_message(m)) == m));
+    auto bytes = sns::encode_published_message(m);
+    bytes.pop_back();
+    BOOST_CHECK_THROW(static_cast<void>(sns::decode_published_message(bytes)),
+                      sns::sns_codec_error);
+}
+
+BOOST_FIXTURE_TEST_CASE(fifo_needs_a_group_and_a_dedup_id, publish_fixture) {
+    BOOST_TEST(message(publish(fifo, {{"Message", "x"}})) ==
+               "Invalid parameter: The MessageGroupId parameter is required for FIFO topics");
+    BOOST_TEST(message(publish(fifo, {{"Message", "x"}, {"MessageGroupId", "g"}})) ==
+               "Invalid parameter: The topic should either have ContentBasedDeduplication "
+               "enabled or MessageDeduplicationId provided explicitly");
+
+    const auto first = publish(
+        fifo, {{"Message", "x"}, {"MessageGroupId", "g"}, {"MessageDeduplicationId", "d1"}});
+    BOOST_TEST_REQUIRE(first._status == 200U, first._body);
+    BOOST_TEST(element(first._body, "SequenceNumber") == "00000000000000000001");
+
+    // The same dedup id within five minutes is the same message.
+    now += sns::k_dedup_window_ms - 1;
+    const auto again = publish(
+        fifo,
+        {{"Message", "different body"}, {"MessageGroupId", "g"}, {"MessageDeduplicationId", "d1"}});
+    BOOST_TEST(element(again._body, "MessageId") == element(first._body, "MessageId"));
+    BOOST_TEST(element(again._body, "SequenceNumber") == "00000000000000000001");
+    BOOST_TEST(last_seq("jobs.fifo") == 1U);
+
+    now += 1;
+    const auto later = publish(
+        fifo, {{"Message", "x"}, {"MessageGroupId", "g"}, {"MessageDeduplicationId", "d1"}});
+    BOOST_TEST(element(later._body, "MessageId") != element(first._body, "MessageId"));
+    BOOST_TEST(element(later._body, "SequenceNumber") == "00000000000000000002");
+}
+
+BOOST_FIXTURE_TEST_CASE(content_based_deduplication_hashes_the_body, publish_fixture) {
+    BOOST_TEST(call("SetTopicAttributes", {{"TopicArn", fifo},
+                                           {"AttributeName", "ContentBasedDeduplication"},
+                                           {"AttributeValue", "true"}})
+                   ._status == 200U);
+    const auto a = publish(fifo, {{"Message", "same"}, {"MessageGroupId", "g1"}});
+    const auto b = publish(fifo, {{"Message", "same"}, {"MessageGroupId", "g2"}});
+    const auto c = publish(fifo, {{"Message", "other"}, {"MessageGroupId", "g1"}});
+    BOOST_TEST(element(a._body, "MessageId") == element(b._body, "MessageId"));
+    BOOST_TEST(element(a._body, "MessageId") != element(c._body, "MessageId"));
+    BOOST_TEST(sns::service_detail::sha256_hex("abc") ==
+               "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+}
+
+BOOST_FIXTURE_TEST_CASE(publish_batch_reports_each_entry, publish_fixture) {
+    const auto r = call("PublishBatch", {{"TopicArn", arn},
+                                         {"PublishBatchRequestEntries.member.1.Id", "a"},
+                                         {"PublishBatchRequestEntries.member.1.Message", "one"},
+                                         {"PublishBatchRequestEntries.member.2.Id", "b"},
+                                         {"PublishBatchRequestEntries.member.2.Message", ""},
+                                         {"PublishBatchRequestEntries.member.3.Id", "c"},
+                                         {"PublishBatchRequestEntries.member.3.Message", "three"},
+                                         {"PublishBatchRequestEntries.member.3.Subject", "s"}});
+    BOOST_TEST_REQUIRE(r._status == 200U, r._body);
+    const auto ok = element(r._body, "Successful");
+    const auto failed = element(r._body, "Failed");
+    BOOST_TEST(count(ok, "<member>") == 2U);
+    BOOST_TEST(element(ok, "Id") == "a");
+    BOOST_TEST(is_uuid(element(ok, "MessageId")));
+    BOOST_TEST(count(failed, "<member>") == 1U);
+    BOOST_TEST(element(failed, "Id") == "b");
+    BOOST_TEST(element(failed, "Code") == "InvalidParameter");
+    BOOST_TEST(element(failed, "Message") == "Invalid parameter: Empty message");
+    BOOST_TEST(element(failed, "SenderFault") == "true");
+    BOOST_TEST(last_seq("orders") == 2U);
+}
+
+BOOST_FIXTURE_TEST_CASE(publish_batch_request_rules, publish_fixture) {
+    std::vector<std::pair<std::string, std::string>> eleven{{"TopicArn", arn}};
+    for (int i = 1; i <= 11; ++i) {
+        const auto p = "PublishBatchRequestEntries.member." + std::to_string(i) + ".";
+        eleven.emplace_back(p + "Id", "e" + std::to_string(i));
+        eleven.emplace_back(p + "Message", "m");
+    }
+    BOOST_TEST(code(call("PublishBatch", eleven)) == "TooManyEntriesInBatchRequest");
+    BOOST_TEST(code(call("PublishBatch", {{"TopicArn", arn},
+                                          {"PublishBatchRequestEntries.member.1.Id", "a"},
+                                          {"PublishBatchRequestEntries.member.1.Message", "m"},
+                                          {"PublishBatchRequestEntries.member.2.Id", "a"},
+                                          {"PublishBatchRequestEntries.member.2.Message", "m"}})) ==
+               "BatchEntryIdsNotDistinct");
+    BOOST_TEST(code(call("PublishBatch", {{"TopicArn", arn}})) == "EmptyBatchRequest");
+    const auto big = std::string(200'000, 'm');
+    BOOST_TEST(code(call("PublishBatch", {{"TopicArn", arn},
+                                          {"PublishBatchRequestEntries.member.1.Id", "a"},
+                                          {"PublishBatchRequestEntries.member.1.Message", big},
+                                          {"PublishBatchRequestEntries.member.2.Id", "b"},
+                                          {"PublishBatchRequestEntries.member.2.Message", big}})) ==
+               "BatchRequestTooLong");
+    BOOST_TEST(last_seq("orders") == 0U);
+}
+
+BOOST_FIXTURE_TEST_CASE(a_fifo_batch_answers_sequence_numbers, publish_fixture) {
+    const auto r =
+        call("PublishBatch", {{"TopicArn", fifo},
+                              {"PublishBatchRequestEntries.member.1.Id", "a"},
+                              {"PublishBatchRequestEntries.member.1.Message", "one"},
+                              {"PublishBatchRequestEntries.member.1.MessageGroupId", "g"},
+                              {"PublishBatchRequestEntries.member.1.MessageDeduplicationId", "1"},
+                              {"PublishBatchRequestEntries.member.2.Id", "b"},
+                              {"PublishBatchRequestEntries.member.2.Message", "two"},
+                              {"PublishBatchRequestEntries.member.2.MessageGroupId", "g"},
+                              {"PublishBatchRequestEntries.member.2.MessageDeduplicationId", "2"}});
+    BOOST_TEST_REQUIRE(r._status == 200U, r._body);
+    BOOST_TEST(count(r._body, "<SequenceNumber>") == 2U);
+    BOOST_TEST(r._body.find("<SequenceNumber>00000000000000000002</SequenceNumber>") !=
+               std::string::npos);
 }
 
 BOOST_AUTO_TEST_SUITE_END()
