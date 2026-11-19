@@ -585,3 +585,11 @@ asked.
     with pyiceberg. Left: the container scenario's Iceberg REST catalog,
     differential checks, KMS, a run against real S3 Tables (needs Clark's
     go).
+  - Progress (November 19, 2026): the container scenario's tables case
+    starts `apache/iceberg-rest-fixture` (profile `tables`) over the S3
+    mock, which now decodes the Java SDK's `aws-chunked` uploads, and
+    commits a JSON channel's batches into it unsigned while every node is
+    killed in turn; pyiceberg in the boto3 client image (now Debian slim
+    for its wheels) reads every record back and checks that no batch was
+    committed twice or overlaps another in its shard. Left: differential
+    checks, KMS, a run against real S3 Tables (needs Clark's go).

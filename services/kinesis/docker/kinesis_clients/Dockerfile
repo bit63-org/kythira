@@ -5,13 +5,18 @@
 # (.kiro/specs/kinesis-compatible-streams/ task 7): Python with boto3 at the
 # version the wire evidence pins (services/kinesis/tests/evidence/
 # requirements.txt), the scenario's producer and polling consumer, and the
-# differential tool with its recordings (task 17).
+# differential tool with its recordings (task 17), and pyiceberg with
+# pyarrow to read back the tables case's Iceberg table (task 19).
 # Built by the docker-kinesis-node-image target with the source root as its
 # context.
 
-FROM python:3.12-alpine@sha256:1b668429b3511ab407d8e00648891631b0b1a4d7e15e3ca70f38ab5b91ad4ab4
+# Debian slim rather than Alpine: pyiceberg's pydantic-core has no
+# musllinux wheel at these versions, and building it from source needs a
+# Rust toolchain in the image.
+FROM python:3.12-slim@sha256:5e2bdb1b0d542d5039cffb8181c65930093949194a65c365dfb1b0fe13a4fa5b
 
-RUN pip install --no-cache-dir boto3==1.43.100
+RUN pip install --no-cache-dir --only-binary=:all: \
+        boto3==1.43.100 pyiceberg==0.10.0 pyarrow==21.0.0
 
 COPY services/kinesis/tests/docker/kinesis_e2e.py /usr/local/bin/kinesis_e2e.py
 # Task 17: the differential tool and the AWS recordings it replays (run with
