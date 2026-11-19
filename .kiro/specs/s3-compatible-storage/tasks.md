@@ -305,6 +305,18 @@ builds it to that design). Each task is one PR unless noted.
 - [ ] 13. Lifecycle and storage classes
   - Rules, the worker, transitions to cloud tiers, restore
   - _Requirements: 7.5, 12.1_
+  - Progress: lifecycle configurations (`s3_lifecycle_rules.hpp`; Put,
+    Get and Delete, old and new forms, S3's checks, the 128 KiB transition
+    minimum header) and the worker (`lifecycle_worker`: expiration with
+    markers in versioned buckets, noncurrent expiration with
+    `NewerNoncurrentVersions`, lone delete markers, aborted uploads,
+    transitions to the coldest due class, ended restores; every change
+    pinned to the judged version's stamp) are done. Archive classes
+    answer GET and copies with `InvalidObjectState` until `RestoreObject`;
+    a copy may change only the storage class; GET, HEAD and PUT carry
+    `x-amz-expiration`. Bytes still stay on the blob stores whatever the
+    class, so restores complete at once. Left: moving the bytes of
+    classes mapped to a cloud tier there, and restore bringing them back.
 
 - [ ] 14. Change log, notifications and replication
   - Change log per group; notifications to SQS, SNS and Kinesis; bucket

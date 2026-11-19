@@ -436,6 +436,17 @@ inline void object_headers(s3_response& r, const object_version& v, const bucket
     }
 }
 
+/// `x-amz-expiration` for the current version `v`, when a rule expires it.
+inline void expiration_header_for(s3_response& r, const bucket_state& b, const object_version& v,
+                                  std::uint64_t day_ms) {
+    if (!b.lifecycle || v.delete_marker) {
+        return;
+    }
+    if (auto e = expiration_of(*b.lifecycle, v, stored_tags(v), day_ms)) {
+        r.set("x-amz-expiration", expiration_header(*e));
+    }
+}
+
 [[nodiscard]] inline auto no_such_key(std::string_view key) -> aws_rest_xml::error {
     auto e = aws_rest_xml::errors::make(404, "NoSuchKey", "The specified key does not exist.");
     e.extra.emplace_back("Key", std::string(key));
@@ -729,6 +740,11 @@ template<metadata_access M>
     for (auto& h : sealed->response) {
         out.headers.push_back(std::move(h));
     }
+    object_version stored;
+    stored.key = c.key;
+    stored.last_modified_ms = r.last_modified_ms != 0 ? r.last_modified_ms : c.now_ms;
+    stored.content = c.content;
+    expiration_header_for(out, b, stored, ctx.options.lifecycle_day_ms);
     return out;
 }
 
@@ -773,6 +789,11 @@ template<metadata_access M>
         return r;
     }
     const auto& v = *found.version;
+    if (!head) {
+        if (auto e = refuse_archived(v, ctx.now_ms())) {
+            return *e;
+        }
+    }
     auto cipher = ctx.keys().open(v.content.system_metadata, *customer, caller_of(auth.who, req));
     if (!cipher) {
         return head ? error_response(cipher.error(), req.request_id, true)
@@ -789,6 +810,9 @@ template<metadata_access M>
     const bool whole = !range_header && (!part || v.content.part_sizes.size() <= 1);
     s3_response out;
     object_headers(out, v, b, checksum_mode && whole);
+    if (!req.query.has("versionId")) {
+        expiration_header_for(out, b, v, ctx.options.lifecycle_day_ms);
+    }
     std::uint64_t first = 0;
     std::uint64_t length = size;
     if (part) {
@@ -1051,6 +1075,11 @@ template<metadata_access M>
     if (source_version && source_version->delete_marker) {
         source_version.reset();
     }
+    if (source_version) {
+        if (auto e = refuse_archived(*source_version, ctx.now_ms())) {
+            return *e;
+        }
+    }
     if (source_version && source_version->content.size() > b.profile.max_put_bytes) {
         return aws_rest_xml::errors::make(
             400, "InvalidRequest",
@@ -1079,12 +1108,14 @@ template<metadata_access M>
         }
         c.content = std::move(*content);
     } else if (auto sc = req.header("x-amz-storage-class")) {
-        // A storage class change alone is a REPLACE of that one field,
-        // which S3 also accepts as a copy onto itself; keep it simple and
-        // refuse until tiering exists.
-        if (*sc != "STANDARD") {
-            return not_implemented();
+        // A storage class change alone: the copy keeps the source's
+        // metadata and takes the new class (S3 accepts this as a copy
+        // onto itself too).
+        if (std::ranges::find(storage_classes, *sc) == storage_classes.end()) {
+            return aws_rest_xml::errors::make(400, "InvalidStorageClass",
+                                              "The storage class you specified is not valid");
         }
+        c.new_storage_class = *sc;
     }
     // The new object's ACL and lock are the request's, never the source's.
     c.override_metadata.emplace_back(object_acl_metadata);

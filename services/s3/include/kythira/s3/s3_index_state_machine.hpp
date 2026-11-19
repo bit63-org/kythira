@@ -229,6 +229,12 @@ struct index_command {
         /// The sweeper deleted `chunks` (collecting ones) from the blob
         /// stores at `now_ms`.
         chunks_deleted = 15,
+        /// Lifecycle and restore state of one version (`version_id`, the
+        /// current one without it): `new_storage_class` when not empty,
+        /// and the stored headers named in `override_metadata`, set from
+        /// `content.system_metadata` or erased when absent there. The
+        /// bytes, ETag and modification time stay as they are.
+        set_object_state = 16,
     };
 
     kind op = kind::put_object;
@@ -269,6 +275,15 @@ struct index_command {
     std::uint64_t written_ms = 0;
     /// claim_chunks, chunks_deleted.
     std::vector<chunk_sha> chunks;
+    /// copy_object (without `replace_metadata`), set_object_state: the
+    /// version's new storage class; empty keeps it.
+    std::string new_storage_class;
+    /// delete_object, set_object_state: act only if the version named (or
+    /// the current one, for a delete that writes a marker) is still the
+    /// one with this stamp, else `412 PreconditionFailed`; 0 does not
+    /// check. Lifecycle passes the version it judged, so a write that
+    /// lands meanwhile is never expired or transitioned in its place.
+    std::uint64_t expect_stamp = 0;
     /// copy_object: stored headers taken from `content.system_metadata`
     /// whatever `replace_metadata` says (erased when absent there): the
     /// new object's ACL, which is never copied, and its tags under
@@ -374,6 +389,7 @@ inline void write_opt_u64(detail::writer& w, const std::optional<std::uint64_t>&
     for (const auto& sha : c.chunks) {
         w.sha(sha);
     }
+    w.str(c.new_storage_class).u64(c.expect_stamp);
     const auto s = w.take();
     std::vector<std::byte> out(s.size());
     std::memcpy(out.data(), s.data(), s.size());
@@ -386,7 +402,7 @@ inline void write_opt_u64(detail::writer& w, const std::optional<std::uint64_t>&
     r.expect_format(command_format, "command");
     index_command c;
     const auto op = r.u8();
-    if (op < 1 || op > 15) {
+    if (op < 1 || op > 16) {
         throw index_format_error("s3 index: unknown command");
     }
     c.op = static_cast<index_command::kind>(op);
@@ -437,6 +453,8 @@ inline void write_opt_u64(detail::writer& w, const std::optional<std::uint64_t>&
     for (auto& sha : c.chunks) {
         sha = r.sha();
     }
+    c.new_storage_class = r.str();
+    c.expect_stamp = r.u64();
     r.done("command");
     return c;
 }
@@ -974,6 +992,8 @@ private:
                 return claim_chunks(t, c);
             case k::chunks_deleted:
                 return chunks_deleted(t, c);
+            case k::set_object_state:
+                return set_object_state(t, c);
         }
         return fail(400, "InvalidRequest", "Unknown index command");
     }
@@ -1307,6 +1327,49 @@ private:
         return r;
     }
 
+    auto set_object_state(txn& t, const index_command& c) -> index_result {
+        const auto& b = c.target;
+        if (c.version_id && *c.version_id != null_version_id && !parse_stamp_id(*c.version_id)) {
+            return fail(400, "InvalidArgument", "Invalid version id specified");
+        }
+        auto v = find_version(&t, b.id, c.key, c.version_id);
+        if (c.expect_stamp != 0 && (!v || v->stamp != c.expect_stamp)) {
+            return stale_version();
+        }
+        if (!v) {
+            return c.version_id
+                       ? fail(404, "NoSuchVersion", "The specified version does not exist.")
+                       : no_such_key();
+        }
+        if (v->delete_marker) {
+            return fail(405, "MethodNotAllowed",
+                        "The specified method is not allowed against this resource.");
+        }
+        if (!c.new_storage_class.empty()) {
+            v->content.storage_class = c.new_storage_class;
+        }
+        for (const auto& name : c.override_metadata) {
+            if (auto it = c.content.system_metadata.find(name);
+                it != c.content.system_metadata.end()) {
+                v->content.system_metadata[name] = it->second;
+            } else {
+                v->content.system_metadata.erase(name);
+            }
+        }
+        t.put(keys::versioned(keys::object_space, b.id, c.key, v->stamp), codec::encode(*v));
+        index_result r;
+        r.bucket_id = b.id;
+        r.version_id = v->version_id();
+        r.etag = v->content.etag;
+        r.last_modified_ms = v->last_modified_ms;
+        return r;
+    }
+
+    [[nodiscard]] static auto stale_version() -> index_result {
+        return fail(412, "PreconditionFailed",
+                    "At least one of the pre-conditions you specified did not hold");
+    }
+
     /// Why a version may not be removed: a legal hold, COMPLIANCE
     /// retention, or GOVERNANCE retention without the bypass. Removing a
     /// version is the only way bytes leave the index, so every path that
@@ -1401,7 +1464,11 @@ private:
             index_result r;
             r.bucket_id = b.id;
             r.version_id = *c.version_id;
-            if (auto v = find_version(&t, b.id, c.key, c.version_id)) {
+            auto v = find_version(&t, b.id, c.key, c.version_id);
+            if (c.expect_stamp != 0 && (!v || v->stamp != c.expect_stamp)) {
+                return stale_version();
+            }
+            if (v) {
                 if (auto locked = lock_refuses(*v, c.now_ms, c.bypass_governance)) {
                     return *locked;
                 }
@@ -1409,6 +1476,12 @@ private:
                 remove_version(t, b.id, *v, c.now_ms);
             }
             return r;
+        }
+        if (c.expect_stamp != 0) {
+            const auto current = find_version(&t, b.id, c.key, std::nullopt);
+            if (!current || current->stamp != c.expect_stamp) {
+                return stale_version();
+            }
         }
         if (b.versioning == versioning_state::unversioned) {
             if (auto v = find_version(&t, b.id, c.key, std::string(null_version_id))) {
@@ -1446,7 +1519,8 @@ private:
             return precondition_failed();
         }
         if (c.source.id == c.target.id && c.source_key == c.key && !c.replace_metadata &&
-            !c.version_id && !c.new_bytes) {
+            !c.version_id && !c.new_bytes &&
+            (c.new_storage_class.empty() || c.new_storage_class == src->content.storage_class)) {
             return fail(400, "InvalidRequest",
                         "This copy request is illegal because it is trying to copy an object to "
                         "itself without changing the object's metadata, storage class, website "
@@ -1475,6 +1549,8 @@ private:
             v.content.system_metadata = c.content.system_metadata;
             v.content.system_metadata.insert(kept.begin(), kept.end());
             v.content.storage_class = c.content.storage_class;
+        } else if (!c.new_storage_class.empty()) {
+            v.content.storage_class = c.new_storage_class;
         }
         // A copy never inherits the source's lock; the request's (or the
         // bucket's default) comes through override_metadata.

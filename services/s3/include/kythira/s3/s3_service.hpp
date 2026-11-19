@@ -40,6 +40,7 @@
 #include <kythira/s3/s3_buckets.hpp>
 #include <kythira/s3/s3_context.hpp>
 #include <kythira/s3/s3_http.hpp>
+#include <kythira/s3/s3_lifecycle.hpp>
 #include <kythira/s3/s3_listings.hpp>
 #include <kythira/s3/s3_metadata.hpp>
 #include <kythira/s3/s3_multipart.hpp>
@@ -95,7 +96,10 @@ struct http_request {
         // Versioning and object lock.
         "GetBucketVersioning", "PutBucketVersioning", "ListObjectVersions",
         "GetObjectLockConfiguration", "PutObjectLockConfiguration", "GetObjectRetention",
-        "PutObjectRetention", "GetObjectLegalHold", "PutObjectLegalHold"};
+        "PutObjectRetention", "GetObjectLegalHold", "PutObjectLegalHold",
+        // Lifecycle and restores.
+        "GetBucketLifecycle", "GetBucketLifecycleConfiguration", "PutBucketLifecycle",
+        "PutBucketLifecycleConfiguration", "DeleteBucketLifecycle", "RestoreObject"};
     return ops;
 }
 
@@ -143,6 +147,12 @@ private:
             {"GetBucketEncryption", &get_bucket_encryption<M>},
             {"PutBucketEncryption", &put_bucket_encryption<M>},
             {"DeleteBucketEncryption", &delete_bucket_encryption<M>},
+            {"GetBucketLifecycleConfiguration", &get_bucket_lifecycle<M>},
+            {"GetBucketLifecycle", &get_bucket_lifecycle<M>},
+            {"PutBucketLifecycleConfiguration", &put_bucket_lifecycle<M>},
+            {"PutBucketLifecycle", &put_bucket_lifecycle<M>},
+            {"DeleteBucketLifecycle", &delete_bucket_lifecycle<M>},
+            {"RestoreObject", &restore_object<M>},
             {"GetBucketPolicy", &get_bucket_policy<M>},
             {"PutBucketPolicy", &put_bucket_policy<M>},
             {"DeleteBucketPolicy", &delete_bucket_policy<M>},
