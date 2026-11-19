@@ -680,9 +680,13 @@ private:
         std::string_view operation;
         if (action == "CreateReplica") {
             operation = "CreateTableReplica";
-        } else if (action == "DeleteReplica") {
+        } else if (action == "DeleteReplica" || action == "LeaveReplica") {
+            // LeaveReplica: the caller's table goes, so this region drops
+            // its replica.
             operation = "DeleteTableReplica";
-        } else if (action == "SetReplicas") {
+        } else if (action == "SetReplicas" || action == "UpdateReplica") {
+            // UpdateReplica: the replica's own settings, as UpdateTable
+            // would change them.
             operation = "UpdateTable";
         } else if (action == "Apply") {
             operation = "PutItem";

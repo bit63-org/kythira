@@ -1347,6 +1347,13 @@ public:
         }
         _tables.set_table_keys(&_keys);
         _tables.set_peers([peers = _peers](std::string_view r) { return peers->has(r); });
+        // DeleteTable of a replica runs on any front end, so it asks a peer
+        // to drop the replica directly rather than through the replicator,
+        // which only nodes with the data role have (data_workers.hpp).
+        _tables.set_peer_leave(
+            [peers = _peers](const table_descriptor& d, const std::string& region) {
+                return ask_replica_to_leave(peers.get(), d, region);
+            });
         if constexpr (k_routes_strong) {
             // Multi-region strong consistency (task 27).
             if (_backend.has_strong()) {

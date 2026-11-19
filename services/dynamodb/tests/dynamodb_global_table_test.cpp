@@ -228,6 +228,9 @@ struct region_cluster {
         queries.register_with(*fe);
         receiver.register_with(*fe);
         tables.set_peers([this](std::string_view p) { return peers.has(p); });
+        tables.set_peer_leave([this](const ddb::table_descriptor& d, const std::string& r) {
+            return replicator.leave(d, r);
+        });
         const auto off = ddb::cluster_profile({{"throttling", "off"}}).value();
         items.set_compat_profile(off);
         queries.set_compat_profile(off);
@@ -676,16 +679,28 @@ BOOST_FIXTURE_TEST_CASE(refusals, two_regions) {
     BOOST_TEST(east.add_replica("orders", k_east).type() == "ValidationException");
     BOOST_TEST(east.replica_updates("orders", R"([{"Update":{"RegionName":"us-west-2"}}])")
                    .message()
-                   .find("not support") != std::string::npos);
+                   .find("has no replica there") != std::string::npos);
     // A replica's own KMS key needs a table under a KMS key.
     BOOST_TEST(east.replica_updates("orders", R"([{"Create":{"RegionName":"us-west-2",)"
                                               R"("KMSMasterKeyId":"k"}}])")
                    .message()
                    .find("encrypted with a KMS key") != std::string::npos);
     BOOST_TEST(east.replica_updates("orders", R"([{"Create":{"RegionName":"us-west-2",)"
-                                              R"("TableClassOverride":"STANDARD"}}])")
+                                              R"("TableClassOverride":"COLD"}}])")
                    .message()
-                   .find("not support") != std::string::npos);
+                   .find("enum value set") != std::string::npos);
+    BOOST_TEST(east.replica_updates("orders", R"([{"Create":{"RegionName":"us-west-2",)"
+                                              R"("ProvisionedThroughputOverride":)"
+                                              R"({"ReadCapacityUnits":5}}}])")
+                   .message()
+                   .find("PROVISIONED") != std::string::npos);
+    BOOST_TEST(east.replica_updates("orders",
+                                    R"([{"Create":{"RegionName":"us-west-2",)"
+                                    R"("GlobalSecondaryIndexes":[{"IndexName":"nope"}]}}])")
+                   .type() == "IndexNotFoundException");
+    BOOST_TEST(east.replica_updates("orders", R"([{"Create":{"RegionName":"us-west-2",)"
+                                              R"("Nope":1}}])")
+                   .type() == "ValidationException");
     BOOST_TEST(east.replica_updates("orders", "[]").type() == "ValidationException");
     BOOST_TEST(
         east.replica_updates("orders", R"([{"Delete":{"RegionName":"us-west-2"}}])").type() ==
@@ -697,10 +712,9 @@ BOOST_FIXTURE_TEST_CASE(refusals, two_regions) {
     BOOST_TEST(east.add_replica("missing", k_west).type() == "ResourceNotFoundException");
 
     BOOST_REQUIRE_EQUAL(east.add_replica("orders", k_west).status, 200U);
-    // A global table is not deleted from under its replicas.
-    const auto del = east.call("DeleteTable", R"({"TableName":"orders"})");
-    BOOST_TEST(del.type() == "ValidationException");
-    BOOST_TEST(del.message().find("ReplicaUpdates") != std::string::npos);
+    // Nor is a table deleted while one of its replicas is changing.
+    BOOST_TEST(east.call("DeleteTable", R"({"TableName":"orders"})").type() ==
+               "LimitExceededException");
 
     // The peer path wants a signature, and a known Action.
     ddb::front_end_request unsigned_call;
@@ -856,4 +870,123 @@ BOOST_AUTO_TEST_CASE(stored_forms_round_trip) {
     plain.region.clear();
     plain.replicas.clear();
     BOOST_TEST(ddb::catalog_detail::version_for(plain) < 10);
+}
+
+BOOST_FIXTURE_TEST_CASE(replica_overrides_on_create_and_update, two_regions) {
+    (void)east.ok("CreateTable",
+                  R"({"TableName":"orders","AttributeDefinitions":[)"
+                  R"({"AttributeName":"pk","AttributeType":"S"},)"
+                  R"({"AttributeName":"g","AttributeType":"S"}],)"
+                  R"("KeySchema":[{"AttributeName":"pk","KeyType":"HASH"}],)"
+                  R"("GlobalSecondaryIndexes":[{"IndexName":"by_g",)"
+                  R"("KeySchema":[{"AttributeName":"g","KeyType":"HASH"}],)"
+                  R"("Projection":{"ProjectionType":"ALL"},)"
+                  R"("OnDemandThroughput":{"MaxReadRequestUnits":80,"MaxWriteRequestUnits":40}}],)"
+                  R"("BillingMode":"PAY_PER_REQUEST",)"
+                  R"("OnDemandThroughput":{"MaxReadRequestUnits":100,"MaxWriteRequestUnits":50}})");
+    const auto r = east.replica_updates(
+        "orders", R"([{"Create":{"RegionName":")" + std::string(k_west) +
+                      R"(","OnDemandThroughputOverride":{"MaxReadRequestUnits":20},)"
+                      R"("TableClassOverride":"STANDARD_INFREQUENT_ACCESS",)"
+                      R"("GlobalSecondaryIndexes":[{"IndexName":"by_g",)"
+                      R"("OnDemandThroughputOverride":{"MaxReadRequestUnits":7}}]}}])");
+    BOOST_REQUIRE_MESSAGE(r.status == 200U, r.type() + ": " + r.message());
+    pump(all);
+    const auto replica_in_east = [&] {
+        const auto t = east.ok("DescribeTable", R"({"TableName":"orders"})").at("Table");
+        return t.as_object().at("Replicas").as_array().at(0).as_object();
+    };
+    auto rep = replica_in_east();
+    BOOST_TEST(rep.at("ReplicaStatus").as_string() == "ACTIVE");
+    BOOST_TEST(rep.at("OnDemandThroughputOverride").as_object().at("MaxReadRequestUnits") == 20);
+    BOOST_TEST(rep.at("ReplicaTableClassSummary").as_object().at("TableClass") ==
+               "STANDARD_INFREQUENT_ACCESS");
+    BOOST_TEST(rep.at("GlobalSecondaryIndexes").as_array().size() == 1U);
+
+    // The west's table has its own reads and class; writes are the table's.
+    auto west_table = [&] {
+        return west.ok("DescribeTable", R"({"TableName":"orders"})").at("Table").as_object();
+    };
+    auto w = west_table();
+    BOOST_TEST(w.at("OnDemandThroughput").as_object().at("MaxReadRequestUnits") == 20);
+    BOOST_TEST(w.at("OnDemandThroughput").as_object().at("MaxWriteRequestUnits") == 50);
+    BOOST_TEST(w.at("TableClassSummary").as_object().at("TableClass") ==
+               "STANDARD_INFREQUENT_ACCESS");
+    const auto& gsi = w.at("GlobalSecondaryIndexes").as_array().at(0).as_object();
+    BOOST_TEST(gsi.at("OnDemandThroughput").as_object().at("MaxReadRequestUnits") == 7);
+    BOOST_TEST(gsi.at("OnDemandThroughput").as_object().at("MaxWriteRequestUnits") == 40);
+    // The east keeps its own.
+    const auto e = east.ok("DescribeTable", R"({"TableName":"orders"})").at("Table").as_object();
+    BOOST_TEST(e.at("OnDemandThroughput").as_object().at("MaxReadRequestUnits") == 100);
+
+    // An Update names only what changes; the rest is kept.
+    const auto u = east.replica_updates(
+        "orders", R"([{"Update":{"RegionName":")" + std::string(k_west) +
+                      R"(","OnDemandThroughputOverride":{"MaxReadRequestUnits":30}}}])");
+    BOOST_REQUIRE_MESSAGE(u.status == 200U, u.type() + ": " + u.message());
+    BOOST_TEST(replica_in_east().at("ReplicaStatus").as_string() == "UPDATING");
+    // One change at a time.
+    BOOST_TEST(east.replica_updates("orders", R"([{"Update":{"RegionName":")" +
+                                                  std::string(k_west) +
+                                                  R"(","TableClassOverride":"STANDARD"}}])")
+                   .type() == "ResourceInUseException");
+    // The catalog form holding UPDATING and the overrides reads back.
+    const auto d = east.backend.describe("orders");
+    BOOST_REQUIRE(d.has_value());
+    BOOST_TEST(ddb::catalog_detail::version_for(*d) == 15U);
+    const auto back = ddb::decode_table_descriptor(ddb::encode_table_descriptor(*d));
+    BOOST_REQUIRE(back.has_value());
+    BOOST_TEST((back->replicas == d->replicas));
+    pump(all);
+    rep = replica_in_east();
+    BOOST_TEST(rep.at("ReplicaStatus").as_string() == "ACTIVE");
+    BOOST_TEST(rep.at("OnDemandThroughputOverride").as_object().at("MaxReadRequestUnits") == 30);
+    w = west_table();
+    BOOST_TEST(w.at("OnDemandThroughput").as_object().at("MaxReadRequestUnits") == 30);
+    BOOST_TEST(w.at("TableClassSummary").as_object().at("TableClass") ==
+               "STANDARD_INFREQUENT_ACCESS");
+    // An Update that changes nothing is no change.
+    BOOST_TEST(east.replica_updates(
+                       "orders", R"([{"Update":{"RegionName":")" + std::string(k_west) + R"("}}])")
+                   .status == 200U);
+    BOOST_TEST(replica_in_east().at("ReplicaStatus").as_string() == "ACTIVE");
+}
+
+BOOST_AUTO_TEST_CASE(delete_table_of_a_replica) {
+    region_cluster east{k_east, 1794300000000ULL};
+    region_cluster west{k_west, 1794300000000ULL};
+    region_cluster europe{k_europe, 1794300000000ULL};
+    const std::vector<region_cluster*> all{&east, &west, &europe};
+    link(all);
+    east.create("orders");
+    BOOST_REQUIRE_EQUAL(east.add_replica("orders", k_west).status, 200U);
+    pump(all);
+    BOOST_REQUIRE_EQUAL(east.add_replica("orders", k_europe).status, 200U);
+    pump(all);
+    BOOST_REQUIRE_EQUAL(west.replicas("orders").size(), 2U);
+
+    // Deleting the west's table: the others drop it.
+    const auto r = west.call("DeleteTable", R"({"TableName":"orders"})");
+    BOOST_REQUIRE_MESSAGE(r.status == 200U, r.type() + ": " + r.message());
+    pump(all);
+    BOOST_TEST(west.describe("orders").type() == "ResourceNotFoundException");
+    BOOST_TEST(!east.replicas("orders").contains(std::string(k_west)));
+    BOOST_TEST(!europe.replicas("orders").contains(std::string(k_west)));
+    BOOST_TEST(east.replicas("orders").at(std::string(k_europe)) == "ACTIVE");
+    east.put("orders", "a", 1, "still");
+    pump(all);
+    BOOST_TEST(europe.get("orders", "a", 1).value_or("") == "still");
+
+    // With no replica reachable the table stays, and the caller may retry.
+    europe.down = true;
+    const auto refused = east.call("DeleteTable", R"({"TableName":"orders"})");
+    BOOST_TEST(refused.status == 500U);
+    BOOST_TEST(east.replicas("orders").at(std::string(k_europe)) == "ACTIVE");
+    europe.down = false;
+    BOOST_REQUIRE_EQUAL(east.call("DeleteTable", R"({"TableName":"orders"})").status, 200U);
+    pump(all);
+    BOOST_TEST(east.describe("orders").type() == "ResourceNotFoundException");
+    BOOST_TEST(europe.replicas("orders").empty());
+    europe.put("orders", "b", 1, "alone");
+    BOOST_TEST(europe.get("orders", "b", 1).value_or("") == "alone");
 }
