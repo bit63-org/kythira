@@ -1321,6 +1321,9 @@ add_raft_completion_test(multi_raft_host_unit_test multi_raft_host_unit_test.cpp
 add_raft_completion_test(multi_raft_routing_unit_test multi_raft_routing_unit_test.cpp)
 add_raft_completion_test(multi_raft_static_cluster_integration_test
                          multi_raft_static_cluster_integration_test.cpp)
+# A group's own quorum loop never acts on a silent voter: no learner
+# promotion, no provision_node calls (and their error log) per assessment.
+add_raft_completion_test(multi_raft_group_quorum_loop_test multi_raft_group_quorum_loop_test.cpp)
 add_raft_completion_test(admin_entry_unit_test admin_entry_unit_test.cpp)
 add_raft_completion_test(splittable_state_machine_unit_test splittable_state_machine_unit_test.cpp)
 add_raft_completion_test(shard_commands_unit_test shard_commands_unit_test.cpp)

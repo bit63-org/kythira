@@ -274,6 +274,18 @@ auto multi_raft<Types, Key, GroupId>::create_group_impl(
     // under the default placement id is what lets a placement driver's
     // learner → promote sequence work at all. `no_op_quorum_manager` always
     // reports `healthy`, so the single-group quorum loop never acts on it.
+    //
+    // That holds only with the leader's process-liveness rule off: on its own
+    // it counts a voter silent for `quorum_peer_dead_after` unreachable, which
+    // against the unbounded target makes the group `critical`. The loop then
+    // promoted any learner in the group behind the placement driver's back and
+    // called `provision_node` on every assessment, in every group, each call
+    // failing and logging an error. Membership here is the placement driver's
+    // and capacity the host's `elastic_capacity_controller`'s, so a group has
+    // no use for the rule: turn it off.
+    if constexpr (requires { node_cfg.config._quorum_peer_dead_after; }) {
+        node_cfg.config._quorum_peer_dead_after = std::chrono::milliseconds{0};
+    }
     {
         using group_qm = decltype(node_cfg.quorum_manager);
         using pg = typename group_qm::placement_group_id_type;
