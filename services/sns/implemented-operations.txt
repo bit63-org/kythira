@@ -18,3 +18,10 @@ RemovePermission
 SetTopicAttributes
 TagResource
 UntagResource
+ConfirmSubscription
+GetSubscriptionAttributes
+ListSubscriptions
+ListSubscriptionsByTopic
+SetSubscriptionAttributes
+Subscribe
+Unsubscribe
