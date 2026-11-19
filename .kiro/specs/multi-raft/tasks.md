@@ -758,4 +758,6 @@ test is the guarantee that this holds.
 **Deliberately deferred.** Cross-shard transactions (out of scope entirely);
 TiKV RFC 0082's buckets as a sharper load signal (`shard_stats` is shaped to
 accept them later without breaking the policy concept); transport-level message
-batching across groups to the same destination (design §11 Phase 9).
+batching across groups to the same destination (design §11 Phase 9). Both are
+now specified on their own: `.kiro/specs/multi-raft-load-buckets/` and
+`.kiro/specs/multi-raft-message-batching/`.

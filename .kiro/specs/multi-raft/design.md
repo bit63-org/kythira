@@ -324,7 +324,8 @@ Optional message batching — coalescing many groups' `AppendEntries` to the sam
 destination into one payload — is a further win but needs a transport-side
 extension concept (`network_client_with_batch`). It is deferred to Phase 6 and
 detected with `if constexpr`, in the same style as
-`network_client_with_pre_vote`.
+`network_client_with_pre_vote`. Now specified in
+`.kiro/specs/multi-raft-message-batching/`.
 
 ---
 
@@ -1571,7 +1572,7 @@ methods and one enum.
 4. **Buckets.** TiKV RFC 0082's sub-shard statistics unit would sharpen the
    load signal considerably. `shard_stats` is shaped so it can be added as a
    field without breaking the policy concept, and it is deliberately out of
-   scope for this pass.
+   scope for this pass. Now specified in `.kiro/specs/multi-raft-load-buckets/`.
 5. **Per-key reads.** `read_state` returns the whole state-machine blob, so
    read latency and read bytes/sec both scale with shard size rather than with
    how busy a shard is (§6.1.4). Until there is a read that names a key the way
