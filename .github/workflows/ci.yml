@@ -432,7 +432,8 @@ jobs:
             --expect CMAKE_BUILD_TYPE=Release \
             --expect KYTHIRA_KCONFIG_STRICT=ON \
             --expect KYTHIRA_TEST_TIMEOUT_SCALE=4 \
-            --expect KYTHIRA_TEST_REPORT_DIR=${{ github.workspace }}/case-reports
+            --expect KYTHIRA_TEST_REPORT_DIR=${{ github.workspace }}/case-reports \
+            --expect KYTHIRA_REDIS_LUA_SANDBOX=ON
 
       - name: Build
         run: cmake --build build -j$(nproc)

@@ -248,7 +248,7 @@ is extended as the rest land.
   - Tests: leader kill while clients are blocked loses no push
   - _Requirements: 27.1-27.5_
 
-- [ ] 25. Lua 5.1 overlay and sandbox
+- [x] 25. Lua 5.1 overlay and sandbox
   - `vcpkg-overlays/lua51/` with deterministic number formatting, Redis's
     bundled libraries, licences recorded; sandbox, locked globals,
     instruction and allocation budgets; determinism tests across amd64

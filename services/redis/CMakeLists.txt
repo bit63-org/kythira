@@ -19,6 +19,23 @@ target_include_directories(kythira_redis INTERFACE "${KYTHIRA_REDIS_INCLUDE_DIR}
 target_link_libraries(kythira_redis INTERFACE kythira_core_headers kythira_build_version
                       OpenSSL::SSL OpenSSL::Crypto)
 
+# The Lua script sandbox (.kiro/specs/redis-general-data-types/ task 25):
+# kythira/redis/lua_sandbox.hpp over the lua51 overlay port
+# (vcpkg-overlays/lua51/, a default dependency in vcpkg.json). A build
+# without vcpkg has no lua51 and simply leaves the sandbox and its tests
+# out; KYTHIRA_REDIS_LUA_SANDBOX records which, and the CI jobs that must
+# have it assert it with scripts/check-build-config.py.
+find_package(lua51 5.1.5 CONFIG QUIET)
+if(lua51_FOUND)
+    add_library(kythira_redis_lua INTERFACE)
+    target_link_libraries(kythira_redis_lua INTERFACE kythira_redis lua51::lua51 OpenSSL::Crypto)
+    set(KYTHIRA_REDIS_LUA_SANDBOX ON CACHE INTERNAL "lua51 found: the Redis Lua sandbox is built")
+    message(STATUS "Redis module: Lua sandbox enabled (lua51 ${lua51_VERSION})")
+else()
+    set(KYTHIRA_REDIS_LUA_SANDBOX OFF CACHE INTERNAL "lua51 found: the Redis Lua sandbox is built")
+    message(STATUS "Redis module: lua51 not found, Lua sandbox and its tests left out")
+endif()
+
 # The images' Dockerfiles, compose files and staging directories. Images
 # build from KYTHIRA_IMAGE_CONTEXT (cmake/kythira_test_helpers.cmake), so
 # their COPY lines name these paths from the source root.
