@@ -245,12 +245,13 @@ PR unless noted.
     it made was deleted; cost under $0.01. The CI dispatch switch is not
     added (the real-cloud workflow is at GitHub's input cap).
 
-- [ ] 14. Measurement and documentation
+- [x] 14. Measurement and documentation
   - _Requirements: 13.5, 14.1_
-  - Progress (November 18, 2026): `services/sqs/doc/` has configuration,
-    delivery semantics and clocks, encryption and the SNS bridge beside
-    `unsupported.md`. `tools/sqs_load.py` and `doc/measurements.md` with
-    the in-memory, co-located and three-layer split rows from a
-    development container (a lower bound; a production-hardware row is
-    still wanted). Left: the layers and sizing page and the migration
-    runbook (after task 11).
+  - Done (November 19, 2026): `services/sqs/doc/` has configuration,
+    layers and sizing (`layers.md`), delivery semantics and clocks,
+    encryption, the SNS bridge, `unsupported.md` and the migration
+    runbook (`migration.md`). `tools/sqs_load.py` and
+    `doc/measurements.md` with the in-memory, co-located and three-layer
+    split rows from a development container (a lower bound). A row on
+    production hardware is a follow-up: `layers.md` and
+    `measurements.md` both say not to size a cluster before it exists.
