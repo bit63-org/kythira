@@ -26,6 +26,13 @@
 /// The body's MD5 is computed alongside, for the single-part ETag S3 gives
 /// an unencrypted object (7.4).
 ///
+/// **Encryption.** Given a `chunk_cipher` (`s3_chunk_cipher.hpp`), the
+/// writer seals each chunk before hashing and writing it and the reader
+/// opens each one after the verified read, so everything past the front
+/// end holds ciphertext. Manifests keep plaintext sizes. An encrypted
+/// body's chunks carry `chunk_cipher::overhead` fewer plaintext bytes, so
+/// a sealed chunk is still at most `chunk_bytes`.
+///
 /// The copies of one chunk are written in parallel and the write waits for
 /// all of them, not just the quorum: the bytes are the caller's, so no
 /// write may outlive the call. Acknowledging at quorum while stragglers
@@ -48,6 +55,7 @@
 /// co-located (the owning group's replicas, this node's in-process) and
 /// with a blob pool.
 
+#include <kythira/s3/s3_chunk_cipher.hpp>
 #include <kythira/s3/s3_index_records.hpp>
 #include <kythira/s3/s3_placement.hpp>
 
@@ -213,9 +221,18 @@ public:
         }
     }
 
-    /// Store one chunk on a write quorum of its placement.
-    auto write_chunk(std::span<const std::byte> bytes) -> aws_rest_xml::result<chunk_ref> {
-        const chunk_ref ref{sha256_of(bytes), bytes.size()};
+    /// Store one chunk on a write quorum of its placement. With a cipher
+    /// the chunk is sealed first; the reference names the sealed bytes and
+    /// keeps the plaintext size.
+    auto write_chunk(std::span<const std::byte> plain, const chunk_cipher* cipher = nullptr)
+        -> aws_rest_xml::result<chunk_ref> {
+        std::vector<std::byte> sealed;
+        if (cipher != nullptr) {
+            sealed = cipher->seal(plain);
+        }
+        const std::span<const std::byte> bytes =
+            cipher != nullptr ? std::span<const std::byte>(sealed) : plain;
+        const chunk_ref ref{sha256_of(bytes), plain.size()};
         const auto p = _placement(ref.sha);
         if (p.write_quorum == 0 || p.write_quorum > p.nodes.size()) {
             return internal_error("placement asks for an impossible write quorum");
@@ -261,7 +278,10 @@ public:
     /// Cuts a streamed body into chunks and writes each as it fills.
     class body_writer {
     public:
-        explicit body_writer(data_path& path) : _path(&path) {
+        /// `cipher`, when given, seals every chunk and must outlive the
+        /// writer.
+        explicit body_writer(data_path& path, const chunk_cipher* cipher = nullptr)
+            : _path(&path), _cipher(cipher) {
             _buffer.reserve(std::min<std::size_t>(path._options.chunk_bytes, 1024 * 1024));
         }
 
@@ -272,7 +292,7 @@ public:
             }
             _md5.update(bytes);
             _size += bytes.size();
-            const auto chunk = _path->_options.chunk_bytes;
+            const auto chunk = _path->plain_chunk_bytes(_cipher != nullptr);
             while (!bytes.empty()) {
                 if (_buffer.empty() && bytes.size() >= chunk) {
                     // A whole chunk straight from the caller's buffer.
@@ -313,7 +333,7 @@ public:
 
     private:
         auto flush(std::span<const std::byte> chunk) -> std::optional<aws_rest_xml::error> {
-            auto r = _path->write_chunk(chunk);
+            auto r = _path->write_chunk(chunk, _cipher);
             if (!r) {
                 _failed = r.error();
                 return _failed;
@@ -323,6 +343,7 @@ public:
         }
 
         data_path* _path;
+        const chunk_cipher* _cipher;
         std::vector<std::byte> _buffer;
         std::vector<chunk_ref> _manifest;
         std::uint64_t _size = 0;
@@ -330,7 +351,17 @@ public:
         std::optional<aws_rest_xml::error> _failed;
     };
 
-    [[nodiscard]] auto writer() -> body_writer { return body_writer(*this); }
+    [[nodiscard]] auto writer(const chunk_cipher* cipher = nullptr) -> body_writer {
+        return body_writer(*this, cipher);
+    }
+
+    /// The plaintext bytes per chunk: `chunk_bytes`, less the sealing
+    /// overhead for an encrypted body so a sealed chunk still fits what a
+    /// blob store takes (unless chunks are tiny, as in tests).
+    [[nodiscard]] auto plain_chunk_bytes(bool sealed) const noexcept -> std::size_t {
+        const auto n = _options.chunk_bytes;
+        return sealed && n > 2 * chunk_cipher::overhead ? n - chunk_cipher::overhead : n;
+    }
 
     auto write_body(std::span<const std::byte> body) -> aws_rest_xml::result<written_body> {
         auto w = writer();
@@ -394,11 +425,14 @@ public:
     /// `sink(std::span<const std::byte>)`, chunk by chunk. The caller has
     /// read `content` from the metadata layer and resolved the range; a
     /// range past the end is `416 InvalidRange`. On an error part of the
-    /// range may have been delivered already.
+    /// range may have been delivered already. An encrypted object's chunks
+    /// are opened with `cipher`; one that does not open is a 500, never
+    /// served.
     template<typename Sink>
     requires std::invocable<Sink&, std::span<const std::byte>>
     auto read_range(const object_content& content, std::uint64_t offset, std::uint64_t length,
-                    Sink&& sink) -> aws_rest_xml::result<std::uint64_t> {
+                    Sink&& sink, const chunk_cipher* cipher = nullptr)
+        -> aws_rest_xml::result<std::uint64_t> {
         const auto size = content.size();
         if (offset > size || length > size - offset) {
             return invalid_range();
@@ -412,6 +446,18 @@ public:
                 auto bytes = read_chunk(ref);
                 if (!bytes) {
                     return bytes.error();
+                }
+                if (cipher != nullptr) {
+                    if (bytes->size() != ref.size + chunk_cipher::overhead) {
+                        return internal_error("sealed chunk " + to_hex(ref.sha) +
+                                              " is not the size its manifest says");
+                    }
+                    auto plain = cipher->open(*bytes);
+                    if (!plain) {
+                        return internal_error("chunk " + to_hex(ref.sha) +
+                                              " does not open under its object's key");
+                    }
+                    bytes = std::move(*plain);
                 }
                 if (bytes->size() != ref.size) {
                     return internal_error("chunk " + to_hex(ref.sha) +

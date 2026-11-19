@@ -12,6 +12,7 @@ CopyObject
 CreateBucket
 CreateMultipartUpload
 DeleteBucket
+DeleteBucketEncryption
 DeleteBucketOwnershipControls
 DeleteBucketPolicy
 DeleteBucketTagging
@@ -20,6 +21,7 @@ DeleteObjectTagging
 DeleteObjects
 DeletePublicAccessBlock
 GetBucketAcl
+GetBucketEncryption
 GetBucketLocation
 GetBucketLogging
 GetBucketOwnershipControls
@@ -45,6 +47,7 @@ ListObjects
 ListObjectsV2
 ListParts
 PutBucketAcl
+PutBucketEncryption
 PutBucketLogging
 PutBucketOwnershipControls
 PutBucketPolicy

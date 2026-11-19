@@ -39,10 +39,16 @@
 /// `x-amz-bypass-governance-retention` to the index, which refuses to
 /// remove a locked version.
 ///
-/// **Not here yet.** SSE (11): a request that asks for SSE-KMS or SSE-C
-/// is refused with `NotImplemented` rather than stored unencrypted.
-/// Storage classes other than `STANDARD` are stored and returned; their
-/// tiering is task 13.
+/// **Encryption** (task 11, `s3_encryption.hpp`). A PUT seals its chunks
+/// under a new data key from its SSE headers or the bucket's default
+/// encryption, and a GET or HEAD opens the version's key (SSE-C: with the
+/// request's key) before anything is read. SSE-KMS and SSE-C objects get
+/// an ETag that is not the MD5 of their bytes. A copy shares the source's
+/// chunks only between SSE-S3 (or unencrypted) objects; otherwise it
+/// re-encrypts the bytes through the front end (`copy_encryption`).
+///
+/// **Not here yet.** Storage classes other than `STANDARD` are stored and
+/// returned; their tiering is task 13.
 
 #include <kythira/s3/s3_access.hpp>
 #include <kythira/s3/s3_auth.hpp>
@@ -341,18 +347,6 @@ struct byte_range {
     return c;
 }
 
-/// SSE asks this task cannot honour yet (task 11).
-[[nodiscard]] inline auto refuse_encryption(const header_list& headers)
-    -> std::optional<aws_rest_xml::error> {
-    if (auto sse = find_header(headers, "x-amz-server-side-encryption"); sse && *sse != "AES256") {
-        return not_implemented();
-    }
-    if (find_header(headers, "x-amz-server-side-encryption-customer-algorithm")) {
-        return not_implemented();
-    }
-    return std::nullopt;
-}
-
 /// The owner of a new object: the bucket owner unless ACLs are on and the
 /// writer keeps it (ObjectWriter, or BucketOwnerPreferred without
 /// `bucket-owner-full-control`).
@@ -583,8 +577,9 @@ template<metadata_access M>
 [[nodiscard]] auto put_object(handler_context<M>& ctx, const s3_request& req,
                               const authenticated& auth, bucket_state& b) -> handler_result {
     using namespace object_detail;
-    if (auto e = refuse_encryption(req.headers)) {
-        return *e;
+    auto sse = parse_sse_request(req.headers, req.secure_transport);
+    if (!sse) {
+        return sse.error();
     }
     const auto& limits = b.profile;
     const auto declared = req.header("x-amz-decoded-content-length")
@@ -648,8 +643,14 @@ template<metadata_access M>
     if (auto h = req.header("If-Match")) {
         conditions.if_match = std::string(access_detail::trim(*h));
     }
+    const auto plan = plan_for(std::move(*sse), b.encryption);
+    auto sealed = ctx.keys().seal(plan, b.client_name, req.resource.key, caller_of(auth.who, req));
+    if (!sealed) {
+        return sealed.error();
+    }
+    content->system_metadata.insert(sealed->metadata.begin(), sealed->metadata.end());
 
-    auto w = ctx.data.writer();
+    auto w = ctx.data.writer(sealed->cipher ? &*sealed->cipher : nullptr);
     std::string buf;
     std::uint64_t size = 0;
     for (bool more = true; more;) {
@@ -691,7 +692,7 @@ template<metadata_access M>
         }
     }
     content->manifest = std::move(written->manifest);
-    content->etag = written->md5_hex;
+    content->etag = hides_md5(plan.kind) ? sealed_etag(content->manifest) : written->md5_hex;
     content->system_metadata[checksum_header(want->algorithm)] = checksum;
     content->system_metadata["x-amz-checksum-type"] = "FULL_OBJECT";
 
@@ -719,6 +720,9 @@ template<metadata_access M>
     out.set("x-amz-checksum-type", "FULL_OBJECT");
     if (auto v = version_header(b, r)) {
         out.set("x-amz-version-id", *v);
+    }
+    for (auto& h : sealed->response) {
+        out.headers.push_back(std::move(h));
     }
     return out;
 }
@@ -748,6 +752,13 @@ template<metadata_access M>
             400, "InvalidRequest",
             "Request specific response headers cannot be used for anonymous GET requests.");
     }
+    if (auto e = refuse_write_headers_on_read(req.headers)) {
+        return *e;
+    }
+    auto customer = parse_customer_key(req.headers, customer_prefix, req.secure_transport);
+    if (!customer) {
+        return customer.error();
+    }
     auto found = find_object(ctx, b, req.resource.key, req.query.get("versionId"));
     if (found.error) {
         auto r = error_response(*found.error, req.request_id, head);
@@ -757,6 +768,11 @@ template<metadata_access M>
         return r;
     }
     const auto& v = *found.version;
+    auto cipher = ctx.keys().open(v.content.system_metadata, *customer, caller_of(auth.who, req));
+    if (!cipher) {
+        return head ? error_response(cipher.error(), req.request_id, true)
+                    : handler_result(cipher.error());
+    }
     if (auto r = read_conditions(req, v)) {
         return std::move(*r);
     }
@@ -820,12 +836,13 @@ template<metadata_access M>
         return out;
     }
     out.stream_length = length;
-    out.stream = [&data = ctx.data, content = v.content, first,
-                  length](const body_sink& sink) -> std::optional<aws_rest_xml::error> {
+    out.stream = [&data = ctx.data, content = v.content, first, length, key = std::move(*cipher)](
+                     const body_sink& sink) -> std::optional<aws_rest_xml::error> {
         bool open = true;
-        auto r = data.read_range(content, first, length, [&](std::span<const std::byte> bytes) {
-            open = open && sink(bytes);
-        });
+        auto r = data.read_range(
+            content, first, length,
+            [&](std::span<const std::byte> bytes) { open = open && sink(bytes); },
+            key ? &*key : nullptr);
         if (!r) {
             return r.error();
         }
@@ -917,14 +934,101 @@ struct copy_source {
     return out;
 }
 
+/// A copy's encryption. The copy shares the source's chunks (and wrapped
+/// key) when both are SSE-S3, or both unencrypted, and the request names
+/// no encryption of its own for a copy onto itself. Otherwise the source
+/// is opened (SSE-C with the `x-amz-copy-source-` key), the bytes stream
+/// through the front end into new chunks sealed under the new object's
+/// key, and `c` carries them (`new_bytes`), with the key material in
+/// `override_metadata`. The source version read is pinned by its ETag
+/// unless the request already pins it, so the index never pairs these
+/// bytes with another version's metadata. SSE-KMS always re-encrypts: its
+/// context names the object. The answer is the encryption headers.
+template<metadata_access M>
+[[nodiscard]] auto copy_encryption(handler_context<M>& ctx, const s3_request& req,
+                                   const authenticated& auth, const bucket_state& b,
+                                   const copy_source& src,
+                                   const std::optional<object_version>& source_version,
+                                   const sse_plan& plan, bool explicit_sse,
+                                   const std::optional<customer_key>& source_customer,
+                                   index_command& c) -> aws_rest_xml::result<header_list> {
+    using namespace object_detail;
+    if (!source_version) {
+        // The index answers NoSuchKey (or the delete-marker error).
+        return header_list{};
+    }
+    const auto& v = *source_version;
+    const auto& src_meta = v.content.system_metadata;
+    const auto src_kind = stored_kind(src_meta);
+    auto& keys = ctx.keys();
+    const auto dest_kind =
+        plan.kind == sse_kind::s3 && !keys.s3_managed ? sse_kind::none : plan.kind;
+    const bool onto_itself = c.source.id == c.target.id && src.key == c.key;
+    if (src_kind == dest_kind && (dest_kind == sse_kind::none || dest_kind == sse_kind::s3) &&
+        !source_customer && !(onto_itself && explicit_sse)) {
+        return sse_response_headers(src_meta);
+    }
+    const auto who = caller_of(auth.who, req);
+    auto source_cipher = keys.open(src_meta, source_customer, who);
+    if (!source_cipher) {
+        return source_cipher.error();
+    }
+    if (!s3_index_state_machine<>::source_conditions_hold(c.source_if, v)) {
+        return precondition_failed("x-amz-copy-source-If");
+    }
+    auto sealed = keys.seal(plan, b.client_name, c.key, who);
+    if (!sealed) {
+        return sealed.error();
+    }
+    auto w = ctx.data.writer(sealed->cipher ? &*sealed->cipher : nullptr);
+    std::optional<aws_rest_xml::error> failed;
+    auto read = ctx.data.read_range(
+        v.content, 0, v.content.size(),
+        [&](std::span<const std::byte> bytes) {
+            if (!failed) {
+                failed = w.append(bytes);
+            }
+        },
+        *source_cipher ? &**source_cipher : nullptr);
+    if (!read) {
+        return read.error();
+    }
+    if (failed) {
+        return *failed;
+    }
+    auto written = w.finish();
+    if (!written) {
+        return written.error();
+    }
+    if (!c.source_if.if_match) {
+        c.source_if.if_match = quote(v.content.etag);
+    }
+    c.new_bytes = true;
+    c.content.manifest = std::move(written->manifest);
+    // The copy's ETag is its own: the MD5 of the bytes, or the sealed form.
+    c.content.etag = hides_md5(plan.kind) ? sealed_etag(c.content.manifest) : written->md5_hex;
+    for (const auto name : sse_metadata_keys) {
+        c.override_metadata.emplace_back(name);
+        c.content.system_metadata.erase(std::string(name));
+    }
+    c.content.system_metadata.insert(sealed->metadata.begin(), sealed->metadata.end());
+    return std::move(sealed->response);
+}
+
 template<metadata_access M>
 [[nodiscard]] auto copy_object(handler_context<M>& ctx, const s3_request& req,
                                const authenticated& auth, bucket_state& b,
                                const bucket_state& source, const copy_source& src)
     -> handler_result {
     using namespace object_detail;
-    if (auto e = refuse_encryption(req.headers)) {
-        return *e;
+    auto sse = parse_sse_request(req.headers, req.secure_transport);
+    if (!sse) {
+        return sse.error();
+    }
+    auto source_customer =
+        parse_customer_key(req.headers, copy_source_customer_prefix, req.secure_transport);
+    if (!source_customer) {
+        return source_customer.error();
     }
     const auto metadata_directive = req.header("x-amz-metadata-directive").value_or("COPY");
     const auto tagging_directive = req.header("x-amz-tagging-directive").value_or("COPY");
@@ -935,15 +1039,21 @@ template<metadata_access M>
     }
     const bool replace = metadata_directive == "REPLACE";
 
-    // The source as of now, for the size limit; apply() checks it again.
-    if (auto v = ctx.meta.version(source.desc.id, src.key, src.version_id);
-        v && !v->delete_marker && v->content.size() > b.profile.max_put_bytes) {
+    // The source as of now, for the size limit and its encryption; apply()
+    // checks it again.
+    auto source_version = ctx.meta.version(source.desc.id, src.key, src.version_id);
+    if (source_version && source_version->delete_marker) {
+        source_version.reset();
+    }
+    if (source_version && source_version->content.size() > b.profile.max_put_bytes) {
         return aws_rest_xml::errors::make(
             400, "InvalidRequest",
             "The specified copy source is larger than the maximum allowable size for a copy "
             "source: " +
                 std::to_string(b.profile.max_put_bytes));
     }
+    const bool explicit_sse = sse->kind != sse_kind::none;
+    const auto plan = plan_for(std::move(*sse), b.encryption);
 
     index_command c;
     c.op = index_command::kind::copy_object;
@@ -1037,6 +1147,11 @@ template<metadata_access M>
     if (auto h = req.header("If-Match")) {
         c.conditions.if_match = std::string(access_detail::trim(*h));
     }
+    auto sse_headers = copy_encryption(ctx, req, auth, b, src, source_version, plan, explicit_sse,
+                                       *source_customer, c);
+    if (!sse_headers) {
+        return sse_headers.error();
+    }
     auto r = ctx.meta.propose(c);
     if (!r.ok()) {
         if (r.error == "NoSuchKey") {
@@ -1059,6 +1174,9 @@ template<metadata_access M>
         if (auto v = ctx.meta.version(source.desc.id, src.key, std::nullopt)) {
             out.set("x-amz-copy-source-version-id", v->version_id());
         }
+    }
+    for (auto& h : *sse_headers) {
+        out.headers.push_back(std::move(h));
     }
     return out;
 }

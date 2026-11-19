@@ -84,6 +84,7 @@ struct http_request {
         "DeleteBucketPolicy", "GetBucketPolicyStatus", "GetBucketAcl", "PutBucketAcl",
         "GetBucketOwnershipControls", "PutBucketOwnershipControls", "DeleteBucketOwnershipControls",
         "GetPublicAccessBlock", "PutPublicAccessBlock", "DeletePublicAccessBlock",
+        "GetBucketEncryption", "PutBucketEncryption", "DeleteBucketEncryption",
         // Objects.
         "PutObject", "GetObject", "HeadObject", "DeleteObject", "DeleteObjects", "CopyObject",
         "GetObjectAttributes", "GetObjectTagging", "PutObjectTagging", "DeleteObjectTagging",
@@ -137,6 +138,9 @@ private:
             {"GetBucketTagging", &get_bucket_tagging<M>},
             {"PutBucketTagging", &put_bucket_tagging<M>},
             {"DeleteBucketTagging", &delete_bucket_tagging<M>},
+            {"GetBucketEncryption", &get_bucket_encryption<M>},
+            {"PutBucketEncryption", &put_bucket_encryption<M>},
+            {"DeleteBucketEncryption", &delete_bucket_encryption<M>},
             {"GetBucketPolicy", &get_bucket_policy<M>},
             {"PutBucketPolicy", &put_bucket_policy<M>},
             {"DeleteBucketPolicy", &delete_bucket_policy<M>},

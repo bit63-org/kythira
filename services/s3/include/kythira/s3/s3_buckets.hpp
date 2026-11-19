@@ -455,6 +455,47 @@ template<metadata_access M>
     return bucket_detail::no_content();
 }
 
+// ---------------------------------------------------------------------------
+// Default encryption
+// ---------------------------------------------------------------------------
+
+template<metadata_access M>
+[[nodiscard]] auto put_bucket_encryption(handler_context<M>& ctx, const s3_request& req,
+                                         const authenticated& /*auth*/, bucket_state& b)
+    -> handler_result {
+    auto body = bucket_detail::document(ctx, req);
+    if (!body) {
+        return body.error();
+    }
+    auto e = parse_bucket_encryption(*body);
+    if (!e) {
+        return e.error();
+    }
+    if (auto err = bucket_detail::store(ctx, b, "encryption", bucket_encryption_xml(*e))) {
+        return *err;
+    }
+    return s3_response{};
+}
+
+/// Every bucket has default encryption, as on S3 since 2023: SSE-S3 until
+/// `PutBucketEncryption` says otherwise.
+template<metadata_access M>
+[[nodiscard]] auto get_bucket_encryption(handler_context<M>& /*ctx*/, const s3_request& /*req*/,
+                                         const authenticated& /*auth*/, bucket_state& b)
+    -> handler_result {
+    return xml_response(bucket_encryption_xml(b.encryption));
+}
+
+template<metadata_access M>
+[[nodiscard]] auto delete_bucket_encryption(handler_context<M>& ctx, const s3_request& /*req*/,
+                                            const authenticated& /*auth*/, bucket_state& b)
+    -> handler_result {
+    if (auto e = bucket_detail::store(ctx, b, "encryption", std::nullopt)) {
+        return *e;
+    }
+    return bucket_detail::no_content();
+}
+
 // ---- policy ------------------------------------------------------------------
 
 template<metadata_access M>

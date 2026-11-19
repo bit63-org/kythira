@@ -249,10 +249,30 @@ builds it to that design). Each task is one PR unless noted.
     `s3_service_test`, `object_lock_is_enforced_on_every_removal` in
     the index test.
 
-- [ ] 11. Encryption
+- [x] 11. Encryption
   - SSE-S3 default, SSE-KMS with bucket keys, SSE-C; chunk sealing in the
     front end
   - _Requirements: 11.1-11.3_
+  - Done: every new object gets its own data key, from its SSE headers,
+    the bucket's default encryption (Get/Put/DeleteBucketEncryption) or
+    SSE-S3, and the data path seals each chunk with AES-256-GCM under it
+    before hashing (`s3_chunk_cipher.hpp`); manifests keep plaintext
+    sizes. Nonces are HMAC-derived from the chunk, so deduplication works
+    within a key and only there. Data keys are stored wrapped
+    (`s3_encryption.hpp`): SSE-S3 by the endpoint's S3-managed provider,
+    SSE-KMS by `GenerateDataKey` as the caller (reads `Decrypt` as the
+    reader, so `kms:Decrypt` is enforced), bucket keys cached per node and
+    wrapping each object's key locally, SSE-C as a salted HMAC only. The
+    `kms_key_provider` library has not moved out of Kinesis yet
+    (kms-compatible-api task 16), so S3 has its own provider concept of the
+    same shape: `local_key_provider` and `kms_api_provider` (Kythira or
+    AWS KMS over the JSON API; the daemon hands it a transport in task 16).
+    Copies share chunks only between SSE-S3 objects and re-encrypt through
+    the front end otherwise (new index field `new_bytes`); multipart
+    uploads keep their key with the upload. DSSE-KMS answers
+    `NotImplemented`. Tests: `s3_encryption_test`, five encryption cases
+    in `s3_service_test`, `a_re_encrypted_copy_takes_its_own_chunks_and_keys`
+    in the index test.
 
 - [ ] 12. Orphan sweep, placement repair and request rates
   - Sweep of uncommitted chunks; repair to the copy count; per-prefix
