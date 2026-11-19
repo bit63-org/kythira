@@ -265,4 +265,7 @@ Reference material to read before starting:
   `KYTHIRA_EC2_TEST_AMI` for the existing `ca-cluster-node` /
   `ca-cluster-node-rpc-tls` real-EC2 test bundles, and any AMI
   retention/cleanup automation, are explicitly out of scope (Requirement
-  13 AC 4-5) — candidate follow-up specs, not part of this one.
+  13 AC 4-5) — candidate follow-up specs, not part of this one. Retention
+  is now specified in `.kiro/specs/ca-cluster-node-ami-retention/`; the AMI
+  wiring was already done by the workflow's "Resolve ca_cluster_node AMI ID"
+  step, which picks the newest tagged image.
