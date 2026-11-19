@@ -59,7 +59,8 @@ Every node of `KYTHIRA_NODE_PEERS` is a voter of the one SQS group.
 
 ## Layers
 
-A node runs every layer by default. `KYTHIRA_SQS_ROLES` splits them:
+A node runs every layer by default. `KYTHIRA_SQS_ROLES` splits them.
+[layers.md](layers.md) covers choosing a layout and sizing each layer.
 
 | Variable | Default | Notes |
 |---|---|---|
