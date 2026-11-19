@@ -30,17 +30,23 @@ test reads the table rows: keep one operation per row, in the
 
 ## Global tables: what `ReplicaUpdates` does not do
 
-Version 2019.11.21 global tables (task 22) take `Create` and `Delete`
-replica updates. These parts of the API answer `ValidationException`
-("Kythira does not support ... yet"), or differ, as listed:
+Version 2019.11.21 global tables (task 22) take `Create`, `Update` and
+`Delete` replica updates with the per-replica overrides
+(`KMSMasterKeyId`, `ProvisionedThroughputOverride`,
+`OnDemandThroughputOverride`, `GlobalSecondaryIndexes` and
+`TableClassOverride`), and `DeleteTable` of one replica. These parts of
+the API answer `ValidationException` ("Kythira does not support ...
+yet"), or differ, as listed:
 
-- `ReplicaUpdates` `Update`, and the per-replica overrides on `Create`
-  other than `KMSMasterKeyId` (`ProvisionedThroughputOverride`,
-  `OnDemandThroughputOverride`, `GlobalSecondaryIndexes`,
-  `TableClassOverride`): replicas take the source table's settings.
-  Each replica has a table key of its own from its own region's key
-  provider, under the `KMSMasterKeyId` its `Create` named or that
-  region's `alias/aws/dynamodb`.
+- An override changes only the replica it names. Changes to the table's
+  own settings in one region (its capacity, class or maximums) are not
+  copied to the other replicas, which keep theirs.
+- An `Update` that the replica's region refuses leaves the replica
+  ACTIVE with the reason in `ReplicaStatusDescription`, since AWS has no
+  failed state for an update.
+- `DeleteTable` of a replica asks one ACTIVE replica to drop it before
+  deleting. When none can be reached it answers `InternalServerError`
+  and keeps the table, so the caller can try again.
 - On multi-region strongly consistent tables (task 27), as on AWS:
   replicas cannot be added after creation, transactions, TTL and LSIs
   are refused, and a single replica or the witness cannot be deleted
@@ -48,8 +54,9 @@ replica updates. These parts of the API answer `ValidationException`
   two members goes to the region that keeps the table. A region without
   a quorum answers `InternalServerError`, since AWS's error for that
   case is not documented.
-- `DeleteTable` of a table with replicas is refused; AWS deletes that
-  replica. Remove the replicas with `ReplicaUpdates` `Delete` first.
+- `DeleteTable` of a multi-region strongly consistent table with
+  replicas is refused: delete the other members with `ReplicaUpdates`
+  first, as above.
 - `ReplicaUpdates` cannot be combined with other `UpdateTable` changes in
   one request, and a table changes one replica at a time.
 - A table need not have a DynamoDB stream to become global: replication

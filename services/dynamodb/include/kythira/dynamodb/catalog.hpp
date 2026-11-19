@@ -233,6 +233,40 @@ enum class replica_status : std::uint8_t {
     active = 1,
     deleting = 2,
     creation_failed = 3,
+    /// Its per-replica settings are being changed (`ReplicaUpdates`
+    /// `Update`): the replicator has yet to apply them in its region.
+    updating = 4,
+};
+
+/// A GSI's settings in one replica (`ReplicaUpdates`
+/// `GlobalSecondaryIndexes`), each 0 or -1 when not overridden.
+struct replica_index_override {
+    std::string index;
+    /// `ProvisionedThroughputOverride.ReadCapacityUnits`; 0: the table's.
+    std::uint64_t read_capacity = 0;
+    /// `OnDemandThroughputOverride.MaxReadRequestUnits`; -1: the table's.
+    std::int64_t max_read = -1;
+
+    friend auto operator==(const replica_index_override&, const replica_index_override&)
+        -> bool = default;
+};
+
+/// What a replica overrides of the table's settings, as AWS allows: read
+/// capacity (provisioned) or the read maximum (on demand), the table
+/// class, and the same reads for each GSI. Writes stay the same in every
+/// replica, as on AWS.
+struct replica_overrides {
+    /// 0: the table's.
+    std::uint64_t read_capacity = 0;
+    /// -1: the table's.
+    std::int64_t max_read = -1;
+    /// 0: the table's; else 1 + `table_class`.
+    std::uint8_t table_class = 0;
+    std::vector<replica_index_override> indexes;
+
+    [[nodiscard]] auto empty() const -> bool { return *this == replica_overrides{}; }
+
+    friend auto operator==(const replica_overrides&, const replica_overrides&) -> bool = default;
 };
 
 struct table_replica {
@@ -253,6 +287,8 @@ struct table_replica {
     /// (`ReplicaUpdates` `Create` `KMSMasterKeyId`), empty for that
     /// region's DynamoDB managed key (KMS task 17, Requirement 12.8).
     std::string kms_key;
+    /// Its per-replica settings (`ReplicaUpdates` `Create` and `Update`).
+    replica_overrides overrides;
 
     friend auto operator==(const table_replica&, const table_replica&) -> bool = default;
 };
@@ -294,6 +330,8 @@ struct table_witness {
             return "DELETING";
         case replica_status::creation_failed:
             return "CREATION_FAILED";
+        case replica_status::updating:
+            return "UPDATING";
     }
     return "ACTIVE";
 }
@@ -762,6 +800,51 @@ struct catalog_result {
     friend auto operator==(const catalog_result&, const catalog_result&) -> bool = default;
 };
 
+/// `d`, a replica's table, with the settings `o` overrides
+/// (`ReplicaUpdates` `Create` and `Update`): read capacity while
+/// provisioned, the read maximum while on demand, the table class, and
+/// each GSI's reads. Writes are left as the table has them.
+inline void apply_replica_overrides(table_descriptor& d, const replica_overrides& o) {
+    const auto set_max_read = [&](const std::string& index, std::int64_t max_read) {
+        auto it = std::find_if(d.on_demand.begin(), d.on_demand.end(),
+                               [&](const on_demand_limit& l) { return l.index == index; });
+        if (it == d.on_demand.end()) {
+            if (max_read == -1) {
+                return;
+            }
+            d.on_demand.push_back(on_demand_limit{index, -1, -1});
+            it = std::prev(d.on_demand.end());
+        }
+        it->max_read = max_read;
+        if (it->max_read == -1 && it->max_write == -1) {
+            d.on_demand.erase(it);
+        }
+    };
+    const bool provisioned = d.billing == billing_mode::provisioned;
+    if (o.read_capacity != 0 && provisioned) {
+        d.read_capacity = o.read_capacity;
+    }
+    if (o.max_read != -1 && !provisioned) {
+        set_max_read("", o.max_read);
+    }
+    if (o.table_class != 0) {
+        d.storage_class = static_cast<table_class>(o.table_class - 1);
+    }
+    for (const auto& i : o.indexes) {
+        const auto g = std::find_if(d.gsis.begin(), d.gsis.end(),
+                                    [&](const global_index& x) { return x.name == i.index; });
+        if (g == d.gsis.end()) {
+            continue;
+        }
+        if (i.read_capacity != 0 && provisioned) {
+            g->read_capacity = i.read_capacity;
+        }
+        if (i.max_read != -1 && !provisioned) {
+            set_max_read(i.index, i.max_read);
+        }
+    }
+}
+
 namespace catalog_detail {
 
 /// 2 added `gsis` (task 11) to the descriptor and to the commands and
@@ -802,13 +885,20 @@ namespace catalog_detail {
 /// an `OnDemandThroughput` (and for a command that changes one), so a node
 /// that predates it refuses such a table's forms rather than dropping its
 /// maximums.
-inline constexpr std::uint8_t k_descriptor_format_version = 14;
+/// 15 added each replica's `overrides` after `on_demand`, and the replica
+/// status `updating`, only for a table with a replica that has either.
+inline constexpr std::uint8_t k_descriptor_format_version = 15;
 inline constexpr std::uint8_t k_job_format_version = 1;
-inline constexpr std::uint8_t k_command_format_version = 14;
-inline constexpr std::uint8_t k_result_format_version = 14;
+inline constexpr std::uint8_t k_command_format_version = 15;
+inline constexpr std::uint8_t k_result_format_version = 15;
 
 /// The version a form carrying `d` is written as.
 [[nodiscard]] inline auto version_for(const table_descriptor& d) -> std::uint8_t {
+    if (std::ranges::any_of(d.replicas, [](const table_replica& r) {
+            return !r.overrides.empty() || r.status == replica_status::updating;
+        })) {
+        return 15;
+    }
     if (!d.on_demand.empty()) {
         return 14;
     }
@@ -1021,6 +1111,20 @@ inline void put_descriptor_body(std::string& out, const table_descriptor& d, std
             detail::put_varint(out, static_cast<std::uint64_t>(l.max_write + 1));
         }
     }
+    if (version >= 15) {
+        for (const auto& r : d.replicas) {
+            const auto& o = r.overrides;
+            detail::put_varint(out, o.read_capacity);
+            detail::put_varint(out, static_cast<std::uint64_t>(o.max_read + 1));
+            out.push_back(static_cast<char>(o.table_class));
+            detail::put_varint(out, o.indexes.size());
+            for (const auto& i : o.indexes) {
+                detail::put_bytes(out, i.index);
+                detail::put_varint(out, i.read_capacity);
+                detail::put_varint(out, static_cast<std::uint64_t>(i.max_read + 1));
+            }
+        }
+    }
 }
 
 /// `version` is the format of the enclosing form (descriptor, command or
@@ -1215,7 +1319,8 @@ inline void put_descriptor_body(std::string& out, const table_descriptor& d, std
             const auto created = r.varint();
             const auto backfilled = get_flag(r);
             const auto m = r.count();
-            if (!name || !status || *status > 3 || !created || !backfilled || !m) {
+            if (!name || !status || *status > (version >= 15 ? 4 : 3) || !created || !backfilled ||
+                !m) {
                 return std::nullopt;
             }
             for (std::size_t j = 0; j < *m; ++j) {
@@ -1316,6 +1421,33 @@ inline void put_descriptor_body(std::string& out, const table_descriptor& d, std
             d.on_demand.push_back(on_demand_limit{std::move(*index),
                                                   static_cast<std::int64_t>(*max_read) - 1,
                                                   static_cast<std::int64_t>(*max_write) - 1});
+        }
+    }
+    if (version >= 15) {
+        constexpr auto k_top = static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max());
+        for (auto& rep : d.replicas) {
+            auto& o = rep.overrides;
+            const auto read = r.varint();
+            const auto max_read = r.varint();
+            const auto cls = r.byte();
+            const auto n = r.count();
+            if (!read || !max_read || *max_read > k_top || !cls || *cls > 2 || !n ||
+                *n > k_max_global_indexes) {
+                return std::nullopt;
+            }
+            o.read_capacity = *read;
+            o.max_read = static_cast<std::int64_t>(*max_read) - 1;
+            o.table_class = *cls;
+            for (std::size_t i = 0; i < *n; ++i) {
+                auto index = r.bytes();
+                const auto index_read = r.varint();
+                const auto index_max = r.varint();
+                if (!index || !index_read || !index_max || *index_max > k_top) {
+                    return std::nullopt;
+                }
+                o.indexes.push_back(replica_index_override{
+                    std::move(*index), *index_read, static_cast<std::int64_t>(*index_max) - 1});
+            }
         }
     }
     d.name = std::move(*name);
@@ -2934,7 +3066,8 @@ private:
         }
         const bool busy =
             std::any_of(d->replicas.begin(), d->replicas.end(), [](const table_replica& r) {
-                return r.status == replica_status::creating || r.status == replica_status::deleting;
+                return r.status == replica_status::creating ||
+                       r.status == replica_status::deleting || r.status == replica_status::updating;
             });
         if (added.size() + removed > 1 || (busy && added.size() + removed == 1)) {
             return failure("LimitExceededException",
@@ -2957,6 +3090,24 @@ private:
                 (want->status == replica_status::active ||
                  want->status == replica_status::creation_failed)) {
                 have.status = want->status;
+                have.failure = want->failure;
+            }
+            // `ReplicaUpdates` `Update` (ACTIVE to UPDATING, with the new
+            // settings), and the replicator's finish (UPDATING to ACTIVE).
+            if (want->status == replica_status::updating &&
+                (want->overrides != have.overrides || want->kms_key != have.kms_key)) {
+                if (have.status != replica_status::active || busy) {
+                    return failure("LimitExceededException",
+                                   "Only one replica can be created, updated or deleted at a "
+                                   "time per table");
+                }
+                have.status = replica_status::updating;
+                have.overrides = want->overrides;
+                have.kms_key = want->kms_key;
+                have.failure.clear();
+            } else if (have.status == replica_status::updating &&
+                       want->status == replica_status::active) {
+                have.status = replica_status::active;
                 have.failure = want->failure;
             }
             have.backfilled = have.backfilled || want->backfilled;
