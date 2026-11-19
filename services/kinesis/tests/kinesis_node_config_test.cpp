@@ -348,6 +348,28 @@ BOOST_AUTO_TEST_CASE(channel_delivery_settings) {
     BOOST_TEST(refused_naming(vars, "KINESIS_CHANNEL_STS_ENDPOINT"));
     vars.erase("KINESIS_CHANNEL_STS_ENDPOINT");
 
+    // S3 Tables: S3 Tables' own catalog, signed, unless pointed elsewhere.
+    o = kn::from_env(lookup(vars));
+    BOOST_TEST(o._channel_iceberg_uri.empty());
+    BOOST_TEST(o._channel_iceberg_warehouse.empty());
+    BOOST_TEST(o._channel_iceberg_sigv4);
+    vars["KINESIS_CHANNEL_ICEBERG_URI"] = "http://iceberg-rest:8181";
+    vars["KINESIS_CHANNEL_ICEBERG_WAREHOUSE"] = "s3://warehouse/";
+    vars["KINESIS_CHANNEL_ICEBERG_SIGV4"] = "false";
+    vars["KINESIS_CHANNEL_ICEBERG_TOKEN"] = "t0ken";
+    o = kn::from_env(lookup(vars));
+    BOOST_TEST(o._channel_iceberg_uri == "http://iceberg-rest:8181");
+    BOOST_TEST(o._channel_iceberg_warehouse == "s3://warehouse/");
+    BOOST_TEST(!o._channel_iceberg_sigv4);
+    BOOST_TEST(o._channel_iceberg_token == "t0ken");
+    BOOST_TEST(kn::describe(o).find("iceberg=http://iceberg-rest:8181") != std::string::npos);
+    vars["KINESIS_CHANNEL_ICEBERG_URI"] = "iceberg-rest:8181";
+    BOOST_TEST(refused_naming(vars, "KINESIS_CHANNEL_ICEBERG_URI"));
+    for (const auto* k : {"KINESIS_CHANNEL_ICEBERG_URI", "KINESIS_CHANNEL_ICEBERG_WAREHOUSE",
+                          "KINESIS_CHANNEL_ICEBERG_SIGV4", "KINESIS_CHANNEL_ICEBERG_TOKEN"}) {
+        vars.erase(k);
+    }
+
     vars["KINESIS_CHANNEL_MAX_DELAY_MS"] = "500";
     BOOST_TEST(refused_naming(vars, "KINESIS_CHANNEL_MAX_DELAY_MS"));
     vars["KINESIS_CHANNEL_MAX_DELAY_MS"] = "900001";
