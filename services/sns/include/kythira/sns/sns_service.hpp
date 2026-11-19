@@ -38,6 +38,7 @@
 
 #include <kythira/sns/sns_compat_profile.hpp>
 #include <kythira/sns/sns_errors.hpp>
+#include <kythira/sns/sns_filter_policy.hpp>
 #include <kythira/sns/sns_front_end.hpp>
 #include <kythira/sns/sns_message.hpp>
 #include <kythira/sns/sns_query.hpp>
@@ -183,6 +184,8 @@ inline constexpr std::string_view k_pending_arn = "PendingConfirmation";
 /// Confirmation tokens: random bytes, hex encoded (SNS's are 256 hex
 /// characters too).
 inline constexpr std::size_t k_token_bytes = 128;
+/// Subscriptions with a filter policy, per topic (SNS's quota).
+inline constexpr std::size_t k_max_filter_policies_per_topic = 200;
 /// Tags per topic, and the lengths SNS allows.
 inline constexpr std::size_t k_max_tags = 50;
 inline constexpr std::size_t k_max_tag_key = 128;
@@ -914,6 +917,9 @@ public:
             }
             stored.insert_or_assign(k, v);
         }
+        if (auto bad = check_filter_policy(*t, stored, 0)) {
+            return *bad;
+        }
         const auto& caller = ctx._principal.account;
         if (const auto limit = limits(ctx).subscriptions_per_topic(t->_fifo); limit != 0) {
             if (_store.subscriptions_of(t->_id).size() >= limit) {
@@ -1069,6 +1075,17 @@ public:
         }
         if (auto bad = check_subscription_attribute(sub->_protocol, *name, value)) {
             return *bad;
+        }
+        if (*name == "FilterPolicy" || *name == "FilterPolicyScope") {
+            auto after = sub->_attributes;
+            after.insert_or_assign(std::string(*name), value);
+            const auto t = _store.topic_by_id(sub->_topic_id);
+            if (!t) {
+                return subscription_not_found();
+            }
+            if (auto bad = check_filter_policy(*t, after, sub->_id)) {
+                return *bad;
+            }
         }
         set_subscription_attribute_command c;
         c._subscription_id = sub->_id;
@@ -1529,6 +1546,38 @@ private:
         return std::nullopt;
     }
 
+    /// Checks the filter policy a subscription's attributes would hold
+    /// (task 5): its grammar in its scope, so a scope change that would
+    /// strand a nested policy is refused too, and SNS's limit of filter
+    /// policies per topic. `self` is the subscription being changed, 0 for
+    /// a new one. An empty policy removes it, as on SNS.
+    [[nodiscard]] auto check_filter_policy(const topic_record& t, const string_map& attrs,
+                                           std::uint64_t self) const -> std::optional<sns_error> {
+        const auto it = attrs.find("FilterPolicy");
+        if (it == attrs.end() || it->second.empty()) {
+            return std::nullopt;
+        }
+        const auto scope_it = attrs.find("FilterPolicyScope");
+        const auto parsed = filter_policy::parse(
+            it->second,
+            parse_filter_scope(scope_it == attrs.end() ? std::string_view{} : scope_it->second));
+        if (!parsed.has_value()) {
+            return parsed.error();
+        }
+        std::size_t others = 0;
+        for (const auto& s : _store.subscriptions_of(t._id)) {
+            const auto f = s._attributes.find("FilterPolicy");
+            if (s._id != self && f != s._attributes.end() && !f->second.empty()) {
+                ++others;
+            }
+        }
+        if (others >= k_max_filter_policies_per_topic) {
+            return model_error("FilterPolicyLimitExceededException",
+                               "Filter policy limit exceeded");
+        }
+        return std::nullopt;
+    }
+
     /// Checks one subscription attribute's name and value for a protocol.
     [[nodiscard]] static auto check_subscription_attribute(std::string_view protocol,
                                                            std::string_view name,
@@ -1555,11 +1604,8 @@ private:
             if (value != "MessageAttributes" && value != "MessageBody") {
                 return bad();
             }
-        } else if (name == "FilterPolicy" || name == "DeliveryPolicy" || name == "ReplayPolicy") {
-            // An empty FilterPolicy removes it, as on SNS; task 5 checks
-            // the policy's grammar.
-            if (!(name == "FilterPolicy" && value.empty()) &&
-                !service_detail::is_json_object(value)) {
+        } else if (name == "DeliveryPolicy" || name == "ReplayPolicy") {
+            if (!service_detail::is_json_object(value)) {
                 return bad();
             }
         } else if (name == "RedrivePolicy") {
