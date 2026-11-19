@@ -209,6 +209,14 @@ keeps the C++ side of it honest; the CMake side is this list.
   `FIU_FOUND`, `FIU_LDFLAGS`, `FIU_INCLUDE_DIRS`.
 - `KYTHIRA_TEST_TIMEOUT_SCALE`, and the `heavy_tu` job pool.
 
+**Its own third-party dependency**: `lua51` (`vcpkg-overlays/lua51/`,
+Lua 5.1.5 with Redis's script libraries), found by the module itself with
+`find_package(lua51 CONFIG)` for the script sandbox
+(`kythira/redis/lua_sandbox.hpp`, target `kythira_redis_lua`). Nothing in
+core uses it. Without it the sandbox and its tests are left out and
+`KYTHIRA_REDIS_LUA_SANDBOX` is `OFF`; the CI jobs that must have it assert
+`ON`.
+
 **Core internals**: the files listed in `boundary-allow.txt` include
 `multi_raft_impl.hpp` (and the daemon `beast_http_transport_impl.hpp`), as
 any application instantiating the multi-Raft host must.

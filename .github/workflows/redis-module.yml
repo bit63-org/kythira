@@ -261,13 +261,13 @@ jobs:
             exit 1
           fi
           leaked=$(ninja -C build -t targets all | sed 's/:.*$//' | grep -v / |
-                   grep -E '^(redis_|resp_protocol|cache_|kythira_redis$|docker-(sccache-e2e|cache-cluster|txn-chaos|engine-chaos))' || true)
+                   grep -E '^(redis_|resp_protocol|cache_|lua_sandbox_|kythira_redis$|kythira_redis_lua$|docker-(sccache-e2e|cache-cluster|txn-chaos|engine-chaos))' || true)
           if [ -n "$leaked" ]; then
             echo "::error::module targets present with the module off:"
             echo "$leaked"
             exit 1
           fi
-          tests=$(ctest --test-dir build -N | grep -E 'Test +#[0-9]+: (redis_|resp_|cache_)' || true)
+          tests=$(ctest --test-dir build -N | grep -E 'Test +#[0-9]+: (redis_|resp_|cache_|lua_sandbox_)' || true)
           if [ -n "$tests" ]; then
             echo "::error::module tests registered with the module off:"
             echo "$tests"
@@ -391,7 +391,8 @@ jobs:
             --compiler clang++-18 \
             --expect CMAKE_BUILD_TYPE=Release \
             --expect KYTHIRA_KCONFIG_STRICT=ON \
-            --expect KYTHIRA_TEST_TIMEOUT_SCALE=4
+            --expect KYTHIRA_TEST_TIMEOUT_SCALE=4 \
+            --expect KYTHIRA_REDIS_LUA_SANDBOX=ON
 
       # Ninja's per-directory target: everything defined under services/redis/
       # (the daemon, the module's tests and the container scenario binaries)

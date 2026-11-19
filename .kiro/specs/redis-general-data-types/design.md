@@ -467,10 +467,18 @@ landed during the gap is not missed.
 
 ### Component 13: Scripts and functions
 
-- Lua 5.1.5 vcpkg overlay port `vcpkg-overlays/lua51/`, built with
-  `LUA_NUMBER` binary64 and a replaced `lua_number2str` using
-  `std::to_chars` (shortest round trip), plus Redis's `cjson`, `cmsgpack`,
-  `bit` and `struct` libraries (MIT/BSD, recorded).
+- Lua 5.1.5 vcpkg overlay port `vcpkg-overlays/lua51/` (Valkey's
+  `deps/lua`, which has Redis's security fixes and read-only tables),
+  built with `LUA_NUMBER` binary64, a replaced `lua_number2str` using
+  `std::to_chars` (Redis's `%.14g` text, without the C library), saturating
+  number-to-integer conversion, one NaN, and no floating-point
+  contraction, plus Redis's `cjson`, `cmsgpack`, `bit` and `struct`
+  libraries and Valkey's `fpconv_dtoa` for `redis.call` number arguments
+  (shortest round trip). The overlay's README lists each difference it
+  removes; `lua_sandbox_determinism_test` holds amd64 and arm64 to one
+  golden. The sandbox itself is `kythira/redis/lua_sandbox.hpp`: one
+  fresh interpreter per run, Valkey's global allow list minus
+  `loadstring`/`load`, read-only globals and libraries, bytecode refused.
 - **Single-shard** (`script` record `0x0C`): the front end resolves
   `EVALSHA`/`FCALL` to the body, checks all declared keys route to one
   group, and proposes the body, keys, args, `now_ms` and a seed derived from

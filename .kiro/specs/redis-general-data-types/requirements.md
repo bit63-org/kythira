@@ -870,8 +870,12 @@ read-modify-write logic, fast on one shard and correct across shards.
 
 1. The Lua interpreter SHALL be Lua 5.1.5 built as a vcpkg overlay port
    (MIT licence, recorded in the overlay), with number-to-string
-   conversion replaced by a shortest-round-trip formatter so amd64 and
-   arm64 replicas print numbers identically.
+   conversion made independent of the C library and locale so amd64 and
+   arm64 replicas print numbers identically: `tostring` keeps Redis's
+   14 significant digits, written by `std::to_chars`, and a number
+   argument of `redis.call` is the integer when integral, else the
+   shortest round-trip text, as Valkey sends it. Every NaN prints the
+   same, and number-to-integer conversions saturate on every architecture.
 2. In `apply()`, scripts SHALL NOT reach any clock, random source, file,
    socket or environment. `redis.call('TIME')`, `RANDOMKEY`, `SRANDMEMBER`,
    `SPOP`, `HRANDFIELD` and `math.random` SHALL be refused or (for

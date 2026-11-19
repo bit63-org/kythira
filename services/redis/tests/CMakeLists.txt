@@ -230,6 +230,19 @@ target_compile_definitions(redis_differential_unit_test PRIVATE
     KYTHIRA_REDIS_DIFF_RECS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/differential/recs")
 set_tests_properties(redis_differential_unit_test PROPERTIES LABELS "unit;redis" TIMEOUT 120)
 
+# redis-general-data-types task 25: the Lua script sandbox, and the golden
+# that holds amd64 and arm64 to the same results (ci.yml runs both).
+if(TARGET kythira_redis_lua)
+    kythira_redis_test(lua_sandbox_unit_test lua_sandbox_unit_test.cpp)
+    target_link_libraries(lua_sandbox_unit_test PRIVATE kythira_redis_lua)
+    set_tests_properties(lua_sandbox_unit_test PROPERTIES LABELS "unit;redis" TIMEOUT 300)
+    kythira_redis_test(lua_sandbox_determinism_test lua_sandbox_determinism_test.cpp)
+    target_link_libraries(lua_sandbox_determinism_test PRIVATE kythira_redis_lua)
+    target_compile_definitions(lua_sandbox_determinism_test PRIVATE
+        KYTHIRA_LUA_GOLDEN_FILE="${CMAKE_CURRENT_SOURCE_DIR}/golden/lua/determinism.txt")
+    set_tests_properties(lua_sandbox_determinism_test PROPERTIES LABELS "unit;redis" TIMEOUT 300)
+endif()
+
 # The container scenarios, under the guard tests/docker_chaos/ is entered with.
 if(TARGET Folly::folly AND Boost_FOUND AND httplib_FOUND)
     add_subdirectory(docker)
