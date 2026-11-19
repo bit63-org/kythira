@@ -168,6 +168,18 @@ elseif(TARGET Boost::json)
     target_link_libraries(s3_lifecycle_test PRIVATE Boost::json)
 endif()
 
+# Task 14: notification configurations (XML, S3's checks, the deprecated
+# form), event JSON, each destination's API request, and the notification
+# worker over the change log on the in-process metadata layer. It includes
+# the persistent state machine contract, hence the shared test PCH target.
+add_raft_completion_test(s3_notifications_test s3_notifications_test.cpp)
+target_link_libraries(s3_notifications_test PRIVATE kythira_s3)
+if(TARGET boost_json)
+    target_link_libraries(s3_notifications_test PRIVATE boost_json)
+elseif(TARGET Boost::json)
+    target_link_libraries(s3_notifications_test PRIVATE Boost::json)
+endif()
+
 # Task 7: the request pipeline end to end (routing, SigV4, the access check,
 # bucket, object and listing handlers) over the in-process metadata layer.
 # It includes the persistent state machine contract, hence the shared test
@@ -199,6 +211,7 @@ set_tests_properties(
     s3_encryption_test
     s3_sweeps_test
     s3_lifecycle_test
+    s3_notifications_test
     s3_service_test
     PROPERTIES LABELS "unit;s3;s3-module" TIMEOUT 60)
 

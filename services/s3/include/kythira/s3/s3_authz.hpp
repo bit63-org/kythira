@@ -386,6 +386,18 @@ struct action_info {
             lists(*op, "BypassGovernanceRetention")) {
             add("BypassGovernanceRetention", f.bucket, f.key);
         }
+        // A replicator's write (task 14): Kythira's replicator marks its
+        // copies so they are not replicated on, and only a principal
+        // allowed to replicate into the bucket may. AWS's reference lists
+        // these actions for no API operation, since S3 replicates
+        // internally; the destination's policy grants them all the same.
+        if (authz_detail::header(f, "x-amz-replication-status")) {
+            if (f.operation == "PutObject") {
+                add("ReplicateObject", f.bucket, f.key);
+            } else if (f.operation == "DeleteObject") {
+                add("ReplicateDelete", f.bucket, f.key);
+            }
+        }
     }
 
     // A copy reads its source.

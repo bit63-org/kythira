@@ -130,6 +130,14 @@ template<metadata_access M>
     if (!status) {
         return s3_response{};  // S3 leaves the state as it is
     }
+    if (*status != "Enabled" && b.replication) {
+        // Replication needs every version kept (task 14).
+        return aws_rest_xml::errors::make(
+            409, "InvalidBucketState",
+            "A replication configuration is present on this bucket, so you cannot change the "
+            "versioning state. To change the versioning state, first delete the replication "
+            "configuration.");
+    }
     if (auto e = bucket_detail::store(ctx, b, "versioning", status)) {
         return *e;
     }

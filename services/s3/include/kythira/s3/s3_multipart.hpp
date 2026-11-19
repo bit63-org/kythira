@@ -370,6 +370,9 @@ template<metadata_access M>
         return sealed.error();
     }
     content->system_metadata.insert(sealed->metadata.begin(), sealed->metadata.end());
+    // Replication is decided when the upload starts, from its tags and
+    // encryption; the completed object takes the upload's metadata.
+    mark_replication(b, req.resource.key, *content, false);
     index_command c;
     c.op = index_command::kind::create_upload;
     c.now_ms = ctx.now_ms();
