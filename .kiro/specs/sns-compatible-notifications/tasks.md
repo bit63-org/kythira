@@ -106,8 +106,21 @@ first builds it to that design). Each task is one PR unless noted.
     to log partitions (5.3). PublishBatch reports each entry. The daemon
     serving these handlers comes with the gateway work of task 6 or 9.
 
-- [ ] 5. Filter policies
+- [x] 5. Filter policies
   - _Requirements: 6.2_
+  - Done (November 19, 2026): `sns_filter_policy.hpp` parses a policy for
+    its scope and matches message attributes or a JSON body: exact
+    strings, numbers, booleans and null, `prefix`, `suffix`,
+    `equals-ignore-case`, `wildcard`, `anything-but` (values, prefix,
+    suffix), `numeric`, `exists`, `cidr` (IPv4 and IPv6) and `$or` at
+    any level, with arrays matching on any element and SNS's typing of
+    attribute data types (Binary ignored). Limits: 5 keys on any path,
+    150 combinations, 256 KiB, and 200 filtered subscriptions per topic
+    (`FilterPolicyLimitExceeded`). Subscribe and SetSubscriptionAttributes
+    check the policy in its scope, so changing the scope cannot strand a
+    nested policy. Error wording beyond the known SNS strings, and which
+    body a `MessageStructure=json` message is filtered on, wait on task
+    12's recordings. Delivery (task 6) calls `filter_policy::matches`.
 
 - [ ] 6. Delivery workers and targets
   - Leased workers; Kythira SQS, real SQS, HTTP/HTTPS with retry policies,
