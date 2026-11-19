@@ -216,6 +216,10 @@ inline constexpr std::string_view tombstone_space = "s3/t/";
 /// Chunks marked collecting and not yet deleted from the blob stores, so a
 /// sweeper that stopped between the two picks them up again.
 inline constexpr std::string_view pending_space = "s3/p/";
+/// Cloud-tier copies of removed versions, for the tier worker to delete.
+inline constexpr std::string_view tier_garbage_space = "s3/g/";
+/// Restores asked of versions held in a cloud tier, for the tier worker.
+inline constexpr std::string_view restore_space = "s3/r/";
 
 /// The smallest key above every key starting with `prefix`; nullopt when
 /// none exists (all 0xFF).
@@ -293,6 +297,28 @@ struct split_key {
     std::string out(tombstone_space);
     detail::put_be64(out, deleted_ms);
     out.append(reinterpret_cast<const char*>(sha.data()), sha.size());
+    return out;
+}
+
+/// `s3/g/<tier>\0<bucket id><stamp>`.
+[[nodiscard]] inline auto tier_garbage(std::string_view tier, std::uint64_t bucket_id,
+                                       std::uint64_t stamp) -> std::string {
+    std::string out(tier_garbage_space);
+    out.append(tier);
+    out.push_back('\0');
+    detail::put_be64(out, bucket_id);
+    detail::put_be64(out, stamp);
+    return out;
+}
+
+/// `s3/r/<bucket id><key>\0<stamp>`.
+[[nodiscard]] inline auto restore(std::uint64_t bucket_id, std::string_view key,
+                                  std::uint64_t stamp) -> std::string {
+    std::string out(restore_space);
+    detail::put_be64(out, bucket_id);
+    out.append(key);
+    out.push_back('\0');
+    detail::put_be64(out, stamp);
     return out;
 }
 

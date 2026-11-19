@@ -302,21 +302,33 @@ builds it to that design). Each task is one PR unless noted.
     in `chunk_service_test`, rate and slow-write cases in
     `s3_service_test`.
 
-- [ ] 13. Lifecycle and storage classes
+- [x] 13. Lifecycle and storage classes
   - Rules, the worker, transitions to cloud tiers, restore
   - _Requirements: 7.5, 12.1_
-  - Progress: lifecycle configurations (`s3_lifecycle_rules.hpp`; Put,
-    Get and Delete, old and new forms, S3's checks, the 128 KiB transition
+  - Done: lifecycle configurations (`s3_lifecycle_rules.hpp`; Put, Get
+    and Delete, old and new forms, S3's checks, the 128 KiB transition
     minimum header) and the worker (`lifecycle_worker`: expiration with
     markers in versioned buckets, noncurrent expiration with
     `NewerNoncurrentVersions`, lone delete markers, aborted uploads,
     transitions to the coldest due class, ended restores; every change
-    pinned to the judged version's stamp) are done. Archive classes
-    answer GET and copies with `InvalidObjectState` until `RestoreObject`;
-    a copy may change only the storage class; GET, HEAD and PUT carry
-    `x-amz-expiration`. Bytes still stay on the blob stores whatever the
-    class, so restores complete at once. Left: moving the bytes of
-    classes mapped to a cloud tier there, and restore bringing them back.
+    pinned to the judged version's stamp). Archive classes answer GET and
+    copies with `InvalidObjectState` until `RestoreObject`; a copy may
+    change only the storage class; GET, HEAD and PUT carry
+    `x-amz-expiration`. `s3_tiers.hpp` maps GLACIER and DEEP_ARCHIVE (only
+    those, since the rest must stay readable) to a `cloud_tier` over any
+    core `key_object_store`; `tier_worker` copies their chunks there, as
+    stored, under per-version keys and drops the version's references on
+    the blob stores. A restore of a tiered version is pending (`s3/r/`,
+    `ongoing-request="true"`, a repeat answers
+    `RestoreAlreadyInProgress`) until the worker brings the chunks back,
+    verified, and the version takes references again until the restore
+    ends. Removing a tiered version leaves an `s3/g/` entry, and the
+    worker deletes its cloud copies. Per-version keys keep reference
+    counts out of the tier at the cost of no dedup there; a copy orphaned
+    by a version removed mid-upload waits for a tier listing sweep that
+    is not built. Daemon wiring (leader only) is task 16's. Tests:
+    `s3_lifecycle_test`, the lifecycle, archive and tier cases in
+    `s3_service_test`, the tier reference case in the index test.
 
 - [ ] 14. Change log, notifications and replication
   - Change log per group; notifications to SQS, SNS and Kinesis; bucket

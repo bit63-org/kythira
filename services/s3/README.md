@@ -51,6 +51,7 @@ module's consumers (Requirement 17.3).
 | `include/kythira/s3/s3_sweeps.hpp` | the chunk sweeper: deletes collected chunks from every node, finds and deletes chunks no commit names (two sweeps a grace period apart), restores missing copies of live chunks; `s3_sweeps_test` | 12 |
 | `include/kythira/s3/s3_lifecycle_rules.hpp` | lifecycle configurations: the rule model (filters by prefix, tags and size; expiration, noncurrent expiration, delete markers, aborted uploads, transitions), its XML with S3's checks, due dates rounded to midnight, the 128 KiB transition minimum, archive classes and restore state; `s3_lifecycle_test` | 13 |
 | `include/kythira/s3/s3_lifecycle.hpp` | Put/Get/DeleteBucketLifecycle(Configuration), RestoreObject, and the lifecycle worker that applies every bucket's rules once a lifecycle day; `s3_lifecycle_test` | 13 |
+| `include/kythira/s3/s3_tiers.hpp` | the archive tier: GLACIER and DEEP_ARCHIVE bytes moved to a cloud object store, restores brought back to the blob stores, removed versions' cloud copies deleted (`tier_worker`); `s3_service_test` | 13 |
 | `include/kythira/s3/s3_service.hpp` | the request pipeline and browser POST uploads; `s3_service_test` | 6-13 |
 | `include/kythira/s3/s3_routes.hpp` | the operation table as routes for core's REST-XML router, and `route_request` (addressing, query, operation); `s3_routing_test` routes every recorded client request | 3 |
 | `implemented-operations.txt` | operations the gateway implements | 1 onward |

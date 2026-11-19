@@ -1255,11 +1255,15 @@ private:
     std::mt19937 _rng;
 };
 
-/// Every chunk's count, recounted from the versions and parts that name it.
+/// Every chunk's count, recounted from the versions and parts that name it
+/// (a version in a cloud tier names none until restored).
 auto recount(const index_sm& sm) -> std::map<chunk_sha, std::uint64_t> {
     std::map<chunk_sha, std::uint64_t> out;
     for (const auto& b : sm.list_buckets()) {
         for (const auto& e : sm.list_versions(b.id, "", "", "", "", 100'000).versions) {
+            if (!holds_local_chunks(e.version.content)) {
+                continue;  // in a cloud tier
+            }
             for (const auto& c : e.version.content.manifest) {
                 ++out[c.sha];
             }
@@ -1351,4 +1355,83 @@ BOOST_AUTO_TEST_CASE(a_snapshot_restores_the_same_state_and_continues_the_same_w
             check_refcounts(follower.sm);
         }
     }
+}
+
+BOOST_AUTO_TEST_CASE(tiered_versions_hold_no_local_references_until_restored) {
+    replica r;
+    r.create("b");
+    BOOST_REQUIRE(r.put("b", "k", content_of({1, 2})).ok());
+    const auto v = r.sm.version(r.ref("b").id, "k", std::nullopt).value();
+    BOOST_TEST(r.count(1) == 1U);
+
+    auto state = [&](std::map<std::string, std::string> set, std::vector<std::string> names) {
+        index_command c;
+        c.op = kind::set_object_state;
+        c.target = r.ref("b");
+        c.key = "k";
+        c.version_id = v.version_id();
+        c.expect_stamp = v.stamp;
+        c.override_metadata = std::move(names);
+        c.content.system_metadata = std::move(set);
+        return r.apply(c);
+    };
+    const std::string tier(tier_metadata);
+    const std::string restored(restored_metadata);
+    const std::string pending(restore_pending_metadata);
+
+    BOOST_REQUIRE(r.put("b", "other", content_of({2})).ok());
+    BOOST_REQUIRE(state({{tier, "cold"}}, {tier}).ok());
+    BOOST_TEST(r.count(1) == 0U);
+    BOOST_TEST(r.count(2) == 1U);  // still the other object's
+    check_refcounts(r.sm);
+    BOOST_TEST(r.sm.pending_restores(10).empty());
+
+    // A restore asked is listed, and holds nothing local yet.
+    BOOST_REQUIRE(state({{pending, "3"}}, {pending}).ok());
+    auto p = r.sm.pending_restores(10);
+    BOOST_REQUIRE(p.size() == 1U);
+    BOOST_TEST(p[0].key == "k");
+    BOOST_TEST(p[0].stamp == v.stamp);
+    BOOST_TEST(p[0].days == 3U);
+    BOOST_TEST(r.count(1) == 0U);
+
+    // Restored: references come back and the request leaves the list.
+    BOOST_REQUIRE(state({{restored, "1"}}, {restored, pending}).ok());
+    BOOST_TEST(r.count(1) == 1U);
+    BOOST_TEST(r.count(2) == 2U);
+    check_refcounts(r.sm);
+    BOOST_TEST(r.sm.pending_restores(10).empty());
+    // Ended: they go again.
+    BOOST_REQUIRE(state({}, {restored}).ok());
+    BOOST_TEST(r.count(1) == 0U);
+    BOOST_TEST(r.sm.tier_garbage_list(10).empty());
+
+    // A tiered version cannot be a copy source until restored.
+    index_command copy;
+    copy.op = kind::copy_object;
+    copy.target = r.ref("b");
+    copy.key = "c";
+    copy.owner = "acct";
+    copy.source = r.ref("b");
+    copy.source_key = "k";
+    BOOST_TEST(r.apply(copy).error == "InvalidObjectState");
+
+    // Removing it leaves its cloud copies to collect.
+    BOOST_REQUIRE(state({{pending, "1"}}, {pending}).ok());
+    BOOST_REQUIRE(r.del("b", "k").ok());
+    BOOST_TEST(r.sm.pending_restores(10).empty());
+    const auto g = r.sm.tier_garbage_list(10);
+    BOOST_REQUIRE(g.size() == 1U);
+    BOOST_TEST(g[0].tier == "cold");
+    BOOST_TEST(g[0].bucket_id == r.ref("b").id);
+    BOOST_TEST(g[0].stamp == v.stamp);
+    BOOST_TEST((g[0].chunks == std::vector<chunk_sha>{sha_of(1), sha_of(2)}));
+    BOOST_TEST(r.count(1) == 0U);
+
+    index_command drop;
+    drop.op = kind::drop_tier_garbage;
+    drop.garbage_keys = {g[0].index_key};
+    BOOST_REQUIRE(r.apply(drop).ok());
+    BOOST_TEST(r.sm.tier_garbage_list(10).empty());
+    check_refcounts(r.sm);
 }

@@ -12,7 +12,9 @@
 #include <boost/test/unit_test.hpp>
 
 #include <kythira/s3/s3_service.hpp>
+#include <kythira/s3/s3_tiers.hpp>
 
+#include <raft/key_object_store.hpp>
 #include <raft/static_key_authorizer.hpp>
 
 #include <array>
@@ -1736,6 +1738,204 @@ BOOST_AUTO_TEST_CASE(archived_objects_need_a_restore_before_a_read) {
     BOOST_TEST(f.send("POST", "/bkt/cold?restore", {},
                       "<RestoreRequest><Type>SELECT</Type></RestoreRequest>")
                    .status == 501U);
+}
+
+namespace {
+
+/// A cloud store in memory, for the archive tier.
+struct memory_cloud {
+    mutable std::mutex mu;
+    mutable std::map<std::string, std::string> objects;
+    mutable bool failing = false;
+
+    auto put_object(const std::string& bucket, const std::string& key, std::string_view bytes) const
+        -> kythira::put_result {
+        const std::lock_guard lock(mu);
+        if (failing) {
+            throw std::runtime_error("cloud down");
+        }
+        objects[bucket + "/" + key] = std::string(bytes);
+        return {};
+    }
+    auto get_object(const std::string& bucket, const std::string& key) const
+        -> std::optional<kythira::get_result> {
+        const std::lock_guard lock(mu);
+        if (failing) {
+            throw std::runtime_error("cloud down");
+        }
+        auto it = objects.find(bucket + "/" + key);
+        if (it == objects.end()) {
+            return std::nullopt;
+        }
+        return kythira::get_result{it->second, {}};
+    }
+    void delete_object(const std::string& bucket, const std::string& key) const {
+        const std::lock_guard lock(mu);
+        if (failing) {
+            throw std::runtime_error("cloud down");
+        }
+        objects.erase(bucket + "/" + key);
+    }
+    auto list_keys(const std::string& bucket, const std::string& prefix) const
+        -> std::vector<std::string> {
+        const std::lock_guard lock(mu);
+        std::vector<std::string> out;
+        for (const auto& [k, v] : objects) {
+            if (k.starts_with(bucket + "/" + prefix)) {
+                out.push_back(k.substr(bucket.size() + 1));
+            }
+        }
+        return out;
+    }
+    [[nodiscard]] auto provider_name() const -> std::string_view { return "memory"; }
+};
+static_assert(kythira::key_object_store<memory_cloud>);
+
+auto k_now_ms() -> std::uint64_t {
+    return static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(k_now.time_since_epoch()).count());
+}
+
+struct tiered : fixture {
+    memory_cloud cloud;
+    s3::cloud_tier tier{"cold", cloud, "archive", "kythira/"};
+    s3::tier_worker<s3::local_metadata> worker;
+
+    static auto options() -> s3::tier_options {
+        s3::tier_options o;
+        o.class_tiers = {{"GLACIER", "cold"}, {"DEEP_ARCHIVE", "cold"}};
+        o.clock = [] { return k_now_ms(); };
+        return o;
+    }
+    tiered() : worker(meta, *data, {&tier}, options()) {}
+
+    /// Forget every local copy, as the sweeper would once nothing refers
+    /// to the chunks.
+    void wipe_local() {
+        for (auto& n : nodes) {
+            const std::lock_guard lock(n.mu);
+            n.chunks.clear();
+        }
+    }
+    [[nodiscard]] auto local_chunks() const -> std::size_t {
+        std::size_t n = 0;
+        for (const auto& c : nodes) {
+            n += c.chunks.size();
+        }
+        return n;
+    }
+};
+
+}  // namespace
+
+BOOST_AUTO_TEST_CASE(archived_bytes_move_to_the_cloud_tier_and_come_back_on_restore) {
+    tiered f;
+    f.make_bucket("bkt");
+    std::string varied(200, 'z');  // four chunks of 64
+    for (std::size_t i = 0; i < varied.size(); ++i) {
+        varied[i] = static_cast<char>('a' + (i / 64));
+    }
+    BOOST_TEST(f.send("PUT", "/bkt/cold", {{"x-amz-storage-class", "GLACIER"}}, varied).status ==
+               200U);
+    BOOST_TEST(f.send("PUT", "/bkt/warm", {}, "warm").status == 200U);
+
+    auto r = f.worker.run();
+    BOOST_TEST(r.archived == 1U);
+    BOOST_TEST(r.chunks_uploaded == 4U);
+    BOOST_TEST(r.failures == 0U);
+    BOOST_TEST(f.cloud.objects.size() == 4U);
+    for (const auto& [k, v] : f.cloud.objects) {
+        BOOST_TEST(k.starts_with("archive/kythira/"));
+    }
+    BOOST_TEST(f.worker.run().archived == 0U);  // done once
+
+    // The sweeper may now take the local copies.
+    f.wipe_local();
+    BOOST_TEST(f.send("PUT", "/bkt/warm", {}, "warm").status == 200U);  // keep warm readable
+    const auto head = f.send("HEAD", "/bkt/cold");
+    BOOST_TEST(head.header("x-amz-storage-class") == "GLACIER");
+    BOOST_TEST(head.header("x-amz-restore").empty());
+    BOOST_TEST(f.send("GET", "/bkt/cold").code() == "InvalidObjectState");
+    // A copy cannot read the bytes either, even to a warm class.
+    BOOST_TEST(f.send("PUT", "/bkt/copy",
+                      {{"x-amz-copy-source", "/bkt/cold"}, {"x-amz-storage-class", "STANDARD"}})
+                   .code() == "InvalidObjectState");
+
+    const std::string req = "<RestoreRequest><Days>3</Days></RestoreRequest>";
+    BOOST_TEST(f.send("POST", "/bkt/cold?restore", {}, req).status == 202U);
+    BOOST_TEST(f.send("HEAD", "/bkt/cold").header("x-amz-restore") == "ongoing-request=\"true\"");
+    BOOST_TEST(f.send("GET", "/bkt/cold").code() == "InvalidObjectState");
+    BOOST_TEST(f.send("POST", "/bkt/cold?restore", {}, req).code() == "RestoreAlreadyInProgress");
+
+    // A failing cloud leaves the restore pending for the next run.
+    f.cloud.failing = true;
+    r = f.worker.run();
+    BOOST_TEST(r.restored == 0U);
+    BOOST_TEST(r.failures >= 1U);
+    f.cloud.failing = false;
+
+    r = f.worker.run();
+    BOOST_TEST(r.restored == 1U);
+    BOOST_TEST(r.chunks_restored == 4U);
+    BOOST_TEST(f.local_chunks() >= 4U);
+    BOOST_TEST(contains(f.send("HEAD", "/bkt/cold").header("x-amz-restore"),
+                        "ongoing-request=\"false\", expiry-date="));
+    const auto read = f.send("GET", "/bkt/cold");
+    BOOST_TEST(read.status == 200U);
+    BOOST_TEST(read.body == varied);
+    BOOST_TEST(f.send("POST", "/bkt/cold?restore", {}, req).status == 200U);  // extends it
+    BOOST_TEST(f.worker.run().archived == 0U);  // not archived again while restored
+
+    // A copy of the restored object is an ordinary STANDARD object.
+    BOOST_TEST(f.send("PUT", "/bkt/copy", {{"x-amz-copy-source", "/bkt/cold"}}).status == 200U);
+    const auto copy = f.send("HEAD", "/bkt/copy");
+    BOOST_TEST(copy.header("x-amz-storage-class").empty());
+    BOOST_TEST(copy.header("x-amz-restore").empty());
+    BOOST_TEST(f.send("GET", "/bkt/copy").body == varied);
+
+    // Removing the version deletes its cloud copies.
+    BOOST_TEST(f.send("DELETE", "/bkt/cold").status == 204U);
+    r = f.worker.run();
+    BOOST_TEST(r.garbage_versions == 1U);
+    BOOST_TEST(r.chunks_deleted == 4U);
+    BOOST_TEST(f.cloud.objects.empty());
+    BOOST_TEST(f.worker.run().garbage_versions == 0U);
+}
+
+BOOST_AUTO_TEST_CASE(a_failed_or_stale_archive_leaves_the_version_local) {
+    tiered f;
+    f.make_bucket("bkt");
+    BOOST_TEST(f.send("PUT", "/bkt/k", {{"x-amz-storage-class", "DEEP_ARCHIVE"}}, "deep").status ==
+               200U);
+    f.cloud.failing = true;
+    auto r = f.worker.run();
+    BOOST_TEST(r.archived == 0U);
+    BOOST_TEST(r.failures == 1U);
+    f.cloud.failing = false;
+    // Still local: a restore completes at once, without the worker.
+    BOOST_TEST(
+        f.send("POST", "/bkt/k?restore", {}, "<RestoreRequest><Days>1</Days></RestoreRequest>")
+            .status == 202U);
+    BOOST_TEST(f.send("GET", "/bkt/k").body == "deep");
+    BOOST_TEST(f.worker.run().archived == 0U);  // not while restored
+
+    // Tiering configured for a warm class is refused.
+    BOOST_CHECK_THROW(
+        (s3::tier_worker<s3::local_metadata>(f.meta, *f.data, {&f.tier},
+                                             [] {
+                                                 s3::tier_options o;
+                                                 o.class_tiers = {{"STANDARD_IA", "cold"}};
+                                                 return o;
+                                             }())),
+        std::invalid_argument);
+    BOOST_CHECK_THROW(
+        (s3::tier_worker<s3::local_metadata>(f.meta, *f.data, {&f.tier},
+                                             [] {
+                                                 s3::tier_options o;
+                                                 o.class_tiers = {{"GLACIER", "nowhere"}};
+                                                 return o;
+                                             }())),
+        std::invalid_argument);
 }
 
 BOOST_AUTO_TEST_CASE(a_copy_can_change_only_the_storage_class) {
