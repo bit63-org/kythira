@@ -55,12 +55,16 @@ public:
     channel_destinations(channel_destinations&&) = delete;
     auto operator=(channel_destinations&&) -> channel_destinations& = delete;
 
-    /// Writes to `bucket`'s root; valid while this object lives.
-    [[nodiscard]] virtual auto bucket(const std::string& bucket) const
+    /// Writes to `bucket`'s root on behalf of `access`'s channel (as its
+    /// execution role when the node assumes roles); valid while this object
+    /// lives.
+    [[nodiscard]] virtual auto bucket(const std::string& bucket,
+                                      const kinesis::channel_access& access) const
         -> std::optional<kinesis::channel_bucket> = 0;
 };
 
-/// S3 in `_channel_s3_region` at `_channel_s3_endpoint`, or nullptr when
+/// S3 in `_channel_s3_region` at `_channel_s3_endpoint` (as each channel's
+/// execution role with `_channel_assume_role`), or nullptr when
 /// this build has no S3 client (`KYTHIRA_KINESIS_TIER_S3`).
 [[nodiscard]] auto make_channel_destinations(const node_options& opt)
     -> std::unique_ptr<channel_destinations>;

@@ -329,6 +329,25 @@ BOOST_AUTO_TEST_CASE(channel_delivery_settings) {
     BOOST_TEST(o._channel_s3_endpoint == "http://s3mock:9000");
     BOOST_TEST(o._channel_max_delay_ms == 5000);
 
+    // Execution roles: the node's own credentials unless told to assume.
+    BOOST_TEST(!o._channel_assume_role);
+    BOOST_TEST(o._channel_sts_endpoint.empty());
+    vars["KINESIS_CHANNEL_DELIVERY"] = "true";
+    vars["KINESIS_CHANNEL_ROLE"] = "assume";
+    vars["KINESIS_CHANNEL_STS_ENDPOINT"] = "https://iam:8443";
+    vars["KINESIS_CHANNEL_CA_FILE"] = "/etc/kinesis/ca.pem";
+    o = kn::from_env(lookup(vars));
+    BOOST_TEST(o._channel_assume_role);
+    BOOST_TEST(o._channel_sts_endpoint == "https://iam:8443");
+    BOOST_TEST(o._channel_ca_file == "/etc/kinesis/ca.pem");
+    BOOST_TEST(kn::describe(o).find("role=assume sts=https://iam:8443") != std::string::npos);
+    vars["KINESIS_CHANNEL_ROLE"] = "service";
+    BOOST_TEST(refused_naming(vars, "KINESIS_CHANNEL_ROLE"));
+    vars["KINESIS_CHANNEL_ROLE"] = "assume";
+    vars["KINESIS_CHANNEL_STS_ENDPOINT"] = "iam:8443";
+    BOOST_TEST(refused_naming(vars, "KINESIS_CHANNEL_STS_ENDPOINT"));
+    vars.erase("KINESIS_CHANNEL_STS_ENDPOINT");
+
     vars["KINESIS_CHANNEL_MAX_DELAY_MS"] = "500";
     BOOST_TEST(refused_naming(vars, "KINESIS_CHANNEL_MAX_DELAY_MS"));
     vars["KINESIS_CHANNEL_MAX_DELAY_MS"] = "900001";

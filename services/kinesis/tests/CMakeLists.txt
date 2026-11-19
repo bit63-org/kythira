@@ -190,6 +190,10 @@ kythira_kinesis_test(kinesis_channels_test kinesis_channels_test.cpp)
 # triggers, record formats, GZIP/ZSTD, the dead-letter location, parents
 # before children, FAILED for a compression the node cannot write).
 kythira_kinesis_test(kinesis_channel_delivery_test kinesis_channel_delivery_test.cpp)
+# Task 19: assuming a channel's service execution role (SigV4 requests that
+# verify server side, STS AssumeRole against a fake STS, the credential
+# cache's refresh and refusal windows).
+kythira_kinesis_test(kinesis_channel_role_test kinesis_channel_role_test.cpp)
 # Task 14: encryption at rest (the local key provider, sealed records, the
 # AWS KMS adapter against a fake KMS, Start/StopStreamEncryption).
 kythira_kinesis_test(kinesis_encryption_test kinesis_encryption_test.cpp)

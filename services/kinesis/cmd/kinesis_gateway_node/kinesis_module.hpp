@@ -482,8 +482,9 @@ public:
         kinesis::channel_delivery_config channels;
         channels._max_delay_ms = _opt._channel_max_delay_ms;
         if (_channel_destinations) {
-            channels._destination = [d = _channel_destinations.get()](const std::string& b) {
-                return d->bucket(b);
+            channels._destination = [d = _channel_destinations.get()](
+                                        const std::string& b, const kinesis::channel_access& a) {
+                return d->bucket(b, a);
             };
         }
         _channels = std::make_unique<
@@ -1062,7 +1063,9 @@ private:
                          " records=" + std::to_string(ch._records) +
                          " dead_letters=" + std::to_string(ch._dead_letters) +
                          " failures=" + std::to_string(ch._failures) +
-                         " failed_channels=" + std::to_string(ch._failed_channels));
+                         " failed_channels=" + std::to_string(ch._failed_channels) +
+                         (ch._last_failure.empty() ? std::string()
+                                                   : " last_failure=" + ch._last_failure));
             }
             if (od._splits + od._failures > 0) {
                 log_info("kinesis on-demand: hot=" + std::to_string(od._hot) + " splits=" +

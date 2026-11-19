@@ -3,6 +3,7 @@
 
 #include "config.hpp"
 
+#include <kythira/kinesis/kinesis_aws_call.hpp>
 #include <kythira/kinesis/kinesis_catalog.hpp>
 #include <kythira/kinesis/kinesis_compat_profile.hpp>
 #include <kythira/kinesis/kinesis_peer_client.hpp>
@@ -539,6 +540,16 @@ void read_kinesis_side(const reader& r, node_options& o) {
         fail("KINESIS_CHANNEL_MAX_DELAY_MS must be at most 900000");
     }
     o._channel_max_delay_ms = static_cast<std::int64_t>(max_delay);
+    const auto role = r.opt("KINESIS_CHANNEL_ROLE", "node");
+    if (role != "node" && role != "assume") {
+        fail("KINESIS_CHANNEL_ROLE must be node or assume");
+    }
+    o._channel_assume_role = role == "assume";
+    o._channel_sts_endpoint = r.opt("KINESIS_CHANNEL_STS_ENDPOINT", "");
+    if (!o._channel_sts_endpoint.empty() && !kinesis::parse_aws_endpoint(o._channel_sts_endpoint)) {
+        fail("KINESIS_CHANNEL_STS_ENDPOINT must be an http:// or https:// URL");
+    }
+    o._channel_ca_file = r.opt("KINESIS_CHANNEL_CA_FILE", "");
 }
 
 }  // namespace
@@ -797,7 +808,12 @@ auto describe(const node_options& o) -> std::string {
                                                       : " endpoint=" + o._channel_s3_endpoint) +
                       (o._channel_max_delay_ms > 0
                            ? " max_delay=" + std::to_string(o._channel_max_delay_ms) + "ms"
-                           : std::string())
+                           : std::string()) +
+                      (o._channel_assume_role
+                           ? " role=assume" + (o._channel_sts_endpoint.empty()
+                                                   ? std::string()
+                                                   : " sts=" + o._channel_sts_endpoint)
+                           : std::string(" role=node"))
                 : std::string("off"))
         << '\n';
     for (const auto& [k, v] : o._compat) {
