@@ -85,6 +85,13 @@ first builds it to that design). Each task is one PR unless noted.
   - Operations, confirmation tokens, attributes, message structure,
     `PublishBatch`
   - _Requirements: 4.1, 4.2, 5.1-5.4_
+  - Part done (November 19, 2026): `sns_service.hpp` with the 12 topic
+    operations (CreateTopic, DeleteTopic, Get/SetTopicAttributes,
+    ListTopics, Tag/Untag/ListTagsForResource, Add/RemovePermission,
+    Get/PutDataProtectionPolicy) over a `topic_store` (a local one over a
+    single state machine; routing topics to groups is task 9), and
+    `sns_service_test` through the front end. Still open: the subscription
+    operations with confirmation tokens, and Publish/PublishBatch.
 
 - [ ] 5. Filter policies
   - _Requirements: 6.2_

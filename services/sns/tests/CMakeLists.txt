@@ -88,6 +88,11 @@ kythira_sns_test(sns_topic_state_machine_test sns_topic_state_machine_test.cpp)
 kythira_sns_test(sns_gateway_inputs_test sns_gateway_inputs_test.cpp)
 kythira_sns_test(sns_front_end_test sns_front_end_test.cpp)
 
+# Task 4, Requirement 4.1: the topic operations end to end through the front
+# end and a local topic store (attributes, policies, tags, pages, data
+# protection, deletion and ids that are never reused).
+kythira_sns_test(sns_service_test sns_service_test.cpp)
+
 # Task 3: the checked-in action table is what tools/gen_sns_actions.py makes
 # of the pinned service reference.
 add_test(NAME sns_actions_up_to_date
