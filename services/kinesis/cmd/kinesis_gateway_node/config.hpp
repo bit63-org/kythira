@@ -195,6 +195,21 @@ struct node_options {
     /// `KINESIS_CHANNEL_CA_FILE`: the CA bundle the STS endpoint's
     /// certificate chains to; the system store when empty.
     std::string _channel_ca_file;
+    /// `KINESIS_CHANNEL_ICEBERG_URI`: the Iceberg REST catalog S3 Tables
+    /// channels commit through; empty is S3 Tables' own,
+    /// `https://s3tables.<region>.amazonaws.com/iceberg` in the table
+    /// bucket's region.
+    std::string _channel_iceberg_uri;
+    /// `KINESIS_CHANNEL_ICEBERG_WAREHOUSE`: the warehouse asked of the
+    /// catalog; empty is the channel's table bucket ARN, as S3 Tables
+    /// expects.
+    std::string _channel_iceberg_warehouse;
+    /// `KINESIS_CHANNEL_ICEBERG_SIGV4` (default true): sign catalog calls
+    /// with SigV4 as `s3tables`; a local catalog usually wants false.
+    bool _channel_iceberg_sigv4{true};
+    /// `KINESIS_CHANNEL_ICEBERG_TOKEN`: a bearer token for a catalog that
+    /// takes one (only when not signing).
+    std::string _channel_iceberg_token;
 };
 
 /// Whether this build can tier to `provider`, and if not, what would

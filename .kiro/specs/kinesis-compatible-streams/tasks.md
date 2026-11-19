@@ -568,3 +568,20 @@ asked.
     refusal is retried every 30 s and logged with STS's code.
     `kinesis_channel_role_test` covers it. Left: S3 Tables, KMS,
     conformance runs.
+  - Progress (November 19, 2026): the S3 Tables destination. A batch is
+    mapped onto the table's current schema, grouped by its partition spec
+    (every Iceberg transform), written as Parquet data files
+    (`kinesis_parquet.hpp`, NONE, SNAPPY or ZSTD), and committed through
+    the Iceberg REST catalog (`kinesis_iceberg_rest.hpp`, SigV4 as
+    `s3tables` or a bearer token) as one format-version-2 snapshot with an
+    Avro manifest and manifest list (`kinesis_avro.hpp`,
+    `kinesis_iceberg.hpp`). The snapshot id and a summary key derive from
+    the batch, so a retry after a lost checkpoint or a 409 finds its own
+    snapshot instead of appending twice. Records that are not JSON or do
+    not fit the schema go to the dead-letter queue; an unsupported table
+    sets the channel to FAILED. `kinesis_iceberg_test` and
+    `kinesis_channel_tables_test` cover it, and
+    `tests/iceberg/read_exported_table.py` reads an exported table back
+    with pyiceberg. Left: the container scenario's Iceberg REST catalog,
+    differential checks, KMS, a run against real S3 Tables (needs Clark's
+    go).
