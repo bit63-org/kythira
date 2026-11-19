@@ -416,6 +416,34 @@ BOOST_AUTO_TEST_CASE(forms_round_trip_and_bad_entries_stop_the_group) {
     BOOST_CHECK_THROW((void)f.catalog.apply(bytes_of("\x01"), 1), std::invalid_argument);
 }
 
+BOOST_AUTO_TEST_CASE(replica_overrides_and_updating_round_trip_from_format_15) {
+    ddb::table_descriptor d;
+    d.name = "orders";
+    d.table_id = 42;
+    d.schema = schema();
+    d.billing = ddb::billing_mode::pay_per_request;
+    d.region = "us-east-1";
+    d.replicas.push_back(ddb::table_replica{.region = "us-west-2"});
+    d.replicas.back().status = ddb::replica_status::active;
+    // A replica with no settings of its own keeps the older format.
+    BOOST_TEST(static_cast<int>(ddb::encode_table_descriptor(d)[0]) < 15);
+    d.replicas.back().overrides.max_read = 20;
+    d.replicas.back().overrides.table_class = 2;
+    d.replicas.back().overrides.indexes = {{"byOwner", 0, 7}, {"byDate", 4, -1}};
+    auto bytes = ddb::encode_table_descriptor(d);
+    BOOST_TEST(static_cast<int>(bytes[0]) == 15);
+    BOOST_TEST((ddb::decode_table_descriptor(bytes) == d));
+    for (std::size_t n = 0; n < bytes.size(); ++n) {
+        BOOST_TEST(!ddb::decode_table_descriptor(bytes.substr(0, n)).has_value());
+    }
+    // UPDATING needs format 15 even with no settings.
+    d.replicas.back().overrides = {};
+    d.replicas.back().status = ddb::replica_status::updating;
+    bytes = ddb::encode_table_descriptor(d);
+    BOOST_TEST(static_cast<int>(bytes[0]) == 15);
+    BOOST_TEST((ddb::decode_table_descriptor(bytes) == d));
+}
+
 BOOST_AUTO_TEST_CASE(on_demand_maximums_round_trip_from_format_14_and_apply_at_once) {
     ddb::table_descriptor d;
     d.name = "orders";

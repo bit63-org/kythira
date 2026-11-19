@@ -686,6 +686,12 @@ private:
             operation = "UpdateTable";
         } else if (action == "Apply") {
             operation = "PutItem";
+        } else if (action == "UpdateReplica") {
+            // The replica's own settings: as UpdateTable would change them.
+            operation = "UpdateTable";
+        } else if (action == "LeaveReplica") {
+            // The caller's table goes: this region drops its replica.
+            operation = "DeleteTableReplica";
         } else {
             return c.respond(validation_error("Unknown replication Action"), id);
         }

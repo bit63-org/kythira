@@ -3,6 +3,19 @@
 Chronological log of notable changes to Kythira, newest first. For the
 current list of outstanding work, see [TODO.md](TODO.md).
 
+### What Changed (November 19, 2026)
+
+- **DynamoDB global tables take replica updates and overrides.**
+  `UpdateTable` `ReplicaUpdates` now accepts `Update`, and `Create` and
+  `Update` take the per-replica overrides (`ProvisionedThroughputOverride`,
+  `OnDemandThroughputOverride`, `GlobalSecondaryIndexes`,
+  `TableClassOverride`, and on `Update` a new `KMSMasterKeyId`). A
+  replica shows `UPDATING` until its region has applied them.
+  `DeleteTable` of a replica now deletes that replica, as on AWS, and the
+  other replicas drop it; before, it was refused while the table had
+  replicas. The catalog's format moves to 15 for tables whose replicas
+  have overrides or are updating.
+
 ### What Changed (November 18, 2026)
 
 - **DynamoDB takes `OnDemandThroughput`.** `CreateTable`, `UpdateTable`

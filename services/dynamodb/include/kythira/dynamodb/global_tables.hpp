@@ -49,6 +49,14 @@
 ///   - `Apply`: `TableName`, `SourceRegion`, `Writes`: a list of
 ///     `{"Item": ...}` or `{"Key": ..., "Delete": true}`, each with
 ///     `WrittenMs` and `Region`, its stamp.
+///   - `UpdateReplica`: `TableName`, `SourceRegion`, `Overrides` (the
+///     replica's settings, `global_tables_detail::overrides_json`) and
+///     `KMSMasterKeyId` when the replica names its own key: applied to the
+///     peer's table (`ReplicaUpdates` `Update`, sent while the replica is
+///     UPDATING).
+///   - `LeaveReplica`: `TableName`, `SourceRegion`: the source is deleting
+///     its table (`DeleteTable` on a replica), so the peer marks the
+///     source's replica DELETING and its replicator tells the others.
 ///
 /// Deleted items are not copied when a replica is created: a write that a
 /// deletion here beat may still land on the new replica if it reaches it
@@ -159,6 +167,44 @@ namespace global_tables_detail {
            e.type == "LimitExceededException" || e.type == "ThrottlingException" ||
            e.type.ends_with("#ResourceInUseException") ||
            e.type.ends_with("#LimitExceededException");
+}
+
+/// A replica's settings as `UpdateReplica` carries them.
+[[nodiscard]] inline auto overrides_json(const replica_overrides& o) -> boost::json::object {
+    boost::json::array indexes;
+    for (const auto& i : o.indexes) {
+        indexes.push_back(boost::json::object{
+            {"IndexName", i.index}, {"ReadCapacity", i.read_capacity}, {"MaxRead", i.max_read}});
+    }
+    return boost::json::object{{"ReadCapacity", o.read_capacity},
+                               {"MaxRead", o.max_read},
+                               {"TableClass", o.table_class},
+                               {"Indexes", std::move(indexes)}};
+}
+
+[[nodiscard]] inline auto overrides_from_json(const boost::json::value& v)
+    -> std::optional<replica_overrides> {
+    try {
+        const auto& o = v.as_object();
+        replica_overrides out;
+        out.read_capacity = o.at("ReadCapacity").to_number<std::uint64_t>();
+        out.max_read = o.at("MaxRead").to_number<std::int64_t>();
+        const auto cls = o.at("TableClass").to_number<std::uint64_t>();
+        if (cls > 2 || out.max_read < -1) {
+            return std::nullopt;
+        }
+        out.table_class = static_cast<std::uint8_t>(cls);
+        for (const auto& e : o.at("Indexes").as_array()) {
+            const auto& i = e.as_object();
+            out.indexes.push_back(
+                replica_index_override{std::string(i.at("IndexName").as_string()),
+                                       i.at("ReadCapacity").to_number<std::uint64_t>(),
+                                       i.at("MaxRead").to_number<std::int64_t>()});
+        }
+        return out;
+    } catch (const std::exception&) {
+        return std::nullopt;
+    }
 }
 
 [[nodiscard]] inline auto not_found(const aws_json::error& e) -> bool {
@@ -367,6 +413,12 @@ public:
         if (action == "Apply") {
             return apply(ctx, in);
         }
+        if (action == "UpdateReplica") {
+            return update_replica(ctx, in);
+        }
+        if (action == "LeaveReplica") {
+            return leave_replica(ctx, in);
+        }
         return validation_error("Unknown replication Action");
     }
 
@@ -431,13 +483,18 @@ private:
         }
         std::vector<table_replica> replicas;
         std::string own_key;
+        replica_overrides own_overrides;
         for (const auto& r : d->replicas) {
             if (r.region != ctx.region) {
                 replicas.push_back(r);
             } else {
                 own_key = r.kms_key;
+                own_overrides = r.overrides;
             }
         }
+        // This region's own settings (`ReplicaUpdates` `Create`
+        // overrides): the replica's reads and table class.
+        apply_replica_overrides(*d, own_overrides);
         replicas.push_back(table_replica{
             .region = source,
             .kms_key = d->sse.kind == sse_kind::kms ? d->sse.key_arn : std::string()});
@@ -489,6 +546,110 @@ private:
             spec = std::move(o);
         }
         return encrypt_new_table(_keys, as, d, &spec);
+    }
+
+    /// `UpdateReplica`: this region's replica takes the settings its
+    /// source's `ReplicaUpdates` `Update` gave it.
+    auto update_replica(call_context& ctx, const boost::json::object& in) -> result {
+        const auto name = ctx.table_name(api_text(in, "TableName"));
+        const auto source = api_text(in, "SourceRegion");
+        const auto* raw = in.if_contains("Overrides");
+        const auto overrides =
+            raw != nullptr ? global_tables_detail::overrides_from_json(*raw) : std::nullopt;
+        if (source.empty() || !overrides) {
+            return validation_error("UpdateReplica needs SourceRegion and Overrides");
+        }
+        auto d = _backend.describe(name);
+        if (!d) {
+            return not_found(name);
+        }
+        if (!d->global() || d->strong || d->replica_in(source) == nullptr) {
+            return validation_error("Table " + call_context::bare_name(name) +
+                                    " is not a replica of " + source);
+        }
+        if (d->status != table_status::active) {
+            return busy("Table is not ACTIVE: " + call_context::bare_name(name));
+        }
+        // Its own KMS key, re-wrapped as `UpdateTable` `SSESpecification`
+        // would (KMS task 16), asked as the table's account.
+        if (const auto key = api_text(in, "KMSMasterKeyId");
+            !key.empty() && d->sse.kind == sse_kind::kms && d->sse.key_arn != key) {
+            if (_keys == nullptr) {
+                return validation_error("This region encrypts no tables");
+            }
+            call_context as = ctx;
+            const auto account = table_account(d->name, ctx.owner());
+            as.principal = table_keys::root_of(account, ctx.partition);
+            auto sse =
+                _keys->rewrap(as, client_table_name(d->name), d->sse, account,
+                              boost::json::object{
+                                  {"Enabled", true}, {"SSEType", "KMS"}, {"KMSMasterKeyId", key}});
+            if (!sse) {
+                return sse.error();
+            }
+            catalog_command k;
+            k.op = catalog_command::kind::set_sse;
+            k.table = *d;
+            k.table.sse = std::move(*sse);
+            k.now_ms = _backend.now_ms();
+            const auto r = _backend.catalog(k);
+            if (!r.ok()) {
+                return from_catalog(r);
+            }
+            d = r.table;
+        }
+        catalog_command c;
+        c.op = catalog_command::kind::update_table;
+        c.table = *d;
+        apply_replica_overrides(c.table, *overrides);
+        if (c.table.read_capacity != d->read_capacity) {
+            c.update_fields |= catalog_command::update_throughput;
+        }
+        if (c.table.storage_class != d->storage_class) {
+            c.update_fields |= catalog_command::update_class;
+        }
+        if (c.table.gsis != d->gsis) {
+            c.update_fields |= catalog_command::update_gsis;
+        }
+        c.update_on_demand = c.table.on_demand != d->on_demand;
+        if (c.update_fields == 0 && !c.update_on_demand) {
+            return boost::json::object{};
+        }
+        c.now_ms = _backend.now_ms();
+        const auto r = _backend.catalog(c);
+        if (!r.ok()) {
+            return from_catalog(r);
+        }
+        return boost::json::object{};
+    }
+
+    /// `LeaveReplica`: the source is deleting its table. Its replica here
+    /// is marked DELETING; this cluster's replicator then deletes the
+    /// source's table (already gone or going) and tells the others.
+    auto leave_replica(call_context& ctx, const boost::json::object& in) -> result {
+        const auto name = ctx.table_name(api_text(in, "TableName"));
+        const auto source = api_text(in, "SourceRegion");
+        if (source.empty()) {
+            return validation_error("LeaveReplica needs SourceRegion");
+        }
+        const auto d = _backend.describe(name);
+        if (!d) {
+            return not_found(name);
+        }
+        const auto* r = d->replica_in(source);
+        if (r == nullptr || r->status == replica_status::deleting) {
+            return boost::json::object{};  // already gone or going
+        }
+        catalog_command c;
+        c.op = catalog_command::kind::set_replicas;
+        c.table = *d;
+        std::erase_if(c.table.replicas, [&](const table_replica& x) { return x.region == source; });
+        c.now_ms = _backend.now_ms();
+        const auto res = _backend.catalog(c);
+        if (!res.ok()) {
+            return from_catalog(res);
+        }
+        return boost::json::object{};
     }
 
     auto delete_replica(const call_context& ctx, const boost::json::object& in) -> result {
@@ -671,6 +832,21 @@ public:
 
     void set_log(std::function<void(std::string_view)> log) { _options.log = std::move(log); }
 
+    /// Asks the replica in `region` to drop this region's replica of `d`
+    /// (`LeaveReplica`), for `DeleteTable` here; the error when it will
+    /// not or cannot.
+    auto leave(const table_descriptor& d, const std::string& region)
+        -> std::optional<aws_json::error> {
+        const auto r = call(d, region,
+                            boost::json::object{{"Action", "LeaveReplica"},
+                                                {"TableName", call_context::bare_name(d.name)},
+                                                {"SourceRegion", d.region}});
+        if (!r && !global_tables_detail::not_found(r.error())) {
+            return r.error();
+        }
+        return std::nullopt;
+    }
+
     /// One pass over every global table; returns the replicas it moved on
     /// (a step taken, or writes sent).
     auto pass() -> std::size_t {
@@ -716,8 +892,38 @@ private:
                 return remove(d, r, linked);
             case replica_status::creation_failed:
                 return false;
+            case replica_status::updating:
+                if (!linked) {
+                    return false;
+                }
+                (void)tail(d, r, /*any_origin=*/false);
+                return update(d, r);
         }
         return false;
+    }
+
+    /// UPDATING: the replica's new settings applied in its region
+    /// (`UpdateReplica`), then ACTIVE again. A refusal is kept as the
+    /// replica's status description, since AWS has no failed state for an
+    /// update.
+    auto update(const table_descriptor& d, const table_replica& r) -> bool {
+        boost::json::object request{
+            {"Action", "UpdateReplica"},
+            {"TableName", call_context::bare_name(d.name)},
+            {"SourceRegion", d.region},
+            {"Overrides", global_tables_detail::overrides_json(r.overrides)}};
+        if (!r.kms_key.empty()) {
+            request["KMSMasterKeyId"] = r.kms_key;
+        }
+        const auto done = call(d, r.region, std::move(request));
+        if (!done) {
+            if (global_tables_detail::retryable(done.error())) {
+                return false;
+            }
+            return finish(d, r.region, replica_status::active,
+                          done.error().message.value_or(done.error().type));
+        }
+        return finish(d, r.region, replica_status::active);
     }
 
     void say(const std::string& line) const {

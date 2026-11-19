@@ -256,8 +256,9 @@ are out of scope and answer `UnknownOperationException`:
 - the two replica auto scaling calls, which belong to Application Auto
   Scaling.
 
-Parts of supported operations are also refused. Among them are
-`ReplicaUpdates` `Update` and the per-replica overrides.
+Parts of supported operations are also refused or differ, such as
+`OnDemandThroughput` changes on a multi-region strongly consistent
+table.
 
 ## Multi-region strong consistency
 

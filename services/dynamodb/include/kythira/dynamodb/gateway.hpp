@@ -1277,6 +1277,9 @@ public:
         }
         _tables.set_table_keys(&_keys);
         _tables.set_peers([peers = _peers](std::string_view r) { return peers->has(r); });
+        _tables.set_peer_leave([this](const table_descriptor& d, const std::string& region) {
+            return _replicator.leave(d, region);
+        });
         if constexpr (k_routes_strong) {
             // Multi-region strong consistency (task 27).
             if (_backend.has_strong() && !_strong_tables) {

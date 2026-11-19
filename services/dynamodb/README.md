@@ -88,7 +88,7 @@ configuration `.github/workflows/dynamodb-module.yml` checks.
 | `include/kythira/dynamodb/global_tables.hpp` | Global tables: the peer API's receiver, the replicator, peer links over HTTP | 22 |
 | `include/kythira/dynamodb/strong_tables.hpp` | Multi-region strong consistency: the worker that adopts strong tables in replica regions, copies replica and witness statuses, and salvages writes made during the switch | 27 |
 | `include/kythira/dynamodb/routed_backend.hpp` | Multi-region strong consistency: the backend that sends each call to the cluster's host or the strong host, by table id | 27 |
-| `tests/dynamodb_global_table_test.cpp` | Replicas in linked clusters: backfill, both directions, clock skew, a three-region mesh, deletion, refusals | 22 |
+| `tests/dynamodb_global_table_test.cpp` | Replicas in linked clusters: backfill, both directions, clock skew, a three-region mesh, deletion, per-replica overrides, `DeleteTable` of a replica, refusals | 22 |
 | `cmd/dynamodb_gateway_node/group_ids.hpp`, `group_layout.hpp`, `durable_file.hpp` | Each voter's own range of group ids for splits, and the saved group layout a node restarts from | 24 |
 | `tools/chaos/` | The chaos scenario: SIGKILLs on a RocksDB cluster during splits and GSI propagation, with streams on (`run_chaos.sh`) | 24 |
 | `tests/dynamodb_strong_test.cpp` | The strong catalog's ids from 2^62, routing between the cluster's host and the strong host, making tables strong, leaving, GSIs, streams, PITR and backups across regions | 27 |
@@ -239,6 +239,11 @@ aws dynamodb update-table --table-name orders \
 Writes replicate asynchronously from the change log, and the last writer
 wins by (time, region) as on AWS; `global_tables.hpp` explains the
 ordering and `doc/unsupported.md` lists what `ReplicaUpdates` does not do.
+A replica can have its own read capacity or maximum, GSI reads and table
+class (`ProvisionedThroughputOverride`, `OnDemandThroughputOverride`,
+`GlobalSecondaryIndexes`, `TableClassOverride`), set on `Create` and
+changed with `Update`. `DeleteTable` in one region deletes only that
+replica; the others drop it.
 
 ### Beside other services in `kythira_node`
 
