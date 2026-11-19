@@ -149,7 +149,9 @@ struct fixture {
             [this](const chunk_sha& sha) { return s3::place(s3::placement_map{}, sha, replicas); },
             s3::resolver_for(copies), dp);
         o.addressing.domains = {std::string(k_host)};
-        o.clock = [] { return std::chrono::system_clock::time_point(k_now); };
+        if (!o.clock) {
+            o.clock = [] { return std::chrono::system_clock::time_point(k_now); };
+        }
         svc = std::make_unique<s3::s3_service<s3::local_metadata, authorizer>>(meta, *data, auth,
                                                                                std::move(o));
     }
@@ -1557,4 +1559,95 @@ BOOST_AUTO_TEST_CASE(encrypted_multipart_uploads) {
     auto ranged = customer_headers(key);
     ranged.emplace_back("Range", "bytes=150-249");
     BOOST_TEST(f.send("GET", "/enc/mp", ranged).body == (p1 + p2).substr(150, 100));
+}
+
+// ---- task 12: request rates and slow writes ----------------------------------
+
+BOOST_AUTO_TEST_CASE(a_prefix_over_its_rate_gets_slow_down) {
+    std::vector<std::pair<std::string, std::string>> hot;
+    s3::service_options o;
+    o.rates.hot_refusals = 1;
+    o.on_hot_prefix = [&](const std::string& b, const std::string& p) { hot.emplace_back(b, p); };
+    fixture f(std::move(o));
+    f.make_bucket("bkt");
+    BOOST_TEST(f.send("PUT", "/bkt?tagging", {},
+                      "<Tagging><TagSet><Tag><Key>kythira:compat:put-rate</Key><Value>2</Value>"
+                      "</Tag><Tag><Key>kythira:compat:get-rate</Key><Value>3</Value></Tag>"
+                      "</TagSet></Tagging>")
+                   .status == 204U);
+    // The clock stands still, so each prefix has its one second of burst.
+    BOOST_TEST(f.send("PUT", "/bkt/a/1", {}, "x").status == 200U);
+    BOOST_TEST(f.send("PUT", "/bkt/a/2", {}, "x").status == 200U);
+    const auto refused = f.send("PUT", "/bkt/a/3", {}, "x");
+    BOOST_TEST(refused.status == 503U);
+    BOOST_TEST(refused.code() == "SlowDown");
+    // Deletes are writes; another prefix has its own bucket; reads have
+    // theirs.
+    BOOST_TEST(f.send("DELETE", "/bkt/a/1").code() == "SlowDown");
+    BOOST_TEST(f.send("PUT", "/bkt/b/1", {}, "x").status == 200U);
+    BOOST_TEST(f.send("GET", "/bkt/a/2").status == 200U);
+    BOOST_TEST(f.send("HEAD", "/bkt/a/2").status == 200U);
+    // A listing counts against its prefix up to the last '/'.
+    BOOST_TEST(f.send("GET", "/bkt?prefix=a/x").status == 200U);
+    BOOST_TEST(f.send("GET", "/bkt?prefix=a/").code() == "SlowDown");
+    BOOST_TEST(f.send("GET", "/bkt?prefix=b/").status == 200U);
+
+    BOOST_TEST(f.svc->rates().refused() == 3U);
+    // More than one refusal in the window: reported once.
+    BOOST_REQUIRE(hot.size() == 1U);
+    BOOST_TEST(hot[0].second == "a/");
+    BOOST_TEST(f.svc->rates().hot_reports() == 1U);
+}
+
+BOOST_AUTO_TEST_CASE(a_rate_of_zero_turns_the_limit_off) {
+    fixture f;
+    f.make_bucket("bkt");
+    BOOST_TEST(f.send("PUT", "/bkt?tagging", {},
+                      "<Tagging><TagSet><Tag><Key>kythira:compat:put-rate</Key><Value>0</Value>"
+                      "</Tag></TagSet></Tagging>")
+                   .status == 204U);
+    for (int i = 0; i < 20; ++i) {
+        BOOST_TEST(f.send("PUT", "/bkt/k", {}, "x").status == 200U);
+    }
+    // Only the tagging request itself, at the default rate, was counted.
+    BOOST_TEST(f.svc->rates().tracked() == 1U);
+}
+
+BOOST_AUTO_TEST_CASE(a_write_slower_than_the_limit_is_not_committed) {
+    s3::service_options o;
+    o.max_write_ms = 0;  // any time at all between first chunk and commit
+    auto ticks = std::make_shared<std::int64_t>(0);
+    o.clock = [ticks] {
+        return std::chrono::system_clock::time_point(k_now) + std::chrono::milliseconds((*ticks)++);
+    };
+    fixture f(std::move(o));
+    f.make_bucket("bkt");
+    const auto r = f.send("PUT", "/bkt/k", {}, "some bytes");
+    BOOST_TEST(r.status == 503U);
+    BOOST_TEST(r.code() == "SlowDown");
+    BOOST_TEST(f.send("HEAD", "/bkt/k").status == 404U);
+}
+
+BOOST_AUTO_TEST_CASE(prefix_buckets_refill_with_time_and_idle_ones_are_dropped) {
+    BOOST_TEST(s3::rate_prefix("a/b/c.txt") == "a/b/");
+    BOOST_TEST(s3::rate_prefix("c.txt").empty());
+    BOOST_TEST(s3::rate_prefix("dir/") == "dir/");
+
+    s3::prefix_rates::options o;
+    o.max_tracked = 2;
+    s3::prefix_rates rates(o);
+    // 10 a second: a burst of 10, then one every 100 ms.
+    for (int i = 0; i < 10; ++i) {
+        BOOST_TEST(rates.admit("b", "p/", true, 10, 1'000));
+    }
+    BOOST_TEST(!rates.admit("b", "p/", true, 10, 1'000));
+    BOOST_TEST(!rates.admit("b", "p/", true, 10, 1'099));
+    BOOST_TEST(rates.admit("b", "p/", true, 10, 1'100));
+    // Reads and writes, and buckets, are counted apart.
+    BOOST_TEST(rates.admit("b", "p/", false, 10, 1'100));
+    BOOST_TEST(rates.tracked() == 2U);
+    // A third bucket drops the ones idle for a second.
+    BOOST_TEST(rates.admit("c", "p/", true, 10, 2'200));
+    BOOST_TEST(rates.tracked() == 1U);
+    BOOST_TEST(rates.refused() == 2U);
 }

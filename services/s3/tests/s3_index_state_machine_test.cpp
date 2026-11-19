@@ -941,7 +941,10 @@ BOOST_AUTO_TEST_CASE(unreferenced_chunks_are_collected_only_after_the_grace_peri
     const auto collected = r.apply(gc).collected;
     BOOST_REQUIRE(collected.size() == 1U);
     BOOST_TEST((collected[0] == sha_of(1)));
-    BOOST_TEST(!r.sm.refcount(sha_of(1)).has_value());
+    // Kept, collecting, until the sweeper reports the bytes deleted.
+    BOOST_REQUIRE(r.sm.refcount(sha_of(1)).has_value());
+    BOOST_TEST((r.sm.refcount(sha_of(1))->state == chunk_state::collecting));
+    BOOST_TEST((r.sm.pending_deletions(10) == std::vector<chunk_sha>{sha_of(1)}));
     BOOST_TEST(r.count(2) == 1U);
     BOOST_TEST(r.apply(gc).collected.empty());
 
@@ -954,6 +957,121 @@ BOOST_AUTO_TEST_CASE(unreferenced_chunks_are_collected_only_after_the_grace_peri
     gc.max = 3;
     BOOST_TEST(r.apply(gc).collected.size() == 3U);
     BOOST_TEST(r.apply(gc).collected.size() == 2U);
+}
+
+BOOST_AUTO_TEST_CASE(a_write_racing_a_chunks_deletion_is_refused_until_it_is_safe) {
+    replica r;
+    r.create("b1");
+    r.put("b1", "k", content_of({1}));
+    r.del("b1", "k");
+    index_command gc;
+    gc.op = kind::collect_chunks;
+    gc.grace_ms = 60'000;
+    gc.max = 100;
+    gc.now_ms = r.now + 60'000;
+    BOOST_REQUIRE(r.apply(gc).collected.size() == 1U);
+
+    // A PUT naming the chunk while it is being deleted: SlowDown, and the
+    // retry writes the bytes again.
+    auto refused = r.put("b1", "k2", content_of({1}));
+    BOOST_TEST(refused.status == 503U);
+    BOOST_TEST(refused.error == "SlowDown");
+    BOOST_TEST(!r.sm.version(r.ref("b1").id, "k2", std::nullopt).has_value());
+
+    index_command done;
+    done.op = kind::chunks_deleted;
+    done.chunks = {sha_of(1), sha_of(9)};  // an unknown one is ignored
+    done.now_ms = gc.now_ms + 1'000;
+    BOOST_TEST(r.apply(done).ok());
+    BOOST_TEST((r.sm.refcount(sha_of(1))->state == chunk_state::deleted));
+    BOOST_TEST(r.sm.refcount(sha_of(1))->deleted_ms == done.now_ms);
+    BOOST_TEST(r.sm.pending_deletions(10).empty());
+    BOOST_TEST(!r.sm.refcount(sha_of(9)).has_value());
+
+    // Bytes written before the deletion (or within the clock allowance
+    // after it) may be gone.
+    index_command early;
+    early.op = kind::put_object;
+    early.target = r.ref("b1");
+    early.key = "k2";
+    early.owner = "acct";
+    early.content = content_of({1});
+    early.written_ms = done.now_ms + chunk_clock_skew_ms - 1;
+    BOOST_TEST(r.apply(early).error == "SlowDown");
+
+    // Written after it: the record comes back to life.
+    early.written_ms = done.now_ms + chunk_clock_skew_ms;
+    BOOST_TEST(r.apply(early).ok());
+    BOOST_TEST(r.count(1) == 1U);
+    BOOST_TEST((r.sm.refcount(sha_of(1))->state == chunk_state::live));
+
+    // ...and its tombstone is gone, so a purge leaves it alone.
+    gc.now_ms = done.now_ms + 10 * 60'000;
+    BOOST_TEST(r.apply(gc).collected.empty());
+    BOOST_TEST(r.count(1) == 1U);
+}
+
+BOOST_AUTO_TEST_CASE(tombstones_are_purged_after_the_grace_period) {
+    replica r;
+    index_command claim;
+    claim.op = kind::claim_chunks;
+    claim.chunks = {sha_of(1), sha_of(2)};
+    BOOST_TEST(r.apply(claim).collected.size() == 2U);
+
+    index_command done;
+    done.op = kind::chunks_deleted;
+    done.chunks = {sha_of(1), sha_of(2)};
+    done.now_ms = 2'000'000;
+    r.apply(done);
+
+    index_command gc;
+    gc.op = kind::collect_chunks;
+    gc.grace_ms = 60'000;
+    gc.max = 100;
+    gc.now_ms = done.now_ms + 59'999;
+    r.apply(gc);
+    BOOST_TEST(r.sm.refcount(sha_of(1)).has_value());
+    gc.now_ms = done.now_ms + 60'000;
+    r.apply(gc);
+    BOOST_TEST(!r.sm.refcount(sha_of(1)).has_value());
+    BOOST_TEST(!r.sm.refcount(sha_of(2)).has_value());
+}
+
+BOOST_AUTO_TEST_CASE(only_chunks_without_a_record_are_claimed_as_orphans) {
+    replica r;
+    r.create("b1");
+    r.put("b1", "k", content_of({1}));
+    index_command claim;
+    claim.op = kind::claim_chunks;
+    claim.chunks = {sha_of(1), sha_of(2)};
+    const auto claimed = r.apply(claim).collected;
+    BOOST_TEST((claimed == std::vector<chunk_sha>{sha_of(2)}));
+    BOOST_TEST(r.count(1) == 1U);
+    BOOST_TEST((r.sm.refcount(sha_of(2))->state == chunk_state::collecting));
+    // A second claim of a collecting chunk is not a second claim.
+    BOOST_TEST(r.apply(claim).collected.empty());
+    BOOST_TEST((r.sm.pending_deletions(10) == std::vector<chunk_sha>{sha_of(2)}));
+
+    // A committed write of an orphan's bytes before the sweeper deletes it
+    // is refused, so the sweeper never deletes referenced bytes.
+    BOOST_TEST(r.put("b1", "k2", content_of({2})).error == "SlowDown");
+}
+
+BOOST_AUTO_TEST_CASE(chunk_commands_round_trip) {
+    index_command c;
+    c.op = kind::chunks_deleted;
+    c.written_ms = 123;
+    c.chunks = {sha_of(1), sha_of(2)};
+    const auto back = codec::decode_command(codec::encode(c));
+    BOOST_TEST(back.written_ms == 123U);
+    BOOST_TEST((back.chunks == c.chunks));
+
+    refcount_record rec;
+    rec.state = chunk_state::deleted;
+    rec.deleted_ms = 77;
+    const auto rr = codec::decode_refcount(codec::encode(rec));
+    BOOST_TEST((rr.state == chunk_state::deleted));
+    BOOST_TEST(rr.deleted_ms == 77U);
 }
 
 BOOST_AUTO_TEST_CASE(a_manifest_naming_a_chunk_twice_counts_it_twice) {

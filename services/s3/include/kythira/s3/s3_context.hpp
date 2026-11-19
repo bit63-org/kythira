@@ -32,6 +32,7 @@
 #include <kythira/s3/s3_compat.hpp>
 #include <kythira/s3/s3_data_path.hpp>
 #include <kythira/s3/s3_encryption.hpp>
+#include <kythira/s3/s3_rates.hpp>
 #include <kythira/s3/s3_http.hpp>
 #include <kythira/s3/s3_metadata.hpp>
 
@@ -67,6 +68,16 @@ struct service_options {
     /// (`s3_encryption.hpp`). None: SSE-S3 objects are stored unencrypted,
     /// SSE-KMS is refused, SSE-C works (it needs no provider).
     std::shared_ptr<sse_keys> encryption;
+    /// Per-prefix request rates (`s3_rates.hpp`): when a prefix counts as
+    /// hot, and who hears about it.
+    prefix_rates::options rates;
+    prefix_rates::hot_fn on_hot_prefix;
+    /// Longest a write may take from its first chunk to its commit. A
+    /// slower one is refused (503 SlowDown) rather than committed: chunks
+    /// it found already stored may have been collected meanwhile, and the
+    /// index catches that only while their tombstones last, so the
+    /// collector's grace period must exceed this (`s3_sweeps.hpp`).
+    std::uint64_t max_write_ms = std::uint64_t{15} * 60 * 1000;
 };
 
 /// The handlers' shared state.
@@ -88,6 +99,11 @@ template<metadata_access M> struct handler_context {
         return static_cast<std::uint64_t>(
             std::chrono::duration_cast<std::chrono::milliseconds>(now().time_since_epoch())
                 .count());
+    }
+    /// Whether a write that began storing chunks at `started_ms` has run
+    /// past `max_write_ms` and must not commit.
+    [[nodiscard]] auto write_expired(std::uint64_t started_ms) const -> bool {
+        return now_ms() > started_ms + options.max_write_ms;
     }
     /// The catalog name of `bucket` for `account`.
     [[nodiscard]] auto catalog_name(std::string_view bucket, std::string_view account) const

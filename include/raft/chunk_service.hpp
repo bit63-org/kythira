@@ -25,6 +25,19 @@
 /// | `PUT /_kythira/chunks/v1/<64 hex>`, body = the chunk | 201 stored now, 200 already held;
 /// durable either way | | `GET /_kythira/chunks/v1/<64 hex>` | 200 with the bytes, 404 not held |
 ///
+/// and, for the blob layer's sweeps (s3-compatible-storage task 12:
+/// orphan sweep and placement repair):
+///
+/// | Request | Answer |
+/// |---|---|
+/// | `GET /_kythira/chunks/v1/?after=<64 hex>&limit=<n>` | 200, one `<hex> <size>` line per
+/// chunk in name order after `after` (from the start without it), at most `limit` (default and
+/// cap 10,000); header `x-kythira-truncated: true` when more follow | | `DELETE
+/// /_kythira/chunks/v1/<64 hex>` | 204 removed, 404 not held |
+///
+/// A listing sorts the whole store per page, which is fine for the sweeps'
+/// cadence; a store too large for that wants an ordered index first.
+///
 /// Errors: 400 the body does not hash to the name (or the name is not 64
 /// hex digits), 413 larger than the store's largest chunk, 403 the caller
 /// may not use the route, 405 another method, 500 the copy here is corrupt
@@ -63,6 +76,8 @@
 #include <raft/chunk_store.hpp>
 #include <raft/mtls_https_client.hpp>
 
+#include <algorithm>
+#include <charconv>
 #include <concepts>
 #include <cstddef>
 #include <cstdint>
@@ -126,6 +141,22 @@ concept chunk_access = requires(A& a, const chunk_sha& sha, std::span<const std:
     { a.read(sha) } -> std::same_as<chunk_read_result>;
 };
 
+/// One page of a store's chunk names and sizes, in name order.
+struct chunk_listing {
+    std::vector<std::pair<chunk_sha, std::uint64_t>> chunks;
+    bool truncated = false;
+};
+
+/// The outcome of deleting one copy of a chunk.
+enum class chunk_remove_result : std::uint8_t {
+    removed,
+    missing,
+    unavailable,
+};
+
+/// Largest page a listing returns.
+inline constexpr std::size_t max_chunk_listing = 10'000;
+
 /// The chunks in this node's own store, by function call.
 class local_chunk_access {
 public:
@@ -174,6 +205,41 @@ public:
         }
     }
 
+    /// Up to `limit` chunks named after `after`, in name order.
+    auto list(const std::optional<chunk_sha>& after, std::size_t limit)
+        -> std::optional<chunk_listing> {
+        limit = std::clamp<std::size_t>(limit, 1, max_chunk_listing);
+        try {
+            std::vector<std::pair<chunk_sha, std::uint64_t>> all;
+            _store->for_each_chunk([&](const chunk_sha& sha, std::uint64_t size) {
+                if (!after || *after < sha) {
+                    all.emplace_back(sha, size);
+                }
+            });
+            std::ranges::sort(all);
+            chunk_listing out;
+            out.truncated = all.size() > limit;
+            if (out.truncated) {
+                all.resize(limit);
+            }
+            out.chunks = std::move(all);
+            return out;
+        } catch (const std::exception&) {
+            return std::nullopt;
+        }
+    }
+
+    /// Delete this node's copy. Only the sweeps call it, for chunks no
+    /// committed manifest names.
+    auto remove(const chunk_sha& sha) -> chunk_remove_result {
+        try {
+            return _store->remove(sha) ? chunk_remove_result::removed
+                                       : chunk_remove_result::missing;
+        } catch (const std::exception&) {
+            return chunk_remove_result::unavailable;
+        }
+    }
+
     [[nodiscard]] auto store() const noexcept -> chunk_store& { return *_store; }
 
 private:
@@ -218,7 +284,16 @@ public:
         if (!_authorize(ctx)) {
             return reply(req, http::status::forbidden, "chunk routes need a cluster identity");
         }
-        const auto sha = chunk_sha_from_hex(target.substr(chunk_service_prefix.size()));
+        const auto rest = target.substr(chunk_service_prefix.size());
+        if (rest.empty() || rest.starts_with('?')) {
+            if (req.method() != http::verb::get) {
+                auto res = reply(req, http::status::method_not_allowed, "GET");
+                res.set(http::field::allow, "GET");
+                return res;
+            }
+            return list(req, rest.empty() ? rest : rest.substr(1));
+        }
+        const auto sha = chunk_sha_from_hex(rest);
         if (!sha) {
             return reply(req, http::status::bad_request, "not a chunk name");
         }
@@ -227,9 +302,19 @@ public:
                 return put(req, *sha);
             case http::verb::get:
                 return get(req, *sha);
+            case http::verb::delete_:
+                switch (_local.remove(*sha)) {
+                    case chunk_remove_result::removed:
+                        return reply(req, http::status::no_content, {});
+                    case chunk_remove_result::missing:
+                        return reply(req, http::status::not_found, "chunk not held");
+                    case chunk_remove_result::unavailable:
+                        break;
+                }
+                return reply(req, http::status::service_unavailable, "chunk store unavailable");
             default: {
-                auto res = reply(req, http::status::method_not_allowed, "PUT or GET");
-                res.set(http::field::allow, "GET, PUT");
+                auto res = reply(req, http::status::method_not_allowed, "PUT, GET or DELETE");
+                res.set(http::field::allow, "GET, PUT, DELETE");
                 return res;
             }
         }
@@ -291,6 +376,52 @@ private:
                 break;
         }
         return reply(req, http::status::service_unavailable, "chunk store unavailable");
+    }
+
+    auto list(const https::request& req, std::string_view query) -> https::response {
+        namespace http = boost::beast::http;
+        std::optional<chunk_sha> after;
+        std::size_t limit = max_chunk_listing;
+        while (!query.empty()) {
+            const auto amp = query.find('&');
+            const auto pair = query.substr(0, amp);
+            query = amp == std::string_view::npos ? std::string_view{} : query.substr(amp + 1);
+            const auto eq = pair.find('=');
+            const auto name = pair.substr(0, eq);
+            const auto value =
+                eq == std::string_view::npos ? std::string_view{} : pair.substr(eq + 1);
+            if (name == "after") {
+                after = chunk_sha_from_hex(value);
+                if (!after) {
+                    return reply(req, http::status::bad_request, "after is not a chunk name");
+                }
+            } else if (name == "limit") {
+                std::size_t n = 0;
+                const auto [end, ec] =
+                    std::from_chars(value.data(), value.data() + value.size(), n);
+                if (ec != std::errc{} || end != value.data() + value.size() || n == 0) {
+                    return reply(req, http::status::bad_request, "limit is not a positive number");
+                }
+                limit = n;
+            }
+        }
+        auto page = _local.list(after, limit);
+        if (!page) {
+            return reply(req, http::status::service_unavailable, "chunk store unavailable");
+        }
+        std::string body;
+        body.reserve(page->chunks.size() * 80);
+        for (const auto& [sha, size] : page->chunks) {
+            body += to_hex(sha);
+            body += ' ';
+            body += std::to_string(size);
+            body += '\n';
+        }
+        auto res = reply(req, http::status::ok, body);
+        if (page->truncated) {
+            res.set("x-kythira-truncated", "true");
+        }
+        return res;
     }
 
     static auto reply(const https::request& req, boost::beast::http::status status,
@@ -365,6 +496,53 @@ public:
                 return {chunk_read_status::corrupt, {}};
             default:
                 return {chunk_read_status::unavailable, {}};
+        }
+    }
+
+    auto list(const std::optional<chunk_sha>& after, std::size_t limit)
+        -> std::optional<chunk_listing> {
+        std::string t = std::string(chunk_service_prefix) + "?limit=" + std::to_string(limit);
+        if (after) {
+            t += "&after=" + to_hex(*after);
+        }
+        auto res = _client.request("GET", _base_url, t, {}, "text/plain", user_agent);
+        if (!res || res->first != 200) {
+            return std::nullopt;
+        }
+        // The truncation header is not surfaced by the client; a full page
+        // means "ask again after the last name".
+        chunk_listing out;
+        std::string_view body = res->second;
+        while (!body.empty()) {
+            const auto nl = body.find('\n');
+            const auto line = body.substr(0, nl);
+            body = nl == std::string_view::npos ? std::string_view{} : body.substr(nl + 1);
+            const auto sp = line.find(' ');
+            const auto sha = chunk_sha_from_hex(line.substr(0, sp));
+            std::uint64_t size = 0;
+            if (!sha || sp == std::string_view::npos ||
+                std::from_chars(line.data() + sp + 1, line.data() + line.size(), size).ec !=
+                    std::errc{}) {
+                return std::nullopt;
+            }
+            out.chunks.emplace_back(*sha, size);
+        }
+        out.truncated = out.chunks.size() >= std::clamp<std::size_t>(limit, 1, max_chunk_listing);
+        return out;
+    }
+
+    auto remove(const chunk_sha& sha) -> chunk_remove_result {
+        auto res = _client.request("DELETE", _base_url, target(sha), {}, "text/plain", user_agent);
+        if (!res) {
+            return chunk_remove_result::unavailable;
+        }
+        switch (res->first) {
+            case 204:
+                return chunk_remove_result::removed;
+            case 404:
+                return chunk_remove_result::missing;
+            default:
+                return chunk_remove_result::unavailable;
         }
     }
 

@@ -286,10 +286,19 @@ BOOST_AUTO_TEST_CASE(service_ignores_other_targets_and_checks_name_method_and_ca
     kythira::https::request bad_name{http::verb::get, "/_kythira/chunks/v1/xyz", 11};
     BOOST_TEST(service.handle(bad_name, trusted)->result_int() == 400U);
 
-    kythira::https::request del{http::verb::delete_, "/_kythira/chunks/v1/" + sha_hex, 11};
-    auto res = service.handle(del, trusted);
+    kythira::https::request post{http::verb::post, "/_kythira/chunks/v1/" + sha_hex, 11};
+    auto res = service.handle(post, trusted);
     BOOST_TEST(res->result_int() == 405U);
-    BOOST_TEST(std::string((*res)[http::field::allow]) == "GET, PUT");
+    BOOST_TEST(std::string((*res)[http::field::allow]) == "GET, PUT, DELETE");
+    kythira::https::request put_list{http::verb::put, "/_kythira/chunks/v1/", 11};
+    BOOST_TEST(service.handle(put_list, trusted)->result_int() == 405U);
+    kythira::https::request bad_after{http::verb::get, "/_kythira/chunks/v1/?after=zz", 11};
+    BOOST_TEST(service.handle(bad_after, trusted)->result_int() == 400U);
+    kythira::https::request bad_limit{http::verb::get, "/_kythira/chunks/v1/?limit=0", 11};
+    BOOST_TEST(service.handle(bad_limit, trusted)->result_int() == 400U);
+    kythira::https::request list_plain{http::verb::get, "/_kythira/chunks/v1/", 11};
+    kythira::https::request_context nobody;
+    BOOST_TEST(service.handle(list_plain, nobody)->result_int() == 403U);
 
     kythira::https::request get{http::verb::get, "/_kythira/chunks/v1/" + sha_hex, 11};
     kythira::https::request_context plaintext;  // no TLS, no certificate
@@ -319,6 +328,48 @@ BOOST_AUTO_TEST_CASE(remote_write_and_read_round_trip_loose_and_packed_chunks) {
         BOOST_TEST((r._status == chunk_read_status::found));
         BOOST_TEST((r._bytes == bytes));
     }
+}
+
+BOOST_AUTO_TEST_CASE(stores_list_their_chunks_in_pages_and_delete_them) {
+    pki p;
+    node n(p);
+    auto remote = remote_for(p, n);
+    kythira::local_chunk_access local(n.store);
+    std::vector<kythira::chunk_sha> names;
+    for (std::uint32_t i = 0; i < 7; ++i) {
+        // Loose and packed sizes both.
+        const auto bytes = make_bytes(i % 2 == 0 ? 100 : 200'000, 500 + i);
+        names.push_back(sha256_of(bytes));
+        BOOST_TEST((local.write(names.back(), bytes) == chunk_write_result::created));
+    }
+    std::ranges::sort(names);
+    const auto walk = [](auto& access, std::size_t page) {
+        std::vector<kythira::chunk_sha> seen;
+        std::optional<kythira::chunk_sha> after;
+        for (int guard = 0; guard < 100; ++guard) {
+            auto l = access.list(after, page);
+            BOOST_TEST_REQUIRE(l.has_value());
+            for (const auto& [sha, size] : l->chunks) {
+                seen.push_back(sha);
+                BOOST_TEST(size > 0U);
+            }
+            if (!l->truncated || l->chunks.empty()) {
+                break;
+            }
+            after = l->chunks.back().first;
+        }
+        return seen;
+    };
+    BOOST_TEST((walk(local, 3) == names));
+    BOOST_TEST((walk(remote, 3) == names));
+    BOOST_TEST((walk(remote, 10'000) == names));
+
+    BOOST_TEST((remote.remove(names[2]) == kythira::chunk_remove_result::removed));
+    BOOST_TEST((remote.remove(names[2]) == kythira::chunk_remove_result::missing));
+    BOOST_TEST((local.remove(names[3]) == kythira::chunk_remove_result::removed));
+    BOOST_TEST(!n.store.contains(names[2]));
+    BOOST_TEST(!n.store.contains(names[3]));
+    BOOST_TEST(walk(remote, 4).size() == 5U);
 }
 
 BOOST_AUTO_TEST_CASE(remote_write_refuses_a_wrong_or_oversized_chunk) {
