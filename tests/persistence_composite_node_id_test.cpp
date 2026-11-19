@@ -80,8 +80,8 @@ auto write_all(const fs::path& p, const std::string& body) -> void {
 }
 
 template<typename NodeId>
-auto make_snapshot(std::vector<NodeId> nodes, std::optional<std::vector<NodeId>> old_nodes)
-    -> kythira::snapshot<NodeId> {
+auto make_snapshot(std::vector<NodeId> nodes, std::optional<std::vector<NodeId>> old_nodes,
+                   std::vector<NodeId> learners = {}) -> kythira::snapshot<NodeId> {
     kythira::snapshot<NodeId> snap;
     snap._last_included_index = 42;
     snap._last_included_term = 7;
@@ -89,6 +89,7 @@ auto make_snapshot(std::vector<NodeId> nodes, std::optional<std::vector<NodeId>>
     snap._configuration._nodes = std::move(nodes);
     snap._configuration._is_joint_consensus = old_nodes.has_value();
     snap._configuration._old_nodes = std::move(old_nodes);
+    snap._configuration._learners = std::move(learners);
     return snap;
 }
 
@@ -102,6 +103,7 @@ auto check_same_snapshot(const kythira::snapshot<NodeId>& got,
     BOOST_TEST(got.configuration().is_joint_consensus() ==
                want.configuration().is_joint_consensus());
     BOOST_CHECK(got.configuration().old_nodes() == want.configuration().old_nodes());
+    BOOST_CHECK(got.configuration().learners() == want.configuration().learners());
 }
 
 }  // namespace
@@ -248,6 +250,30 @@ BOOST_AUTO_TEST_CASE(numeric_and_string_formats_are_unchanged, *boost::unit_test
     BOOST_CHECK(eng.load_voted_for() == std::string("n2"));
 }
 
+// Learners used to be dropped from this engine's snapshots, so a node restarted
+// from one forgot every learner whose config entry had been compacted.
+BOOST_AUTO_TEST_CASE(snapshot_learners_survive_reload, *boost::unit_test::timeout(10)) {
+    temp_dir d("file_learn");
+    const auto snap = make_snapshot<aws_id>({aws(k_a), aws(k_b)}, std::nullopt, {aws(k_c)});
+    {
+        file_engine_t eng(d.path);
+        eng.save_snapshot(snap);
+    }
+    file_engine_t eng(d.path);
+    const auto loaded = eng.load_snapshot();
+    BOOST_REQUIRE(loaded.has_value());
+    check_same_snapshot(*loaded, snap);
+
+    // Without learners the record carries no member for them, as before.
+    temp_dir dn("file_nolearn");
+    {
+        kythira::file_persistence_engine<> num(dn.path);
+        num.save_snapshot(make_snapshot<std::uint64_t>({1, 2}, std::nullopt));
+    }
+    BOOST_TEST(
+        !boost::json::parse(read_all(dn.path / "snapshot")).as_object().contains("learners"));
+}
+
 BOOST_AUTO_TEST_SUITE_END()
 
 // ── object_store_persistence_engine ───────────────────────────────────────────
@@ -330,6 +356,21 @@ BOOST_AUTO_TEST_CASE(joint_snapshot_survives_reload, *boost::unit_test::timeout(
     check_same_snapshot(*loaded, snap);
 }
 
+BOOST_AUTO_TEST_CASE(snapshot_learners_survive_reload, *boost::unit_test::timeout(10)) {
+    store_t store;
+    const auto snap = make_snapshot<aws_id>({aws(k_a)}, std::nullopt, {aws(k_b), aws(k_c)});
+    {
+        os_engine_t eng{store, "kythira", "raft"};
+        eng.save_snapshot(snap);
+    }
+    const auto body = boost::json::parse(store.body("raft/snapshot")).as_object();
+    BOOST_TEST(boost::json::serialize(body.at("learners")) == "[\"" + k_b + "\",\"" + k_c + "\"]");
+    os_engine_t eng{store, "kythira", "raft"};
+    const auto loaded = eng.load_snapshot();
+    BOOST_REQUIRE(loaded.has_value());
+    check_same_snapshot(*loaded, snap);
+}
+
 BOOST_AUTO_TEST_CASE(numeric_records_are_unchanged, *boost::unit_test::timeout(10)) {
     store_t store;
     const auto opts = options(kythira::hard_state_layout::combined);
@@ -341,6 +382,7 @@ BOOST_AUTO_TEST_CASE(numeric_records_are_unchanged, *boost::unit_test::timeout(1
     BOOST_TEST(store.body("raft/term") == "{\"term\":2,\"voted_for\":17}");
     const auto body = boost::json::parse(store.body("raft/snapshot")).as_object();
     BOOST_TEST(boost::json::serialize(body.at("nodes")) == "[17,18]");
+    BOOST_TEST(!body.contains("learners"));
 }
 
 BOOST_AUTO_TEST_SUITE_END()

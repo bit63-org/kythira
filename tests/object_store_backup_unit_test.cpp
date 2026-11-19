@@ -887,6 +887,24 @@ BOOST_AUTO_TEST_CASE(a_joint_consensus_marker_is_not_carried_into_a_new_cluster)
     BOOST_TEST(!snap.contains("old_nodes"));
 }
 
+BOOST_AUTO_TEST_CASE(the_old_clusters_learners_are_not_carried_into_a_new_cluster) {
+    // The seeded membership is exactly the ids supplied; a learner carried
+    // across would name a node the new cluster never added.
+    const mock_object_store store;
+    const std::string p = std::string(k_source_prefix) + "/";
+    store.seed(p + "term", "5");
+    store.seed(p + "snapshot",
+               R"({"last_included_index":3,"last_included_term":4,"state":"",)"
+               R"("nodes":["n1","n2"],"is_joint_consensus":false,"learners":["n9"]})");
+    const object_store_backup<mock_object_store> backup{store};
+    std::ignore = backup.create(source_ref(), dest_ref(), {.backup_id = "b1"});
+
+    std::ignore = backup.restore_seed(dest_ref(), "b1", target_ref("fresh"), {"alpha"});
+
+    const auto snap = boost::json::parse(store.body("fresh/alpha/snapshot")).as_object();
+    BOOST_TEST(!snap.contains("learners"));
+}
+
 BOOST_AUTO_TEST_CASE(numeric_node_ids_are_seeded_as_numbers) {
     // The engine reads this array with `as_int64()` when its NodeId is an
     // integer and `as_string()` when it is a string, and boost::json throws on

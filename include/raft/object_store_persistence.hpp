@@ -3074,6 +3074,17 @@ private:
             }
             obj["old_nodes"] = old_nodes;
         }
+        // Learners only when there are some, so a snapshot without them stays
+        // byte-identical to what every earlier binary wrote. Before this member
+        // existed they were dropped here, and a node restarted from the
+        // snapshot forgot every learner whose config entry had been compacted.
+        if (!snap.configuration().learners().empty()) {
+            boost::json::array learners;
+            for (const auto& n : snap.configuration().learners()) {
+                learners.push_back(persistence_node_id::to_json(n));
+            }
+            obj["learners"] = learners;
+        }
         return boost::json::serialize(obj);
     }
 
@@ -3121,6 +3132,11 @@ private:
                 old_nodes.push_back(snapshot_member(n));
             }
             snap._configuration._old_nodes = std::move(old_nodes);
+        }
+        if (obj.contains("learners")) {
+            for (const auto& n : obj.at("learners").as_array()) {
+                snap._configuration._learners.push_back(snapshot_member(n));
+            }
         }
         return snap;
     }
