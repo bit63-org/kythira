@@ -25,3 +25,5 @@ ListSubscriptionsByTopic
 SetSubscriptionAttributes
 Subscribe
 Unsubscribe
+Publish
+PublishBatch

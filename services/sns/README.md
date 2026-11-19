@@ -31,8 +31,9 @@ Built when `CONFIG_SNS=y` (`services/sns/Kconfig`, off by default).
 | `include/kythira/sns/sns_query.hpp`, `sns_errors.hpp` | query inputs (attribute maps, message attributes, batches, tags) and SNS's errors in the query protocol | 3 |
 | `include/kythira/sns/sns_topic_policy.hpp` | topic and subscription ARNs, the default topic policy, AddPermission and RemovePermission | 3 |
 | `include/kythira/sns/sns_compat_profile.hpp` | the `kythira:compat:*` switches and SNS's documented limits per region | 3 |
-| `include/kythira/sns/sns_service.hpp` | the operation handlers over a `topic_store` (one in-process state machine for now): topics, attributes, tags, permissions, data protection policies and subscriptions | 4 |
-| `cmd/sns_node/` | the daemon; a placeholder whose `--self-test` checks the operation table until tasks 3 and 4 | 1 |
+| `include/kythira/sns/sns_service.hpp` | the operation handlers over a `topic_store` (one in-process state machine for now): topics, attributes, tags, permissions, data protection policies, subscriptions and publishing | 4 |
+| `include/kythira/sns/sns_message.hpp` | a published message as a publish log record carries it: body, structure, subject, attributes, timestamp and publisher, for delivery to read | 4 |
+| `cmd/sns_node/` | the daemon; a placeholder whose `--self-test` checks the operation table, until the daemon serves the handlers | 1 |
 
 ## Upgrading the model
 

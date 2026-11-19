@@ -16,10 +16,9 @@ SNS's `ErrorResponse` XML, with the message `Could not find operation
 unsigned caller gets SigV4's error instead. Task 12's recorded SNS
 responses pin the exact message.
 
-The pinned model has 42 operations. 19 are implemented (the topic,
-attribute, tag, permission, data protection and subscription operations
-of task 4). 2 more are planned in task 4: Publish and PublishBatch.
-The other 21 are SMS (11) and mobile push (10), which the spec leaves out
+The pinned model has 42 operations. 21 are implemented (task 4: topics,
+attributes, tags, permissions, data protection, subscriptions and
+publishing). The other 21 are SMS (11) and mobile push (10), which the spec leaves out
 of scope: they stay here for good, with the same error.
 
 `PutDataProtectionPolicy` and `GetDataProtectionPolicy` are implemented as
@@ -45,8 +44,6 @@ Kythira does not enforce it (no message is audited, masked or denied).
 | `ListPlatformApplications` | none (out of scope) | Mobile push (platform applications and endpoints) has no Kythira counterpart. | `InvalidAction`, HTTP 400 |
 | `ListSMSSandboxPhoneNumbers` | none (out of scope) | SMS has no Kythira counterpart. | `InvalidAction`, HTTP 400 |
 | `OptInPhoneNumber` | none (out of scope) | SMS has no Kythira counterpart. | `InvalidAction`, HTTP 400 |
-| `Publish` | task 4 | Not built yet (publishing). | `InvalidAction`, HTTP 400 |
-| `PublishBatch` | task 4 | Not built yet (publishing). | `InvalidAction`, HTTP 400 |
 | `SetEndpointAttributes` | none (out of scope) | Mobile push (platform applications and endpoints) has no Kythira counterpart. | `InvalidAction`, HTTP 400 |
 | `SetPlatformApplicationAttributes` | none (out of scope) | Mobile push (platform applications and endpoints) has no Kythira counterpart. | `InvalidAction`, HTTP 400 |
 | `SetSMSAttributes` | none (out of scope) | SMS has no Kythira counterpart. | `InvalidAction`, HTTP 400 |

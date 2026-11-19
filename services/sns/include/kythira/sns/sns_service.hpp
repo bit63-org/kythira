@@ -39,6 +39,7 @@
 #include <kythira/sns/sns_compat_profile.hpp>
 #include <kythira/sns/sns_errors.hpp>
 #include <kythira/sns/sns_front_end.hpp>
+#include <kythira/sns/sns_message.hpp>
 #include <kythira/sns/sns_query.hpp>
 #include <kythira/sns/sns_topic_policy.hpp>
 #include <kythira/sns/sns_topic_state_machine.hpp>
@@ -47,6 +48,7 @@
 
 #include <boost/json.hpp>
 
+#include <openssl/evp.h>
 #include <openssl/rand.h>
 
 #include <algorithm>
@@ -399,6 +401,108 @@ inline constexpr std::string_view k_tracing_config = "TracingConfig";
     return std::pair{static_cast<std::uint32_t>(*topic), *id};
 }
 
+/// A random version 4 UUID, lowercase: a message id.
+[[nodiscard]] inline auto random_uuid() -> std::string {
+    auto h = random_hex(16);
+    h[12] = '4';
+    static constexpr std::string_view k_variant = "89ab";
+    h[16] = k_variant.at(static_cast<std::size_t>(h[16] - (h[16] >= 'a' ? 'a' - 10 : '0')) & 3U);
+    return h.substr(0, 8) + "-" + h.substr(8, 4) + "-" + h.substr(12, 4) + "-" + h.substr(16, 4) +
+           "-" + h.substr(20);
+}
+
+/// SHA-256 of `data`, lowercase hex: the deduplication id of a FIFO
+/// message under content-based deduplication.
+[[nodiscard]] inline auto sha256_hex(std::string_view data) -> std::string {
+    std::array<unsigned char, EVP_MAX_MD_SIZE> md{};
+    unsigned int len = 0;
+    if (EVP_Digest(data.data(), data.size(), md.data(), &len, EVP_sha256(), nullptr) != 1) {
+        throw std::runtime_error("sns: SHA-256 failed");
+    }
+    static constexpr std::string_view k_hex = "0123456789abcdef";
+    std::string out;
+    for (unsigned int i = 0; i < len; ++i) {
+        out += k_hex.at(md.at(i) >> 4U);
+        out += k_hex.at(md.at(i) & 0x0FU);
+    }
+    return out;
+}
+
+/// 64-bit FNV-1a: a FIFO message group's log partition, the same on every
+/// node and release.
+[[nodiscard]] inline auto fnv1a(std::string_view s) -> std::uint64_t {
+    std::uint64_t h = 0xcbf29ce484222325ULL;
+    for (const unsigned char c : s) {
+        h = (h ^ c) * 0x100000001b3ULL;
+    }
+    return h;
+}
+
+/// A message group or deduplication id: 1 to 128 characters of letters,
+/// digits and ASCII punctuation, as SNS takes them.
+[[nodiscard]] inline auto valid_fifo_id(std::string_view id) -> bool {
+    return !id.empty() && id.size() <= 128 &&
+           std::all_of(id.begin(), id.end(), [](unsigned char c) {
+               return std::isalnum(c) != 0 || std::ispunct(c) != 0;
+           });
+}
+
+/// A message attribute name SNS accepts: up to 256 letters, digits,
+/// hyphens, underscores and periods, no leading, trailing or doubled
+/// period, and no `AWS.` or `Amazon.` prefix in any case.
+[[nodiscard]] inline auto valid_attribute_name(std::string_view n) -> bool {
+    if (n.empty() || n.size() > 256 || n.front() == '.' || n.back() == '.' ||
+        n.find("..") != std::string_view::npos) {
+        return false;
+    }
+    std::string lower(n);
+    std::transform(lower.begin(), lower.end(), lower.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    if (lower.starts_with("aws.") || lower.starts_with("amazon.")) {
+        return false;
+    }
+    return std::all_of(n.begin(), n.end(), [](unsigned char c) {
+        return std::isalnum(c) != 0 || c == '-' || c == '_' || c == '.';
+    });
+}
+
+/// A Number attribute's value: an optional sign, digits with at most one
+/// decimal point, and an optional exponent.
+[[nodiscard]] inline auto valid_number(std::string_view v) -> bool {
+    std::size_t i = 0;
+    if (i < v.size() && (v[i] == '+' || v[i] == '-')) {
+        ++i;
+    }
+    bool digits = false;
+    bool point = false;
+    for (; i < v.size(); ++i) {
+        if (std::isdigit(static_cast<unsigned char>(v[i])) != 0) {
+            digits = true;
+        } else if (v[i] == '.' && !point) {
+            point = true;
+        } else {
+            break;
+        }
+    }
+    if (!digits) {
+        return false;
+    }
+    if (i < v.size() && (v[i] == 'e' || v[i] == 'E')) {
+        ++i;
+        if (i < v.size() && (v[i] == '+' || v[i] == '-')) {
+            ++i;
+        }
+        const auto start = i;
+        while (i < v.size() && std::isdigit(static_cast<unsigned char>(v[i])) != 0) {
+            ++i;
+        }
+        if (i == start) {
+            return false;
+        }
+    }
+    return i == v.size();
+}
+
 [[nodiscard]] inline auto system_now_ms() -> std::int64_t {
     return std::chrono::duration_cast<std::chrono::milliseconds>(
                std::chrono::system_clock::now().time_since_epoch())
@@ -458,6 +562,8 @@ public:
         bind("SetSubscriptionAttributes", &sns_service::set_subscription_attributes);
         bind("ListSubscriptionsByTopic", &sns_service::list_subscriptions_by_topic);
         bind("ListSubscriptions", &sns_service::list_subscriptions);
+        bind("Publish", &sns_service::publish);
+        bind("PublishBatch", &sns_service::publish_batch);
     }
 
     /// The facts authorization needs about a topic: its effective policy
@@ -1061,6 +1167,136 @@ public:
         return w.str();
     }
 
+    // ---- publishing -------------------------------------------------------
+
+    /// Publish (Requirements 5.1 to 5.4): one entry, committed to the topic's
+    /// publish log before the message id is answered, and never waiting for
+    /// delivery. A FIFO duplicate within five minutes answers the original
+    /// message id and sequence number.
+    auto publish(call_context& ctx, const params& in) -> query_result<std::string> {
+        if (!ctx._topic) {
+            if (in.contains("PhoneNumber")) {
+                return invalid_parameter("PhoneNumber", "SMS is not supported");
+            }
+            return invalid_parameter("TopicArn or TargetArn", "no value for required parameter");
+        }
+        auto t = topic_of(ctx);
+        if (!t.has_value()) {
+            return t.error();
+        }
+        const auto now = _config._now_ms();
+        std::size_t bytes = 0;
+        auto e = prepare_entry(ctx, *t, in, now, bytes);
+        if (!e.has_value()) {
+            return e.error();
+        }
+        publish_command c;
+        c._account = t->_account;
+        c._name = t->_name;
+        c._entries.push_back(std::move(*e));
+        c._now_ms = now;
+        const auto r = _store.submit(c);
+        if (!r) {
+            return internal_error();
+        }
+        if (r->_status == apply_status::topic_not_found) {
+            return topic_not_found();
+        }
+        if (r->_status != apply_status::ok || r->_entries.size() != 1 ||
+            r->_entries[0]._status == publish_status::invalid_parameter) {
+            return internal_error();
+        }
+        aws_query::xml_writer w;
+        w.element("MessageId", r->_entries[0]._message_id);
+        if (t->_fifo) {
+            w.element("SequenceNumber", sequence_number(r->_entries[0]._seq));
+        }
+        return w.str();
+    }
+
+    /// PublishBatch: up to ten entries in one command. An entry that fails
+    /// validation is reported under `Failed` and the rest are published;
+    /// the whole batch's messages together may not exceed one message's
+    /// limit, as on SNS.
+    auto publish_batch(call_context& ctx, const params& in) -> query_result<std::string> {
+        auto entries = in.batch("PublishBatchRequestEntries", k_max_publish_entries);
+        if (!entries.has_value()) {
+            return entries.error();
+        }
+        auto t = topic_of(ctx);
+        if (!t.has_value()) {
+            return t.error();
+        }
+        const auto now = _config._now_ms();
+        struct failure {
+            std::string _id;
+            sns_error _error;
+        };
+        std::vector<failure> failed;
+        std::vector<std::string> ids;
+        publish_command c;
+        c._account = t->_account;
+        c._name = t->_name;
+        c._now_ms = now;
+        std::size_t total = 0;
+        for (const auto& entry : *entries) {
+            const auto id = std::string(entry.get("Id").value_or(""));
+            std::size_t bytes = 0;
+            auto e = prepare_entry(ctx, *t, entry, now, bytes);
+            total += bytes;
+            if (!e.has_value()) {
+                failed.push_back({id, e.error()});
+                continue;
+            }
+            ids.push_back(id);
+            c._entries.push_back(std::move(*e));
+        }
+        if (total > limits(ctx).max_message_bytes(std::nullopt)) {
+            return model_error("BatchRequestTooLongException",
+                               "The length of all the messages put together is more than the "
+                               "limit.");
+        }
+        std::vector<publish_entry_result> results;
+        if (!c._entries.empty()) {
+            const auto r = _store.submit(c);
+            if (!r) {
+                return internal_error();
+            }
+            if (r->_status == apply_status::topic_not_found) {
+                return topic_not_found();
+            }
+            if (r->_status != apply_status::ok || r->_entries.size() != c._entries.size()) {
+                return internal_error();
+            }
+            results = r->_entries;
+        }
+        aws_query::xml_writer w;
+        w.open("Successful");
+        for (std::size_t i = 0; i < results.size(); ++i) {
+            if (results[i]._status == publish_status::invalid_parameter) {
+                failed.push_back({ids[i], internal_error()});
+                continue;
+            }
+            w.open("member").element("Id", ids[i]).element("MessageId", results[i]._message_id);
+            if (t->_fifo) {
+                w.element("SequenceNumber", sequence_number(results[i]._seq));
+            }
+            w.close();
+        }
+        w.close();
+        w.open("Failed");
+        for (const auto& f : failed) {
+            w.open("member")
+                .element("Id", f._id)
+                .element("Code", f._error._code)
+                .element("Message", f._error._message)
+                .boolean("SenderFault", f._error._sender_fault)
+                .close();
+        }
+        w.close();
+        return w.str();
+    }
+
     // ---- data protection --------------------------------------------------
 
     auto get_data_protection_policy(call_context& ctx, const params&) -> query_result<std::string> {
@@ -1369,6 +1605,134 @@ private:
         w.element("Endpoint", sub._endpoint);
         w.element("TopicArn", topic_arn);
         w.close();
+    }
+
+    /// SNS's 20-digit sequence numbers: the log sequence, zero padded, so
+    /// they sort as numbers and as strings within a message group.
+    [[nodiscard]] static auto sequence_number(std::uint64_t seq) -> std::string {
+        auto s = std::to_string(seq);
+        return std::string(s.size() < 20 ? 20 - s.size() : 0, '0') + s;
+    }
+
+    /// Validates one Publish or PublishBatch entry as SNS does and builds it
+    /// for the publish command; `bytes` gets the message's size as SNS
+    /// counts it (the body, and each attribute's name, type and value).
+    [[nodiscard]] auto prepare_entry(const call_context& ctx, const topic_record& t,
+                                     const params& in, std::int64_t now, std::size_t& bytes) const
+        -> query_result<publish_entry> {
+        const auto message = in.get("Message");
+        if (!message || message->empty()) {
+            return invalid_parameter("Empty message");
+        }
+        published_message m;
+        m._message = std::string(*message);
+        m._timestamp_ms = now;
+        m._publisher = ctx._principal.account;
+        if (const auto subject = in.get("Subject")) {
+            if (subject->empty() || subject->size() > 100 ||
+                !std::all_of(subject->begin(), subject->end(),
+                             [](unsigned char c) { return c >= 0x20 && c < 0x7F; })) {
+                return invalid_parameter("Subject");
+            }
+            m._subject = std::string(*subject);
+        }
+        if (const auto structure = in.get("MessageStructure")) {
+            if (*structure != "json") {
+                return invalid_parameter("MessageStructure");
+            }
+            boost::system::error_code ec;
+            const auto doc = boost::json::parse(*message, ec);
+            if (ec || !doc.is_object()) {
+                return invalid_parameter("Message Structure - JSON message body failed to parse");
+            }
+            const auto* def = doc.as_object().if_contains("default");
+            if (def == nullptr || !def->is_string()) {
+                return invalid_parameter(
+                    "Message Structure - No default entry in JSON message body");
+            }
+            for (const auto& member : doc.as_object()) {
+                if (!member.value().is_string()) {
+                    return invalid_parameter(
+                        "Message Structure - JSON message body failed to parse");
+                }
+            }
+            m._json_structure = true;
+        }
+        auto attrs = in.message_attrs();
+        if (!attrs.has_value()) {
+            return attrs.error();
+        }
+        bytes = m._message.size();
+        for (const auto& [name, a] : *attrs) {
+            if (!service_detail::valid_attribute_name(name)) {
+                return invalid_parameter_value("The message attribute name '" + name +
+                                               "' is invalid.");
+            }
+            if (a._string_value && a._string_value->empty()) {
+                return invalid_parameter_value("The message attribute '" + name +
+                                               "' must contain non-empty message attribute "
+                                               "value.");
+            }
+            if (a._data_type.starts_with("Number") &&
+                !service_detail::valid_number(*a._string_value)) {
+                return invalid_parameter_value("The message attribute '" + name +
+                                               "' has an invalid numeric value.");
+            }
+            bytes += name.size() + a._data_type.size() + a._string_value.value_or("").size() +
+                     a._binary_value.value_or("").size();
+        }
+        m._attributes = std::move(*attrs);
+        if (bytes > limits(ctx).max_message_bytes(std::nullopt)) {
+            return invalid_parameter("Message too long");
+        }
+        publish_entry e;
+        const auto group = in.get("MessageGroupId");
+        const auto dedup = in.get("MessageDeduplicationId");
+        if (t._fifo) {
+            if (!group) {
+                return invalid_parameter(
+                    "The MessageGroupId parameter is required for FIFO "
+                    "topics");
+            }
+            if (!service_detail::valid_fifo_id(*group)) {
+                return invalid_parameter("MessageGroupId");
+            }
+            if (dedup) {
+                if (!service_detail::valid_fifo_id(*dedup)) {
+                    return invalid_parameter("MessageDeduplicationId");
+                }
+                e._dedup_id = std::string(*dedup);
+            } else if (const auto it = t._attributes.find("ContentBasedDeduplication");
+                       it != t._attributes.end() && it->second == "true") {
+                e._dedup_id = service_detail::sha256_hex(m._message);
+            } else {
+                return invalid_parameter(
+                    "The topic should either have ContentBasedDeduplication "
+                    "enabled or MessageDeduplicationId provided explicitly");
+            }
+            e._group_id = std::string(*group);
+            e._partition =
+                static_cast<std::uint32_t>(service_detail::fnv1a(*group) % t._partitions);
+        } else {
+            if (dedup) {
+                return invalid_parameter("MessageDeduplicationId",
+                                         "The request includes MessageDeduplicationId parameter "
+                                         "that is not valid for this topic type");
+            }
+            if (t._partitions > 1) {
+                std::array<unsigned char, 4> raw{};
+                if (RAND_bytes(raw.data(), static_cast<int>(raw.size())) != 1) {
+                    throw std::runtime_error("sns: RAND_bytes failed");
+                }
+                const std::uint32_t r = (std::uint32_t{raw[0]} << 24U) |
+                                        (std::uint32_t{raw[1]} << 16U) |
+                                        (std::uint32_t{raw[2]} << 8U) | std::uint32_t{raw[3]};
+                e._partition = r % t._partitions;
+            }
+        }
+        e._message_id = service_detail::random_uuid();
+        e._payload = encode_published_message(m);
+        return e;
     }
 
     /// `<name><entry><key>k</key><value>v</value></entry>...</name>`.
