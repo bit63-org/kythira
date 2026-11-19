@@ -24,6 +24,7 @@
     "./vcpkg-overlays/libcoap",
     "./vcpkg-overlays/poco-dnssd",
     "./vcpkg-overlays/cantcoap",
-    "./vcpkg-overlays/libnyoci"
+    "./vcpkg-overlays/libnyoci",
+    "./vcpkg-overlays/lua51"
   ]
 }

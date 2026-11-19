@@ -1,0 +1,180 @@
+diff --git a/deps/lua/src/lstrlib.c b/deps/lua/src/lstrlib.c
+index 7a03489..ffc0047 100644
+--- a/deps/lua/src/lstrlib.c
++++ b/deps/lua/src/lstrlib.c
+@@ -774,22 +774,22 @@ static int str_format (lua_State *L) {
+       strfrmt = scanformat(L, strfrmt, form);
+       switch (*strfrmt++) {
+         case 'c': {
+-          sprintf(buff, form, (int)luaL_checknumber(L, arg));
++          sprintf(buff, form, kythira_lua_num2int(luaL_checknumber(L, arg)));
+           break;
+         }
+         case 'd':  case 'i': {
+           addintlen(form);
+-          sprintf(buff, form, (LUA_INTFRM_T)luaL_checknumber(L, arg));
++          sprintf(buff, form, (LUA_INTFRM_T)kythira_lua_num2ll(luaL_checknumber(L, arg)));
+           break;
+         }
+         case 'o':  case 'u':  case 'x':  case 'X': {
+           addintlen(form);
+-          sprintf(buff, form, (unsigned LUA_INTFRM_T)luaL_checknumber(L, arg));
++          sprintf(buff, form, (unsigned LUA_INTFRM_T)kythira_lua_num2ll(luaL_checknumber(L, arg)));
+           break;
+         }
+         case 'e':  case 'E': case 'f':
+         case 'g': case 'G': {
+-          sprintf(buff, form, (double)luaL_checknumber(L, arg));
++          sprintf(buff, form, kythira_lua_canonical_nan((double)luaL_checknumber(L, arg)));
+           break;
+         }
+         case 'q': {
+diff --git a/deps/lua/src/lua_cmsgpack.c b/deps/lua/src/lua_cmsgpack.c
+index 9ac967e..9b9de18 100644
+--- a/deps/lua/src/lua_cmsgpack.c
++++ b/deps/lua/src/lua_cmsgpack.c
+@@ -19,10 +19,15 @@
+ #endif
+ 
+ /* Check if float or double can be an integer without loss of precision */
++/* Kythira: range-check before the cast, which is undefined out of range:
++ * 2^63 cast to int64_t is INT64_MIN on x86-64 and INT64_MAX on arm64, and
++ * INT64_MAX converts back to 2^63, so arm64 alone packed 2^63 as an int. */
+ #define IS_INT_TYPE_EQUIVALENT(x, T) (!isinf(x) && (T)(x) == (x))
++#define IS_INT64_IN_RANGE(x) ((x) >= -9223372036854775808.0 && (x) < 9223372036854775808.0)
++#define IS_INT_IN_RANGE(x) ((x) >= -2147483648.0 && (x) < 2147483648.0)
+ 
+-#define IS_INT64_EQUIVALENT(x) IS_INT_TYPE_EQUIVALENT(x, int64_t)
+-#define IS_INT_EQUIVALENT(x) IS_INT_TYPE_EQUIVALENT(x, int)
++#define IS_INT64_EQUIVALENT(x) (IS_INT64_IN_RANGE(x) && IS_INT_TYPE_EQUIVALENT(x, int64_t))
++#define IS_INT_EQUIVALENT(x) (IS_INT_IN_RANGE(x) && IS_INT_TYPE_EQUIVALENT(x, int))
+ 
+ /* If size of pointer is equal to a 4 byte integer, we're on 32 bits. */
+ #if UINTPTR_MAX == UINT_MAX
+@@ -204,7 +209,10 @@ void mp_encode_bytes(lua_State *L, mp_buf *buf, const unsigned char *s, size_t l
+ /* we assume IEEE 754 internal format for single and double precision floats. */
+ void mp_encode_double(lua_State *L, mp_buf *buf, double d) {
+     unsigned char b[9];
+-    float f = d;
++    float f;
++
++    d = kythira_lua_canonical_nan(d); /* Kythira: one NaN encoding */
++    f = d;
+ 
+     assert(sizeof(f) == 4 && sizeof(d) == 8);
+     if (d == (double)f) {
+diff --git a/deps/lua/src/lua_struct.c b/deps/lua/src/lua_struct.c
+index c58c8e7..6f1831a 100644
+--- a/deps/lua/src/lua_struct.c
++++ b/deps/lua/src/lua_struct.c
+@@ -171,8 +171,13 @@ static void putinteger (lua_State *L, luaL_Buffer *b, int arg, int endian,
+   lua_Number n = luaL_checknumber(L, arg);
+   Uinttype value;
+   char buff[MAXINTSIZE];
++  /* Kythira: saturate instead of an undefined cast (see luaconf.h). */
+   if (n < 0)
+-    value = (Uinttype)(Inttype)n;
++    value = (Uinttype)(Inttype)kythira_lua_num2ll(n);
++  else if (n != n)
++    value = 0;
++  else if (n >= 18446744073709551616.0)
++    value = ~(Uinttype)0;
+   else
+     value = (Uinttype)n;
+   if (endian == LITTLE) {
+@@ -231,13 +236,13 @@ static int b_pack (lua_State *L) {
+         break;
+       }
+       case 'f': {
+-        float f = (float)luaL_checknumber(L, arg++);
++        float f = (float)kythira_lua_canonical_nan(luaL_checknumber(L, arg++));
+         correctbytes((char *)&f, size, h.endian);
+         luaL_addlstring(&b, (char *)&f, size);
+         break;
+       }
+       case 'd': {
+-        double d = luaL_checknumber(L, arg++);
++        double d = kythira_lua_canonical_nan(luaL_checknumber(L, arg++));
+         correctbytes((char *)&d, size, h.endian);
+         luaL_addlstring(&b, (char *)&d, size);
+         break;
+diff --git a/deps/lua/src/luaconf.h b/deps/lua/src/luaconf.h
+index e2cb261..96b3e71 100644
+--- a/deps/lua/src/luaconf.h
++++ b/deps/lua/src/luaconf.h
+@@ -520,7 +520,12 @@
+ */
+ #define LUA_NUMBER_SCAN		"%lf"
+ #define LUA_NUMBER_FMT		"%.14g"
+-#define lua_number2str(s,n)	sprintf((s), LUA_NUMBER_FMT, (n))
++/* Kythira: the same text as "%.14g" in the C locale, but written by
++** std::to_chars (kythira_lua_number.cpp), so it depends on neither the C
++** library nor the locale, and every NaN prints as "nan" whatever its sign
++** bit (x86-64 produces a negative NaN for 0/0, arm64 a positive one). */
++int kythira_lua_number2str(char *s, double n);
++#define lua_number2str(s,n)	kythira_lua_number2str((s), (n))
+ #define LUAI_MAXNUMBER2STR	32 /* 16 digits, sign, point, and \0 */
+ #define lua_str2number(s,p)	strtod((s), (p))
+ 
+@@ -553,34 +558,33 @@
+ ** in C is extremely slow, so any alternative is worth trying.
+ */
+ 
+-/* On a Pentium, resort to a trick */
+-#if defined(LUA_NUMBER_DOUBLE) && !defined(LUA_ANSI) && !defined(__SSE2__) && \
+-    (defined(__i386) || defined (_M_IX86) || defined(__i386__))
+-
+-/* On a Microsoft compiler, use assembler */
+-#if defined(_MSC_VER)
+-
+-#define lua_number2int(i,d)   __asm fld d   __asm fistp i
+-#define lua_number2integer(i,n)		lua_number2int(i, n)
+-
+-/* the next trick should work on any Pentium, but sometimes clashes
+-   with a DirectX idiosyncrasy */
+-#else
+-
+-union luai_Cast { double l_d; long l_l; };
+-#define lua_number2int(i,d) \
+-  { volatile union luai_Cast u; u.l_d = (d) + 6755399441055744.0; (i) = u.l_l; }
+-#define lua_number2integer(i,n)		lua_number2int(i, n)
+-
+-#endif
+-
+-
+-/* this option always works, but may be slow */
+-#else
+-#define lua_number2int(i,d)	((i)=(int)(d))
+-#define lua_number2integer(i,d)	((i)=(lua_Integer)(d))
+-
+-#endif
++/* Kythira: a C cast of an out-of-range double, or of NaN, to an integer
++** is undefined. x86-64 answers the "integer indefinite" value (INT_MIN),
++** arm64 saturates and maps NaN to 0, so the same script would compute
++** different results on the two. These conversions saturate and map NaN to 0
++** on every architecture. */
++static inline int kythira_lua_num2int (double d) {
++  if (d != d) return 0;
++  if (d >= 2147483647.0) return INT_MAX;
++  if (d <= -2147483648.0) return INT_MIN;
++  return (int)d;
++}
++
++static inline long long kythira_lua_num2ll (double d) {
++  if (d != d) return 0;
++  if (d >= 9223372036854775808.0) return LLONG_MAX;
++  if (d < -9223372036854775808.0) return LLONG_MIN;
++  return (long long)d;
++}
++
++/* Kythira: one NaN bit pattern (positive, quiet) for every NaN that leaves
++** the interpreter as bytes (string.format, struct.pack, cmsgpack.pack). */
++static inline double kythira_lua_canonical_nan (double d) {
++  return (d != d) ? __builtin_nan("") : d;
++}
++
++#define lua_number2int(i,d)	((i)=kythira_lua_num2int(d))
++#define lua_number2integer(i,d)	((i)=(lua_Integer)kythira_lua_num2ll(d))
+ 
+ /* }================================================================== */
+ 
