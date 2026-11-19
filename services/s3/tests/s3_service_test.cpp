@@ -204,11 +204,11 @@ struct fixture {
                    sent_body ? std::move(*sent_body) : std::move(body));
     }
 
-    auto raw(std::string method, std::string target, s3::header_list headers, std::string body)
-        -> reply {
+    auto raw(std::string method, std::string target, s3::header_list headers, std::string body,
+             std::string host = std::string(k_host)) -> reply {
         s3::http_request in;
         in.method = std::move(method);
-        in.host = std::string(k_host);
+        in.host = std::move(host);
         in.target = std::move(target);
         in.headers = std::move(headers);
         in.body = s3::memory_body(std::move(body));
@@ -967,10 +967,10 @@ BOOST_AUTO_TEST_CASE(authentication_failures_and_unbuilt_operations) {
     const auto tampered = f.send("PUT", "/bkt/k", {}, "abc", "AKIDOWNER", "abd");
     BOOST_TEST(tampered.code() == "XAmzContentSHA256Mismatch");
     BOOST_TEST(f.send("GET", "/bkt/k").code() == "NoSuchKey");
-    const auto r = f.send("GET", "/bkt?cors");
+    const auto r = f.send("GET", "/bkt?analytics&id=a");
     BOOST_TEST(r.status == 501U);
     BOOST_TEST(r.code() == "NotImplemented");
-    BOOST_TEST(f.send("GET", "/bkt?website").status == 501U);
+    BOOST_TEST(f.send("GET", "/bkt?inventory&id=a").status == 501U);
 }
 
 BOOST_AUTO_TEST_CASE(versioned_buckets_answer_with_version_ids_and_delete_markers) {
@@ -2401,4 +2401,284 @@ BOOST_AUTO_TEST_CASE(copies_uploads_and_customer_keys_get_their_own_replication_
     BOOST_TEST(p.dest.send("GET", "/dst/docs/copied").body == "bytes");
     BOOST_TEST(p.dest.send("GET", "/dst/docs/mp").body == "p");
     BOOST_TEST(p.dest.send("GET", "/dst/docs/secret").status == 404U);
+}
+
+// ---- task 15: CORS and website hosting ---------------------------------------
+
+namespace {
+
+const std::string k_cors_config =
+    "<CORSConfiguration><CORSRule><AllowedOrigin>https://app.example.com</AllowedOrigin>"
+    "<AllowedMethod>GET</AllowedMethod><AllowedMethod>PUT</AllowedMethod>"
+    "<AllowedHeader>*</AllowedHeader><ExposeHeader>ETag</ExposeHeader>"
+    "<MaxAgeSeconds>600</MaxAgeSeconds></CORSRule></CORSConfiguration>";
+
+constexpr std::string_view k_site_domain = "s3-website.kythira.test";
+
+auto site_fixture_options() -> s3::service_options {
+    s3::service_options o;
+    o.website_domains = {std::string(k_site_domain)};
+    return o;
+}
+
+/// An unauthenticated request to `<bucket>.<website domain>`.
+auto site(fixture& f, const std::string& bucket, std::string method, std::string target,
+          s3::header_list headers = {}) -> reply {
+    const auto host = bucket + "." + std::string(k_site_domain);
+    headers.emplace_back("Host", host);
+    return f.raw(std::move(method), std::move(target), std::move(headers), {}, host);
+}
+
+/// A bucket whose objects anyone may read; `list` also lets anyone list it.
+void make_public_bucket(fixture& f, const std::string& name, bool list) {
+    BOOST_TEST(f.make_bucket(name).status == 200U);
+    BOOST_TEST(f.send("DELETE", "/" + name + "?publicAccessBlock").status == 204U);
+    std::string policy =
+        R"({"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":"*",)"
+        R"("Action":"s3:GetObject","Resource":"arn:aws:s3:::)" +
+        name + R"(/*"})";
+    if (list) {
+        policy += R"(,{"Effect":"Allow","Principal":"*","Action":"s3:ListBucket",)"
+                  R"("Resource":"arn:aws:s3:::)" +
+                  name + R"("})";
+    }
+    policy += "]}";
+    BOOST_TEST(f.send("PUT", "/" + name + "?policy", {}, policy).status == 204U);
+}
+
+auto put_config(fixture& f, const std::string& target, const std::string& doc) -> reply {
+    return f.send("PUT", target, {{"Content-MD5", md5_b64(doc)}}, doc);
+}
+
+}  // namespace
+
+BOOST_AUTO_TEST_CASE(cors_configurations_are_stored_and_answer_preflights) {
+    fixture f;
+    f.make_bucket("web");
+    const auto none = f.send("GET", "/web?cors");
+    BOOST_TEST(none.status == 404U);
+    BOOST_TEST(none.code() == "NoSuchCORSConfiguration");
+    BOOST_TEST(f.send("PUT", "/web?cors", {}, k_cors_config).code() == "InvalidRequest");
+    BOOST_TEST(put_config(f, "/web?cors", "<CORSConfiguration/>").code() == "MalformedXML");
+    // Without CORS, a preflight is refused.
+    const s3::header_list ask{{"Host", std::string(k_host)},
+                              {"Origin", "https://app.example.com"},
+                              {"Access-Control-Request-Method", "PUT"},
+                              {"Access-Control-Request-Headers", "Content-Type, X-Amz-Date"}};
+    const auto off = f.raw("OPTIONS", "/web/k", ask, {});
+    BOOST_TEST(off.status == 403U);
+    BOOST_TEST(off.code() == "AccessForbidden");
+    BOOST_TEST(contains(off.body, "CORS is not enabled for this bucket."));
+
+    BOOST_TEST(put_config(f, "/web?cors", k_cors_config).status == 200U);
+    const auto got = f.send("GET", "/web?cors");
+    BOOST_TEST(got.status == 200U);
+    BOOST_TEST(contains(got.body, "<AllowedOrigin>https://app.example.com</AllowedOrigin>"));
+    BOOST_TEST(contains(got.body, "<MaxAgeSeconds>600</MaxAgeSeconds>"));
+
+    // A preflight needs no signature.
+    const auto pre = f.raw("OPTIONS", "/web/k", ask, {});
+    BOOST_TEST(pre.status == 200U);
+    BOOST_TEST(pre.header("Access-Control-Allow-Origin") == "https://app.example.com");
+    BOOST_TEST(pre.header("Access-Control-Allow-Methods") == "GET, PUT");
+    BOOST_TEST(pre.header("Access-Control-Allow-Headers") == "content-type, x-amz-date");
+    BOOST_TEST(pre.header("Access-Control-Expose-Headers") == "ETag");
+    BOOST_TEST(pre.header("Access-Control-Max-Age") == "600");
+    BOOST_TEST(pre.header("Access-Control-Allow-Credentials") == "true");
+    BOOST_TEST(contains(pre.header("Vary"), "Origin"));
+    // ...on the bucket itself too.
+    BOOST_TEST(f.raw("OPTIONS", "/web", ask, {}).status == 200U);
+
+    auto other = ask;
+    other[1].second = "https://evil.test";
+    BOOST_TEST(f.raw("OPTIONS", "/web/k", other, {}).code() == "AccessForbidden");
+    auto del = ask;
+    del[2].second = "DELETE";
+    BOOST_TEST(f.raw("OPTIONS", "/web/k", del, {}).code() == "AccessForbidden");
+    auto bogus = ask;
+    bogus[2].second = "PATCH";
+    BOOST_TEST(f.raw("OPTIONS", "/web/k", bogus, {}).code() == "BadRequest");
+    BOOST_TEST(f.raw("OPTIONS", "/web/k", {{"Host", std::string(k_host)}}, {}).code() ==
+               "BadRequest");
+    const auto missing = f.raw("OPTIONS", "/nobucket/k", ask, {});
+    BOOST_TEST(missing.code() == "AccessForbidden");
+    BOOST_TEST(contains(missing.body, "Bucket not found"));
+
+    // Actual requests from an allowed origin carry the rule's headers,
+    // error answers included; other origins get none.
+    BOOST_TEST(f.send("PUT", "/web/k", {}, "v").status == 200U);
+    const auto get = f.send("GET", "/web/k", {{"Origin", "https://app.example.com"}});
+    BOOST_TEST(get.status == 200U);
+    BOOST_TEST(get.header("Access-Control-Allow-Origin") == "https://app.example.com");
+    BOOST_TEST(get.header("Access-Control-Allow-Headers").empty());
+    BOOST_TEST(contains(get.header("Vary"), "Access-Control-Request-Method"));
+    const auto lost = f.send("GET", "/web/nope", {{"Origin", "https://app.example.com"}});
+    BOOST_TEST(lost.code() == "NoSuchKey");
+    BOOST_TEST(lost.header("Access-Control-Allow-Origin") == "https://app.example.com");
+    const auto foreign = f.send("GET", "/web/k", {{"Origin", "https://evil.test"}});
+    BOOST_TEST(foreign.header("Access-Control-Allow-Origin").empty());
+    BOOST_TEST(!foreign.header("Vary").empty());
+    BOOST_TEST(f.send("GET", "/web/k").header("Vary").empty());
+
+    BOOST_TEST(f.send("DELETE", "/web?cors").status == 204U);
+    BOOST_TEST(f.send("GET", "/web?cors").code() == "NoSuchCORSConfiguration");
+    BOOST_TEST(f.raw("OPTIONS", "/web/k", ask, {}).code() == "AccessForbidden");
+}
+
+BOOST_AUTO_TEST_CASE(website_configurations_are_stored_and_checked) {
+    fixture f;
+    f.make_bucket("site");
+    BOOST_TEST(f.send("GET", "/site?website").code() == "NoSuchWebsiteConfiguration");
+    const std::string config =
+        "<WebsiteConfiguration><IndexDocument><Suffix>index.html</Suffix></IndexDocument>"
+        "<ErrorDocument><Key>error.html</Key></ErrorDocument></WebsiteConfiguration>";
+    BOOST_TEST(f.send("PUT", "/site?website", {}, config).code() == "InvalidRequest");
+    BOOST_TEST(put_config(f, "/site?website", "<WebsiteConfiguration/>").code() ==
+               "InvalidArgument");
+    BOOST_TEST(put_config(f, "/site?website", config).status == 200U);
+    const auto got = f.send("GET", "/site?website");
+    BOOST_TEST(contains(got.body, "<Suffix>index.html</Suffix>"));
+    BOOST_TEST(contains(got.body, "<Key>error.html</Key>"));
+    // Only the owner may change it.
+    BOOST_TEST(f.send("DELETE", "/site?website", {}, {}, "AKIDOTHER").code() == "AccessDenied");
+    BOOST_TEST(f.send("DELETE", "/site?website").status == 204U);
+    BOOST_TEST(f.send("GET", "/site?website").code() == "NoSuchWebsiteConfiguration");
+}
+
+BOOST_AUTO_TEST_CASE(the_website_endpoint_serves_index_and_error_documents) {
+    fixture f(site_fixture_options());
+    make_public_bucket(f, "pub", false);
+    BOOST_TEST(put_config(f, "/pub?website",
+                          "<WebsiteConfiguration>"
+                          "<IndexDocument><Suffix>index.html</Suffix></IndexDocument>"
+                          "<ErrorDocument><Key>error.html</Key></ErrorDocument>"
+                          "<RoutingRules><RoutingRule>"
+                          "<Condition><KeyPrefixEquals>docs/</KeyPrefixEquals></Condition>"
+                          "<Redirect><ReplaceKeyPrefixWith>documents/</ReplaceKeyPrefixWith>"
+                          "</Redirect></RoutingRule></RoutingRules>"
+                          "</WebsiteConfiguration>")
+                   .status == 200U);
+    BOOST_TEST(
+        f.send("PUT", "/pub/index.html", {{"Content-Type", "text/html"}}, "<p>home</p>").status ==
+        200U);
+    BOOST_TEST(f.send("PUT", "/pub/about/index.html", {}, "about").status == 200U);
+    BOOST_TEST(f.send("PUT", "/pub/error.html", {}, "oops").status == 200U);
+    BOOST_TEST(
+        f.send("PUT", "/pub/old.html", {{"x-amz-website-redirect-location", "/new.html"}}, "")
+            .status == 200U);
+
+    const auto home = site(f, "pub", "GET", "/");
+    BOOST_TEST(home.status == 200U);
+    BOOST_TEST(home.body == "<p>home</p>");
+    BOOST_TEST(home.header("Content-Type") == "text/html");
+    const auto head = site(f, "pub", "HEAD", "/");
+    BOOST_TEST(head.status == 200U);
+    BOOST_TEST(site(f, "pub", "GET", "/about/").body == "about");
+    // A folder without its slash goes to the folder.
+    const auto folder = site(f, "pub", "GET", "/about");
+    BOOST_TEST(folder.status == 302U);
+    BOOST_TEST(folder.header("Location") == "/about/");
+    // Routing rules and per-object redirects.
+    const auto docs = site(f, "pub", "GET", "/docs/guide.html");
+    BOOST_TEST(docs.status == 301U);
+    BOOST_TEST(docs.header("Location") ==
+               "https://pub.s3-website.kythira.test/documents/guide.html");
+    const auto old = site(f, "pub", "GET", "/old.html");
+    BOOST_TEST(old.status == 301U);
+    BOOST_TEST(old.header("Location") == "/new.html");
+    // Conditions pass through to the read.
+    const auto etag = home.header("ETag");
+    BOOST_TEST(site(f, "pub", "GET", "/", {{"If-None-Match", etag}}).status == 304U);
+    const auto range = site(f, "pub", "GET", "/index.html", {{"Range", "bytes=3-6"}});
+    BOOST_TEST(range.status == 206U);
+    BOOST_TEST(range.body == "home");
+
+    // Without s3:ListBucket a missing key is 403, served by the error
+    // document with that status.
+    const auto lost = site(f, "pub", "GET", "/missing.html", {{"Range", "bytes=0-0"}});
+    BOOST_TEST(lost.status == 403U);
+    BOOST_TEST(lost.body == "oops");
+    // With no error document left, S3's HTML page says why.
+    BOOST_TEST(f.send("DELETE", "/pub/error.html").status == 204U);
+    const auto page = site(f, "pub", "GET", "/missing.html");
+    BOOST_TEST(page.status == 403U);
+    BOOST_TEST(page.header("Content-Type") == "text/html; charset=utf-8");
+    BOOST_TEST(contains(page.body, "<li>Code: AccessDenied</li>"));
+    BOOST_TEST(contains(page.body,
+                        "An Error Occurred While Attempting to Retrieve a Custom Error Document"));
+    BOOST_TEST(site(f, "pub", "HEAD", "/missing.html").body.empty());
+    // Only GET and HEAD.
+    const auto post = site(f, "pub", "POST", "/index.html");
+    BOOST_TEST(post.status == 405U);
+    BOOST_TEST(contains(post.body, "MethodNotAllowed"));
+    // The REST endpoint still answers for the same bucket.
+    BOOST_TEST(f.send("GET", "/pub/index.html").body == "<p>home</p>");
+}
+
+BOOST_AUTO_TEST_CASE(the_website_endpoint_follows_access_and_configuration) {
+    fixture f(site_fixture_options());
+    make_public_bucket(f, "open", true);
+    BOOST_TEST(put_config(f, "/open?website",
+                          "<WebsiteConfiguration>"
+                          "<IndexDocument><Suffix>index.html</Suffix></IndexDocument>"
+                          "<RoutingRules><RoutingRule><Condition>"
+                          "<HttpErrorCodeReturnedEquals>404</HttpErrorCodeReturnedEquals>"
+                          "<KeyPrefixEquals>img/</KeyPrefixEquals></Condition>"
+                          "<Redirect><HostName>cdn.example.com</HostName>"
+                          "<Protocol>http</Protocol><HttpRedirectCode>307</HttpRedirectCode>"
+                          "</Redirect></RoutingRule></RoutingRules>"
+                          "</WebsiteConfiguration>")
+                   .status == 200U);
+    // With s3:ListBucket a missing key is 404 (no error document here).
+    const auto lost = site(f, "open", "GET", "/nope.html");
+    BOOST_TEST(lost.status == 404U);
+    BOOST_TEST(contains(lost.body, "<li>Code: NoSuchKey</li>"));
+    BOOST_TEST(contains(lost.body, "<li>Key: nope.html</li>"));
+    BOOST_TEST(!contains(lost.body, "Custom Error Document"));
+    // An error-code rule redirects after the error.
+    const auto img = site(f, "open", "GET", "/img/a.png");
+    BOOST_TEST(img.status == 307U);
+    BOOST_TEST(img.header("Location") == "http://cdn.example.com/img/a.png");
+
+    // A private bucket's website serves nothing to anyone.
+    BOOST_TEST(f.make_bucket("private").status == 200U);
+    BOOST_TEST(put_config(f, "/private?website",
+                          "<WebsiteConfiguration><IndexDocument><Suffix>index.html</Suffix>"
+                          "</IndexDocument></WebsiteConfiguration>")
+                   .status == 200U);
+    BOOST_TEST(f.send("PUT", "/private/index.html", {}, "secret").status == 200U);
+    const auto denied = site(f, "private", "GET", "/");
+    BOOST_TEST(denied.status == 403U);
+    BOOST_TEST(!contains(denied.body, "secret"));
+
+    // No bucket, no configuration.
+    const auto nobucket = site(f, "ghost", "GET", "/");
+    BOOST_TEST(nobucket.status == 404U);
+    BOOST_TEST(contains(nobucket.body, "<li>Code: NoSuchBucket</li>"));
+    BOOST_TEST(f.make_bucket("plain").status == 200U);
+    const auto plain = site(f, "plain", "GET", "/");
+    BOOST_TEST(plain.status == 404U);
+    BOOST_TEST(contains(plain.body, "NoSuchWebsiteConfiguration"));
+
+    // RedirectAllRequestsTo keeps the path.
+    BOOST_TEST(put_config(f, "/plain?website",
+                          "<WebsiteConfiguration><RedirectAllRequestsTo>"
+                          "<HostName>www.example.com</HostName><Protocol>https</Protocol>"
+                          "</RedirectAllRequestsTo></WebsiteConfiguration>")
+                   .status == 200U);
+    const auto moved = site(f, "plain", "GET", "/a/b%20c.html");
+    BOOST_TEST(moved.status == 301U);
+    BOOST_TEST(moved.header("Location") == "https://www.example.com/a/b%20c.html");
+
+    // The website endpoint answers CORS preflights from the bucket's rules.
+    BOOST_TEST(put_config(f, "/open?cors", k_cors_config).status == 200U);
+    BOOST_TEST(f.send("PUT", "/open/index.html", {}, "hi").status == 200U);
+    const auto pre =
+        site(f, "open", "OPTIONS", "/index.html",
+             {{"Origin", "https://app.example.com"}, {"Access-Control-Request-Method", "GET"}});
+    BOOST_TEST(pre.status == 200U);
+    BOOST_TEST(pre.header("Access-Control-Allow-Origin") == "https://app.example.com");
+    const auto get = site(f, "open", "GET", "/", {{"Origin", "https://app.example.com"}});
+    BOOST_TEST(get.body == "hi");
+    BOOST_TEST(get.header("Access-Control-Allow-Origin") == "https://app.example.com");
 }

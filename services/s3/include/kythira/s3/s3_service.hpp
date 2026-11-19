@@ -31,14 +31,23 @@
 ///    Operations not built yet answer `501 NotImplemented`
 ///    (`doc/unsupported.md`).
 ///
+/// Two kinds of request skip that pipeline (task 15): a CORS preflight
+/// (`OPTIONS`), answered from the bucket's CORS rules without
+/// authentication, and anything sent to a website endpoint host
+/// (`service_options::website_domains`), served by `s3_website.hpp` as
+/// the anonymous principal. An answer from a bucket with CORS carries the
+/// `Access-Control-*` headers of the rule matching the request's `Origin`.
+///
 /// Every response carries `x-amz-request-id` and `x-amz-id-2`; every
-/// error is S3's XML `<Error>` (none for HEAD).
+/// error is S3's XML `<Error>` (none for HEAD), or on a website endpoint
+/// S3's HTML error page.
 
 #include <kythira/s3/s3_access.hpp>
 #include <kythira/s3/s3_auth.hpp>
 #include <kythira/s3/s3_authz.hpp>
 #include <kythira/s3/s3_buckets.hpp>
 #include <kythira/s3/s3_context.hpp>
+#include <kythira/s3/s3_cors.hpp>
 #include <kythira/s3/s3_http.hpp>
 #include <kythira/s3/s3_lifecycle.hpp>
 #include <kythira/s3/s3_listings.hpp>
@@ -50,6 +59,7 @@
 #include <kythira/s3/s3_replication.hpp>
 #include <kythira/s3/s3_routes.hpp>
 #include <kythira/s3/s3_versioning.hpp>
+#include <kythira/s3/s3_website.hpp>
 
 #include <raft/aws_request_authorizer.hpp>
 #include <raft/aws_rest_xml_protocol.hpp>
@@ -106,7 +116,10 @@ struct http_request {
         "GetBucketNotification", "GetBucketNotificationConfiguration", "PutBucketNotification",
         "PutBucketNotificationConfiguration",
         // Replication.
-        "GetBucketReplication", "PutBucketReplication", "DeleteBucketReplication"};
+        "GetBucketReplication", "PutBucketReplication", "DeleteBucketReplication",
+        // CORS and website hosting.
+        "GetBucketCors", "PutBucketCors", "DeleteBucketCors", "GetBucketWebsite",
+        "PutBucketWebsite", "DeleteBucketWebsite"};
     return ops;
 }
 
@@ -130,7 +143,18 @@ public:
 
     auto serve(http_request in) -> s3_response {
         const auto request_id = new_request_id();
-        auto out = serve_inner(in, request_id);
+        std::optional<cors_configuration> cors;
+        auto out = serve_inner(in, request_id, cors);
+        if (auto origin = find_header(in.headers, "Origin"); origin && cors) {
+            // Requirement 6.1: an answer from a bucket with CORS carries
+            // the matching rule's headers, error answers included.
+            if (const auto* rule = match_cors_rule(*cors, *origin, in.method)) {
+                for (auto& [k, v] : cors_headers(*rule, *origin, std::nullopt)) {
+                    out.set(std::move(k), std::move(v));
+                }
+            }
+            out.set("Vary", std::string(cors_vary));
+        }
         out.set("x-amz-request-id", request_id);
         out.set("x-amz-id-2", request_id);
         return out;
@@ -166,6 +190,12 @@ private:
             {"GetBucketReplication", &get_bucket_replication<M>},
             {"PutBucketReplication", &put_bucket_replication<M>},
             {"DeleteBucketReplication", &delete_bucket_replication<M>},
+            {"GetBucketCors", &get_bucket_cors<M>},
+            {"PutBucketCors", &put_bucket_cors<M>},
+            {"DeleteBucketCors", &delete_bucket_cors<M>},
+            {"GetBucketWebsite", &get_bucket_website<M>},
+            {"PutBucketWebsite", &put_bucket_website<M>},
+            {"DeleteBucketWebsite", &delete_bucket_website<M>},
             {"RestoreObject", &restore_object<M>},
             {"GetBucketPolicy", &get_bucket_policy<M>},
             {"PutBucketPolicy", &put_bucket_policy<M>},
@@ -219,15 +249,34 @@ private:
         return std::chrono::floor<std::chrono::seconds>(_ctx.now());
     }
 
-    auto serve_inner(http_request& in, const std::string& request_id) -> s3_response {
+    auto serve_inner(http_request& in, const std::string& request_id,
+                     std::optional<cors_configuration>& cors) -> s3_response {
         const bool head = in.method == "HEAD";
         const auto fail = [&](const aws_rest_xml::error& e) {
             return error_response(e, request_id, head);
         };
+        if (auto site = website_resource(in.host, in.target, _options.website_domains)) {
+            if (!*site) {
+                return website_error_response(site->error(), request_id, head);
+            }
+            if (in.method == "OPTIONS") {
+                return preflight(in, **site, request_id);
+            }
+            return website(in, **site, request_id, cors);
+        }
+        if (in.method == "OPTIONS") {
+            auto resource = aws_rest_xml::parse_resource(
+                in.host, std::string_view(in.target).substr(0, in.target.find('?')),
+                _options.addressing);
+            if (!resource) {
+                return fail(resource.error());
+            }
+            return preflight(in, *resource, request_id);
+        }
         const auto content_type = find_header(in.headers, "Content-Type").value_or("");
         if (in.method == "POST" && in.target.find('?') == std::string::npos &&
             form_boundary(content_type)) {
-            return post_upload(in, request_id);
+            return post_upload(in, request_id, cors);
         }
 
         const auto has_header = [&](std::string_view name) {
@@ -265,7 +314,7 @@ private:
         if (!implemented_operations().contains(op)) {
             return fail(not_implemented());
         }
-        auto result = dispatch(op, req, *auth);
+        auto result = dispatch(op, req, *auth, cors);
         if (!result) {
             return fail(result.error());
         }
@@ -399,8 +448,8 @@ private:
         return std::nullopt;
     }
 
-    auto dispatch(const std::string& op, s3_request& req, const authenticated& auth)
-        -> handler_result {
+    auto dispatch(const std::string& op, s3_request& req, const authenticated& auth,
+                  std::optional<cors_configuration>& cors) -> handler_result {
         if (op == "ListBuckets" || op == "CreateBucket") {
             if (!auth.who) {
                 return access_denied();
@@ -436,6 +485,7 @@ private:
         if (auto e = find_bucket(req.resource.bucket, auth, req, b)) {
             return *e;
         }
+        cors = b.cors;
         if (auto e = admit(req, b)) {
             return *e;
         }
@@ -510,7 +560,8 @@ private:
 
     // ---- browser POST uploads ----------------------------------------------
 
-    auto post_upload(http_request& in, const std::string& request_id) -> s3_response {
+    auto post_upload(http_request& in, const std::string& request_id,
+                     std::optional<cors_configuration>& cors) -> s3_response {
         const auto fail = [&](const aws_rest_xml::error& e) {
             return error_response(e, request_id);
         };
@@ -583,6 +634,7 @@ private:
         if (auto e = find_bucket(resource->bucket, auth, req, b)) {
             return fail(*e);
         }
+        cors = b.cors;
         if (auto e = admit(req, b)) {
             return fail(*e);
         }
@@ -671,6 +723,96 @@ private:
             out.status = status == "200" ? 200 : 204;
         }
         return out;
+    }
+
+    // ---- CORS preflight and the website endpoint ---------------------------
+
+    /// A CORS preflight (`OPTIONS`): never authenticated, answered from the
+    /// bucket's CORS configuration alone, as on S3.
+    auto preflight(const http_request& in, const aws_rest_xml::resource& resource,
+                   const std::string& request_id) -> s3_response {
+        const auto forbidden = [&](std::string message) {
+            auto e = aws_rest_xml::errors::make(403, "AccessForbidden",
+                                                "CORSResponse: " + std::move(message));
+            e.extra.emplace_back("Method", "OPTIONS");
+            e.extra.emplace_back("ResourceType", resource.key.empty() ? "BUCKET" : "OBJECT");
+            return error_response(e, request_id);
+        };
+        const auto bad = [&](std::string message) {
+            return error_response(aws_rest_xml::errors::make(400, "BadRequest", std::move(message)),
+                                  request_id);
+        };
+        if (resource.bucket.empty()) {
+            return error_response(aws_rest_xml::errors::method_not_allowed(), request_id);
+        }
+        const auto origin = find_header(in.headers, "Origin");
+        if (!origin) {
+            return bad("Insufficient information. Origin request header needed.");
+        }
+        const auto method = find_header(in.headers, "Access-Control-Request-Method");
+        if (!method || !cors_detail::is_method(*method)) {
+            return bad("Invalid Access-Control-Request-Method: " + method.value_or("null"));
+        }
+        // Only the catalog entry matters here: no principal, no policy.
+        // Per-account namespaces need a principal to name the bucket.
+        auto desc = _options.account_namespaces
+                        ? std::nullopt
+                        : _ctx.meta.bucket(_ctx.catalog_name(resource.bucket, ""));
+        if (!desc) {
+            return forbidden("Bucket not found");
+        }
+        auto it = desc->config.find("cors");
+        auto config = it == desc->config.end() ? std::nullopt : load_cors(it->second);
+        if (!config) {
+            return forbidden("CORS is not enabled for this bucket.");
+        }
+        const auto requested = split_header_list(
+            find_header(in.headers, "Access-Control-Request-Headers").value_or(""));
+        const auto* rule = match_cors_rule(*config, *origin, *method, requested);
+        if (rule == nullptr) {
+            return forbidden(
+                "This CORS request is not allowed. This is usually because the evalution of "
+                "Origin, request method / Access-Control-Request-Method or "
+                "Access-Control-Request-Headers are not whitelisted by the resource's CORS spec.");
+        }
+        s3_response out;
+        for (auto& [k, v] : cors_headers(*rule, *origin, requested)) {
+            out.set(std::move(k), std::move(v));
+        }
+        out.set("Vary", std::string(cors_vary));
+        return out;
+    }
+
+    /// Requirement 12.4: a request to the website endpoint.
+    auto website(const http_request& in, const aws_rest_xml::resource& resource,
+                 const std::string& request_id, std::optional<cors_configuration>& cors)
+        -> s3_response {
+        const bool head = in.method == "HEAD";
+        s3_request req;
+        req.method = in.method;
+        req.resource = resource;
+        req.headers = in.headers;
+        req.source_ip = in.source_ip;
+        req.secure_transport = in.secure_transport;
+        req.request_id = request_id;
+        const authenticated anonymous;
+        bucket_state b;
+        if (auto e = find_bucket(resource.bucket, anonymous, req, b)) {
+            return website_error_response(*e, request_id, head);
+        }
+        cors = b.cors;
+        if (auto e = admit(req, b)) {
+            return website_error_response(*e, request_id, head);
+        }
+        const auto allowed = [&](std::string_view operation, const std::string& key) {
+            auto facts = facts_for(req, anonymous, &b);
+            facts.operation = std::string(operation);
+            facts.key = key;
+            const auto obj = load_object(b, key, std::nullopt);
+            facts.existing_tags = obj.tags;
+            return !authorize(facts, anonymous, b, nullptr, obj, {}).has_value();
+        };
+        return serve_website(_ctx, b, req, in.host, allowed);
     }
 
     /// Requirement 13: a request over its prefix's rate is `503 SlowDown`
