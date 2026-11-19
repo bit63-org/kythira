@@ -560,3 +560,11 @@ asked.
     destination's `StorageClass` and `ExpectedBucketOwner`
     (`aws_s3_client::put_object_with`), dead letters their own
     configuration's owner. Left: S3 Tables, KMS, conformance runs.
+  - Progress (November 19, 2026): the execution role. With
+    `KINESIS_CHANNEL_ROLE=assume` a node writes each channel's objects as
+    its `ServiceExecutionRoleARN`, through STS `AssumeRole` signed with
+    SigV4 (`kinesis_channel_role.hpp`, no SDK component needed), credentials
+    cached per role and channel and refreshed five minutes before expiry; a
+    refusal is retried every 30 s and logged with STS's code.
+    `kinesis_channel_role_test` covers it. Left: S3 Tables, KMS,
+    conformance runs.

@@ -199,6 +199,17 @@ struct node_options {
     /// `DataFreshnessInSeconds` (seconds-scale delivery for tests and
     /// demos); 0, the default, keeps each channel's own.
     std::int64_t _channel_max_delay_ms{0};
+    /// `KINESIS_CHANNEL_ROLE`: `node` (the default) writes channel objects
+    /// with this node's own credentials; `assume` writes each channel's
+    /// objects as its `ServiceExecutionRoleARN`, through STS `AssumeRole`,
+    /// as AWS does.
+    bool _channel_assume_role{false};
+    /// `KINESIS_CHANNEL_STS_ENDPOINT`: STS's URL for `assume` (AWS's in the
+    /// channel S3 region when empty; Kythira's IAM service also answers).
+    std::string _channel_sts_endpoint;
+    /// `KINESIS_CHANNEL_CA_FILE`: the CA bundle the STS endpoint's
+    /// certificate chains to; the system store when empty.
+    std::string _channel_ca_file;
 };
 
 /// Whether this build can tier to `provider`, and if not, what would
