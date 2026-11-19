@@ -3425,6 +3425,34 @@ private:
                s._stream;
     }
 
+    /// The destination as the model's S3DestinationDescription /
+    /// S3TablesDestinationDescription shapes give it: both require
+    /// `DataFreshnessInSeconds` and `DeadLetterQueueS3Configuration`. An S3
+    /// channel created without a dead-letter configuration describes the one
+    /// it uses, the destination bucket under `errors/`, as AWS documents.
+    [[nodiscard]] static auto destination_description(const channel_record& c)
+        -> boost::json::object {
+        auto d = boost::json::parse(c._destination_config).as_object();
+        if (!d.contains("DataFreshnessInSeconds")) {
+            d["DataFreshnessInSeconds"] = k_default_channel_freshness_s;
+        }
+        if (c._destination == channel_destination::s3 &&
+            !d.contains("DeadLetterQueueS3Configuration")) {
+            boost::json::object dlq;
+            if (const auto* st = d.if_contains("StorageConfiguration");
+                st != nullptr && st->is_object()) {
+                for (const char* k : {"BucketARN", "ExpectedBucketOwner"}) {
+                    if (const auto* v = st->as_object().if_contains(k)) {
+                        dlq[k] = *v;
+                    }
+                }
+            }
+            dlq["ErrorOutputPrefix"] = "errors/";
+            d["DeadLetterQueueS3Configuration"] = std::move(dlq);
+        }
+        return d;
+    }
+
     [[nodiscard]] static auto channel_json(const call_context& ctx, const channel_record& c)
         -> boost::json::object {
         boost::json::object o;
@@ -3447,7 +3475,7 @@ private:
         o["StreamConfigurationList"] = std::move(streams);
         o[c._destination == channel_destination::s3 ? "S3DestinationConfiguration"
                                                     : "S3TablesDestinationConfiguration"] =
-            boost::json::parse(c._destination_config);
+            destination_description(c);
         if (!c._encryption_config.empty()) {
             o["EncryptionConfiguration"] = boost::json::parse(c._encryption_config);
         }

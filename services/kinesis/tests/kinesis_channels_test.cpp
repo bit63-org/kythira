@@ -155,6 +155,8 @@ BOOST_AUTO_TEST_CASE(create_describe_and_list) {
     const auto& dest = created.at("S3DestinationConfiguration").as_object();
     BOOST_TEST(dest.at("DataFreshnessInSeconds").as_int64() == 300);  // the default
     BOOST_TEST(str(dest.at("StorageConfiguration").at("CompressionType")) == "GZIP");
+    BOOST_TEST(str(dest.at("DeadLetterQueueS3Configuration").at("BucketARN")) ==
+               "arn:aws:s3:::dead-letters");
     BOOST_TEST(!created.contains("S3TablesDestinationConfiguration"));
     BOOST_TEST(created.at("LoggingConfiguration").at("CloudWatchLogs").at("Enabled").as_bool() ==
                false);
@@ -180,6 +182,28 @@ BOOST_AUTO_TEST_CASE(create_describe_and_list) {
 
     const auto tags = f.ok("ListTagsForResource", {{"ResourceARN", arn}});
     BOOST_TEST(json::serialize(tags.at("Tags")) == R"([{"Key":"team","Value":"data"}])");
+}
+
+// The model's S3DestinationDescription requires DataFreshnessInSeconds and
+// DeadLetterQueueS3Configuration (the differential tool's model check found
+// the second missing). A channel created without a dead-letter configuration
+// describes the one delivery uses: the destination bucket under errors/.
+BOOST_AUTO_TEST_CASE(an_s3_channel_describes_its_default_dead_letter_location) {
+    fixture f;
+    f.on_demand("orders");
+    auto body = create_body("to-s3", {source("orders")});
+    body["S3DestinationConfiguration"].as_object().erase("DeadLetterQueueS3Configuration");
+    const auto created = f.ok("CreateChannel", body).at("ChannelDescription").as_object();
+    const auto& dest = created.at("S3DestinationConfiguration").as_object();
+    BOOST_TEST(dest.at("DataFreshnessInSeconds").as_int64() == 300);
+    const auto& dlq = dest.at("DeadLetterQueueS3Configuration").as_object();
+    BOOST_TEST(str(dlq.at("BucketARN")) == "arn:aws:s3:::delivered");
+    BOOST_TEST(str(dlq.at("ExpectedBucketOwner")) == std::string(k_account));
+    BOOST_TEST(str(dlq.at("ErrorOutputPrefix")) == "errors/");
+    const auto described = f.ok("DescribeChannel", {{"ChannelARN", created.at("ChannelARN")}})
+                               .at("ChannelDescription")
+                               .as_object();
+    BOOST_TEST(json::serialize(described) == json::serialize(created));
 }
 
 BOOST_AUTO_TEST_CASE(s3_tables_destination) {
