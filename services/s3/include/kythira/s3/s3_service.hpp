@@ -44,8 +44,10 @@
 #include <kythira/s3/s3_listings.hpp>
 #include <kythira/s3/s3_metadata.hpp>
 #include <kythira/s3/s3_multipart.hpp>
+#include <kythira/s3/s3_notifications.hpp>
 #include <kythira/s3/s3_objects.hpp>
 #include <kythira/s3/s3_post_policy.hpp>
+#include <kythira/s3/s3_replication.hpp>
 #include <kythira/s3/s3_routes.hpp>
 #include <kythira/s3/s3_versioning.hpp>
 
@@ -99,7 +101,12 @@ struct http_request {
         "PutObjectRetention", "GetObjectLegalHold", "PutObjectLegalHold",
         // Lifecycle and restores.
         "GetBucketLifecycle", "GetBucketLifecycleConfiguration", "PutBucketLifecycle",
-        "PutBucketLifecycleConfiguration", "DeleteBucketLifecycle", "RestoreObject"};
+        "PutBucketLifecycleConfiguration", "DeleteBucketLifecycle", "RestoreObject",
+        // Event notifications.
+        "GetBucketNotification", "GetBucketNotificationConfiguration", "PutBucketNotification",
+        "PutBucketNotificationConfiguration",
+        // Replication.
+        "GetBucketReplication", "PutBucketReplication", "DeleteBucketReplication"};
     return ops;
 }
 
@@ -152,6 +159,13 @@ private:
             {"PutBucketLifecycleConfiguration", &put_bucket_lifecycle<M>},
             {"PutBucketLifecycle", &put_bucket_lifecycle<M>},
             {"DeleteBucketLifecycle", &delete_bucket_lifecycle<M>},
+            {"GetBucketNotification", &get_bucket_notification<M>},
+            {"GetBucketNotificationConfiguration", &get_bucket_notification_configuration<M>},
+            {"PutBucketNotification", &put_bucket_notification<M>},
+            {"PutBucketNotificationConfiguration", &put_bucket_notification_configuration<M>},
+            {"GetBucketReplication", &get_bucket_replication<M>},
+            {"PutBucketReplication", &put_bucket_replication<M>},
+            {"DeleteBucketReplication", &delete_bucket_replication<M>},
             {"RestoreObject", &restore_object<M>},
             {"GetBucketPolicy", &get_bucket_policy<M>},
             {"PutBucketPolicy", &put_bucket_policy<M>},

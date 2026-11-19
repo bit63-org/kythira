@@ -13,7 +13,7 @@ implement: the XML error `NotImplemented` ("A header you provided implies
 functionality that is not implemented") with HTTP status 501, which every
 SDK surfaces as a non-retryable service error (`s3_service.hpp`).
 
-The model has 116 operations. 62 are implemented; of the other 54, 13 are
+The model has 116 operations. 69 are implemented; of the other 47, 6 are
 planned in a spec task and 41 (`none`) are out of the spec's scope, or
 were added to S3 after the spec was written and wait on the owner's
 decision.
@@ -30,7 +30,6 @@ decision.
 | `DeleteBucketMetadataConfiguration` | none | Out of scope: S3 Metadata, which keeps its tables in S3 Tables. | `NotImplemented`, HTTP 501 |
 | `DeleteBucketMetadataTableConfiguration` | none | Out of scope: S3 Metadata, which keeps its tables in S3 Tables. | `NotImplemented`, HTTP 501 |
 | `DeleteBucketMetricsConfiguration` | none | Not in the spec: CloudWatch request-metrics filters. Kythira exports its own metrics instead. | `NotImplemented`, HTTP 501 |
-| `DeleteBucketReplication` | task 14 | Not built yet (change log, notifications and replication). | `NotImplemented`, HTTP 501 |
 | `DeleteBucketWebsite` | task 15 | Not built yet (CORS and website hosting). | `NotImplemented`, HTTP 501 |
 | `DeleteObjectAnnotation` | none | Not in the spec: object annotations, added to S3 after the spec was written. Open question for the owner. | `NotImplemented`, HTTP 501 |
 | `GetBucketAbac` | none | Not in the spec: bucket ABAC (tag-based access to general purpose buckets), added to S3 after the spec was written. Open question for the owner. | `NotImplemented`, HTTP 501 |
@@ -42,9 +41,6 @@ decision.
 | `GetBucketMetadataConfiguration` | none | Out of scope: S3 Metadata, which keeps its tables in S3 Tables. | `NotImplemented`, HTTP 501 |
 | `GetBucketMetadataTableConfiguration` | none | Out of scope: S3 Metadata, which keeps its tables in S3 Tables. | `NotImplemented`, HTTP 501 |
 | `GetBucketMetricsConfiguration` | none | Not in the spec: CloudWatch request-metrics filters. Kythira exports its own metrics instead. | `NotImplemented`, HTTP 501 |
-| `GetBucketNotification` | task 14 | Not built yet (change log, notifications and replication). Deprecated in the model in favour of the `*Configuration` form; planned with it because old SDKs still send it. | `NotImplemented`, HTTP 501 |
-| `GetBucketNotificationConfiguration` | task 14 | Not built yet (change log, notifications and replication). | `NotImplemented`, HTTP 501 |
-| `GetBucketReplication` | task 14 | Not built yet (change log, notifications and replication). | `NotImplemented`, HTTP 501 |
 | `GetBucketWebsite` | task 15 | Not built yet (CORS and website hosting). | `NotImplemented`, HTTP 501 |
 | `GetObjectAnnotation` | none | Not in the spec: object annotations, added to S3 after the spec was written. Open question for the owner. | `NotImplemented`, HTTP 501 |
 | `GetObjectTorrent` | none | Not in the spec: BitTorrent, which S3 no longer offers to new accounts. | `NotImplemented`, HTTP 501 |
@@ -61,9 +57,6 @@ decision.
 | `PutBucketIntelligentTieringConfiguration` | none | Not in the spec: the Intelligent-Tiering archive tiers. Storage classes map to Kythira tiers through lifecycle (task 13). | `NotImplemented`, HTTP 501 |
 | `PutBucketInventoryConfiguration` | none | Out of scope: S3 Inventory. | `NotImplemented`, HTTP 501 |
 | `PutBucketMetricsConfiguration` | none | Not in the spec: CloudWatch request-metrics filters. Kythira exports its own metrics instead. | `NotImplemented`, HTTP 501 |
-| `PutBucketNotification` | task 14 | Not built yet (change log, notifications and replication). Deprecated in the model in favour of the `*Configuration` form; planned with it because old SDKs still send it. | `NotImplemented`, HTTP 501 |
-| `PutBucketNotificationConfiguration` | task 14 | Not built yet (change log, notifications and replication). | `NotImplemented`, HTTP 501 |
-| `PutBucketReplication` | task 14 | Not built yet (change log, notifications and replication). | `NotImplemented`, HTTP 501 |
 | `PutBucketRequestPayment` | none | Out of scope: Requester Pays. `GetBucketRequestPayment` answers `BucketOwner`. | `NotImplemented`, HTTP 501 |
 | `PutBucketWebsite` | task 15 | Not built yet (CORS and website hosting). | `NotImplemented`, HTTP 501 |
 | `PutObjectAnnotation` | none | Not in the spec: object annotations, added to S3 after the spec was written. Open question for the owner. | `NotImplemented`, HTTP 501 |
