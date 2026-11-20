@@ -138,6 +138,14 @@ public:
         return visit([](const auto& sm) { return sm.durable_applied_index(); });
     }
 
+    /// Forwarded, so the Raft node finds it and can make the engine durable
+    /// before compacting the log. Without it the node's `requires` check is
+    /// false, the durable index never moves on an engine that only syncs when
+    /// asked, and the log is never compacted (doc/memory_profiling.md).
+    auto sync_durable() -> void {
+        visit([](auto& sm) { sm.sync_durable(); });
+    }
+
     auto checkpoint(const std::filesystem::path& dir) -> kythira::snapshot_manifest {
         return visit([&](auto& sm) { return sm.checkpoint(dir); });
     }
