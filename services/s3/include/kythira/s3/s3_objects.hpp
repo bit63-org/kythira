@@ -283,6 +283,45 @@ struct byte_range {
     return {};
 }
 
+/// Whether a new version with these tags and encryption goes to any
+/// replication destination (`s3_replication_rules.hpp`). SSE-C objects do
+/// not: the replicator cannot read them.
+[[nodiscard]] inline auto replicates(const bucket_state& b, std::string_view key,
+                                     const std::map<std::string, std::string>& metadata,
+                                     sse_kind kind) -> bool {
+    if (!b.replication || kind == sse_kind::customer) {
+        return false;
+    }
+    std::vector<std::pair<std::string, std::string>> tags;
+    if (auto it = metadata.find(std::string(tagging_metadata)); it != metadata.end()) {
+        if (auto t = parse_tag_header(it->second)) {
+            tags = std::move(*t);
+        }
+    }
+    return !replication_rules_for(*b.replication, key, tags, kind == sse_kind::kms).empty();
+}
+
+/// A new version's replication status: `REPLICA` for a replicator's own
+/// write, `PENDING` when the bucket's rules send it somewhere, else none.
+inline void mark_replication(const bucket_state& b, std::string_view key, object_content& c,
+                             bool replica) {
+    auto& m = c.system_metadata;
+    m.erase(std::string(replication_status_metadata));
+    if (replica) {
+        m[std::string(replication_status_metadata)] = "REPLICA";
+    } else if (replicates(b, key, m, stored_kind(m))) {
+        m[std::string(replication_status_metadata)] = "PENDING";
+    }
+}
+
+/// `x-amz-replication-status: REPLICA` on a write: a replicator's, which
+/// the request was authorized for as `s3:ReplicateObject` or
+/// `s3:ReplicateDelete` (`s3_authz.hpp`).
+[[nodiscard]] inline auto replica_write(const s3_request& req) -> bool {
+    auto v = req.header("x-amz-replication-status").value_or("");
+    return authz_detail::lower(v) == "replica";
+}
+
 /// The metadata a PUT (or a REPLACE copy) asks to store.
 [[nodiscard]] inline auto content_from_headers(const header_list& headers)
     -> aws_rest_xml::result<object_content> {
@@ -707,12 +746,17 @@ template<metadata_access M>
     content->etag = hides_md5(plan.kind) ? sealed_etag(content->manifest) : written->md5_hex;
     content->system_metadata[checksum_header(want->algorithm)] = checksum;
     content->system_metadata["x-amz-checksum-type"] = "FULL_OBJECT";
+    const bool replica = replica_write(req);
+    mark_replication(b, req.resource.key, *content, replica);
 
     if (ctx.write_expired(started_ms)) {
         return slow_down();
     }
     index_command c;
     c.op = index_command::kind::put_object;
+    c.replica = replica;
+    // A browser POST upload streams into this path (`s3_service.hpp`).
+    c.event = req.method == "POST" ? change_event::object_created_post : change_event::none;
     c.now_ms = ctx.now_ms();
     c.written_ms = started_ms;
     c.owner = owner;
@@ -900,6 +944,7 @@ template<metadata_access M>
     c.key = req.resource.key;
     c.version_id = version_id;
     c.bypass_governance = bypass_governance(req.headers);
+    c.replica = replica_write(req);
     auto r = ctx.meta.propose(c);
     if (!r.ok()) {
         return from_index(r);
@@ -1188,6 +1233,26 @@ template<metadata_access M>
                                        *source_customer, c);
     if (!sse_headers) {
         return sse_headers.error();
+    }
+    // The copy's own replication status, by its tags and encryption.
+    {
+        const bool tags_given =
+            std::ranges::find(c.override_metadata, std::string(tagging_metadata)) !=
+            c.override_metadata.end();
+        std::map<std::string, std::string> meta;
+        if (source_version && !tags_given) {
+            meta = source_version->content.system_metadata;
+        } else {
+            meta = c.content.system_metadata;
+        }
+        const auto kind = c.new_bytes || !source_version
+                              ? stored_kind(c.content.system_metadata)
+                              : stored_kind(source_version->content.system_metadata);
+        c.override_metadata.emplace_back(replication_status_metadata);
+        c.content.system_metadata.erase(std::string(replication_status_metadata));
+        if (replicates(b, c.key, meta, kind)) {
+            c.content.system_metadata[std::string(replication_status_metadata)] = "PENDING";
+        }
     }
     if (c.new_bytes && ctx.write_expired(c.written_ms)) {
         return slow_down();

@@ -53,10 +53,24 @@ concept metadata_access =
         } -> std::same_as<std::pair<std::vector<upload_record>, bool>>;
     };
 
+/// What the change log's consumers need (task 14): read records after
+/// their cursor, and the cursor itself, both at the leader. They advance
+/// the cursor with `index_command::kind::advance_change_log`.
+template<typename M>
+concept change_log_access = metadata_access<M> && requires(const M& cm, std::string_view s,
+                                                           std::uint64_t n, std::size_t m) {
+    { cm.change_cursor(s) } -> std::same_as<std::uint64_t>;
+    { cm.read_changes(n, m) } -> std::same_as<std::vector<sequenced_change>>;
+};
+
 /// One state machine in process, entries applied in order.
 class local_metadata {
 public:
-    explicit local_metadata(index_options options = {}) : _sm(options) {
+    /// `changes`: where the change log keeps its records; none keeps only
+    /// its state (`s3_index_state_machine::set_change_log`).
+    explicit local_metadata(index_options options = {}, segment_store* changes = nullptr)
+        : _sm(options) {
+        _sm.set_change_log(changes);
         _sm.open(_engine, key_range{"", std::nullopt});
     }
 
@@ -125,6 +139,16 @@ public:
         return _sm.tier_garbage_list(max);
     }
 
+    [[nodiscard]] auto change_cursor(std::string_view consumer) const -> std::uint64_t {
+        const std::scoped_lock lock(_mutex);
+        return _sm.change_cursor(consumer);
+    }
+    [[nodiscard]] auto read_changes(std::uint64_t after, std::size_t max) const
+        -> std::vector<sequenced_change> {
+        const std::scoped_lock lock(_mutex);
+        return _sm.read_changes(after, max);
+    }
+
     /// The state machine, for tests that look underneath.
     [[nodiscard]] auto state_machine() const -> const s3_index_state_machine<>& { return _sm; }
 
@@ -136,5 +160,6 @@ private:
 };
 
 static_assert(metadata_access<local_metadata>);
+static_assert(change_log_access<local_metadata>);
 
 }  // namespace kythira::s3

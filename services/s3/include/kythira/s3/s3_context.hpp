@@ -32,10 +32,12 @@
 #include <kythira/s3/s3_compat.hpp>
 #include <kythira/s3/s3_data_path.hpp>
 #include <kythira/s3/s3_encryption.hpp>
+#include <kythira/s3/s3_event_sinks.hpp>
 #include <kythira/s3/s3_lifecycle_rules.hpp>
 #include <kythira/s3/s3_rates.hpp>
 #include <kythira/s3/s3_http.hpp>
 #include <kythira/s3/s3_metadata.hpp>
+#include <kythira/s3/s3_replication_rules.hpp>
 
 #include <raft/aws_rest_xml_protocol.hpp>
 
@@ -83,6 +85,9 @@ struct service_options {
     /// periods and the `x-amz-expiration` dates count in these. Tests
     /// shorten it, as Requirement 12.1's faster test interval.
     std::uint64_t lifecycle_day_ms = standard_day_ms;
+    /// Where `PutBucketNotificationConfiguration` sends its `s3:TestEvent`
+    /// (`s3_event_sinks.hpp`); none skips the destination check.
+    notification_sink notifications;
 };
 
 /// The handlers' shared state.
@@ -201,6 +206,8 @@ struct bucket_state {
     bucket_encryption encryption;
     /// `PutBucketLifecycleConfiguration`; none when not set.
     std::optional<lifecycle_configuration> lifecycle;
+    /// `PutBucketReplication`; none when not set.
+    std::optional<replication_configuration> replication;
     compat_profile profile;
     access_context access;  ///< for `authorize_check`; its `bucket_acl` points at `acl`
 
@@ -247,6 +254,9 @@ void load_bucket_state(const handler_context<M>& ctx, bucket_descriptor desc, bu
     if (auto it = cfg.find("lifecycle"); it != cfg.end()) {
         out.lifecycle = load_lifecycle(it->second);
     }
+    if (auto it = cfg.find("replication"); it != cfg.end()) {
+        out.replication = load_replication(it->second);
+    }
     out.profile = for_bucket(ctx.options.profile, out.tags);
 
     const auto account_bpa = ctx.options.account_public_access_block
@@ -266,8 +276,11 @@ void load_bucket_state(const handler_context<M>& ctx, bucket_descriptor desc, bu
     out.desc = std::move(desc);
 }
 
+/// What an object entry carries about its bucket. A bucket with event
+/// notifications or replication has its writes logged (`s3_change_log.hpp`).
 [[nodiscard]] inline auto ref_of(const bucket_descriptor& b) -> bucket_ref {
-    return {b.id, b.versioning, b.object_lock};
+    return {b.id, b.versioning, b.object_lock,
+            b.config.contains("notification") || b.config.contains("replication")};
 }
 
 }  // namespace kythira::s3

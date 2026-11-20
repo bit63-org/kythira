@@ -330,10 +330,43 @@ builds it to that design). Each task is one PR unless noted.
     `s3_lifecycle_test`, the lifecycle, archive and tier cases in
     `s3_service_test`, the tier reference case in the index test.
 
-- [ ] 14. Change log, notifications and replication
+- [x] 14. Change log, notifications and replication
   - Change log per group; notifications to SQS, SNS and Kinesis; bucket
     replication to Kythira and to real S3
   - _Requirements: 12.2, 12.3_
+  - Done: the change log (`s3_change_log.hpp`): the index state machine
+    appends one record per object change to a core `segment_store` in
+    apply (barrier before the engine write, truncated to the engine on
+    open, active segment carried in checkpoints like DynamoDB's change
+    log), only for buckets with a notification or replication
+    configuration. Consumers keep cursors in the index
+    (`advance_change_log`), and the log is trimmed below the lowest.
+    Notifications (`s3_notifications.hpp`): the current and deprecated
+    configuration forms with S3's checks (events, filters, overlapping
+    rules, unique ids, destination TestEvents unless
+    `x-amz-skip-destination-validation`), queue, topic and Kythira's
+    `KinesisStreamConfiguration`; Lambda is refused (`InvalidArgument`)
+    and EventBridge answers 501. The worker sends S3's event JSON (2.1,
+    or 2.3 for the newer event types) in log order, at least once,
+    holding back on a transient failure and dropping a delivery the
+    destination refuses for good or after `max_attempts`.
+    `s3_event_sinks.hpp` builds SQS, SNS and Kinesis API requests over a
+    transport function, so a co-located module and AWS look alike.
+    `sourceIPAddress` is empty (the index does not keep it). Replication
+    (`s3_replication_rules.hpp`, `s3_replication.hpp`): both schemas with
+    S3's checks, versioning required on source and local destination and
+    kept on while configured, `PENDING` set at write time (copies decide
+    afresh), and a worker that PUTs each new version (bytes, metadata,
+    tags, lock, storage class) with `x-amz-replication-status: REPLICA`,
+    sends client delete markers where the rule says, and sets `COMPLETED`
+    or `FAILED`. Replica writes need `s3:ReplicateObject` /
+    `s3:ReplicateDelete` and are never replicated on. Not built:
+    `ExistingObjectReplication` (501), replicating SSE-C objects (as on
+    S3) and later tag or ACL changes, and keeping the source's version
+    ids at a destination (only S3's internal path can). Daemon wiring
+    (leader only, transports) is task 16's. Tests:
+    `s3_notifications_test`, the change log cases in the index test, the
+    notification and replication cases in `s3_service_test`.
 
 - [ ] 15. CORS and website hosting
   - _Requirements: 12.4_

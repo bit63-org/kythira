@@ -73,10 +73,12 @@
 /// A failed condition or a missing bucket is a normal result: the entry
 /// still advances the applied index and changes nothing else.
 
+#include <kythira/s3/s3_change_log.hpp>
 #include <kythira/s3/s3_index_records.hpp>
 
 #include <raft/memory_kv_engine.hpp>
 #include <raft/persistent_state_machine.hpp>
+#include <raft/segment_store.hpp>
 
 #include <openssl/evp.h>
 
@@ -87,6 +89,9 @@
 #include <cstring>
 #include <deque>
 #include <filesystem>
+#include <fstream>
+#include <functional>
+#include <iterator>
 #include <map>
 #include <optional>
 #include <stdexcept>
@@ -120,6 +125,10 @@ inline constexpr std::string_view restored_metadata = "x-kythira-restored";
 /// A restore asked of a tiered version, in days; listed under `s3/r/`
 /// until the tier worker has brought the bytes back.
 inline constexpr std::string_view restore_pending_metadata = "x-kythira-restore-pending";
+/// A version's replication status (task 14): `PENDING`, `COMPLETED` or
+/// `FAILED` on a source, `REPLICA` on a copy a replicator wrote. Returned
+/// as the header of the same name; a copy never inherits it.
+inline constexpr std::string_view replication_status_metadata = "x-amz-replication-status";
 
 /// Whether `v`'s manifest counts references on the blob stores.
 [[nodiscard]] inline auto holds_local_chunks(const object_content& c) -> bool {
@@ -187,6 +196,9 @@ struct bucket_ref {
     std::uint64_t id = 0;
     versioning_state versioning = versioning_state::unversioned;
     bool object_lock = false;
+    /// The bucket has event notifications or replication configured, so
+    /// its object writes append change records (`s3_change_log.hpp`).
+    bool log_changes = false;
 
     friend auto operator==(const bucket_ref&, const bucket_ref&) -> bool = default;
 };
@@ -253,6 +265,10 @@ struct index_command {
         /// The tier worker deleted the cloud copies under `garbage_keys`
         /// (keys from `tier_garbage_list`).
         drop_tier_garbage = 17,
+        /// The change log consumer `config_name` has finished with every
+        /// record up to `change_seq` (task 14). A cursor never goes back;
+        /// sealed segments every consumer has passed are trimmed.
+        advance_change_log = 18,
     };
 
     kind op = kind::put_object;
@@ -318,6 +334,18 @@ struct index_command {
     /// limits (`kythira:compat:*` tags); 0 takes `index_options`.
     std::uint64_t min_part_bytes = 0;
     std::uint32_t max_parts = 0;
+    /// The S3 event the entry's change record names when the operation
+    /// alone does not say (task 14): a browser POST, lifecycle expiration,
+    /// transition and restores. `none` takes the operation's own (PUT,
+    /// copy, completed upload, delete); a `set_object_state` without one
+    /// records nothing.
+    change_event event = change_event::none;
+    /// advance_change_log.
+    std::uint64_t change_seq = 0;
+    /// put_object, delete_object: a replicator's write, authorized as
+    /// `s3:ReplicateObject` or `s3:ReplicateDelete`; its change record says
+    /// so, and replication does not send it on.
+    bool replica = false;
 
     friend auto operator==(const index_command&, const index_command&) -> bool = default;
 };
@@ -336,6 +364,8 @@ struct index_result {
     std::uint64_t last_modified_ms = 0;
     /// collect_chunks: the chunks to delete from the blob stores.
     std::vector<chunk_sha> collected;
+    /// Object writes and per-version changes: the version's size.
+    std::uint64_t object_size = 0;
 
     [[nodiscard]] auto ok() const noexcept -> bool { return error.empty(); }
 
@@ -349,6 +379,7 @@ inline constexpr std::uint8_t result_format = 1;
 
 inline void write_bucket_ref(detail::writer& w, const bucket_ref& b) {
     w.u64(b.id).u8(static_cast<std::uint8_t>(b.versioning)).boolean(b.object_lock);
+    w.boolean(b.log_changes);
 }
 
 [[nodiscard]] inline auto read_bucket_ref(detail::reader& r) -> bucket_ref {
@@ -360,6 +391,7 @@ inline void write_bucket_ref(detail::writer& w, const bucket_ref& b) {
     }
     b.versioning = static_cast<versioning_state>(v);
     b.object_lock = r.boolean();
+    b.log_changes = r.boolean();
     return b;
 }
 
@@ -414,6 +446,7 @@ inline void write_opt_u64(detail::writer& w, const std::optional<std::uint64_t>&
     for (const auto& k : c.garbage_keys) {
         w.str(k);
     }
+    w.u8(static_cast<std::uint8_t>(c.event)).u64(c.change_seq).boolean(c.replica);
     const auto s = w.take();
     std::vector<std::byte> out(s.size());
     std::memcpy(out.data(), s.data(), s.size());
@@ -426,7 +459,7 @@ inline void write_opt_u64(detail::writer& w, const std::optional<std::uint64_t>&
     r.expect_format(command_format, "command");
     index_command c;
     const auto op = r.u8();
-    if (op < 1 || op > 17) {
+    if (op < 1 || op > 18) {
         throw index_format_error("s3 index: unknown command");
     }
     c.op = static_cast<index_command::kind>(op);
@@ -483,6 +516,13 @@ inline void write_opt_u64(detail::writer& w, const std::optional<std::uint64_t>&
     for (auto& k : c.garbage_keys) {
         k = r.str();
     }
+    const auto event = r.u8();
+    if (event > k_last_change_event) {
+        throw index_format_error("s3 index: unknown change event");
+    }
+    c.event = static_cast<change_event>(event);
+    c.change_seq = r.u64();
+    c.replica = r.boolean();
     r.done("command");
     return c;
 }
@@ -495,6 +535,7 @@ inline void write_opt_u64(detail::writer& w, const std::optional<std::uint64_t>&
     for (const auto& s : x.collected) {
         w.sha(s);
     }
+    w.u64(x.object_size);
     const auto s = w.take();
     std::vector<std::byte> out(s.size());
     std::memcpy(out.data(), s.data(), s.size());
@@ -519,6 +560,7 @@ inline void write_opt_u64(detail::writer& w, const std::optional<std::uint64_t>&
     for (auto& s : x.collected) {
         s = r.sha();
     }
+    x.object_size = r.u64();
     r.done("result");
     return x;
 }
@@ -610,6 +652,21 @@ public:
 
     explicit s3_index_state_machine(index_options options = {}) : _options(options) {}
 
+    /// Fetches and installs a change log segment this node lacks (from the
+    /// group's peers), or throws. `ingest` calls it for the active segment
+    /// a snapshot names, without which appends cannot continue.
+    using change_log_fetcher = std::function<void(const record_segment_descriptor&)>;
+
+    /// The node's store for change records (task 14), shared by every
+    /// group on the node, and how to fetch a segment from a peer; set
+    /// before `open`. Without a store the group still keeps its change
+    /// log state (sequences and cursors), so replicas agree, but keeps no
+    /// records.
+    auto set_change_log(segment_store* store, change_log_fetcher fetch = {}) -> void {
+        _log = store;
+        _fetch = std::move(fetch);
+    }
+
     // ---- persistent_state_machine ----------------------------------------
 
     auto open(engine_type& engine, const key_range& range) -> void {
@@ -621,6 +678,7 @@ public:
             _applied = static_cast<LogIndex>(std::stoull(*v));
         }
         _durable_floor = _applied;
+        load_change_log(std::nullopt);
     }
 
     auto apply(const std::vector<std::byte>& command, LogIndex index) -> std::vector<std::byte> {
@@ -630,6 +688,7 @@ public:
         const auto cmd = codec::decode_command(command);
         txn t(*this);
         index_result result;
+        _next_log.reset();
         try {
             result = dispatch(t, cmd, static_cast<std::uint64_t>(index));
         } catch (const out_of_range&) {
@@ -642,12 +701,32 @@ public:
         }
         if (!result.ok()) {
             t = txn(*this);  // a failed entry changes nothing but the applied index
+            _next_log.reset();
+        } else {
+            for (auto& change : changes_of(cmd, result)) {
+                append_change(std::move(change));
+            }
+        }
+        std::optional<std::uint64_t> trim_to;
+        if (_next_log) {
+            if (_next_log->first_seq > (_log_state ? _log_state->first_seq : 1)) {
+                trim_to = _next_log->first_seq;
+            }
+            t.batch.put(column_family::meta, change_log_state_key(_range.start),
+                        codec::encode_change_log_state(*_next_log));
         }
         t.batch.put(column_family::meta, meta_key(), std::to_string(index));
         const auto seq = engine().write(t.batch);
         _applied = index;
         _ring.emplace_back(index, seq);
         trim_ring();
+        if (_next_log) {
+            _log_state = std::move(_next_log);
+            _next_log.reset();
+            if (trim_to && _log != nullptr) {
+                (void)_log->trim_before(_log_state->stream, *trim_to);
+            }
+        }
         return codec::encode(result);
     }
 
@@ -665,23 +744,96 @@ public:
         return best;
     }
 
+    /// The engine's checkpoint, plus the change log's active segment as
+    /// this node has it, so a replica installing the snapshot can fetch
+    /// and check that prefix from a peer.
     auto checkpoint(const std::filesystem::path& dir) -> snapshot_manifest {
-        return engine().checkpoint(_range, dir);
+        auto m = engine().checkpoint(_range, dir);
+        if (const auto active = active_descriptor()) {
+            const auto bytes = encode_segment_descriptor(*active);
+            const auto path = dir / std::string(active_segment_file);
+            {
+                std::ofstream out(path, std::ios::binary | std::ios::trunc);
+                out.write(reinterpret_cast<const char*>(bytes.data()),  // NOLINT
+                          static_cast<std::streamsize>(bytes.size()));
+                out.flush();
+                if (!out) {
+                    throw persistent_storage_error("s3_index_state_machine: cannot write " +
+                                                   path.string());
+                }
+            }
+            const auto [digest, size] = sha256_of_file(path);
+            m.files.push_back(checkpoint_file{std::string(active_segment_file), size, digest});
+        }
+        return m;
     }
 
     auto ingest(const std::filesystem::path& dir, const snapshot_manifest& manifest, LogIndex index)
         -> void {
-        engine().ingest(_range, dir, manifest);
+        auto engine_manifest = manifest;
+        std::optional<record_segment_descriptor> active;
+        for (auto it = engine_manifest.files.begin(); it != engine_manifest.files.end(); ++it) {
+            if (it->name == active_segment_file) {
+                active = read_active_file(dir / it->name, *it);
+                engine_manifest.files.erase(it);
+                break;
+            }
+        }
+        engine().ingest(_range, dir, engine_manifest);
         _applied = index;
         _durable_floor = index;
         _ring.clear();
+        load_change_log(active);
     }
 
-    auto drop() -> void { engine().drop(_range); }
+    /// Leaves the change log's segments in the store; a group that takes
+    /// the range over (task 18) continues them.
+    auto drop() -> void {
+        engine().drop(_range);
+        _log_state.reset();
+    }
 
     [[nodiscard]] auto range() const -> const key_range& { return _range; }
 
     // ---- reads (local, at this replica's applied index) -------------------
+
+    /// The group's change log state; none before its first logged write.
+    [[nodiscard]] auto change_log() const -> const std::optional<change_log_state>& {
+        return _log_state;
+    }
+
+    /// The consumer's cursor: the last sequence it has finished with.
+    [[nodiscard]] auto change_cursor(std::string_view consumer) const -> std::uint64_t {
+        if (!_log_state) {
+            return 0;
+        }
+        const auto it = _log_state->cursors.find(std::string(consumer));
+        return it == _log_state->cursors.end() ? 0 : it->second;
+    }
+
+    /// Up to `max` change records after sequence `after`, oldest first. A
+    /// node without a store, or one missing a segment, returns what it
+    /// holds; the leader, which wrote every record, holds them all.
+    [[nodiscard]] auto read_changes(std::uint64_t after, std::size_t max) const
+        -> std::vector<sequenced_change> {
+        std::vector<sequenced_change> out;
+        if (_log == nullptr || !_log_state || after >= _log_state->last_seq || max == 0) {
+            return out;
+        }
+        segment_read_limits limits;
+        limits._max_records = max;
+        const auto from = std::max(after + 1, _log_state->first_seq);
+        const auto got = _log->read(_log_state->stream, from, limits);
+        for (const auto& rec : got._records) {
+            if (rec._seq > _log_state->last_seq) {
+                break;  // a tail no committed entry covers
+            }
+            out.push_back({rec._seq, codec::decode_change(std::string_view(
+                                         reinterpret_cast<const char*>(rec._data.data()),  // NOLINT
+                                         rec._data.size()))});
+        }
+        return out;
+    }
 
     [[nodiscard]] auto bucket(std::string_view name) const -> std::optional<bucket_descriptor> {
         if (auto v = engine().get(column_family::data, keys::bucket(name))) {
@@ -1099,6 +1251,8 @@ private:
                 return set_object_state(t, c);
             case k::drop_tier_garbage:
                 return drop_tier_garbage(t, c);
+            case k::advance_change_log:
+                return advance_change_log(c);
         }
         return fail(400, "InvalidRequest", "Unknown index command");
     }
@@ -1409,6 +1563,7 @@ private:
         r.delete_marker = v.delete_marker;
         r.etag = v.content.etag;
         r.last_modified_ms = v.last_modified_ms;
+        r.object_size = v.content.size();
         return r;
     }
 
@@ -1449,6 +1604,7 @@ private:
         r.version_id = v->version_id();
         r.etag = v->content.etag;
         r.last_modified_ms = v->last_modified_ms;
+        r.object_size = v->content.size();
         return r;
     }
 
@@ -1501,6 +1657,7 @@ private:
         r.version_id = v->version_id();
         r.etag = v->content.etag;
         r.last_modified_ms = v->last_modified_ms;
+        r.object_size = v->content.size();
         return r;
     }
 
@@ -1714,7 +1871,7 @@ private:
         for (const auto name :
              {lock_mode_metadata, lock_until_metadata, legal_hold_metadata, tier_metadata,
               restored_metadata, restore_pending_metadata, std::string_view("x-amz-restore"),
-              std::string_view("x-kythira-restore-until")}) {
+              std::string_view("x-kythira-restore-until"), replication_status_metadata}) {
             v.content.system_metadata.erase(std::string(name));
         }
         for (const auto& name : c.override_metadata) {
@@ -2041,6 +2198,215 @@ private:
         return out;
     }
 
+    // ---- change log (task 14) ---------------------------------------------
+
+    /// The snapshot file naming the change log's active segment.
+    static constexpr std::string_view active_segment_file = "s3-change-log-active";
+
+    /// The records an applied entry makes, if its bucket logs changes:
+    /// one, except a restore a requester starts on bytes already here,
+    /// which starts and completes in one entry (`ObjectRestore:Post`, then
+    /// `:Completed`; the tier worker's completion has no requester).
+    [[nodiscard]] static auto changes_of(const index_command& c, const index_result& r)
+        -> std::vector<change_record> {
+        auto one = change_of(c, r);
+        if (!one) {
+            return {};
+        }
+        std::vector<change_record> out;
+        if (one->event == change_event::object_restore_completed && !c.owner.empty()) {
+            auto post = *one;
+            post.event = change_event::object_restore_post;
+            out.push_back(std::move(post));
+        }
+        out.push_back(std::move(*one));
+        return out;
+    }
+
+    [[nodiscard]] static auto change_of(const index_command& c, const index_result& r)
+        -> std::optional<change_record> {
+        using k = index_command::kind;
+        if (!c.target.log_changes) {
+            return std::nullopt;
+        }
+        change_record out;
+        switch (c.op) {
+            case k::put_object:
+                out.event =
+                    c.event != change_event::none ? c.event : change_event::object_created_put;
+                break;
+            case k::copy_object:
+                out.event = change_event::object_created_copy;
+                break;
+            case k::complete_upload:
+                out.event = change_event::object_created_complete_multipart_upload;
+                break;
+            case k::delete_object: {
+                const bool lifecycle = c.event == change_event::lifecycle_expiration_delete;
+                if (r.delete_marker && !c.version_id) {
+                    out.event = lifecycle ? change_event::lifecycle_expiration_delete_marker_created
+                                          : change_event::object_removed_delete_marker_created;
+                } else {
+                    out.event = lifecycle ? change_event::lifecycle_expiration_delete
+                                          : change_event::object_removed_delete;
+                }
+                break;
+            }
+            case k::set_object_metadata:
+                // The stored header names of object tagging and object
+                // ACLs (`s3_objects.hpp`).
+                if (c.config_name == "x-amz-tagging") {
+                    out.event = c.document ? change_event::object_tagging_put
+                                           : change_event::object_tagging_delete;
+                } else if (c.config_name == "x-kythira-acl") {
+                    out.event = change_event::object_acl_put;
+                } else {
+                    return std::nullopt;
+                }
+                break;
+            case k::set_object_state:
+                if (c.event == change_event::none) {
+                    return std::nullopt;
+                }
+                out.event = c.event;
+                out.storage_class = c.new_storage_class;
+                break;
+            default:
+                return std::nullopt;
+        }
+        out.bucket_id = c.target.id;
+        out.key = c.key;
+        out.version_id = r.version_id;
+        out.size = r.object_size;
+        out.etag = r.etag;
+        out.requester = c.owner;
+        out.written_ms = c.now_ms;
+        out.replica = c.replica;
+        return out;
+    }
+
+    /// The state this entry changes: a copy of the committed one (or a
+    /// new log's) that `apply` writes with the entry's batch.
+    auto next_log() -> change_log_state& {
+        if (!_next_log) {
+            if (_log_state) {
+                _next_log = *_log_state;
+            } else {
+                _next_log.emplace();
+                _next_log->stream = change_stream_key(_range.start, 0);
+            }
+        }
+        return *_next_log;
+    }
+
+    /// Appends one record to the open stream and fsyncs it. The record
+    /// reaches disk before the engine batch, so the engine never holds a
+    /// state whose records were lost; a record the engine missed is
+    /// truncated on open and replayed from the Raft log.
+    void append_change(change_record rec) {
+        auto& st = next_log();
+        rec.written_ms = std::max(rec.written_ms, st.last_ms);
+        st.last_ms = rec.written_ms;
+        const auto seq = st.last_seq + 1;
+        st.last_seq = seq;
+        if (_log != nullptr) {
+            const auto body = codec::encode_change(rec);
+            const segment_record_view view{
+                seq, static_cast<std::int64_t>(rec.written_ms),
+                std::span<const std::byte>(
+                    reinterpret_cast<const std::byte*>(body.data()),  // NOLINT
+                    body.size())};
+            const auto res = _log->append(st.stream, view);
+            st.sealed.insert(st.sealed.end(), res._sealed.begin(), res._sealed.end());
+            _log->barrier();
+        }
+    }
+
+    /// Moves a consumer's cursor forward and drops the sealed segments
+    /// every consumer has passed (the store trims them after the batch).
+    auto advance_change_log(const index_command& c) -> index_result {
+        if (!is_change_log_consumer(c.config_name)) {
+            return fail(400, "InvalidRequest", "Unknown change log consumer");
+        }
+        if (!_log_state) {
+            return index_result{};  // nothing logged yet: nothing to pass
+        }
+        auto& st = next_log();
+        auto& cursor = st.cursors[c.config_name];
+        cursor = std::max(cursor, std::min(c.change_seq, st.last_seq));
+        const auto done = st.consumed();
+        std::size_t n = 0;
+        while (n < st.sealed.size() && st.sealed[n]._last_seq <= done) {
+            ++n;
+        }
+        if (n > 0) {
+            st.first_seq = st.sealed[n - 1]._last_seq + 1;
+            st.sealed.erase(st.sealed.begin(), st.sealed.begin() + static_cast<std::ptrdiff_t>(n));
+        }
+        return index_result{};
+    }
+
+    /// Reads the group's change log state; drops a local tail past it
+    /// (on open, a write whose entry the engine never made durable: the
+    /// Raft log replays it); after an install, fetches the active segment
+    /// the snapshot named when this node lacks it.
+    void load_change_log(const std::optional<record_segment_descriptor>& active) {
+        _log_state.reset();
+        _next_log.reset();
+        if (const auto v = engine().get(column_family::meta, change_log_state_key(_range.start))) {
+            _log_state = codec::decode_change_log_state(*v);
+        }
+        if (_log == nullptr || !_log_state) {
+            return;
+        }
+        const auto& st = *_log_state;
+        _log->truncate_after(st.stream, st.last_seq >= st.first_seq
+                                            ? std::optional<std::uint64_t>(st.last_seq)
+                                            : std::nullopt);
+        if (active && active->_stream == st.stream && active->_last_seq == st.last_seq &&
+            !_log->has_segment(*active)) {
+            if (!_fetch) {
+                throw record_segment_error(
+                    "s3_index_state_machine: the snapshot names an active change log segment of " +
+                    st.stream + " this node lacks, and no fetcher is set");
+            }
+            _fetch(*active);
+        }
+    }
+
+    /// The open stream's active segment as the local store has it.
+    [[nodiscard]] auto active_descriptor() const -> std::optional<record_segment_descriptor> {
+        if (_log == nullptr || !_log_state) {
+            return std::nullopt;
+        }
+        const auto& st = *_log_state;
+        const auto first = st.sealed.empty() ? st.first_seq : st.sealed.back()._last_seq + 1;
+        if (st.last_seq < first) {
+            return std::nullopt;
+        }
+        return _log->describe(st.stream, first);
+    }
+
+    [[nodiscard]] static auto read_active_file(const std::filesystem::path& path,
+                                               const checkpoint_file& file)
+        -> record_segment_descriptor {
+        const auto [digest, size] = sha256_of_file(path);
+        if (size != file.size || digest != file.sha256) {
+            throw persistent_storage_error(
+                "s3_index_state_machine: the active segment file does not match its manifest");
+        }
+        std::ifstream in(path, std::ios::binary);
+        const std::string body((std::istreambuf_iterator<char>(in)),
+                               std::istreambuf_iterator<char>());
+        std::span<const std::byte> bytes(reinterpret_cast<const std::byte*>(body.data()),  // NOLINT
+                                         body.size());
+        auto d = decode_segment_descriptor(bytes);
+        if (!d || !bytes.empty()) {
+            throw persistent_storage_error("s3_index_state_machine: corrupt active segment file");
+        }
+        return *d;
+    }
+
     [[nodiscard]] auto meta_key() const -> std::string { return "s3-applied/" + _range.start; }
 
     [[nodiscard]] auto engine() const -> engine_type& {
@@ -2066,6 +2432,12 @@ private:
     std::uint64_t _written_ms = 0;
     LogIndex _durable_floor{};
     std::deque<std::pair<LogIndex, engine_sequence>> _ring;
+    /// The node's change record store (task 14), or none.
+    segment_store* _log = nullptr;
+    change_log_fetcher _fetch;
+    /// The committed change log state, and the applying entry's.
+    std::optional<change_log_state> _log_state;
+    std::optional<change_log_state> _next_log;
 };
 
 static_assert(persistent_state_machine<s3_index_state_machine<>, std::uint64_t>);

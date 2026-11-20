@@ -319,6 +319,7 @@ private:
             const auto until = due_after(now, std::max<std::uint32_t>(p.days, 1), _options.day_ms);
             index_command c;
             c.op = index_command::kind::set_object_state;
+            c.event = change_event::object_restore_completed;
             c.now_ms = now;
             c.written_ms = written_ms;
             c.target = ref_of(*desc);
