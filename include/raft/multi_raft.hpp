@@ -1631,8 +1631,12 @@ private:
         /// @param latency_windows Sub-windows in each latency digest's ring;
         ///        see `multi_raft_config::latency_window_count`.
         explicit group_state(std::size_t latency_windows = latency_digest::k_default_windows,
-                             load_split_sampler_config sampler = {})
+                             load_split_sampler_config sampler = {}, bucket_config buckets = {})
             : _load_sampler(sampler),
+              _bucket_set(buckets._enabled ? std::make_unique<bucket_set<Key>>(
+                                                 buckets, unbounded_shard_range<Key>(),
+                                                 std::chrono::steady_clock::now())
+                                           : nullptr),
               _read_latency(latency_windows),
               _apply_latency(latency_windows) {}
 
@@ -1725,6 +1729,30 @@ private:
         mutable std::mutex _sampler_mutex;
         load_split_sampler<Key> _load_sampler;
         std::vector<hot_key_sample<Key>> _hot_keys;
+
+        /// @brief Sub-shard load buckets (.kiro/specs/multi-raft-load-buckets/).
+        ///
+        /// Built once with the group when buckets are enabled, null otherwise,
+        /// and never replaced: the routing path reads it through this plain
+        /// pointer, so its only shared load is the set's own layout. Leaving
+        /// and regaining leadership, a split and a merge all `reset()` it
+        /// instead of building a new one.
+        std::unique_ptr<bucket_set<Key>> _bucket_set;
+        /// Whether this replica has built the set as leader and is counting
+        /// into it. `stats_for` reports buckets only while it holds, so a
+        /// follower's stale set is never mistaken for live load.
+        std::atomic<bool> _buckets_led{false};
+        /// Guards the fields below, which the apply path (split, merge) writes
+        /// and the policy phase reads. Never held across a call into the node.
+        mutable std::mutex _bucket_mutex;
+        /// Boundaries handed down by a split parent or a merge (Requirements
+        /// 4.2, 4.3), used once, the next time this replica builds its set.
+        std::optional<std::vector<Key>> _inherited_boundaries;
+        /// The range the set was last built for. A split narrows the parent's
+        /// range and a merge widens the survivor's; a mismatch with the
+        /// descriptor is how the policy phase notices and re-builds.
+        shard_range<Key> _bucket_range{};
+        std::chrono::steady_clock::time_point _buckets_refreshed_at{};
 
         /// @brief Latency percentiles over a bounded recent window (design
         ///        §6.1.4), rotated on the policy tick.
@@ -2008,6 +2036,26 @@ private:
     /// Called once per policy tick, which is the only place holding two
     /// observations and the interval between them.
     auto update_load_rates(group_state& g, std::chrono::steady_clock::time_point now) -> void;
+
+    /// @brief The load buckets' policy phase for one group: build the set on
+    ///        gaining leadership or a new range, drop it on losing
+    ///        leadership, roll the window, and re-cut every refresh interval.
+    auto update_buckets(group_state& g, std::chrono::steady_clock::time_point now) -> void;
+
+    /// @brief Boundary candidates for `g`: the state machine's suggested
+    ///        split keys where it has them, else the reservoir's quantiles.
+    [[nodiscard]] auto bucket_candidates(group_state& g, const shard_range<Key>& range)
+        -> std::vector<Key>;
+
+    /// @brief Hand the split parent's boundaries to each child's replica on
+    ///        this node, the derived child included (Requirement 4.2).
+    auto inherit_split_buckets(group_state& parent, const std::vector<descriptor_type>& children)
+        -> void;
+
+    /// @brief Hand the merge survivor the union of both shards' boundaries,
+    ///        trimmed by load (Requirement 4.3).
+    auto inherit_merge_buckets(group_state& target, group_state& source,
+                               const shard_range<Key>& merged) -> void;
 
     /// @brief Channel (a): ask the policy about every local leader, once per
     /// `policy_interval`.
