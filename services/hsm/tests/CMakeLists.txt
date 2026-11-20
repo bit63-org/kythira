@@ -98,6 +98,12 @@ set_tests_properties(hsm_roles_test PROPERTIES
 kythira_hsm_test(hsm_peer_test hsm_peer_test.cpp)
 set_tests_properties(hsm_peer_test PROPERTIES
     LABELS "unit;hsm;hsm-module" TIMEOUT 120)
+# The blocking HTTPS clients (mtls_https_client.hpp, https_peer_client.hpp)
+# keep their deadline on every step: a dial nothing answers and a peer that
+# never answers both end at the deadline, not at the kernel's SYN retries.
+kythira_hsm_test(hsm_peer_deadline_test hsm_peer_deadline_test.cpp)
+set_tests_properties(hsm_peer_deadline_test PROPERTIES
+    LABELS "unit;hsm;hsm-module" TIMEOUT 60)
 kythira_hsm_test(hsm_admin_test hsm_admin_test.cpp)
 set_tests_properties(hsm_admin_test PROPERTIES
     LABELS "unit;hsm;hsm-module" TIMEOUT 120)

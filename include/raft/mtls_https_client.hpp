@@ -20,7 +20,14 @@
 /// one for 12 to 40 s, longer than any forward's deadline, and a member
 /// that just restarted sits at an address its name does not give yet. A
 /// failed dial tells the resolver, so a stale answer is retired.
+///
+/// Every step (dial, handshake, write, read, close) runs asynchronously
+/// under the exchange's deadline (beast_deadline.hpp): a blocking Beast
+/// call ignores the stream's deadline, so a dial to a restarted peer's old
+/// address waited out the kernel's SYN retries (about 127 s) and a forward
+/// that should have failed in seconds held a proposal for minutes.
 
+#include <raft/beast_deadline.hpp>
 #include <raft/bounded_resolver.hpp>
 
 #include <boost/asio/connect.hpp>
@@ -160,19 +167,17 @@ private:
     }
 
     template<typename Stream, typename Request>
-    [[nodiscard]] auto send(Stream& stream, const Request& req) const
+    [[nodiscard]] auto send(boost::asio::io_context& ioc, Stream& stream, const Request& req) const
         -> std::optional<std::pair<unsigned, std::string>> {
         namespace http = boost::beast::http;
-        boost::beast::error_code ec;
-        http::write(stream, req, ec);
-        if (ec) {
+        using kythira::beast_deadline::run;
+        if (run(ioc, [&](auto h) { http::async_write(stream, req, std::move(h)); })) {
             return std::nullopt;
         }
         boost::beast::flat_buffer buffer;
         http::response_parser<http::string_body> parser;
         parser.body_limit(_config.max_body_bytes);
-        http::read(stream, buffer, parser, ec);
-        if (ec) {
+        if (run(ioc, [&](auto h) { http::async_read(stream, buffer, parser, std::move(h)); })) {
             return std::nullopt;
         }
         auto res = parser.release();
@@ -187,16 +192,16 @@ private:
         if (!endpoints) {
             return std::nullopt;
         }
+        using kythira::beast_deadline::run;
         boost::asio::io_context ioc;
         boost::beast::tcp_stream stream(ioc);
         stream.expires_after(remaining(dialled_at));
-        boost::beast::error_code ec;
-        stream.connect(*endpoints, ec);
-        if (ec) {
+        if (run(ioc, [&](auto h) { stream.async_connect(*endpoints, std::move(h)); })) {
             kythira::net_resolve::mark_unreachable(e.host, e.port, SOCK_STREAM, dialled_at);
             return std::nullopt;
         }
-        auto out = send(stream, req);
+        auto out = send(ioc, stream, req);
+        boost::beast::error_code ec;
         (void)stream.socket().shutdown(boost::asio::ip::tcp::socket::shutdown_both, ec);
         return out;
     }
@@ -230,20 +235,21 @@ private:
             return std::nullopt;
         }
         stream.set_verify_callback(ssl::host_name_verification(e.host));
+        using kythira::beast_deadline::run;
         auto& lowest = boost::beast::get_lowest_layer(stream);
         lowest.expires_after(remaining(dialled_at));
-        boost::beast::error_code ec;
-        lowest.connect(*endpoints, ec);
-        if (ec) {
+        if (run(ioc, [&](auto h) { lowest.async_connect(*endpoints, std::move(h)); })) {
             kythira::net_resolve::mark_unreachable(e.host, e.port, SOCK_STREAM, dialled_at);
             return std::nullopt;
         }
-        (void)stream.handshake(ssl::stream_base::client, ec);
-        if (ec) {
+        if (run(ioc,
+                [&](auto h) { stream.async_handshake(ssl::stream_base::client, std::move(h)); })) {
             return std::nullopt;
         }
-        auto out = send(stream, req);
-        (void)stream.shutdown(ec);
+        auto out = send(ioc, stream, req);
+        // The close_notify exchange is a courtesy: a peer that drops the
+        // connection instead is fine, and it never outlasts the deadline.
+        (void)run(ioc, [&](auto h) { stream.async_shutdown(std::move(h)); });
         return out;
     }
 
