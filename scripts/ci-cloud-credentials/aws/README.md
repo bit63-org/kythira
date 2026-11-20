@@ -270,7 +270,8 @@ The role's inline policy has 10,240 characters for every bundle together
 rendered to 10,224 until the renderer started dropping actions an earlier
 unconditioned `Resource: "*"` statement already grants (every EC2 bundle
 lists `ec2:DescribeInstances` and friends); that changes no permission and
-brought the nine down to about 8,050, leaving room for more bundles.
+brought the nine down to about 8,200, leaving room for the AMI pruner's
+grants and roughly one more bundle.
 
 Applying this bundle to the live CI role, and the first real runs, need
 Clark's go-ahead (spec task 7).
@@ -316,8 +317,11 @@ grants an instance-changing action on instances without a condition.
 What is still `Resource: "*"`: `RunInstances` and the other create
 actions, which have no existing resource to scope to; the `Describe*`
 actions, which support no resource-level permissions; and the deletes of
-VPCs, subnets, security groups, key pairs, volumes, snapshots and AMIs in
-every bundle but `asg-quorum-manager`. `ami-build`'s `CreateImage` and
+VPCs, subnets, security groups, key pairs and volumes in every bundle but
+`asg-quorum-manager`. AMI and snapshot deletes (`ec2:DeregisterImage`,
+`ec2:DeleteSnapshot`, `ami-build` only) are conditioned on
+`kythira:component=ca-cluster-node`, the tag Packer stamps on both; see
+`.kiro/specs/ca-cluster-node-ami-retention/`. `ami-build`'s `CreateImage` and
 `CreateSnapshot` can still read any instance's or volume's disk, though no
 bundle can share the result outside the account. The account is a CI-only
 account, which is what keeps those Low; the next step, if that changes, is
@@ -497,3 +501,26 @@ Packer's documented example policy. In particular it does **not** grant:
 If a future template change needs one of these, Packer fails with
 `UnauthorizedOperation` naming it; add it back then, conditioned as narrowly
 as the action allows, rather than restoring the whole list.
+
+### AMI retention grants
+
+The job's last step, `scripts/ami-retention/prune-amis.sh`, deregisters old
+`ca_cluster_node` AMIs and deletes their snapshots
+(`.kiro/specs/ca-cluster-node-ami-retention/`). For that the bundle adds
+`ec2:DescribeLaunchTemplates` and `ec2:DescribeLaunchTemplateVersions` (to
+keep any image a launch template names) and grants `ec2:DeregisterImage`
+and `ec2:DeleteSnapshot` only in the `AmiPruneOwnImagesOnly` statement,
+on resources tagged `kythira:component=ca-cluster-node`. The script already
+limits itself to those images; the condition makes the rule hold even if the
+script is wrong.
+
+One trade-off: Packer tags an AMI after `CreateImage` returns. If a build
+fails in that window, Packer's own cleanup can no longer deregister the
+half-made image (`UnauthorizedOperation`). The image is untagged, so the
+pruner never sees it either; find it by name (`kythira-ca-cluster-node-*`) and
+remove it by hand. Before this change Packer could deregister any AMI in the
+account, which is the larger risk.
+
+Applying the change is a policy re-apply with the bundles the role already
+carries; dispatch `reprovision-aws-ci-role.yml` on `main`, or run
+`update-ci-role-policy.sh` locally.

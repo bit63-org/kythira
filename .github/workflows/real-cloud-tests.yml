@@ -1926,6 +1926,36 @@ jobs:
           name: ca-cluster-node-ami-manifest-${{ matrix.arch }}
           path: packer-manifest.json
 
+      # .kiro/specs/ca-cluster-node-ami-retention/: remove this leg's old
+      # AMIs and snapshots. Runs only after a successful build (and after the
+      # manifest upload, so a red step here loses nothing), restricted to the
+      # leg's own arch so the two matrix legs never act on the same images.
+      # A dry run, printing the plan into the job summary, until the
+      # REAL_CLOUD_TESTS_AWS_AMI_PRUNE_ENABLED variable is "true": read the
+      # first real plan before turning it on. Keep rules and the
+      # kythira:retain=true pin: packer/ca_cluster_node/README.md.
+      - name: Prune old ca_cluster_node AMIs
+        if: ${{ success() }}
+        env:
+          PRUNE: ${{ vars.REAL_CLOUD_TESTS_AWS_AMI_PRUNE_ENABLED == 'true' }}
+          KEEP: ${{ vars.REAL_CLOUD_TESTS_AWS_AMI_KEEP || '2' }}
+          MIN_AGE: ${{ vars.REAL_CLOUD_TESTS_AWS_AMI_MIN_AGE_DAYS || '7' }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          # The default `bash -e` shell has no pipefail; without it `tee`
+          # would turn a failed prune into a green step.
+          set -o pipefail
+          args=(--arch "$ARCH" --keep "$KEEP" --min-age-days "$MIN_AGE")
+          if [ "$PRUNE" = true ]; then args+=(--apply); fi
+          {
+            echo "### ca_cluster_node AMI retention ($ARCH)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          rc=0
+          scripts/ami-retention/prune-amis.sh "${args[@]}" 2>&1 | tee -a "$GITHUB_STEP_SUMMARY" || rc=$?
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          exit "$rc"
+
   # ── Azure ────────────────────────────────────────────────────────────────
   # .kiro/specs/azure-cloud-services/ — azure_vm_quorum_manager,
   # azure_vmss_quorum_manager, azure_key_vault_ca_provider. Authenticated via
