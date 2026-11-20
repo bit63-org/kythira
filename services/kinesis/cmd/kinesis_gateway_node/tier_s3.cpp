@@ -205,7 +205,9 @@ public:
                 bucket, key, bytes,
                 kythira::s3_put_options{.storage_class = o._storage_class,
                                         .expected_bucket_owner = o._expected_owner,
-                                        .content_type = {}});
+                                        .content_type = {},
+                                        .metadata = o._metadata,
+                                        .sse_kms_key_id = o._sse_kms_key_id});
         };
         return b;
     }

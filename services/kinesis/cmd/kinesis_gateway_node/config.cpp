@@ -571,6 +571,11 @@ void read_kinesis_side(const reader& r, node_options& o) {
         fail("KINESIS_CHANNEL_ROLE must be node or assume");
     }
     o._channel_assume_role = role == "assume";
+    const auto encryption = r.opt("KINESIS_CHANNEL_ENCRYPTION", "envelope");
+    if (encryption != "envelope" && encryption != "sse-kms") {
+        fail("KINESIS_CHANNEL_ENCRYPTION must be envelope or sse-kms");
+    }
+    o._channel_sse_kms = encryption == "sse-kms";
     o._channel_sts_endpoint = r.opt("KINESIS_CHANNEL_STS_ENDPOINT", "");
     if (!o._channel_sts_endpoint.empty() && !kinesis::parse_aws_endpoint(o._channel_sts_endpoint)) {
         fail("KINESIS_CHANNEL_STS_ENDPOINT must be an http:// or https:// URL");
@@ -862,6 +867,7 @@ auto describe(const node_options& o) -> std::string {
                                                    ? std::string()
                                                    : " sts=" + o._channel_sts_endpoint)
                            : std::string(" role=node")) +
+                      (o._channel_sse_kms ? " encryption=sse-kms" : " encryption=envelope") +
                       (o._channel_iceberg_uri.empty()
                            ? std::string()
                            : " iceberg=" + o._channel_iceberg_uri +
