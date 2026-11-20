@@ -263,6 +263,13 @@ jobs:
           bucket: ${{ vars.OCI_BUILD_CACHE_BUCKET }}
           namespace: ${{ vars.OCI_BUILD_CACHE_NAMESPACE }}
           region: ${{ vars.OCI_CI_REGION }}
+          kythira-cache-url: ${{ vars.KYTHIRA_BUILD_CACHE_URL }}
+          kythira-cache-rw-user: ${{ vars.KYTHIRA_BUILD_CACHE_RW_USER }}
+          kythira-cache-rw-password: ${{ secrets.KYTHIRA_BUILD_CACHE_RW_PASSWORD }}
+          kythira-cache-pr-user: ${{ vars.KYTHIRA_BUILD_CACHE_PR_USER }}
+          kythira-cache-pr-password: ${{ secrets.KYTHIRA_BUILD_CACHE_PR_PASSWORD }}
+          kythira-cache-ro-user: ${{ vars.KYTHIRA_BUILD_CACHE_RO_USER }}
+          kythira-cache-ro-password: ${{ secrets.KYTHIRA_BUILD_CACHE_RO_PASSWORD }}
 
       - name: Cache vcpkg packages
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -774,6 +781,13 @@ jobs:
           bucket: ${{ vars.OCI_BUILD_CACHE_BUCKET }}
           namespace: ${{ vars.OCI_BUILD_CACHE_NAMESPACE }}
           region: ${{ vars.OCI_CI_REGION }}
+          kythira-cache-url: ${{ vars.KYTHIRA_BUILD_CACHE_URL }}
+          kythira-cache-rw-user: ${{ vars.KYTHIRA_BUILD_CACHE_RW_USER }}
+          kythira-cache-rw-password: ${{ secrets.KYTHIRA_BUILD_CACHE_RW_PASSWORD }}
+          kythira-cache-pr-user: ${{ vars.KYTHIRA_BUILD_CACHE_PR_USER }}
+          kythira-cache-pr-password: ${{ secrets.KYTHIRA_BUILD_CACHE_PR_PASSWORD }}
+          kythira-cache-ro-user: ${{ vars.KYTHIRA_BUILD_CACHE_RO_USER }}
+          kythira-cache-ro-password: ${{ secrets.KYTHIRA_BUILD_CACHE_RO_PASSWORD }}
 
       - name: Cache vcpkg packages
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -980,6 +994,13 @@ jobs:
           bucket: ${{ vars.OCI_BUILD_CACHE_BUCKET }}
           namespace: ${{ vars.OCI_BUILD_CACHE_NAMESPACE }}
           region: ${{ vars.OCI_CI_REGION }}
+          kythira-cache-url: ${{ vars.KYTHIRA_BUILD_CACHE_URL }}
+          kythira-cache-rw-user: ${{ vars.KYTHIRA_BUILD_CACHE_RW_USER }}
+          kythira-cache-rw-password: ${{ secrets.KYTHIRA_BUILD_CACHE_RW_PASSWORD }}
+          kythira-cache-pr-user: ${{ vars.KYTHIRA_BUILD_CACHE_PR_USER }}
+          kythira-cache-pr-password: ${{ secrets.KYTHIRA_BUILD_CACHE_PR_PASSWORD }}
+          kythira-cache-ro-user: ${{ vars.KYTHIRA_BUILD_CACHE_RO_USER }}
+          kythira-cache-ro-password: ${{ secrets.KYTHIRA_BUILD_CACHE_RO_PASSWORD }}
 
       - name: Cache vcpkg packages
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -1220,6 +1241,13 @@ jobs:
           bucket: ${{ vars.OCI_BUILD_CACHE_BUCKET }}
           namespace: ${{ vars.OCI_BUILD_CACHE_NAMESPACE }}
           region: ${{ vars.OCI_CI_REGION }}
+          kythira-cache-url: ${{ vars.KYTHIRA_BUILD_CACHE_URL }}
+          kythira-cache-rw-user: ${{ vars.KYTHIRA_BUILD_CACHE_RW_USER }}
+          kythira-cache-rw-password: ${{ secrets.KYTHIRA_BUILD_CACHE_RW_PASSWORD }}
+          kythira-cache-pr-user: ${{ vars.KYTHIRA_BUILD_CACHE_PR_USER }}
+          kythira-cache-pr-password: ${{ secrets.KYTHIRA_BUILD_CACHE_PR_PASSWORD }}
+          kythira-cache-ro-user: ${{ vars.KYTHIRA_BUILD_CACHE_RO_USER }}
+          kythira-cache-ro-password: ${{ secrets.KYTHIRA_BUILD_CACHE_RO_PASSWORD }}
 
       # Byte-identical to the x64 clang++-18 build-and-test leg's key, so
       # this job shares that leg's clang-built tree rather than keeping
@@ -1539,6 +1567,13 @@ jobs:
           bucket: ${{ vars.OCI_BUILD_CACHE_BUCKET }}
           namespace: ${{ vars.OCI_BUILD_CACHE_NAMESPACE }}
           region: ${{ vars.OCI_CI_REGION }}
+          kythira-cache-url: ${{ vars.KYTHIRA_BUILD_CACHE_URL }}
+          kythira-cache-rw-user: ${{ vars.KYTHIRA_BUILD_CACHE_RW_USER }}
+          kythira-cache-rw-password: ${{ secrets.KYTHIRA_BUILD_CACHE_RW_PASSWORD }}
+          kythira-cache-pr-user: ${{ vars.KYTHIRA_BUILD_CACHE_PR_USER }}
+          kythira-cache-pr-password: ${{ secrets.KYTHIRA_BUILD_CACHE_PR_PASSWORD }}
+          kythira-cache-ro-user: ${{ vars.KYTHIRA_BUILD_CACHE_RO_USER }}
+          kythira-cache-ro-password: ${{ secrets.KYTHIRA_BUILD_CACHE_RO_PASSWORD }}
 
       # Distinct key ("-edhoc-coap-alt-"): this tree is the g++-13 edhoc tree
       # plus cantcoap and libnyoci, so restoring the plain edhoc cache would
@@ -1809,6 +1844,13 @@ jobs:
           bucket: ${{ vars.OCI_BUILD_CACHE_BUCKET }}
           namespace: ${{ vars.OCI_BUILD_CACHE_NAMESPACE }}
           region: ${{ vars.OCI_CI_REGION }}
+          kythira-cache-url: ${{ vars.KYTHIRA_BUILD_CACHE_URL }}
+          kythira-cache-rw-user: ${{ vars.KYTHIRA_BUILD_CACHE_RW_USER }}
+          kythira-cache-rw-password: ${{ secrets.KYTHIRA_BUILD_CACHE_RW_PASSWORD }}
+          kythira-cache-pr-user: ${{ vars.KYTHIRA_BUILD_CACHE_PR_USER }}
+          kythira-cache-pr-password: ${{ secrets.KYTHIRA_BUILD_CACHE_PR_PASSWORD }}
+          kythira-cache-ro-user: ${{ vars.KYTHIRA_BUILD_CACHE_RO_USER }}
+          kythira-cache-ro-password: ${{ secrets.KYTHIRA_BUILD_CACHE_RO_PASSWORD }}
 
       # The g++-13 build-and-test legs' key plus the poco-dnssd feature: the
       # tree is theirs with one more port in it. On a miss, every port but
@@ -2015,6 +2057,13 @@ jobs:
           bucket: ${{ vars.OCI_BUILD_CACHE_BUCKET }}
           namespace: ${{ vars.OCI_BUILD_CACHE_NAMESPACE }}
           region: ${{ vars.OCI_CI_REGION }}
+          kythira-cache-url: ${{ vars.KYTHIRA_BUILD_CACHE_URL }}
+          kythira-cache-rw-user: ${{ vars.KYTHIRA_BUILD_CACHE_RW_USER }}
+          kythira-cache-rw-password: ${{ secrets.KYTHIRA_BUILD_CACHE_RW_PASSWORD }}
+          kythira-cache-pr-user: ${{ vars.KYTHIRA_BUILD_CACHE_PR_USER }}
+          kythira-cache-pr-password: ${{ secrets.KYTHIRA_BUILD_CACHE_PR_PASSWORD }}
+          kythira-cache-ro-user: ${{ vars.KYTHIRA_BUILD_CACHE_RO_USER }}
+          kythira-cache-ro-password: ${{ secrets.KYTHIRA_BUILD_CACHE_RO_PASSWORD }}
 
       # Byte-identical to the x64 clang++-18 build-and-test leg's key, so
       # this job shares that leg's clang-built tree rather than keeping
@@ -2274,6 +2323,13 @@ jobs:
           bucket: ${{ vars.OCI_BUILD_CACHE_BUCKET }}
           namespace: ${{ vars.OCI_BUILD_CACHE_NAMESPACE }}
           region: ${{ vars.OCI_CI_REGION }}
+          kythira-cache-url: ${{ vars.KYTHIRA_BUILD_CACHE_URL }}
+          kythira-cache-rw-user: ${{ vars.KYTHIRA_BUILD_CACHE_RW_USER }}
+          kythira-cache-rw-password: ${{ secrets.KYTHIRA_BUILD_CACHE_RW_PASSWORD }}
+          kythira-cache-pr-user: ${{ vars.KYTHIRA_BUILD_CACHE_PR_USER }}
+          kythira-cache-pr-password: ${{ secrets.KYTHIRA_BUILD_CACHE_PR_PASSWORD }}
+          kythira-cache-ro-user: ${{ vars.KYTHIRA_BUILD_CACHE_RO_USER }}
+          kythira-cache-ro-password: ${{ secrets.KYTHIRA_BUILD_CACHE_RO_PASSWORD }}
 
       # Byte-identical to the x64 build-and-test legs' key (they set no
       # vcpkg_cxx), so this job shares their tree rather than keeping another
@@ -2537,6 +2593,13 @@ jobs:
           bucket: ${{ vars.OCI_BUILD_CACHE_BUCKET }}
           namespace: ${{ vars.OCI_BUILD_CACHE_NAMESPACE }}
           region: ${{ vars.OCI_CI_REGION }}
+          kythira-cache-url: ${{ vars.KYTHIRA_BUILD_CACHE_URL }}
+          kythira-cache-rw-user: ${{ vars.KYTHIRA_BUILD_CACHE_RW_USER }}
+          kythira-cache-rw-password: ${{ secrets.KYTHIRA_BUILD_CACHE_RW_PASSWORD }}
+          kythira-cache-pr-user: ${{ vars.KYTHIRA_BUILD_CACHE_PR_USER }}
+          kythira-cache-pr-password: ${{ secrets.KYTHIRA_BUILD_CACHE_PR_PASSWORD }}
+          kythira-cache-ro-user: ${{ vars.KYTHIRA_BUILD_CACHE_RO_USER }}
+          kythira-cache-ro-password: ${{ secrets.KYTHIRA_BUILD_CACHE_RO_PASSWORD }}
 
       # The exact key the variant's build job saves (dns-discovery-build,
       # gcp-sdk-build, ion-serializer-build, config-variants); restore only.
@@ -2728,6 +2791,13 @@ jobs:
           bucket: ${{ vars.OCI_BUILD_CACHE_BUCKET }}
           namespace: ${{ vars.OCI_BUILD_CACHE_NAMESPACE }}
           region: ${{ vars.OCI_CI_REGION }}
+          kythira-cache-url: ${{ vars.KYTHIRA_BUILD_CACHE_URL }}
+          kythira-cache-rw-user: ${{ vars.KYTHIRA_BUILD_CACHE_RW_USER }}
+          kythira-cache-rw-password: ${{ secrets.KYTHIRA_BUILD_CACHE_RW_PASSWORD }}
+          kythira-cache-pr-user: ${{ vars.KYTHIRA_BUILD_CACHE_PR_USER }}
+          kythira-cache-pr-password: ${{ secrets.KYTHIRA_BUILD_CACHE_PR_PASSWORD }}
+          kythira-cache-ro-user: ${{ vars.KYTHIRA_BUILD_CACHE_RO_USER }}
+          kythira-cache-ro-password: ${{ secrets.KYTHIRA_BUILD_CACHE_RO_PASSWORD }}
 
       - name: Cache vcpkg packages
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -3144,6 +3214,13 @@ jobs:
           bucket: ${{ vars.OCI_BUILD_CACHE_BUCKET }}
           namespace: ${{ vars.OCI_BUILD_CACHE_NAMESPACE }}
           region: ${{ vars.OCI_CI_REGION }}
+          kythira-cache-url: ${{ vars.KYTHIRA_BUILD_CACHE_URL }}
+          kythira-cache-rw-user: ${{ vars.KYTHIRA_BUILD_CACHE_RW_USER }}
+          kythira-cache-rw-password: ${{ secrets.KYTHIRA_BUILD_CACHE_RW_PASSWORD }}
+          kythira-cache-pr-user: ${{ vars.KYTHIRA_BUILD_CACHE_PR_USER }}
+          kythira-cache-pr-password: ${{ secrets.KYTHIRA_BUILD_CACHE_PR_PASSWORD }}
+          kythira-cache-ro-user: ${{ vars.KYTHIRA_BUILD_CACHE_RO_USER }}
+          kythira-cache-ro-password: ${{ secrets.KYTHIRA_BUILD_CACHE_RO_PASSWORD }}
 
       - name: Cache vcpkg packages
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -3522,6 +3599,13 @@ jobs:
           bucket: ${{ vars.OCI_BUILD_CACHE_BUCKET }}
           namespace: ${{ vars.OCI_BUILD_CACHE_NAMESPACE }}
           region: ${{ vars.OCI_CI_REGION }}
+          kythira-cache-url: ${{ vars.KYTHIRA_BUILD_CACHE_URL }}
+          kythira-cache-rw-user: ${{ vars.KYTHIRA_BUILD_CACHE_RW_USER }}
+          kythira-cache-rw-password: ${{ secrets.KYTHIRA_BUILD_CACHE_RW_PASSWORD }}
+          kythira-cache-pr-user: ${{ vars.KYTHIRA_BUILD_CACHE_PR_USER }}
+          kythira-cache-pr-password: ${{ secrets.KYTHIRA_BUILD_CACHE_PR_PASSWORD }}
+          kythira-cache-ro-user: ${{ vars.KYTHIRA_BUILD_CACHE_RO_USER }}
+          kythira-cache-ro-password: ${{ secrets.KYTHIRA_BUILD_CACHE_RO_PASSWORD }}
 
       - name: Cache vcpkg packages
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
