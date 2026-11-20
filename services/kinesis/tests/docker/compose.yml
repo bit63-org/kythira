@@ -72,6 +72,12 @@ x-env: &env
   # nodes.
   KINESIS_CHANNEL_S3_ENDPOINT: "${KINESIS_SCENARIO_CHANNEL_ENDPOINT:-}"
   KINESIS_CHANNEL_MAX_DELAY_MS: "${KINESIS_SCENARIO_CHANNEL_MAX_DELAY_MS:-0}"
+  # The key provider (the channel case's encrypted channel seals its
+  # objects with it), off unless the scenario sets these and recreates the
+  # nodes. `local` wraps data keys under the passphrase, which the boto3
+  # client is handed to open the objects again.
+  KINESIS_KMS: "${KINESIS_SCENARIO_KMS:-off}"
+  KINESIS_KMS_PASSPHRASE: "${KINESIS_SCENARIO_KMS_PASSPHRASE:-}"
   # S3 Tables delivery (task 19's tables case) through the local Iceberg
   # REST catalog below, unsigned, only when the scenario sets these.
   KINESIS_CHANNEL_ICEBERG_URI: "${KINESIS_SCENARIO_ICEBERG_URI:-}"
