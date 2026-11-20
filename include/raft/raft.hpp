@@ -599,6 +599,29 @@ public:
     /// `shard_stats` reports it too.
     [[nodiscard]] auto last_applied_index() const -> log_index_type;
 
+    /// @brief Where this replica's log, commit and apply stand, read under
+    ///        one lock so the figures agree with each other.
+    ///
+    /// For an operator reading a live node: `_last_log - _commit` is what
+    /// the leader has appended but a quorum has not yet persisted,
+    /// `_commit - _applied` is the apply backlog, `_pending_commands` the
+    /// client proposals still waiting for their result, and on a leader
+    /// `_last_log - _slowest_match` how far its slowest follower trails.
+    /// A shard whose write path is stuck shows here as a queue that grows
+    /// (GitHub issue 942).
+    struct log_progress {
+        log_index_type _last_log{0};
+        log_index_type _commit{0};
+        log_index_type _applied{0};
+        /// Leader only: the lowest match index over its followers and
+        /// learners, or
+        /// `_last_log` when it has none.
+        log_index_type _slowest_match{0};
+        std::size_t _pending_commands{0};
+        bool _leader{false};
+    };
+    [[nodiscard]] auto progress() const -> log_progress;
+
     /// @brief When an accepted AppendEntries last left this node caught up.
     ///
     /// Set when, after the request is handled, this node's commit index has
@@ -3299,6 +3322,29 @@ auto node<Types>::log_entries_between(log_index_type from, log_index_type to) co
 template<raft_types Types> auto node<Types>::last_applied_index() const -> log_index_type {
     std::lock_guard<std::mutex> lock(_mutex);
     return _last_applied;
+}
+
+template<raft_types Types> auto node<Types>::progress() const -> log_progress {
+    log_progress p;
+    {
+        std::lock_guard<std::mutex> lock(_mutex);
+        p._last_log = get_last_log_index();
+        p._commit = _commit_index;
+        p._applied = _last_applied;
+        p._leader = _state == kythira::server_state::leader;
+        p._slowest_match = p._last_log;
+        if (p._leader) {
+            for (const auto& [peer, match] : _match_index) {
+                if (peer != _node_id && match < p._slowest_match) {
+                    p._slowest_match = match;
+                }
+            }
+        }
+    }
+    // The waiter has its own lock; taking it outside the node's keeps the
+    // two from nesting.
+    p._pending_commands = _commit_waiter.get_pending_count();
+    return p;
 }
 
 template<raft_types Types>
