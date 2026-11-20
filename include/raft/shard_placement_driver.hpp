@@ -144,6 +144,16 @@ template<raft_group_id GroupId, shard_key Key, typename NodeId> struct shard_rep
     /// from a leader that has since been deposed.
     std::uint64_t _term{0};
 
+    /// @brief The shard's busiest load buckets, busiest first, at most
+    ///        `bucket_config::_report_top_buckets` of them
+    ///        (multi-raft-load-buckets Requirement 5.2).
+    ///
+    /// Bounded so a heartbeat stays the same size however finely shards are
+    /// cut. A driver may use it to prefer scattering a shard whose load is
+    /// spread (a split divides it) over one whose load is a single bucket.
+    /// Empty when buckets are off.
+    std::vector<bucket_stats<Key>> _hot_buckets{};
+
     [[nodiscard]] auto group_id() const -> const GroupId& { return _descriptor._group_id; }
     [[nodiscard]] auto epoch() const -> const shard_epoch& { return _descriptor._epoch; }
     [[nodiscard]] auto descriptor() const -> const shard_descriptor<GroupId, Key, NodeId>& {

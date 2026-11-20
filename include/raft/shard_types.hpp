@@ -754,6 +754,106 @@ template<shard_key Key> struct bucket_stats {
     }
 };
 
+/// @brief The bucket boundary that best balances a shard's load, and how
+///        evenly it does.
+///
+/// `_boundary` indexes the boundaries, so the cut is at
+/// `buckets[_boundary + 1]._start`. `_left` and `_right` are the combined
+/// read and write qps of the buckets on either side.
+struct bucket_cut {
+    std::size_t _boundary{0};
+    double _left{0.0};
+    double _right{0.0};
+
+    /// @brief Share of the load on the heavier side, in `[0.5, 1.0]`; 1.0 for
+    ///        no load at all, as `hot_key_sample::one_sided_fraction` does.
+    [[nodiscard]] auto one_sided_fraction() const -> double {
+        const auto total = _left + _right;
+        if (total <= 0.0) {
+            return 1.0;
+        }
+        return (_left > _right ? _left : _right) / total;
+    }
+};
+
+/// @brief The boundary minimising `|left - right|` over combined qps, or
+///        nothing when there is no boundary (fewer than two buckets).
+///
+/// Ties go to the leftmost boundary. Evaluated over every boundary, so the
+/// result's `one_sided_fraction()` is the best any boundary achieves: when it
+/// is too one-sided, every boundary is.
+template<shard_key Key>
+[[nodiscard]] auto best_bucket_cut(const std::vector<bucket_stats<Key>>& buckets)
+    -> std::optional<bucket_cut> {
+    if (buckets.size() < 2) {
+        return std::nullopt;
+    }
+    double total = 0.0;
+    for (const auto& b : buckets) {
+        total += b.qps();
+    }
+    std::optional<bucket_cut> best;
+    double left = 0.0;
+    for (std::size_t i = 0; i + 1 < buckets.size(); ++i) {
+        left += buckets[i].qps();
+        const bucket_cut cut{._boundary = i, ._left = left, ._right = total - left};
+        const auto gap = cut._left > cut._right ? cut._left - cut._right : cut._right - cut._left;
+        const auto best_gap = best.has_value()
+                                  ? (best->_left > best->_right ? best->_left - best->_right
+                                                                : best->_right - best->_left)
+                                  : gap + 1.0;
+        if (gap < best_gap) {
+            best = cut;
+        }
+    }
+    return best;
+}
+
+/// @brief Index of the busiest bucket by combined qps, leftmost on a tie;
+///        nothing for an empty list.
+template<shard_key Key>
+[[nodiscard]] auto hottest_bucket(const std::vector<bucket_stats<Key>>& buckets)
+    -> std::optional<std::size_t> {
+    if (buckets.empty()) {
+        return std::nullopt;
+    }
+    std::size_t hot = 0;
+    for (std::size_t i = 1; i < buckets.size(); ++i) {
+        if (buckets[i].qps() > buckets[hot].qps()) {
+            hot = i;
+        }
+    }
+    return hot;
+}
+
+/// @brief Share of a shard's keyed load in its busiest bucket, in `[0, 1]`
+///        (Requirement 5.3); zero with no load or no buckets.
+template<shard_key Key>
+[[nodiscard]] auto hottest_bucket_share(const std::vector<bucket_stats<Key>>& buckets) -> double {
+    double total = 0.0;
+    for (const auto& b : buckets) {
+        total += b.qps();
+    }
+    const auto hot = hottest_bucket(buckets);
+    if (!hot.has_value() || total <= 0.0) {
+        return 0.0;
+    }
+    return buckets[*hot].qps() / total;
+}
+
+/// @brief The `k` busiest buckets by combined qps, busiest first, ties in key
+///        order (Requirement 5.2).
+template<shard_key Key>
+[[nodiscard]] auto top_buckets(std::vector<bucket_stats<Key>> buckets, std::size_t k)
+    -> std::vector<bucket_stats<Key>> {
+    std::stable_sort(buckets.begin(), buckets.end(),
+                     [](const auto& a, const auto& b) { return a.qps() > b.qps(); });
+    if (buckets.size() > k) {
+        buckets.resize(k);
+    }
+    return buckets;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Statistics
 // ─────────────────────────────────────────────────────────────────────────────
@@ -847,6 +947,16 @@ struct shard_stats {
     /// @brief Bumped whenever the shard's bucket boundaries change, so a
     ///        consumer can tell a re-cut from a change in load.
     std::uint64_t _buckets_version{0};
+    /// @brief How long the window behind `_buckets`' rates covers; zero until
+    ///        a slot has closed since the set was built or re-cut.
+    ///
+    /// A policy aiming a load split at a boundary waits until this reaches its
+    /// sampling duration, exactly as the sampler waits out its window
+    /// (Requirement 6.1).
+    std::chrono::milliseconds _buckets_window{};
+    /// @brief Whether the load-split sampler has this shard in single-hot-key
+    ///        back-off. A bucket-based split honours it too (Requirement 6.4).
+    bool _load_split_backoff{false};
 
     [[nodiscard]] auto descriptor() const -> const shard_descriptor<GroupId, Key, NodeId>& {
         return _descriptor;
