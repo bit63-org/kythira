@@ -162,6 +162,51 @@ auto read_secret_file(const std::string& path) -> std::string {
     return s;
 }
 
+/// `KINESIS_ROLES`, read first: a segment node is held to fewer of the
+/// Raft settings. Whether the set can be served is checked once the
+/// segment layer is known (`read_segment_layer`).
+void read_roles(const reader& r, node_options& o) {
+    try {
+        o._roles = kythira::layers::role_set::parse(
+            r.opt("KINESIS_ROLES", "gateway,front_end,data,segments"));
+    } catch (const std::invalid_argument& e) {
+        fail("KINESIS_ROLES: " + std::string(e.what()));
+    }
+}
+
+/// `KINESIS_SEGMENT_NODES` and the role set against it (task 10).
+void read_segment_layer(const reader& r, node_options& o) {
+    try {
+        o._segment_nodes = kythira::parse_segment_nodes(r.opt("KINESIS_SEGMENT_NODES", ""));
+    } catch (const std::invalid_argument& e) {
+        fail("KINESIS_SEGMENT_NODES: " + std::string(e.what()));
+    }
+    const auto text = r.opt("KINESIS_ROLES", "gateway,front_end,data,segments");
+    if (const auto gap = unserved_roles(o._roles, !o._segment_nodes.empty())) {
+        fail("KINESIS_ROLES=" + text + ": " + *gap);
+    }
+    const auto self = kythira::host_node_id_text(o._node_id);
+    if (is_segment_node(o._roles) && !kythira::segment_node_of(o._segment_nodes, self)) {
+        fail("KINESIS_ROLES=" + text + ": a segment node must be listed in KINESIS_SEGMENT_NODES " +
+             "under its own id " + self);
+    }
+    const bool uses_layer = !o._roles.has(kythira::layers::role::segments) ||
+                            kythira::segment_node_of(o._segment_nodes, self).has_value();
+    if (!o._segment_nodes.empty() && uses_layer) {
+        // Volume calls are signed like forwarded writes.
+        if (o._forward_secret.size() < 16) {
+            fail(
+                "KINESIS_FORWARD_SECRET (or _FILE) of at least 16 bytes is required with "
+                "KINESIS_SEGMENT_NODES: data nodes sign their volume calls with it");
+        }
+        try {
+            (void)volume_assignments(o);
+        } catch (const std::invalid_argument& e) {
+            fail("KINESIS_SEGMENT_NODES: " + std::string(e.what()));
+        }
+    }
+}
+
 void read_raft_side(const reader& r, node_options& o) {
     if (auto id = kythira::parse_host_node_id(r.required("KYTHIRA_NODE_ID")); id) {
         o._node_id = std::move(id).value();
@@ -174,16 +219,20 @@ void read_raft_side(const reader& r, node_options& o) {
         fail("KYTHIRA_RAFT_PORT must be between 1 and 65535");
     }
     o._raft_port = static_cast<std::uint16_t>(raft_port);
-    // Raft RPC has no TLS here; off loopback that has to be asked for.
+    // Raft RPC has no TLS here; off loopback that has to be asked for. A
+    // segment node opens no Raft port.
     o._allow_plaintext_raft = r.flag("KYTHIRA_ALLOW_PLAINTEXT_RAFT", "false");
-    if (!o._allow_plaintext_raft && !is_loopback_address(o._bind_address)) {
+    const bool segment_node = is_segment_node(o._roles);
+    if (!segment_node && !o._allow_plaintext_raft && !is_loopback_address(o._bind_address)) {
         fail("refusing to serve plaintext, unauthenticated Raft RPC on KYTHIRA_RAFT_BIND=" +
              o._bind_address +
              " (set KYTHIRA_RAFT_BIND to a loopback address, or "
              "KYTHIRA_ALLOW_PLAINTEXT_RAFT=true on a network you trust)");
     }
     o._peers = parse_id_map("KYTHIRA_PEERS", r.required("KYTHIRA_PEERS"));
-    if (!o._peers.contains(o._node_id)) {
+    // A segment node is not a voter: KYTHIRA_PEERS names the data voters
+    // whose volumes it holds.
+    if (!segment_node && !o._peers.contains(o._node_id)) {
         fail("KYTHIRA_PEERS must include this node's own id " +
              kythira::host_node_id_text(o._node_id));
     }
@@ -372,17 +421,7 @@ void read_kinesis_side(const reader& r, node_options& o) {
 
     o._disk_floor_bytes = r.u64("KINESIS_DISK_FLOOR_BYTES", "1073741824");
     o._metrics = r.flag("KINESIS_METRICS", "false");
-    {
-        const auto text = r.opt("KINESIS_ROLES", "gateway,front_end,data,segments");
-        try {
-            o._roles = kythira::layers::role_set::parse(text);
-        } catch (const std::invalid_argument& e) {
-            fail("KINESIS_ROLES: " + std::string(e.what()));
-        }
-        if (const auto gap = unserved_roles(o._roles)) {
-            fail("KINESIS_ROLES=" + text + ": " + *gap);
-        }
-    }
+    read_segment_layer(r, o);
     o._kms = r.opt("KINESIS_KMS", "off");
     o._kms_set = r.set("KINESIS_KMS");
     if (o._kms != "off" && o._kms != "local" && o._kms != "aws" && o._kms != "pkcs11" &&
@@ -533,6 +572,7 @@ auto is_loopback_address(const std::string& address) -> bool {
 auto from_env(const env_lookup& env) -> node_options {
     node_options o;
     const reader r{env};
+    read_roles(r, o);
     read_raft_side(r, o);
     read_kinesis_side(r, o);
     return o;
@@ -619,20 +659,45 @@ auto composite_env(service_node::env_lookup env) -> service_node::env_lookup {
     };
 }
 
-auto unserved_roles(kythira::layers::role_set roles) -> std::optional<std::string> {
+auto is_segment_node(kythira::layers::role_set roles) -> bool {
+    using kythira::layers::role;
+    return roles.has(role::segments) && !roles.has(role::data);
+}
+
+auto volume_assignments(const node_options& o) -> std::vector<kythira::volume_assignment> {
+    if (o._segment_nodes.empty()) {
+        return {};
+    }
+    std::vector<std::string> replicas;
+    replicas.reserve(o._peers.size());
+    for (const auto& [id, url] : o._peers) {
+        replicas.push_back(kythira::host_node_id_text(id));
+    }
+    return kythira::initial_volume_assignments("kinesis", replicas, o._segment_nodes);
+}
+
+auto unserved_roles(kythira::layers::role_set roles, bool segment_layer)
+    -> std::optional<std::string> {
     using kythira::layers::role;
     if (roles.empty()) {
         return "names no role; a node runs at least one of gateway, front_end, data, segments";
+    }
+    if (roles == kythira::layers::role_set{role::segments}) {
+        if (!segment_layer) {
+            return "a segment node holds volumes for the data nodes listed with it in "
+                   "KINESIS_SEGMENT_NODES, which is not set";
+        }
+        return std::nullopt;
     }
     if (!roles.has(role::data)) {
         return "a node without the data role reaches the data layer through the data-layer "
                "API of data nodes (kinesis-independent-layers task 6), which this build does "
                "not have yet; add data";
     }
-    if (!roles.has(role::segments)) {
-        return "data without segments keeps its record segments on a volume assigned on a "
-               "segment node (kinesis-independent-layers task 10), which this build does not "
-               "have yet; add segments";
+    if (!roles.has(role::segments) && !segment_layer) {
+        return "data without segments keeps its record segments on a volume on a segment "
+               "node, and KINESIS_SEGMENT_NODES names none; list the segment nodes there or "
+               "add segments";
     }
     if (roles.has(role::gateway) && !roles.has(role::front_end)) {
         return "gateway without front_end hands each call to a front end "
@@ -673,6 +738,15 @@ auto describe(const node_options& o) -> std::string {
         << '\n';
     for (const auto& [id, gw] : o._peer_gateways) {
         out << "peer_gateway " << kythira::host_node_id_text(id) << '=' << gw << '\n';
+    }
+    for (const auto& n : o._segment_nodes) {
+        out << "segment_node " << n._id << '=' << n._endpoint
+            << (n._placement_group.empty() ? std::string() : " group=" + n._placement_group)
+            << '\n';
+    }
+    for (const auto& a : volume_assignments(o)) {
+        out << "volume " << a._volume << " on segment_node " << a._segment_node
+            << " epoch=" << a._epoch << '\n';
     }
     out << "disk_floor_bytes=" << o._disk_floor_bytes << '\n'
         << "maintenance_interval_ms=" << o._maintenance_interval.count() << '\n'
@@ -757,7 +831,10 @@ auto usage() -> std::string {
            "                                   unauthenticated (false)\n"
            "  KINESIS_ROLES                    layers this node runs, a subset of gateway,\n"
            "                                   front_end, data, segments (all four);\n"
-           "                                   data,segments serves only peers\n"
+           "                                   data,segments serves only peers; data alone\n"
+           "                                   keeps segments on a segment node, segments\n"
+           "                                   alone is one (both need KINESIS_SEGMENT_NODES)\n"
+           "  KINESIS_SEGMENT_NODES            the segment layer: id=host:port[@group],...\n"
            "  KINESIS_KMS                      key provider for encrypted streams: off, local,\n"
            "                                   aws, pkcs11 or kythira (off; kythira_node:\n"
            "                                   kythira when the KMS module runs)\n"

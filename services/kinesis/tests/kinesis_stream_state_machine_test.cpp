@@ -14,13 +14,18 @@
 #include <kythira/kinesis/kinesis_stream_state_machine.hpp>
 
 #include <raft/record_segment_store.hpp>
+#include <raft/remote_segment_store.hpp>
+#include <raft/segment_volume_placement.hpp>
+#include <raft/segment_volume_service.hpp>
 #include <raft/splittable_state_machine.hpp>
 #include <raft/types.hpp>
 
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <atomic>
 #include <memory>
+#include <optional>
 #include <random>
 #include <string>
 #include <vector>
@@ -751,6 +756,176 @@ BOOST_AUTO_TEST_CASE(restore_truncates_a_tail_past_the_snapshot) {
     BOOST_TEST(r._status == k::apply_status::ok);
     BOOST_TEST(r._first_counter == 5U);
     BOOST_TEST((b.get_state() == a.get_state()));
+}
+
+BOOST_AUTO_TEST_SUITE_END()
+
+// kinesis-independent-layers task 10 (Requirements 9.4 and 9.5): three
+// data replicas keep their records in volumes on three segment nodes.
+// Losing one segment node stops only the replica whose volume it held;
+// the other two keep acknowledging, nothing acknowledged is lost, and a
+// replacement on a fourth segment node restores and carries on byte for
+// byte. Raft is played by hand: an entry is acknowledged once a majority
+// has applied it and passed its barrier, as `apply()` does.
+BOOST_AUTO_TEST_SUITE(segment_layer)
+
+namespace {
+
+struct segment_node_sim {
+    temp_dir _dir;
+    kythira::segment_volume_service _service{
+        kythira::segment_volume_service_options{.data_dir = _dir._path,
+                                                .store = {._max_segment_bytes = 600,
+                                                          ._max_segment_age_ms = 0,
+                                                          ._max_record_bytes = 4096,
+                                                          ._index_interval_bytes = 128,
+                                                          ._barriers_enabled = false}}};
+    std::shared_ptr<std::atomic<bool>> _up = std::make_shared<std::atomic<bool>>(true);
+
+    auto transport() -> kythira::segment_volume_transport {
+        return
+            [this, up = _up](std::vector<std::byte> req) -> std::optional<std::vector<std::byte>> {
+                if (!up->load()) {
+                    return std::nullopt;
+                }
+                return _service.handle(req);
+            };
+    }
+};
+
+struct replica {
+    std::unique_ptr<kythira::remote_segment_store> _store;
+    std::unique_ptr<sm_type> _sm;
+    bool _stopped = false;
+};
+
+auto all_records(const kythira::segment_store& s, const std::string& key)
+    -> std::vector<kythira::segment_record> {
+    return s.read(key, 0, kythira::segment_read_limits{._max_records = 100'000})._records;
+}
+
+}  // namespace
+
+BOOST_AUTO_TEST_CASE(acknowledged_writes_survive_losing_one_segment_node) {
+    std::vector<std::unique_ptr<segment_node_sim>> seg;
+    std::vector<kythira::segment_node_info> infos;
+    for (const auto* id : {"a", "b", "c", "d"}) {
+        seg.push_back(std::make_unique<segment_node_sim>());
+        infos.push_back({._id = id, ._endpoint = std::string(id) + ":1"});
+    }
+    const auto assignments = kythira::initial_volume_assignments("kinesis", {"1", "2", "3"}, infos);
+    const auto sim_of = [&](const std::string& id) -> segment_node_sim& {
+        for (std::size_t i = 0; i < infos.size(); ++i) {
+            if (infos[i]._id == id) {
+                return *seg[i];
+            }
+        }
+        throw std::out_of_range(id);
+    };
+    std::vector<replica> rs(3);
+    for (std::size_t i = 0; i < 3; ++i) {
+        const auto& a = assignments[i];
+        auto& node = sim_of(a._segment_node);
+        node._service.assign(a._volume, a._epoch);
+        rs[i]._store =
+            std::make_unique<kythira::remote_segment_store>(node.transport(), a._volume, a._epoch);
+        rs[i]._sm = std::make_unique<sm_type>(rs[i]._store.get());
+    }
+
+    std::vector<std::vector<std::byte>> log;
+    std::size_t acked_records = 0;
+    // Commit one entry: every running replica applies it; it is
+    // acknowledged when two of three applied it and passed the barrier.
+    const auto commit = [&](const k::stream_command& c, std::size_t records) {
+        log.push_back(k::encode_command(c));
+        std::size_t durable = 0;
+        for (auto& r : rs) {
+            if (r._stopped) {
+                continue;
+            }
+            try {
+                (void)r._sm->apply(log.back(), log.size());
+                r._store->barrier();
+                ++durable;
+            } catch (const kythira::record_segment_error&) {
+                // A failed disk: this replica stops applying for good.
+                r._stopped = true;
+            }
+        }
+        if (durable >= 2) {
+            acked_records += records;
+            return true;
+        }
+        return false;
+    };
+
+    BOOST_REQUIRE(commit(
+        k::create_stream_command{
+            ._account = test_account, ._name = "s", ._shard_count = 1, ._created_ms = 1000},
+        0));
+    const auto key = k::routing_key(1, 0);
+    BOOST_REQUIRE(commit(k::open_shard_command{key}, 0));
+    for (int i = 0; i < 20; ++i) {
+        BOOST_REQUIRE(commit(append(key, 100 + i, 3, 50, static_cast<std::uint32_t>(i * 3)), 3));
+    }
+
+    // The segment node holding replica 2's volume goes away.
+    sim_of(assignments[1]._segment_node)._up->store(false);
+    for (int i = 20; i < 40; ++i) {
+        BOOST_TEST(commit(append(key, 100 + i, 3, 50, static_cast<std::uint32_t>(i * 3)), 3));
+    }
+    BOOST_TEST(rs[1]._stopped);
+    BOOST_TEST(!rs[0]._stopped);
+    BOOST_TEST(!rs[2]._stopped);
+
+    // Every acknowledged record is on both survivors, byte for byte.
+    const auto on_0 = all_records(*rs[0]._store, key);
+    BOOST_TEST(on_0.size() == acked_records);
+    BOOST_TEST((on_0 == all_records(*rs[2]._store, key)));
+    BOOST_TEST((rs[0]._store->local_segments(key) == rs[2]._store->local_segments(key)));
+
+    // The replacement: a volume on a node none of the survivors use, at
+    // the next epoch, restored from a survivor's snapshot and its peers.
+    const auto next =
+        kythira::replace_volume(assignments[1], {assignments[0], assignments[2]}, infos);
+    BOOST_REQUIRE(next.has_value());
+    BOOST_TEST(next->_epoch == 2U);
+    BOOST_TEST(next->_segment_node != assignments[1]._segment_node);
+    auto& home = sim_of(next->_segment_node);
+    home._service.assign(next->_volume, next->_epoch);
+    auto store = std::make_unique<kythira::remote_segment_store>(home.transport(), next->_volume,
+                                                                 next->_epoch);
+    auto* peer = rs[0]._store.get();
+    auto fetch = [&store, peer](const kythira::record_segment_descriptor& desc) {
+        const std::vector<std::string> peers{"replica-1"};
+        if (!store->fetch_segment(desc, peers,
+                                  [peer](const std::string&, const std::string& stream,
+                                         std::uint64_t first, std::uint64_t length) {
+                                      return peer->read_segment_bytes(stream, first, length);
+                                  })) {
+            throw kythira::record_segment_error("fetch failed");
+        }
+    };
+    rs[1]._sm = std::make_unique<sm_type>(store.get(), fetch);
+    rs[1]._sm->restore_from_snapshot(rs[0]._sm->get_state(), log.size());
+    rs[1]._store = std::move(store);
+    rs[1]._stopped = false;
+    BOOST_TEST((rs[1]._sm->get_state() == rs[0]._sm->get_state()));
+
+    // All three acknowledge again and stay identical.
+    for (int i = 40; i < 50; ++i) {
+        BOOST_TEST(commit(append(key, 100 + i, 3, 50, static_cast<std::uint32_t>(i * 3)), 3));
+    }
+    BOOST_TEST(!rs[1]._stopped);
+    BOOST_TEST((rs[1]._sm->get_state() == rs[0]._sm->get_state()));
+    BOOST_TEST(
+        (rs[1]._store->local_segments(key).back() == rs[0]._store->local_segments(key).back()));
+    BOOST_TEST(all_records(*rs[0]._store, key).size() == acked_records);
+
+    // The lost segment node comes back: the old volume is still there, but
+    // its replica is gone and nothing writes to it.
+    sim_of(assignments[1]._segment_node)._up->store(true);
+    BOOST_TEST(sim_of(assignments[1]._segment_node)._service.volumes().size() == 1U);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

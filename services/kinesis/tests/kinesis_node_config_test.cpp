@@ -412,9 +412,10 @@ BOOST_AUTO_TEST_CASE(a_data_and_segments_node_is_served) {
 BOOST_AUTO_TEST_CASE(a_role_set_this_build_cannot_serve_is_refused_naming_what_is_missing) {
     // No data role: the data-layer API.
     BOOST_TEST(refused_naming(role_vars("gateway,front_end"), "data-layer API"));
-    BOOST_TEST(refused_naming(role_vars("segments"), "data-layer API"));
-    // Data without segments: segment-node volumes.
-    BOOST_TEST(refused_naming(role_vars("gateway,front_end,data"), "segment node"));
+    BOOST_TEST(refused_naming(role_vars("gateway,segments"), "data-layer API"));
+    // A segment node, or data without segments, needs a segment layer.
+    BOOST_TEST(refused_naming(role_vars("segments"), "KINESIS_SEGMENT_NODES"));
+    BOOST_TEST(refused_naming(role_vars("gateway,front_end,data"), "KINESIS_SEGMENT_NODES"));
     // A gateway apart from its front end, and the reverse.
     BOOST_TEST(refused_naming(role_vars("gateway,data,segments"), "hands each call"));
     BOOST_TEST(refused_naming(role_vars("front_end,data,segments"), "front-end API"));
@@ -437,4 +438,69 @@ BOOST_AUTO_TEST_CASE(kythira_node_never_fills_in_the_roles) {
                "gateway,front_end,data,segments");
     vars["KINESIS_ROLES"] = "data,segments";
     BOOST_TEST(kn::from_env(kn::composite_env(lookup(vars)))._roles.to_string() == "data,segments");
+}
+
+// The segment layer (kinesis-independent-layers task 10, Requirements 9.4
+// and 9.8): KINESIS_SEGMENT_NODES, a data node keeping its segments on one
+// of them, and a segment node holding them.
+namespace {
+
+auto layer_vars(std::string roles, std::string node_id = "1")
+    -> std::map<std::string, std::string> {
+    return {
+        {"KYTHIRA_NODE_ID", std::move(node_id)},
+        {"KYTHIRA_PEERS",
+         "1=http://127.0.0.1:7001,2=http://127.0.0.1:7002,3=http://127.0.0.1:7003"},
+        {"KYTHIRA_RAFT_BIND", "127.0.0.1"},
+        {"KINESIS_ALLOW_PLAINTEXT", "true"},
+        {"KINESIS_STATIC_KEYS_FILE", "/k"},
+        {"KINESIS_DATA_DIR", "/d"},
+        {"KINESIS_FORWARD_SECRET", "0123456789abcdef0123"},
+        {"KINESIS_ROLES", std::move(roles)},
+        {"KINESIS_SEGMENT_NODES", "11=seg-a:8443@z1,12=seg-b:8443@z2,13=seg-c:8443@z3"},
+    };
+}
+
+}  // namespace
+
+BOOST_AUTO_TEST_CASE(a_data_node_keeps_its_segments_on_a_segment_node) {
+    const auto o = kn::from_env(lookup(layer_vars("data")));
+    BOOST_TEST(o._roles.to_string() == "data");
+    BOOST_REQUIRE_EQUAL(o._segment_nodes.size(), 3U);
+    BOOST_TEST(o._segment_nodes[1]._placement_group == "z2");
+    const auto as = kn::volume_assignments(o);
+    BOOST_REQUIRE_EQUAL(as.size(), 3U);
+    const auto mine = kythira::assignment_of(as, "1");
+    BOOST_REQUIRE(mine.has_value());
+    BOOST_TEST(mine->_volume == "kinesis-1");
+    BOOST_TEST(mine->_epoch == 1U);
+    const auto text = kn::describe(o);
+    BOOST_TEST(text.find("segment_node 12=seg-b:8443 group=z2") != std::string::npos);
+    BOOST_TEST(text.find("volume kinesis-1 on segment_node ") != std::string::npos);
+    // data,segments with a segment layer still keeps its own segments.
+    BOOST_TEST(kn::from_env(lookup(layer_vars("data,segments")))._roles.to_string() ==
+               "data,segments");
+}
+
+BOOST_AUTO_TEST_CASE(a_segment_node_is_listed_and_is_not_a_voter) {
+    // Not in KYTHIRA_PEERS, and no loopback Raft bind needed.
+    auto vars = layer_vars("segments", "12");
+    vars["KYTHIRA_RAFT_BIND"] = "0.0.0.0";
+    const auto o = kn::from_env(lookup(vars));
+    BOOST_TEST(kn::is_segment_node(o._roles));
+    BOOST_TEST(!kn::is_segment_node(kn::from_env(lookup(layer_vars("data")))._roles));
+    // A segment node must be one of the listed nodes.
+    BOOST_TEST(refused_naming(layer_vars("segments", "14"), "listed in KINESIS_SEGMENT_NODES"));
+}
+
+BOOST_AUTO_TEST_CASE(a_segment_layer_too_small_or_unsigned_is_refused) {
+    auto vars = layer_vars("data");
+    vars["KINESIS_SEGMENT_NODES"] = "11=seg-a:8443,12=seg-b:8443";
+    BOOST_TEST(refused_naming(vars, "3 data replicas need 3 segment nodes"));
+    vars = layer_vars("data");
+    vars["KINESIS_SEGMENT_NODES"] = "11=seg-a";
+    BOOST_TEST(refused_naming(vars, "KINESIS_SEGMENT_NODES: segment node"));
+    vars = layer_vars("data");
+    vars.erase("KINESIS_FORWARD_SECRET");
+    BOOST_TEST(refused_naming(vars, "KINESIS_FORWARD_SECRET"));
 }

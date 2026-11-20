@@ -347,6 +347,54 @@ BOOST_AUTO_TEST_CASE(without_a_secret_the_internal_endpoints_do_not_exist) {
     BOOST_TEST(s->_status == 404U);
 }
 
+// kinesis-independent-layers task 10: a data node without `segments`
+// writes its record segments through the volume API of the node holding
+// its volume. Signed with the forwarding secret, and only where a volume
+// service is set.
+BOOST_AUTO_TEST_CASE(a_data_node_writes_its_segments_through_the_volume_api) {
+    node n;
+    temp_dir vd;
+    kythira::segment_volume_service volumes(
+        kythira::segment_volume_service_options{.data_dir = vd._path, .store = {}});
+    volumes.assign("kinesis-2", 1);
+    n._gateway->set_volume_service(&volumes);
+    const auto c = plain_client();
+
+    kythira::remote_segment_store store(
+        kin::make_volume_transport(c, std::string(k_secret), n.address()), "kinesis-2", 1);
+    const std::vector<std::byte> data(100, std::byte{7});
+    (void)store.append("shard-1", kythira::segment_record_view{1, 1000, data});
+    store.barrier();
+    const auto r = store.read("shard-1", 0);
+    BOOST_REQUIRE_EQUAL(r._records.size(), 1U);
+    BOOST_TEST((r._records.front()._data == data));
+    BOOST_TEST(store.space().second > 0U);
+    // The bytes are in the volume's own directory on the segment node.
+    BOOST_TEST(std::filesystem::exists(volumes.volume_dir("kinesis-2") / "streams"));
+
+    // Unsigned, signed over the bare body, or the wrong secret: 403.
+    const std::string body("\x83\x0f\x69kinesis-2\x01", 13);
+    const auto unsigned_post =
+        c.request(n.address(), http::verb::post, kin::k_volume_path, {}, body);
+    BOOST_TEST_REQUIRE(unsigned_post.has_value());
+    BOOST_TEST(unsigned_post->_status == 403U);
+    const auto bare = kin::forward::sign(k_secret, body, std::chrono::system_clock::now());
+    const auto replayed = c.request(n.address(), http::verb::post, kin::k_volume_path,
+                                    {{std::string(kin::forward::k_header), bare}}, body);
+    BOOST_TEST_REQUIRE(replayed.has_value());
+    BOOST_TEST(replayed->_status == 403U);
+    BOOST_CHECK_THROW(
+        (void)std::make_unique<kythira::remote_segment_store>(
+            kin::make_volume_transport(c, "another secret of 16+", n.address()), "kinesis-2", 1),
+        kythira::record_segment_error);
+
+    // A node holding no volumes does not serve the path.
+    node other;
+    const auto absent = c.request(other.address(), http::verb::post, kin::k_volume_path, {}, body);
+    BOOST_TEST_REQUIRE(absent.has_value());
+    BOOST_TEST(absent->_status == 404U);
+}
+
 BOOST_AUTO_TEST_CASE(a_peer_fetches_a_segment_and_the_store_verifies_it) {
     node source;
     const auto c = plain_client();

@@ -94,6 +94,17 @@ public:
         return _barrier_requests;
     }
 
+    /// The segment node's storage as `{capacity, available}` bytes: what
+    /// this data node reports to the capacity policy in place of its own
+    /// disk (task 10, Requirement 10.6). Throws `record_segment_error` when
+    /// the segment node cannot be reached.
+    [[nodiscard]] auto space() const -> std::pair<std::uint64_t, std::uint64_t> {
+        auto r = call(volume_wire::op::space, [](volume_wire::writer&) {}, 0);
+        const auto capacity = r.uint();
+        const auto available = r.uint();
+        return {capacity, available};
+    }
+
     [[nodiscard]] auto max_record_bytes() const noexcept -> std::uint32_t override {
         return _max_record_bytes;
     }
