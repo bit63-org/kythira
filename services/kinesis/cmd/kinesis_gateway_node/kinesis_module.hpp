@@ -64,6 +64,9 @@
 #include <raft/multi_raft_transport_handles.hpp>
 #include <raft/persistence.hpp>
 #include <raft/record_segment_store.hpp>
+#include <raft/remote_segment_store.hpp>
+#include <raft/segment_volume_placement.hpp>
+#include <raft/segment_volume_service.hpp>
 #include <raft/service_module.hpp>
 #include <raft/static_key_authorizer.hpp>
 #include <raft/static_or_iam_authorizer.hpp>
@@ -78,6 +81,7 @@
 #include <fstream>
 #include <iostream>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <sstream>
 #include <stdexcept>
@@ -266,18 +270,21 @@ public:
     }
 
     void register_groups(Host& host, const service_node::group_space& space) override {
-        std::filesystem::create_directories(_opt._data_dir / "raft");
-        std::filesystem::create_directories(_opt._data_dir / "segments");
-        kythira::record_segment_store_options so;
-        so._data_dir = _opt._data_dir / "segments";
-        _store = std::make_unique<kythira::record_segment_store>(so);
-
         _peers = std::make_unique<kinesis::peer_client>(kinesis::peer_client_config{
             ._tls = !_opt._allow_plaintext,
             ._ca_path = _opt._peer_ca_path,
             ._timeout = _opt._command_timeout,
             ._user_agent = std::string(kinesis::k_peer_user_agent),
         });
+        // The segment layer (kinesis-independent-layers task 10): a node
+        // listed in KINESIS_SEGMENT_NODES holds the volumes placed on it,
+        // and a segment node holds nothing else.
+        open_volumes();
+        if (is_segment_node(_opt._roles)) {
+            return;
+        }
+        std::filesystem::create_directories(_opt._data_dir / "raft");
+        open_store();
         for (const auto& [id, gw] : _opt._peer_gateways) {
             if (id != _opt._node_id) {
                 _other_gateways.push_back(gw);
@@ -337,6 +344,10 @@ public:
     }
 
     void start(service_node::module_registry& registry) override {
+        if (is_segment_node(_opt._roles)) {
+            start_segment_node();
+            return;
+        }
         if (_iam_in_process) {
             // IAM starts first (starts_after), so its evaluator answers
             // before this module serves a request.
@@ -482,6 +493,7 @@ public:
         _on_demand.reset();
         _maintenance.reset();
         _server.reset();
+        _volumes.reset();
         _leases.reset();
         _gateway.reset();
         _service.reset();
@@ -494,6 +506,12 @@ public:
         if (!_started) {
             return {false, "not started"};
         }
+        // A replica whose volume does not answer has stopped applying
+        // (Requirement 9.5): say so, so the data layer replaces it.
+        if (_remote != nullptr && !_volume_reachable.load(std::memory_order_acquire)) {
+            return {false, "segment volume " + _remote->volume() +
+                               " is unreachable on segment node " + _volume_node};
+        }
         return {true, {}};
     }
 
@@ -501,10 +519,15 @@ public:
         if (!_started) {
             return {};
         }
-        std::vector<service_node::module_metric> out{
-            {"groups", static_cast<double>(_groups), {}},
-            {"voters", static_cast<double>(_voters.size()), {}},
-            {"raft_term_sum", service_node::raft_term_sum(*_raft), {}}};
+        std::vector<service_node::module_metric> out;
+        if (_raft) {
+            out.push_back({"groups", static_cast<double>(_groups), {}});
+            out.push_back({"voters", static_cast<double>(_voters.size()), {}});
+            out.push_back({"raft_term_sum", service_node::raft_term_sum(*_raft), {}});
+        }
+        if (_volumes) {
+            out.push_back({"segment_volumes", static_cast<double>(_volumes->volumes().size()), {}});
+        }
         // One series per role this node runs (kinesis-independent-layers
         // Requirement 2.6), so a dashboard can count each layer.
         for (const auto r : kythira::layers::every_role) {
@@ -520,6 +543,133 @@ public:
     [[nodiscard]] auto api_port() const -> std::uint16_t { return _server ? _server->port() : 0; }
 
 private:
+    /// The record segment store: the node's own directory, or with
+    /// `KINESIS_ROLES` lacking `segments`, its volume on the segment node
+    /// KINESIS_SEGMENT_NODES places it on. A segment node that is not up
+    /// yet, or has not assigned the volume yet, is waited for; one that
+    /// stays away fails the start.
+    void open_store() {
+        if (_opt._roles.has(kythira::layers::role::segments)) {
+            std::filesystem::create_directories(_opt._data_dir / "segments");
+            kythira::record_segment_store_options so;
+            so._data_dir = _opt._data_dir / "segments";
+            _store = std::make_unique<kythira::record_segment_store>(so);
+            return;
+        }
+        const auto self = kythira::host_node_id_text(_opt._node_id);
+        const auto assignment = kythira::assignment_of(volume_assignments(_opt), self);
+        const auto node =
+            assignment ? kythira::segment_node_of(_opt._segment_nodes, assignment->_segment_node)
+                       : std::nullopt;
+        if (!assignment || !node) {
+            throw std::invalid_argument("kinesis: no segment volume is placed for node " + self);
+        }
+        _volume_node = node->_id;
+        auto inner = kinesis::make_volume_transport(*_peers, _opt._forward_secret, node->_endpoint);
+        kythira::segment_volume_transport transport =
+            [this, inner = std::move(inner)](std::vector<std::byte> request) {
+                auto r = inner(std::move(request));
+                _volume_reachable.store(r.has_value(), std::memory_order_release);
+                return r;
+            };
+        const auto deadline = std::chrono::steady_clock::now() + k_volume_wait;
+        for (;;) {
+            try {
+                auto remote = std::make_unique<kythira::remote_segment_store>(
+                    transport, assignment->_volume, assignment->_epoch);
+                _remote = remote.get();
+                _store = std::move(remote);
+                break;
+            } catch (const kythira::record_segment_error& e) {
+                if (std::chrono::steady_clock::now() >= deadline) {
+                    throw kythira::record_segment_error(
+                        "kinesis: segment node " + node->_id + " (" + node->_endpoint +
+                        ") did not open volume " + assignment->_volume + ": " + e.what());
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(500));
+            }
+        }
+        log_info("kinesis: record segments on volume " + assignment->_volume + " epoch " +
+                 std::to_string(assignment->_epoch) + " at segment node " + node->_id + " (" +
+                 node->_endpoint + ")");
+    }
+
+    /// The volumes KINESIS_SEGMENT_NODES places on this node, when it is
+    /// one of them and runs `segments`. Re-assigning at the same epoch on
+    /// restart keeps each volume's files.
+    void open_volumes() {
+        const auto self = kythira::host_node_id_text(_opt._node_id);
+        if (!_opt._roles.has(kythira::layers::role::segments) ||
+            !kythira::segment_node_of(_opt._segment_nodes, self)) {
+            return;
+        }
+        // The local store's defaults: a replica's files must match what a
+        // co-located replica would write (Requirement 9.7).
+        _volumes = std::make_unique<kythira::segment_volume_service>(
+            kythira::segment_volume_service_options{.data_dir = _opt._data_dir, .store = {}});
+        for (const auto& a : volume_assignments(_opt)) {
+            if (a._segment_node == self) {
+                _volumes->assign(a._volume, a._epoch);
+            }
+        }
+    }
+
+    /// A segment node's listener: health and the volume API, nothing else.
+    void start_segment_node() {
+        https::server_config hc;
+        hc.bind_address = _opt._listen_host;
+        hc.port = _opt._listen_port;
+        hc.tls_cert_path = _opt._tls_cert_path;
+        hc.tls_key_path = _opt._tls_key_path;
+        hc.insecure_plaintext = _opt._allow_plaintext;
+        hc.max_body_bytes = _opt._max_body_bytes;
+        hc.max_connections = _opt._max_connections;
+        _server = std::make_unique<https::server>(
+            hc,
+            [this](const https::request& req, const https::request_context&) {
+                const std::string_view target = req.target();
+                const auto path = target.substr(0, target.find('?'));
+                if (path == kinesis::k_health_path &&
+                    req.method() == boost::beast::http::verb::get) {
+                    auto res = kinesis::gateway_detail::reply(req, 200, "ok\n", "text/plain");
+                    res.set(kinesis::k_roles_header, _opt._roles.to_string());
+                    return res;
+                }
+                if (path == kinesis::k_volume_path) {
+                    return kinesis::serve_volume(req, _opt._forward_secret, *_volumes,
+                                                 std::chrono::system_clock::now());
+                }
+                return kinesis::gateway_detail::reply(req, 404, "not found\n", "text/plain");
+            },
+            [this](bool warning, std::string_view message) {
+                _logger->log(warning ? kythira::log_level::warning : kythira::log_level::info,
+                             "kinesis segment node: " + std::string(message), {});
+            });
+        _server->start();
+        _started = true;
+        std::cout << "kinesis_gateway_node " << kythira::host_node_id_text(_opt._node_id)
+                  << " ready: segment node, volumes=" << _volumes->volumes().size()
+                  << " kinesis=" << _server->port()
+                  << (_opt._allow_plaintext ? " (http)" : " (https)") << std::endl;
+    }
+
+    /// The segment node's `{capacity, available}`, asked at most every few
+    /// seconds; the last answer while it does not reply, nullopt before
+    /// the first.
+    [[nodiscard]] auto segment_space() -> std::optional<std::pair<std::uint64_t, std::uint64_t>> {
+        const std::scoped_lock lock(_space_mu);
+        const auto now = std::chrono::steady_clock::now();
+        if (_remote != nullptr && (!_space || now - _space_at >= std::chrono::seconds{5})) {
+            _space_at = now;
+            try {
+                _space = _remote->space();
+            } catch (const std::exception&) {
+                // Keep the last answer: a missed reply is not an empty disk.
+            }
+        }
+        return _space;
+    }
+
     /// KINESIS_AUTH=both: an access key id may be in the key file or in
     /// IAM, not both.
     [[nodiscard]] auto key_clash() const -> std::optional<std::string> {
@@ -565,6 +715,14 @@ private:
         cfg.executor_stripes = _opt._executor_stripes;
         cfg.policy_interval = _opt._policy_interval;
         cfg.partitioner = kythira::make_partitioner<std::string>(stream_partitioner{});
+        // A data node on a volume reports its segment node's storage, so
+        // the data layer's capacity policy counts the segment layer's room
+        // (Requirement 10.6).
+        if (_remote != nullptr) {
+            cfg.capacity_probe = [this] {
+                return segment_space().value_or(std::pair<std::uint64_t, std::uint64_t>{0, 0});
+            };
+        }
         return cfg;
     }
 
@@ -650,8 +808,18 @@ private:
             const auto it = gateways.find(id);
             return it == gateways.end() ? std::nullopt : std::optional{it->second};
         };
-        _guard = std::make_unique<kinesis::disk_guard>(_opt._data_dir / "segments",
-                                                       _opt._disk_floor_bytes);
+        // On a volume, the guarded disk is the segment node's.
+        _guard = _remote == nullptr ? std::make_unique<kinesis::disk_guard>(
+                                          _opt._data_dir / "segments", _opt._disk_floor_bytes)
+                                    : std::make_unique<kinesis::disk_guard>(
+                                          _opt._disk_floor_bytes,
+                                          [this]() -> std::optional<std::uint64_t> {
+                                              if (auto s = segment_space()) {
+                                                  return s->second;
+                                              }
+                                              return std::nullopt;
+                                          },
+                                          [] { return wall_ms(); }, std::chrono::seconds{5});
         _cluster =
             std::make_unique<cluster_type>(*_raft,
                                            kinesis::make_http_forwarder<kythira::host_node_id>(
@@ -704,6 +872,7 @@ private:
                    kinesis::admission mode) { return _cluster->propose_local(key, command, mode); },
             _store.get(), _opt._forward_secret);
         _gateway->set_roles(_opt._roles);
+        _gateway->set_volume_service(_volumes.get());
         _leases = std::make_unique<kinesis::lease_api<cluster_type, authorizer_type>>(
             *_cluster, *_authorizer, fc);
         _gateway->set_lease_handler(
@@ -787,7 +956,19 @@ private:
     std::unique_ptr<authorizer_type> _authorizer;
     kinesis::kinesis_compat_profile _profile{};
 
-    std::unique_ptr<kythira::record_segment_store> _store;
+    /// How long a data node waits for its segment node at start.
+    static constexpr auto k_volume_wait = std::chrono::seconds{60};
+
+    std::unique_ptr<kythira::segment_store> _store;
+    /// `_store` when it is a volume on a segment node.
+    kythira::remote_segment_store* _remote = nullptr;
+    std::string _volume_node;
+    std::atomic<bool> _volume_reachable{true};
+    std::mutex _space_mu;
+    std::optional<std::pair<std::uint64_t, std::uint64_t>> _space;
+    std::chrono::steady_clock::time_point _space_at{};
+    /// The volumes this node holds for data nodes without `segments`.
+    std::unique_ptr<kythira::segment_volume_service> _volumes;
     std::unique_ptr<kinesis::peer_client> _peers;
     std::vector<std::string> _other_gateways;
     kythira::segment_store::fetch_transport _transport;

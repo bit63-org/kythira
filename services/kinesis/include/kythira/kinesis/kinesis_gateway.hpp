@@ -22,6 +22,9 @@
 ///   trusted for content). Signed like a forwarded write, over the path and
 ///   query, so a segment cannot be read by anyone without the cluster
 ///   secret.
+/// - `POST /_kythira/kinesis/v1/volume`: a volume API request from a data
+///   node whose record segments live on this segment node (task 10 of
+///   kinesis-independent-layers), signed like a forwarded write.
 /// - `POST /_kythira/kinesis/v1/txn`: a resharding transaction op (task 11)
 ///   another gateway's coordinator sends to the leader of the keys' group,
 ///   submitted here with `submit_txn` when the composition root sets a
@@ -58,6 +61,8 @@
 #include <raft/beast_https_server.hpp>
 #include <raft/layer_roles.hpp>
 #include <raft/record_segment_store.hpp>
+#include <raft/remote_segment_store.hpp>
+#include <raft/segment_volume_service.hpp>
 
 #include <boost/beast/http.hpp>
 #include <boost/json.hpp>
@@ -77,6 +82,21 @@
 namespace kythira::kinesis {
 
 inline constexpr std::string_view k_segment_path = "/_kythira/kinesis/v1/segment";
+/// The volume API a data node without the `segments` role writes its
+/// record segments through (kinesis-independent-layers task 10): `POST`,
+/// the body one `segment_volume_service` request, signed with the
+/// forwarding secret over `volume_signed_text`.
+inline constexpr std::string_view k_volume_path = "/_kythira/kinesis/v1/volume";
+
+/// What a volume call's signature covers: the path, then the body, so a
+/// signed volume request cannot be replayed as a forwarded write or a
+/// transaction op.
+[[nodiscard]] inline auto volume_signed_text(std::string_view body) -> std::string {
+    std::string out(k_volume_path);
+    out.push_back('\n');
+    out.append(body);
+    return out;
+}
 inline constexpr std::string_view k_health_path = "/healthz";
 inline constexpr std::string_view k_metrics_path = "/metrics";
 /// The node's role set, on `/healthz` and on a refusal for want of one.
@@ -241,6 +261,30 @@ namespace gateway_detail {
     return std::string(k_segment_path) + "?" + std::string(query);
 }
 
+/// Answers a volume API request on the internal listener: a `POST` whose
+/// body `secret` signs, handed to `volumes`. 404 without a secret (a
+/// single node has no peers to serve); the service's own answer, with its
+/// status inside, otherwise.
+[[nodiscard]] inline auto serve_volume(const https::request& req, std::string_view secret,
+                                       segment_volume_service& volumes,
+                                       std::chrono::system_clock::time_point now)
+    -> https::response {
+    if (secret.empty()) {
+        return gateway_detail::reply(req, 404, "not found\n", "text/plain");
+    }
+    if (req.method() != boost::beast::http::verb::post) {
+        return gateway_detail::reply(req, 405, "method not allowed\n", "text/plain");
+    }
+    const auto it = req.find(forward::k_header);
+    if (it == req.end() ||
+        !forward::verify(secret, it->value(), volume_signed_text(req.body()), now)) {
+        return gateway_detail::reply(req, 403, "bad or stale forwarding signature\n", "text/plain");
+    }
+    const auto request = gateway_detail::to_bytes(req.body());
+    return gateway_detail::reply(req, 200, gateway_detail::to_string(volumes.handle(request)),
+                                 "application/cbor");
+}
+
 struct gateway_stats {
     std::atomic<std::uint64_t> _forwarded_in{0};
     std::atomic<std::uint64_t> _forward_refused{0};
@@ -289,6 +333,12 @@ public:
         }
         if (path == forward::k_txn_path) {
             return txn(req);
+        }
+        if (path == k_volume_path) {
+            if (_volumes == nullptr) {
+                return gateway_detail::reply(req, 404, "not found\n", "text/plain");
+            }
+            return serve_volume(req, _secret, *_volumes, _clock());
         }
         if (!_roles.has(layers::role::gateway)) {
             return not_a_gateway(req);
@@ -358,6 +408,11 @@ public:
     /// listener starts.
     void set_txn_handler(txn_handler h) { _txn = std::move(h); }
 
+    /// Serve `k_volume_path` from `volumes`: this node holds volumes for
+    /// data nodes without the `segments` role. Set before the listener
+    /// starts; it must outlive the gateway.
+    void set_volume_service(segment_volume_service* volumes) { _volumes = volumes; }
+
     /// Serve `k_metrics_path` with what `h` renders. Set before the
     /// listener starts.
     void set_metrics_handler(std::function<std::string()> h) { _metrics = std::move(h); }
@@ -378,6 +433,7 @@ private:
     std::function<std::string()> _metrics;
     lease_handler _leases;
     txn_handler _txn;
+    segment_volume_service* _volumes = nullptr;
     local_proposer _propose;
     const segment_store* _store;
     std::string _secret;
@@ -576,6 +632,34 @@ template<typename NodeId>
         const auto res = client.request(peer, boost::beast::http::verb::get,
                                         std::string(k_segment_path) + "?" + query,
                                         {{std::string(forward::k_header), signature}});
+        if (!res || res->_status != 200) {
+            return std::nullopt;
+        }
+        return gateway_detail::to_bytes(res->_body);
+    };
+}
+
+/// A data node's volume transport: posts each volume API request to the
+/// segment node at `endpoint` (`host:port`), signed with `secret`;
+/// `nullopt` when the node cannot be reached or refuses the call outright
+/// (which `remote_segment_store` treats as an unreachable volume).
+[[nodiscard]] inline auto make_volume_transport(
+    const peer_client& client, std::string secret, std::string endpoint,
+    std::function<std::chrono::system_clock::time_point()> clock = [] {
+        return std::chrono::system_clock::now();
+    }) -> segment_volume_transport {
+    return [&client, secret = std::move(secret), endpoint = std::move(endpoint),
+            clock = std::move(clock)](
+               std::vector<std::byte> request) -> std::optional<std::vector<std::byte>> {
+        if (secret.empty()) {
+            return std::nullopt;
+        }
+        auto body = gateway_detail::to_string(request);
+        const auto signature = forward::sign(secret, volume_signed_text(body), clock());
+        const auto res = client.request(
+            endpoint, boost::beast::http::verb::post, k_volume_path,
+            {{std::string(forward::k_header), signature}, {"Content-Type", "application/cbor"}},
+            std::move(body));
         if (!res || res->_status != 200) {
             return std::nullopt;
         }
