@@ -105,10 +105,19 @@ group's stripe.
 
 **Off-tick flush (Req 3.2).** Sends that arrive outside the send phase are
 flushed by `flush_due`, driven from a small timer thread the batcher owns,
-waking every `_max_delay`. The thread sleeps on a condition variable while
+waking every `_max_delay`. Each wake flushes every destination whose oldest
+member would pass `_max_delay` before the next wake, so no member waits
+longer than `_max_delay` for the timer. The thread sleeps on a condition variable while
 every queue is empty, so an idle host pays nothing. The tick's own
 `flush_all` covers everything enqueued during the send phase, so most
 heartbeats never wait for the timer.
+
+**Futures.** `group_scoped_client::send_append_entries` returns either the
+batcher's future or the shared client's, so they must be one type. The
+batcher makes its futures from the project's default promise
+(`promise_default<T>` for `future_default<T>`), which is what every batching
+transport returns; a client returning any other future type does not satisfy
+`append_entries_batching_client` and never batches.
 
 **Completion.** A batch's response is matched to members by position. A
 whole-batch exception fails every member (Req 2.2). A batch that fails with
@@ -121,11 +130,26 @@ resends that batch's members alone without marking (Req 5.4).
 `multi_group_network_server::start()` already registers one lambda per RPC
 type on the inner server. When the inner server satisfies the batch concept,
 it registers one more: for each member, look up `request.group_id()` in the
-group table exactly as the single-message lambda does, run the handler on
-the group's stripe, and collect the result. Members for different groups run
-concurrently on their own stripes; the handler returns when all have
-finished. A missing group yields `batch_member_error{unknown_group}` instead
-of failing the batch.
+group table exactly as the single-message lambda does, run the handler, and
+collect the result. A handler that throws yields
+`batch_member_error{handler_failed}` for that member only.
+
+**As built (task 4), two departures from the draft above.**
+
+- Members run one after another, in array order, on the transport's thread
+  that received the batch. A lone AppendEntries runs its handler on the
+  transport's thread too: the demultiplexer has no stripe of its own to run
+  on, and the node's lock is what serialises a group. Sequential dispatch
+  keeps every guarantee the single-message path gives (Req 2.4, 2.6) at the
+  cost of a batch completing at the sum of its members' handler times rather
+  than the slowest. Task 9's p99 commit latency is where that shows; posting
+  members to their groups' stripes is the remedy if it does.
+- A member for a group with no replica goes through the demultiplexer's own
+  fallback (tombstone check, lazy creation, then the refusal at the sender's
+  term), so its answer is a normal response byte for byte equal to what a
+  lone message gets (Req 2.3). `batch_member_error{unknown_group}` stays in
+  the wire format for a server that cannot build that refusal; the batcher
+  rebuilds the same refusal from it on the sending side.
 
 ## Wire
 

@@ -75,6 +75,18 @@ template<typename NodeId>
     }
 }
 
+// A peer refused a request as too large: more batch members than it accepts,
+// or a body above its request limit (HTTP 413). Raised by the batched
+// AppendEntries RPC (.kiro/specs/multi-raft-message-batching/, Requirement
+// 5.4); the batcher answers it by sending that batch's members one by one,
+// without concluding that the peer cannot take batches at all, which is what
+// separates it from `rpc_not_implemented_exception`.
+class rpc_payload_too_large_exception : public network_exception {
+public:
+    explicit rpc_payload_too_large_exception(const std::string& message)
+        : network_exception(message) {}
+};
+
 // Exception for persistence-related errors
 class persistence_exception : public raft_exception {
 public:

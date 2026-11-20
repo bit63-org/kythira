@@ -33,6 +33,7 @@
 /// multiple Raft groups" — obtained here by construction rather than by a
 /// pooling layer.
 
+#include <raft/append_entries_batcher.hpp>
 #include <raft/network.hpp>
 #include <raft/shard_types.hpp>
 #include <raft/synchronized.hpp>
@@ -45,6 +46,7 @@
 #include <functional>
 #include <memory>
 #include <unordered_map>
+#include <variant>
 #include <utility>
 
 namespace kythira {
@@ -317,15 +319,58 @@ public:
             [this](const typename Messages::append_entries_request_type& req) {
                 return dispatch(
                     req, [](const handlers_type& h) -> const auto& { return h._append_entries; },
-                    [&req] {
-                        return typename Messages::append_entries_response_type{
-                            ._term = req.term(),
-                            ._success = false,
-                            ._conflict_index = std::nullopt,
-                            ._conflict_term = std::nullopt,
-                            ._group_id = req.group_id()};
-                    });
+                    [&req] { return refused_append_entries(req); });
             });
+
+        if constexpr (network_server_with_append_entries_batch<Server,
+                                                               typename Messages::node_id_type>) {
+            // One batch, many groups (.kiro/specs/multi-raft-message-batching/).
+            // Each member goes through exactly the lookup a lone AppendEntries
+            // takes (Requirement 2.6), in array order, so two messages of one
+            // group reach its handler in the order they were sent (2.4), and a
+            // member for a group with no replica here gets the very refusal a
+            // lone message would (2.3) instead of failing its neighbours. A
+            // handler that throws fails only its own member.
+            //
+            // Members run one after another on this thread. A lone message's
+            // handler runs on the transport's thread too, and the node's own
+            // lock is what serialises a group, so this keeps every guarantee
+            // the single-message path gives; running members on their groups'
+            // stripes concurrently is left until the benchmark (task 9) shows
+            // head-of-line blocking matters.
+            _inner.register_append_entries_batch_handler(
+                [this](const append_entries_batch_request<
+                       typename Messages::append_entries_request_type>& batch) {
+                    append_entries_batch_response<typename Messages::append_entries_response_type>
+                        out;
+                    out._members.reserve(batch._members.size());
+                    for (const auto& req : batch._members) {
+                        try {
+                            out._members.emplace_back(
+                                std::in_place_index<0>,
+                                dispatch(
+                                    req,
+                                    [](const handlers_type& h) -> const auto& {
+                                        return h._append_entries;
+                                    },
+                                    [&req] { return refused_append_entries(req); }));
+                        } catch (const std::exception& e) {
+                            out._members.emplace_back(
+                                std::in_place_index<1>,
+                                batch_member_error{
+                                    ._kind = batch_member_error::kind_type::handler_failed,
+                                    ._message = e.what()});
+                        } catch (...) {
+                            out._members.emplace_back(
+                                std::in_place_index<1>,
+                                batch_member_error{
+                                    ._kind = batch_member_error::kind_type::handler_failed,
+                                    ._message = "unknown exception"});
+                        }
+                    }
+                    return out;
+                });
+        }
 
         _inner.register_install_snapshot_handler(
             [this](const typename Messages::install_snapshot_request_type& req) {
@@ -370,6 +415,19 @@ public:
     [[nodiscard]] auto inner() -> Server& { return _inner; }
 
 private:
+    /// @brief The answer to an AppendEntries no local replica can take: a
+    /// refusal at the sender's own term, which neither bumps its term nor
+    /// counts towards a commit.
+    [[nodiscard]] static auto refused_append_entries(
+        const typename Messages::append_entries_request_type& req) ->
+        typename Messages::append_entries_response_type {
+        return typename Messages::append_entries_response_type{._term = req.term(),
+                                                               ._success = false,
+                                                               ._conflict_index = std::nullopt,
+                                                               ._conflict_term = std::nullopt,
+                                                               ._group_id = req.group_id()};
+    }
+
     /// @brief Look the group up, run its handler, and fall back when it has none.
     ///
     /// The handler table is copied out as a `shared_ptr` under a read lock and
@@ -577,8 +635,16 @@ public:
     using group_id_type = GroupId;
     using messages_type = Messages;
 
+    /// The host's batcher type for this client; used only when the client
+    /// satisfies `append_entries_batching_client`.
+    using batcher_type = append_entries_batcher<Client, Messages>;
+
     group_scoped_client() = default;
     group_scoped_client(Client& inner, GroupId group) : _inner(&inner), _group(std::move(group)) {}
+    /// @param batcher The host's AppendEntries batcher, or null to send every
+    ///        message alone. Non-owning, like `inner`.
+    group_scoped_client(Client& inner, GroupId group, batcher_type* batcher)
+        : _inner(&inner), _group(std::move(group)), _batcher(batcher) {}
 
     [[nodiscard]] auto group_id() const -> const GroupId& { return _group; }
 
@@ -593,6 +659,16 @@ public:
     auto send_append_entries(typename Messages::node_id_type target,
                              const typename Messages::append_entries_request_type& req,
                              std::chrono::milliseconds timeout) {
+        // Batching is decided twice: at type level, whether the shared
+        // client can batch at all, and at run time, whether the host built
+        // a batcher (it does only when batching is enabled). Either "no" is
+        // today's path, unchanged (.kiro/specs/multi-raft-message-batching/
+        // Requirement 1.2, 1.4).
+        if constexpr (append_entries_batching_client<Client, Messages>) {
+            if (_batcher != nullptr) {
+                return _batcher->send(target, stamped(req), timeout);
+            }
+        }
         return _inner->send_append_entries(target, stamped(req), timeout);
     }
 
@@ -661,6 +737,7 @@ private:
 
     Client* _inner{nullptr};
     GroupId _group{};
+    batcher_type* _batcher{nullptr};
 };
 
 }  // namespace kythira

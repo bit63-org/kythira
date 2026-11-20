@@ -1908,6 +1908,17 @@ add_raft_completion_test(latency_digest_unit_test latency_digest_unit_test.cpp)
 add_raft_completion_test(composite_policy_unit_test composite_policy_unit_test.cpp)
 add_raft_completion_test(shard_placement_driver_unit_test shard_placement_driver_unit_test.cpp)
 add_raft_completion_test(multi_raft_placement_driver_test multi_raft_placement_driver_test.cpp)
+# .kiro/specs/multi-raft-message-batching/ tasks 2, 4 and 5: the AppendEntries
+# batcher and the demultiplexer's batch handler over fakes, then the four
+# multi-raft integration suites a second time with batched AppendEntries on
+# (Requirement 7.1). The static-cluster suite also carries the rolling-upgrade
+# case, which mixes batching and pre-batching hosts in either run.
+add_raft_completion_test(append_entries_batcher_unit_test append_entries_batcher_unit_test.cpp)
+foreach(_suite multi_raft_static_cluster_integration_test multi_raft_split_integration_test
+               multi_raft_merge_integration_test multi_raft_placement_driver_test)
+    add_test(NAME ${_suite}_batching COMMAND ${_suite})
+    set_tests_properties(${_suite}_batching PROPERTIES ENVIRONMENT "KYTHIRA_TEST_BATCHING=1")
+endforeach()
 add_raft_completion_test(leader_transfer_test leader_transfer_test.cpp)
 # .kiro/specs/http-coap-pre-vote-timeout-now/ tasks 5.4 and 6: PreVote and
 # TimeoutNow end to end over cpp-httplib, three multi_raft hosts on real

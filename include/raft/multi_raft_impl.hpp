@@ -91,6 +91,13 @@ multi_raft<Types, Key, GroupId>::multi_raft(config_type cfg)
         }
     }
 
+    if constexpr (k_transport_batches) {
+        if (_cfg.batching._enabled) {
+            _batcher = std::make_unique<batcher_type>(_client, _cfg.batching);
+            _batcher->set_info_logger([this](const std::string& msg) { _cfg.logger.info(msg); });
+        }
+    }
+
     _automatic_enabled.store(_cfg.automatic_split_merge_enabled);
     _last_policy_run = std::chrono::steady_clock::now();
 }
@@ -113,6 +120,9 @@ auto multi_raft<Types, Key, GroupId>::start() -> void {
         }
     }
     _demux.start();
+    if (_batcher) {
+        _batcher->start();
+    }
     for (const auto& g : all_groups()) {
         g->_node->start();
         note_activity(*g);
@@ -142,6 +152,12 @@ auto multi_raft<Types, Key, GroupId>::stop() -> void {
 
     for (const auto& g : all_groups()) {
         g->_node->stop();
+    }
+    // After the nodes, which may still have queued a heartbeat on the way
+    // out: send what is queued and wait for every batch in flight, so no
+    // completion runs against a stopped host.
+    if (_batcher) {
+        _batcher->stop();
     }
     _demux.stop();
 
@@ -225,7 +241,7 @@ auto multi_raft<Types, Key, GroupId>::create_group_impl(
 
     node_config<group_types> node_cfg{
         .node_id = _cfg.node_id,
-        .network_client = typename group_types::network_client_type{_client, group},
+        .network_client = typename group_types::network_client_type{_client, group, _batcher.get()},
         // The state, not the node, is the owner: it is what holds the node, and
         // it exists already, which the node does not.
         .network_server =
@@ -761,6 +777,8 @@ auto multi_raft<Types, Key, GroupId>::tick() -> tick_report {
     using clock = std::chrono::steady_clock;
 
     tick_report report;
+    const auto batches_before = _batcher ? _batcher->batches_sent() : 0;
+    const auto members_before = _batcher ? _batcher->members_sent() : 0;
     std::vector<group_ptr> hibernating;
     auto ready = select_ready(hibernating);
 
@@ -806,6 +824,14 @@ auto multi_raft<Types, Key, GroupId>::tick() -> tick_report {
             }
             g._node->replicate_to_followers_if_due();
         });
+        // Every AppendEntries this phase produced leaves now, so heartbeats
+        // and tick-driven replication never wait past the tick that made
+        // them (.kiro/specs/multi-raft-message-batching/ Requirement 3.1).
+        if (_batcher) {
+            _batcher->flush_all();
+            report._batches_sent = _batcher->batches_sent() - batches_before;
+            report._batched_members = _batcher->members_sent() - members_before;
+        }
         report._send_duration = clock::now() - t0;
     }
 

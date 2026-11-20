@@ -374,6 +374,7 @@ private:
         cfg.hibernation = hibernation_mode::off;
         KYTHIRA_TEST_STATE_ENGINE(cfg);
         cfg.executor_stripes = 2;
+        cfg.batching = kythira::testing::fabric_batching_config();
         cfg.allocate_group_ids = [this](std::size_t n) { return _ids.allocate(n); };
         // No cooldown here. The arbiter's one-hour default is right for a real
         // deployment and would mask every case in this file behind the first
@@ -1217,6 +1218,7 @@ BOOST_AUTO_TEST_CASE(the_external_lookup_is_rate_limited, *boost::unit_test::tim
     cfg.hibernation = hibernation_mode::off;
     KYTHIRA_TEST_STATE_ENGINE(cfg);
     cfg.executor_stripes = 1;
+    cfg.batching = kythira::testing::fabric_batching_config();
     cfg.unknown_group_lookup_interval = std::chrono::seconds{30};
     cfg.lookup_descriptor = [&lookups](const group_id_type&) -> std::optional<descriptor_type> {
         lookups.fetch_add(1);
@@ -1248,6 +1250,7 @@ BOOST_AUTO_TEST_CASE(lazy_creation_can_be_turned_off_entirely, *boost::unit_test
     cfg.hibernation = hibernation_mode::off;
     KYTHIRA_TEST_STATE_ENGINE(cfg);
     cfg.executor_stripes = 1;
+    cfg.batching = kythira::testing::fabric_batching_config();
     cfg.lazy_replica_creation = false;
     cfg.lookup_descriptor = [](const group_id_type&) -> std::optional<descriptor_type> {
         BOOST_FAIL("lookup must not be consulted when lazy creation is off");
