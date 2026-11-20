@@ -14,6 +14,13 @@
 #   run.sh throughput   PUT a KYTHIRA_MB (default 500) MB object to one node
 #                       and GET it back from another, timing both
 #                       (design.md Risks)
+#   run.sh matrix       aggregate PUT throughput for every pairing of
+#                       KYTHIRA_WRITERS concurrent writers (default
+#                       "1 4 16 32") and KYTHIRA_SIZES object sizes (default
+#                       "64K 2M"), plus KYTHIRA_LARGE_WRITERS (default "1 4")
+#                       writers of KYTHIRA_LARGE_SIZE objects (default 256M);
+#                       then each node's bytes written per byte stored
+#                       (GitHub issue 942)
 #
 # Each mode prints KYTHIRA_* lines that tests/docker_chaos/
 # cache_cluster_test.cpp parses, and exits 0 only if every build or install
@@ -199,12 +206,108 @@ run_throughput() {
     [[ "$put_code" == 201 && "$get_code" == 200 && "$match" == 1 ]]
 }
 
+# Bytes for a size written as N, NK or NM.
+size_bytes() {
+    local v="$1"
+    case "$v" in
+        *K) echo $((${v%K} * 1024)) ;;
+        *M) echo $((${v%M} * 1024 * 1024)) ;;
+        *) echo "$v" ;;
+    esac
+}
+
+# One node's /_metrics value, or 0. Needs the admin user.
+metric() {
+    local url="$1" name="$2"
+    curl -sS -u "${KYTHIRA_ADMIN_USER:-ops}:${KYTHIRA_ADMIN_PASSWORD:-ops-secret}" \
+        "${url}/_metrics" 2>/dev/null | awk -v n="$name" '$1 == n { print $2; found = 1 } END { if (!found) print 0 }'
+}
+
+# PUT one object of fresh random bytes and print its status:
+# matrix_put <url> <bytes> <key>. Fresh bytes because the chunk store keeps
+# one copy of identical chunks, and repeated content would hide the store's
+# writes from the amplification figure; real sccache objects are unique.
+# Streamed, so the client never holds an object: curl sends it chunked.
+matrix_put() {
+    head -c "$2" /dev/urandom |
+        curl -sS -o /dev/null -w '%{http_code}\n' -u "${user}:${password}" -T - "$1/$3" \
+            2>/dev/null || echo 000
+}
+
+# One cell: matrix_cell <writers> <size>. Writes max(writers,
+# KYTHIRA_CELL_MB / size) objects, spread round-robin over the nodes, keeps
+# `writers` PUTs in flight, and deletes them afterwards so the cells do not
+# add up against the disk budget. Every key is under `sccache/`, split over
+# its sixteen hex prefixes, so both sides of the `sccache/8` cut take
+# writes, as they do from a real CI run.
+matrix_cell() {
+    local writers="$1" size="$2" bytes count cell_bytes
+    bytes=$(size_bytes "$size")
+    cell_bytes=$(( ${KYTHIRA_CELL_MB:-128} * 1024 * 1024 ))
+    count=$(( cell_bytes / bytes ))
+    (( count < writers )) && count=$writers
+    local run i=0 jobs="${scratch}/matrix-jobs"
+    run="matrix/$(date +%s%N)"
+    : > "$jobs"
+    for ((i = 0; i < count; i++)); do
+        echo "${nodes[i % ${#nodes[@]}]} $bytes sccache/$(printf '%x' $((i % 16)))/${run}/${i}" >> "$jobs"
+    done
+    local begin end statuses
+    begin=$(date +%s.%N)
+    statuses=$(xargs -P "$writers" -L 1 bash -c 'matrix_put "$@"' _ < "$jobs")
+    end=$(date +%s.%N)
+    local ok
+    ok=$(grep -c '^201$' <<<"$statuses")
+    local seconds rate
+    seconds=$(awk -v a="$begin" -v b="$end" 'BEGIN{printf "%.2f", b - a}')
+    rate=$(awk -v n="$ok" -v s="$bytes" -v t="$seconds" 'BEGIN{printf "%.2f", (t > 0 ? n * s / t / 1048576 : 0)}')
+    echo "KYTHIRA_MATRIX writers=${writers} size=${size} bytes=${bytes} puts=${count} ok=${ok} seconds=${seconds} mib_per_s=${rate}"
+    while read -r node _ key; do
+        curl -sS -o /dev/null -u "${user}:${password}" -X DELETE "${node}/${key}" 2>/dev/null || true
+    done < "$jobs"
+    rm -f "$jobs"
+    [[ "$ok" == "$count" ]]
+}
+
+run_matrix() {
+    read -r -a nodes <<<"${KYTHIRA_NODE_URLS:-http://cache-1:8080 http://cache-2:8080 http://cache-3:8080}"
+    export -f matrix_put
+    export user password
+    wait_for_cache
+    local -A disk0 store0
+    local n
+    for n in "${nodes[@]}"; do
+        disk0[$n]=$(metric "$n" kythira_cache_disk_write_bytes)
+        store0[$n]=$(metric "$n" kythira_cache_store_written_bytes)
+    done
+    local failed=0 w s
+    for s in ${KYTHIRA_SIZES:-64K 2M}; do
+        for w in ${KYTHIRA_WRITERS:-1 4 16 32}; do
+            matrix_cell "$w" "$s" || failed=1
+        done
+    done
+    for w in ${KYTHIRA_LARGE_WRITERS:-1 4}; do
+        matrix_cell "$w" "${KYTHIRA_LARGE_SIZE:-256M}" || failed=1
+    done
+    # Bytes written per byte stored, per node, over the whole matrix: the
+    # process's own write_bytes, so a RAID member or an overlay layer does
+    # not count a write twice.
+    for n in "${nodes[@]}"; do
+        local disk store
+        disk=$(( $(metric "$n" kythira_cache_disk_write_bytes) - ${disk0[$n]} ))
+        store=$(( $(metric "$n" kythira_cache_store_written_bytes) - ${store0[$n]} ))
+        echo "KYTHIRA_AMPLIFICATION node=${n} disk_bytes=${disk} store_bytes=${store} ratio=$(awk -v d="$disk" -v s="$store" 'BEGIN{printf "%.2f", (s > 0 ? d / s : 0)}')"
+    done
+    return "$failed"
+}
+
 case "${1:-}" in
     sccache) run_sccache ;;
     vcpkg) run_vcpkg ;;
     throughput) run_throughput ;;
+    matrix) run_matrix ;;
     *)
-        echo "usage: run.sh sccache|vcpkg|throughput" >&2
+        echo "usage: run.sh sccache|vcpkg|throughput|matrix" >&2
         exit 64
         ;;
 esac
