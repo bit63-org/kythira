@@ -936,8 +936,12 @@ public:
     /// that negotiated one must not be sent the other. This is the one
     /// serializer whose media type depends on instance state rather than being
     /// a constant.
-    [[nodiscard]] auto media_type() const -> std::string {
-        return _encoding == ion_encoding::binary ? "application/x-amzn-ion" : "text/x-amzn-ion";
+    /// Returns a reference to one of two constants, so the per-request
+    /// `supports()` check allocates nothing (doc/memory_profiling.md).
+    [[nodiscard]] auto media_type() const -> const std::string& {
+        static const std::string k_binary{"application/x-amzn-ion"};
+        static const std::string k_text{"text/x-amzn-ion"};
+        return _encoding == ion_encoding::binary ? k_binary : k_text;
     }
 
 private:

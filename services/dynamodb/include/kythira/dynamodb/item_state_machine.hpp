@@ -768,6 +768,14 @@ public:
         return best;
     }
 
+    /// Makes every write so far durable (`SyncWAL` on RocksDB), so
+    /// `durable_applied_index()` reaches the applied index. The Raft node
+    /// calls this before it compacts the log (`persistent_sync_lag_entries`);
+    /// without it an engine that only syncs when asked never lets the log
+    /// compact, and the log grows in memory until the node restarts
+    /// (doc/memory_profiling.md).
+    auto sync_durable() -> void { engine().sync(engine().latest_sequence()); }
+
     /// The engine's checkpoint of the range, plus (when the group logs
     /// changes) a file describing the open stream's active segment as it
     /// stands, so a replica installing the snapshot can fetch exactly that

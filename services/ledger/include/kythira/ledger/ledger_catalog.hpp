@@ -285,6 +285,23 @@ public:
         return best;
     }
 
+    /// Makes every write so far durable (`SyncWAL` on RocksDB), so
+    /// `durable_applied_index()` reaches the applied index. The Raft node
+    /// calls this before it compacts the log (`persistent_sync_lag_entries`);
+    /// without it an engine that only syncs when asked never lets the log
+    /// compact, and the log grows in memory until the node restarts
+    /// (doc/memory_profiling.md).
+    auto sync_durable() -> void {
+        engine_type* engine = nullptr;
+        {
+            const std::lock_guard lock(mutex_);
+            engine = engine_;
+        }
+        if (engine != nullptr) {
+            engine->sync(engine->latest_sequence());
+        }
+    }
+
     auto checkpoint(const std::filesystem::path& dir) -> kythira::snapshot_manifest {
         const std::lock_guard lock(mutex_);
         return engine_->checkpoint(range_, dir);

@@ -78,6 +78,13 @@ using kythira::testing::message_fabric;
 
 using group_sm = kms::kms_group_state_machine<memory_kv_engine>;
 
+// The Raft node compacts a persistent group's log only up to the durable
+// applied index, and asks the state machine to sync first through
+// sync_durable() when it has one. RocksDB writes its WAL unsynced, so a
+// group state machine that does not offer sync_durable() never compacts:
+// its log grows in memory until the node restarts (doc/memory_profiling.md).
+static_assert(requires(group_sm& sm) { sm.sync_durable(); });
+
 struct host_types {
     using future_type = kythira::future_default<std::vector<std::byte>>;
     using promise_type = kythira::promise_default<std::vector<std::byte>>;

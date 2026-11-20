@@ -33,6 +33,12 @@ using group_sm = basic_ledger_group_state_machine<memory_kv_engine>;
 
 static_assert(kythira::persistent_state_machine<group_sm>);
 static_assert(kythira::persistent_splittable_state_machine<group_sm>);
+// The Raft node compacts a persistent group's log only up to the durable
+// applied index, and asks the state machine to sync first through
+// sync_durable() when it has one. RocksDB writes its WAL unsynced, so a
+// group state machine that does not offer sync_durable() never compacts:
+// its log grows in memory until the node restarts (doc/memory_profiling.md).
+static_assert(requires(group_sm& sm) { sm.sync_durable(); });
 static_assert(kythira::split_policy_state_machine<group_sm, std::string>);
 static_assert(kythira::storage_kind_of<group_sm> == kythira::state_machine_storage::persistent);
 
