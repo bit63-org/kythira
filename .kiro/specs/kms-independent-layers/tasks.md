@@ -6,17 +6,17 @@ pieces (layer identity, route cache, layer membership group, the
 authenticated call) come from `.kiro/specs/kinesis-independent-layers/`;
 a task that needs one first builds it to that spec's design.
 
-- [ ] 1. `kms_catalog_access` and the local implementation
+- [x] 1. `kms_catalog_access` and the local implementation
   - The interface and a local implementation over the catalog replica;
     the KMS spec's tasks build handlers against it
   - _Requirements: 3.1-3.3_
 
-- [ ] 2. Job lease
+- [x] 2. Job lease
   - Lease record and fencing token in the catalog state machine; jobs run
     on the holder; KMS spec design updated to say "lease holder"
   - _Requirements: 5.1-5.3_
 
-- [ ] 3. Roles and remote catalog access
+- [x] 3. Roles and remote catalog access
   - `KYTHIRA_KMS_ROLES`, validation, no HSM client without `front_end`;
     remote catalog access with consistent reads; bounded-staleness switch
   - _Requirements: 1.1-1.3, 2.1-2.4, 4.1-4.3_

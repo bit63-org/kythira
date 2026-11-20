@@ -7,8 +7,8 @@
 // (.kiro/specs/kms-independent-layers/ task 1, Requirements 3.1-3.3).
 //
 // The KMS catalog is one Raft group on the data layer. A node that holds
-// a replica (the `data` role, every node today) reads it in-process; a
-// front end on its own (task 3) will read it over the data-layer API.
+// a replica (the `data` role) reads it in-process; a front end on its own
+// reads it over the data-layer API (kms_catalog_api.hpp).
 // Handlers and jobs are written once for both, against two interfaces:
 //
 //  - `kms_catalog_reader`: the catalog's queries, each answering a value
@@ -33,6 +33,7 @@
 
 #include <kythira/kms/kms_catalog.hpp>
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -297,6 +298,77 @@ private:
     functions _f;
     mutable std::mutex _mutex;
     mutable std::shared_ptr<const local_catalog_reader<Catalog>> _reader;
+};
+
+/// The compatibility switch of Requirement 4.2 (KYTHIRA_KMS_BOUNDED_
+/// STALENESS_MS): a read-index point reached at most `bound` ago serves
+/// a request's barrier, so a busy front end pays one round trip per bound
+/// rather than per request, and answers may be up to `bound` behind, as
+/// AWS documents its KMS to be. Off (bound 0) it adds nothing.
+///
+/// - A barrier that fails is never covered by an older one: a front end
+///   that cannot reach the catalog answers an error once the bound has
+///   passed (Requirement 4.3), never a cached answer beyond it.
+/// - A proposal through this access forgets the point, so this front end
+///   reads its own writes.
+/// - The jobs and the job lease use the inner access: they read at a
+///   fresh point whatever the switch says.
+class bounded_staleness_access final : public kms_catalog_access {
+public:
+    using clock_fn = std::function<std::chrono::steady_clock::time_point()>;
+
+    bounded_staleness_access(
+        kms_catalog_access& inner, std::chrono::milliseconds bound,
+        clock_fn clock = [] { return std::chrono::steady_clock::now(); })
+        : _inner(inner), _bound(bound), _clock(std::move(clock)) {
+        if (bound.count() < 0 || !_clock) {
+            throw std::invalid_argument("bounded_staleness_access: negative bound or no clock");
+        }
+    }
+
+    [[nodiscard]] auto barrier() -> bool override {
+        if (_bound.count() == 0) {
+            return _inner.barrier();
+        }
+        const auto now = _clock();
+        {
+            const std::scoped_lock lock(_mutex);
+            if (_point && now - *_point < _bound) {
+                return true;
+            }
+        }
+        if (!_inner.barrier()) {
+            return false;
+        }
+        const std::scoped_lock lock(_mutex);
+        // The point is when the round started: what it saw is at least
+        // that fresh.
+        if (!_point || *_point < now) {
+            _point = now;
+        }
+        return true;
+    }
+
+    [[nodiscard]] auto reader() const -> std::shared_ptr<const kms_catalog_reader> override {
+        return _inner.reader();
+    }
+
+    auto propose(const std::vector<std::byte>& command) -> catalog_status override {
+        {
+            const std::scoped_lock lock(_mutex);
+            _point.reset();
+        }
+        return _inner.propose(command);
+    }
+
+    [[nodiscard]] auto bound() const noexcept -> std::chrono::milliseconds { return _bound; }
+
+private:
+    kms_catalog_access& _inner;
+    std::chrono::milliseconds _bound;
+    clock_fn _clock;
+    std::mutex _mutex;
+    std::optional<std::chrono::steady_clock::time_point> _point;
 };
 
 /// Fills a handler's or job's dependency struct (api_deps, crypto_deps,

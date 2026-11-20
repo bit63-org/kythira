@@ -31,6 +31,37 @@ The KMS is module 7 of `kythira_node` (`KYTHIRA_SERVICES` naming `kms`).
 Run three or five members; every member must reach the same token, because
 every member answers cryptographic requests itself.
 
+### Independent layers (`KYTHIRA_KMS_ROLES`)
+
+Every node runs all three of the KMS's layers unless `KYTHIRA_KMS_ROLES`
+says otherwise (`.kiro/specs/kms-independent-layers/`):
+
+| Role | What the node does | Holds |
+|---|---|---|
+| `gateway` | the AWS API on `KYTHIRA_KMS_API_LISTEN` | nothing secret |
+| `front_end` | the handlers, `kms.client` for co-located Kinesis and DynamoDB, the key jobs while it holds the job lease | the HSM client and `KYTHIRA_KMS_PIN_FILE` |
+| `data` | a catalog replica and vote, the members' forwarding routes, the catalog API for front ends without a replica | the catalog (key metadata, no key material) |
+
+- `KYTHIRA_KMS_API_URLS` lists the catalog members, the data nodes, and a
+  node is listed exactly when it runs `data`. A front end without `data`
+  reads and proposes through those URLs, failing over between them, and
+  opens no Raft group.
+- A data node admits the front ends whose certificate identities are in
+  `KYTHIRA_KMS_PEER_IDENTITIES`, alongside the members.
+- A node without `front_end` refuses a PIN file and never loads a PKCS#11
+  module, so data nodes cannot reach the HSM.
+- A gateway needs `front_end` on the same node for now; gateways in front
+  of other nodes' front ends come with the authenticated call.
+- Every request reads key metadata at a read-index point of the catalog,
+  as co-located members do. `KYTHIRA_KMS_BOUNDED_STALENESS_MS` on a front
+  end lets a point that recent serve instead (AWS documents KMS as
+  eventually consistent); a write through the front end forces a fresh
+  point, and a catalog it cannot reach fails requests once the bound has
+  passed.
+
+A data node's ready line says `roles=data members=N`; a front end without
+`data` says `data_nodes=N`.
+
 ### With the virtual HSM in the same process
 
 The simplest layout: each node runs the HSM and the KMS, and the KMS uses
@@ -248,6 +279,8 @@ DynamoDB's Raft logs. It reports the Raft log files that hold values.
   another takes over at its next pass. Every job write carries the lease's
   fencing token, so a holder that stalled past its lease cannot commit a
   step after another took over. `kythira_kms_job_lease_holder` is 1 on the holder.
+  Only front ends take the lease; data nodes report no job metrics, and
+  front ends without `data` no `kythira_kms_leader`.
 - **Losing members.** The catalog needs a majority to change keys.
   Cryptographic calls write nothing, but each first passes a read barrier
   through the catalog's leader (so a disabled key is never used from a
