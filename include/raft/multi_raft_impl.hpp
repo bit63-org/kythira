@@ -214,7 +214,8 @@ auto multi_raft<Types, Key, GroupId>::create_group_impl(
         }
     }
 
-    auto state = std::make_shared<group_state>(_cfg.latency_window_count, _cfg.load_split);
+    auto state =
+        std::make_shared<group_state>(_cfg.latency_window_count, _cfg.load_split, _cfg.buckets);
     state->_group_id = group;
     state->_descriptor = descriptor;
     state->_stripe = std::hash<GroupId>{}(group) % _stripe_count;
@@ -928,6 +929,13 @@ auto multi_raft<Types, Key, GroupId>::tick() -> tick_report {
             for (const auto& g : ready) {
                 update_load_rates(*g, now);
             }
+            // Buckets after the rates, before the policy reads either: the
+            // stats a policy sees this tick then describe the same window.
+            if (_cfg.buckets._enabled) {
+                for (const auto& g : ready) {
+                    update_buckets(*g, now);
+                }
+            }
 
             // Rotate the latency windows here, on the policy tick, so that the
             // percentile a policy reads covers the last
@@ -1043,6 +1051,154 @@ auto multi_raft<Types, Key, GroupId>::update_load_rates(group_state& g,
             g._hot_keys = samples;
         }
     }
+}
+
+template<raft_types Types, shard_key Key, raft_group_id GroupId>
+auto multi_raft<Types, Key, GroupId>::update_buckets(group_state& g,
+                                                     std::chrono::steady_clock::time_point now)
+    -> void {
+    if (!g._bucket_set) {
+        return;
+    }
+    // Sampled BEFORE taking `_bucket_mutex`: `is_leader()` takes the node's
+    // mutex, and the apply path takes `_bucket_mutex` while holding that one.
+    const bool leader = g._node && !g._destroyed.load(std::memory_order_acquire) &&
+                        !is_oracle_group(g._group_id) && g._node->is_leader();
+    if (!leader) {
+        // Leader-local (Requirement 4.1): a follower neither counts nor
+        // reports, and starts from nothing if it leads again.
+        if (g._buckets_led.exchange(false, std::memory_order_acq_rel)) {
+            std::lock_guard lock(g._bucket_mutex);
+            g._bucket_set->reset(g._bucket_range, {}, now);
+        }
+        return;
+    }
+
+    const auto range = g._descriptor._range;
+    bool rebuilt = false;
+    {
+        std::lock_guard lock(g._bucket_mutex);
+        if (!g._buckets_led.load(std::memory_order_relaxed) || !(g._bucket_range == range)) {
+            // Newly leading, or the range moved under a split or merge. Start
+            // over on the current range, from the inherited boundaries when a
+            // split or merge left some.
+            auto inherited = std::exchange(g._inherited_boundaries, std::nullopt);
+            const bool have = inherited.has_value() && !inherited->empty();
+            g._bucket_set->reset(range, have ? std::move(*inherited) : std::vector<Key>{}, now);
+            g._bucket_range = range;
+            // Inherited boundaries count as a fresh cut, so a hot child can be
+            // split again at once rather than after a refresh interval; with
+            // none, cut on this policy phase.
+            g._buckets_refreshed_at = have ? now : std::chrono::steady_clock::time_point{};
+            g._buckets_led.store(true, std::memory_order_release);
+            rebuilt = true;
+        }
+    }
+    if (!rebuilt) {
+        g._bucket_set->roll(now);
+    }
+
+    // Re-cut every refresh interval, and on every phase while the set is
+    // still one bucket: a new leader of a state machine without split hooks
+    // has an empty reservoir at first, and waiting a whole interval for its
+    // first cut would leave a minute with no location for the load.
+    const bool due = g._buckets_refreshed_at == std::chrono::steady_clock::time_point{} ||
+                     now - g._buckets_refreshed_at >= _cfg.buckets._refresh_interval ||
+                     g._bucket_set->bucket_count() == 1;
+    if (!due) {
+        return;
+    }
+    // No candidates at all keeps the current cut rather than collapsing it to
+    // one bucket: "nothing to suggest right now" is not evidence the old
+    // boundaries stopped being useful.
+    if (auto candidates = bucket_candidates(g, range); !candidates.empty()) {
+        (void)g._bucket_set->refresh(std::move(candidates), now);
+    }
+    g._buckets_refreshed_at = now;
+}
+
+template<raft_types Types, shard_key Key, raft_group_id GroupId>
+auto multi_raft<Types, Key, GroupId>::bucket_candidates(group_state& g,
+                                                        const shard_range<Key>& range)
+    -> std::vector<Key> {
+    const auto max = _cfg.buckets._target_buckets - 1;
+    std::vector<Key> keys;
+    // Requirement 2.1. `suggest_split_keys` is leader-only and advisory, so
+    // calling it off the request path takes on no determinism obligation;
+    // `can_split_at` keeps a boundary from sitting where no split could go.
+    if constexpr (split_policy_state_machine<typename Types::state_machine_type, Key>) {
+        g._node->with_state_machine([&](typename Types::state_machine_type& sm) {
+            for (auto& k : sm.suggest_split_keys(max)) {
+                if (range.is_interior(k) && sm.can_split_at(k)) {
+                    keys.push_back(std::move(k));
+                }
+            }
+        });
+        keys = bucket_set<Key>::normalize_boundaries(std::move(keys), range, max);
+    }
+    // Requirement 2.2: fewer than two usable keys falls back to the traffic,
+    // unless the traffic has even less to say.
+    if (keys.size() < 2) {
+        auto traffic = g._bucket_set->reservoir_boundaries();
+        if (traffic.size() > keys.size()) {
+            keys = std::move(traffic);
+        }
+    }
+    return keys;
+}
+
+template<raft_types Types, shard_key Key, raft_group_id GroupId>
+auto multi_raft<Types, Key, GroupId>::inherit_split_buckets(
+    group_state& parent, const std::vector<descriptor_type>& children) -> void {
+    if (!parent._bucket_set || !parent._buckets_led.load(std::memory_order_acquire)) {
+        return;  // only the replica that measured the parent has boundaries
+    }
+    const auto boundaries = parent._bucket_set->boundaries();
+    const auto max = _cfg.buckets._target_buckets - 1;
+    for (const auto& child : children) {
+        group_ptr held;
+        group_state* state = &parent;
+        if (!(child._group_id == parent._group_id)) {
+            held = find_group(child._group_id);
+            if (!held || !held->_bucket_set) {
+                continue;
+            }
+            state = held.get();
+        }
+        // Strictly inside the child's range; the child starts at version 1
+        // with empty counters when its leader builds the set.
+        auto inside = bucket_set<Key>::normalize_boundaries(boundaries, child._range, max);
+        std::lock_guard lock(state->_bucket_mutex);
+        state->_inherited_boundaries = std::move(inside);
+    }
+}
+
+template<raft_types Types, shard_key Key, raft_group_id GroupId>
+auto multi_raft<Types, Key, GroupId>::inherit_merge_buckets(group_state& target,
+                                                            group_state& source,
+                                                            const shard_range<Key>& merged)
+    -> void {
+    if (!target._bucket_set) {
+        return;
+    }
+    const bool target_led = target._buckets_led.load(std::memory_order_acquire);
+    const bool source_led =
+        source._bucket_set && source._buckets_led.load(std::memory_order_acquire);
+    if (!target_led && !source_led) {
+        return;
+    }
+    std::vector<Key> own;
+    std::vector<bucket_counts> own_counts;
+    auto own_range = target._descriptor._range;
+    if (target_led) {
+        own = target._bucket_set->boundaries();
+        own_counts = target._bucket_set->window_counts();
+    }
+    const auto absorbed = source_led ? source._bucket_set->boundaries() : std::vector<Key>{};
+    auto boundaries = bucket_set<Key>::merge_boundaries(merged, own_range, own, own_counts,
+                                                        absorbed, _cfg.buckets._target_buckets - 1);
+    std::lock_guard lock(target._bucket_mutex);
+    target._inherited_boundaries = std::move(boundaries);
 }
 
 template<raft_types Types, shard_key Key, raft_group_id GroupId>
@@ -1596,6 +1752,12 @@ auto multi_raft<Types, Key, GroupId>::stats_for(const GroupId& group) const
     {
         std::lock_guard lock(g->_sampler_mutex);
         stats._hot_key_samples = g->_hot_keys;
+    }
+    // Empty unless this replica leads and has built its set (Requirement 1.3):
+    // a follower's set holds nothing current.
+    if (g->_bucket_set && g->_buckets_led.load(std::memory_order_acquire)) {
+        stats._buckets = g->_bucket_set->snapshot();
+        stats._buckets_version = g->_bucket_set->version();
     }
 
     const auto now = now_ns();
@@ -2357,6 +2519,12 @@ auto multi_raft<Types, Key, GroupId>::apply_split(group_state& parent,
     fiu_do_on("raft/multiraft/split/after_children_before_parent",
               throw shard_exception("chaos: split/after_children_before_parent"););
 
+    // Load buckets: hand the parent's boundaries down while the parent still
+    // describes its old range and every local child exists.
+    if (_cfg.buckets._enabled) {
+        inherit_split_buckets(parent, cmd._children);
+    }
+
     // The derived child keeps the parent's group id, log and term; only its
     // range narrows and its state machine is reduced to its own share.
     if constexpr (detail::persistent_split_state_machine<Types, Key>) {
@@ -3091,6 +3259,9 @@ auto multi_raft<Types, Key, GroupId>::apply_merge_commit(
     }
     survivor._epoch._version =
         std::max(cmd._source._epoch._version, target._descriptor._epoch._version) + 1;
+    if (_cfg.buckets._enabled) {
+        inherit_merge_buckets(target, *source, survivor._range);
+    }
     target._descriptor = survivor;
 
     fiu_do_on("raft/multiraft/merge/after_absorb_before_destroy",
@@ -3575,6 +3746,14 @@ auto multi_raft<Types, Key, GroupId>::route_and_run(std::optional<Key> key,
             std::lock_guard lock(local->_sampler_mutex);
             local->_load_sampler.observe(*key);
         }
+        // Load buckets (Requirement 3.1): the same keyed requests `_reads` and
+        // `_writes` count below, into the bucket holding the key. Keyless
+        // requests stay shard-level only (Requirement 3.4). One branch on an
+        // immutable member when off (Requirement 1.2); no lock when on.
+        const bool count_bucket = _cfg.buckets._enabled && key.has_value();
+        if (count_bucket) {
+            local->_bucket_set->count(*key, is_read ? 0 : command->size(), is_read);
+        }
 
         if (is_read) {
             local->_reads.fetch_add(1, std::memory_order_relaxed);
@@ -3590,24 +3769,29 @@ auto multi_raft<Types, Key, GroupId>::route_and_run(std::optional<Key> key,
             // attempt took.
             const auto started = std::chrono::steady_clock::now();
             const auto& g = local;
-            return local->_node->read_state(timeout).thenTry([g, started, timeout](auto&& result) {
-                // A completed read AND a timed-out read are both samples;
-                // the timeout is clamped at its deadline. A percentile over
-                // the requests that survived reports the health of the
-                // survivors. Rejections before execution are excluded, and
-                // they never reach here — `not_leader` and epoch mismatch
-                // are refused above, before this continuation exists.
-                auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(
-                    std::chrono::steady_clock::now() - started);
-                if (result.hasException()) {
-                    elapsed = std::min(
-                        elapsed, std::chrono::duration_cast<std::chrono::nanoseconds>(timeout));
-                }
-                g->_read_latency.record(elapsed);
-                auto value = std::forward<decltype(result)>(result).value();
-                g->_read_bytes.fetch_add(value.size(), std::memory_order_relaxed);
-                return value;
-            });
+            auto bucket_key = count_bucket ? key : std::nullopt;
+            return local->_node->read_state(timeout).thenTry(
+                [g, started, timeout, bucket_key = std::move(bucket_key)](auto&& result) {
+                    // A completed read AND a timed-out read are both samples;
+                    // the timeout is clamped at its deadline. A percentile over
+                    // the requests that survived reports the health of the
+                    // survivors. Rejections before execution are excluded, and
+                    // they never reach here — `not_leader` and epoch mismatch
+                    // are refused above, before this continuation exists.
+                    auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        std::chrono::steady_clock::now() - started);
+                    if (result.hasException()) {
+                        elapsed = std::min(
+                            elapsed, std::chrono::duration_cast<std::chrono::nanoseconds>(timeout));
+                    }
+                    g->_read_latency.record(elapsed);
+                    auto value = std::forward<decltype(result)>(result).value();
+                    g->_read_bytes.fetch_add(value.size(), std::memory_order_relaxed);
+                    if (bucket_key.has_value()) {
+                        g->_bucket_set->add_bytes(*bucket_key, value.size(), true);
+                    }
+                    return value;
+                });
         }
         local->_writes.fetch_add(1, std::memory_order_relaxed);
         local->_write_bytes.fetch_add(command->size(), std::memory_order_relaxed);
