@@ -46,6 +46,7 @@
 /// makes either order safe.
 
 #include <raft/exceptions.hpp>
+#include <raft/executor_default.hpp>
 #include <raft/future_default.hpp>
 #include <raft/network.hpp>
 #include <raft/synchronized.hpp>
@@ -171,9 +172,16 @@ public:
         _info = std::move(log);
     }
 
-    /// @brief Start the off-tick flush timer. Idempotent.
+    /// @brief Start the off-tick flush timer (and, on the boost future
+    ///        backend, the member completion pool). Idempotent.
     auto start() -> void {
         std::lock_guard lock(_timer_mutex);
+#if defined(KYTHIRA_FUTURE_BACKEND_BOOST)
+        if (!_completion_pool) {
+            _completion_pool = std::make_unique<executor_default>(completion_threads());
+            _completion_executor.store(_completion_pool.get(), std::memory_order_release);
+        }
+#endif
         if (_timer.joinable()) {
             return;
         }
@@ -219,7 +227,7 @@ public:
 
         auto& dest = destination_for(target);
         auto promise = std::make_shared<promise_type>();
-        auto future = promise->getFuture();
+        auto future = member_future(*promise);
         std::vector<pending> overflow;
         std::vector<pending> full;
         bool wake_timer = false;
@@ -600,6 +608,37 @@ private:
         }
     }
 
+    /// @brief The future a member's caller gets back.
+    ///
+    /// On the boost future backend a continuation attached to a plain
+    /// promise's future runs on a freshly created OS thread, and
+    /// `pthread_create` serialises on a glibc lock. Lone AppendEntries do
+    /// not pay this: the Beast client `.via()`s each response future onto
+    /// its stream's strand. A batch response fulfils every member's
+    /// promise at once, so completing a 1000-member batch meant 1000
+    /// thread creations back to back. On a 48-thread host at 1000 groups
+    /// every asio I/O thread sat in `pthread_create`, heartbeats and votes
+    /// timed out and the cluster crawled; moving completion to one
+    /// dedicated thread made it worse (thread creation could no longer
+    /// keep up at all). Running member continuations on a small pool
+    /// removes the thread creation instead. A batcher that was never
+    /// started (unit tests drive it by hand) hands back the plain future.
+    /// The Folly and stdexec backends do not start a thread per
+    /// continuation, so their futures are left as they are.
+    auto member_future(promise_type& promise) -> future_type {
+        auto future = promise.getFuture();
+#if defined(KYTHIRA_FUTURE_BACKEND_BOOST)
+        if (auto* pool = _completion_executor.load(std::memory_order_acquire)) {
+            return std::move(future).via(pool->handle());
+        }
+#endif
+        return future;
+    }
+
+    static auto completion_threads() -> std::size_t {
+        return std::clamp<std::size_t>(std::thread::hardware_concurrency() / 8, 2, 8);
+    }
+
     auto finish_flight() -> void {
         std::lock_guard lock(_flight_mutex);
         if (--_in_flight == 0) {
@@ -652,6 +691,12 @@ private:
     std::condition_variable _timer_cv;
     bool _stopping{false};
     std::thread _timer;
+
+    // Boost backend only: where member futures' continuations run (see
+    // member_future()). Created by start() and kept until destruction, so
+    // a continuation chained after stop() still has somewhere to run.
+    std::unique_ptr<executor_default> _completion_pool;
+    std::atomic<executor_default*> _completion_executor{nullptr};
 
     std::mutex _flight_mutex;
     std::condition_variable _flight_cv;
