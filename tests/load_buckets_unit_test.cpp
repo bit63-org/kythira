@@ -364,8 +364,16 @@ BOOST_AUTO_TEST_CASE(a_different_refresh_bumps_the_version_and_empties_the_windo
 BOOST_AUTO_TEST_CASE(a_layout_swap_under_concurrent_counts_loses_nothing_it_keeps) {
     // Counts racing refreshes and rolls: no crash, no torn layout (TSan and
     // ASan see this one), and every count lands in some layout's counters.
+    //
+    // On the REAL clock, deliberately. A replaced layout is freed once it has
+    // been retired for `retire_after()` of the caller's clock, on the premise
+    // that no count holds a pointer that long; a fake clock jumping ten
+    // seconds per roll would free layouts microseconds after retiring them,
+    // which no real policy phase does. 1.5 s with 1 ms slots runs well past
+    // the one-second grace, so reclamation runs under the counts too.
     auto cfg = enabled_config();
-    cfg._window_slots = 64;  // never wrap, so nothing counted is zeroed
+    cfg._window_slots = 64;
+    cfg._slot_duration = 1ms;
     const auto t0 = clock::now();
     set_type set{cfg, unbounded(), t0, {key_of(500)}};
 
@@ -382,20 +390,22 @@ BOOST_AUTO_TEST_CASE(a_layout_swap_under_concurrent_counts_loses_nothing_it_keep
             }
         });
     }
-    auto now = t0;
-    for (int r = 0; r < 200; ++r) {
-        now += 10s;
+    int r = 0;
+    while (clock::now() - t0 < 1500ms) {
+        const auto now = clock::now();
         set.roll(now);
-        if (r % 20 == 0) {
-            (void)set.refresh({key_of(100 + r), key_of(600)}, now);
+        if (++r % 20 == 0) {
+            (void)set.refresh({key_of(100 + (r % 300)), key_of(600)}, now);
         }
         (void)set.snapshot();
+        std::this_thread::sleep_for(1ms);
     }
     stop = true;
     for (auto& t : counters) {
         t.join();
     }
     BOOST_TEST(counted.load() > 0U);
+    BOOST_TEST(set.version() > 1U);
     for (const auto& b : set.snapshot()) {
         BOOST_TEST(b._read_qps >= 0.0);
     }
@@ -543,4 +553,23 @@ BOOST_AUTO_TEST_CASE(the_best_cut_balances_and_reports_how_evenly) {
     BOOST_TEST(cut->one_sided_fraction() == 210.0 / 400.0);
     BOOST_TEST(!kythira::best_bucket_cut(stats_with({100})).has_value());
     BOOST_TEST(kythira::best_bucket_cut(stats_with({0, 0}))->one_sided_fraction() == 1.0);
+}
+
+BOOST_AUTO_TEST_CASE(a_replaced_layout_is_freed_only_after_it_has_been_retired_long_enough) {
+    // Task 8's raw-pointer swap: a count may still hold the layout a refresh
+    // just replaced, so it stays alive for two slots (at least a second) and
+    // is freed by a later policy-phase call, never at once.
+    const auto t0 = clock::now();
+    set_type set{enabled_config(), unbounded(), t0, {key_of(500)}};
+    BOOST_TEST(set.retired_layouts() == 0U);
+    BOOST_TEST(set.refresh({key_of(300)}, t0 + 1s));
+    BOOST_TEST(set.retired_layouts() == 1U);
+    BOOST_TEST(set.refresh({key_of(400)}, t0 + 12s));
+    BOOST_TEST(set.retired_layouts() == 2U);
+    set.roll(t0 + 15s);  // retired 14 s and 3 s ago: both under two slots
+    BOOST_TEST(set.retired_layouts() == 2U);
+    set.roll(t0 + 25s);  // 24 s and 13 s: the first goes, the second stays
+    BOOST_TEST(set.retired_layouts() == 1U);
+    set.roll(t0 + 35s);
+    BOOST_TEST(set.retired_layouts() == 0U);
 }
