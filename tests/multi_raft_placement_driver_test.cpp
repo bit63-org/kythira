@@ -146,6 +146,7 @@ auto make_config(message_fabric& fabric, std::uint64_t node_id) -> config_type {
     cfg.config = fast_raft_config();
     cfg.hibernation = hibernation_mode::off;
     cfg.executor_stripes = 4;
+    cfg.batching = kythira::testing::fabric_batching_config();
     return cfg;
 }
 

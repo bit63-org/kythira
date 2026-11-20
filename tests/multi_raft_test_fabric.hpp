@@ -40,6 +40,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
+#include <cstdlib>
 #include <deque>
 #include <functional>
 #include <memory>
@@ -47,6 +48,7 @@
 #include <set>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <unordered_map>
 #include <utility>
@@ -55,6 +57,23 @@
 namespace kythira::testing {
 
 using fabric_messages = kythira::group_rpc_messages<>;
+using fabric_batch_request =
+    kythira::append_entries_batch_request<fabric_messages::append_entries_request_type>;
+using fabric_batch_response =
+    kythira::append_entries_batch_response<fabric_messages::append_entries_response_type>;
+
+/// @brief The batching setting the multi-Raft integration suites run with.
+///
+/// Off unless `KYTHIRA_TEST_BATCHING=1`, which is how CMake registers a
+/// second run of each suite with batched AppendEntries on
+/// (`.kiro/specs/multi-raft-message-batching/` Requirement 7.1). The suites
+/// themselves stay one source each, so a fix to one is a fix to both runs.
+inline auto fabric_batching_config() -> kythira::batching_config {
+    kythira::batching_config cfg;
+    const char* env = std::getenv("KYTHIRA_TEST_BATCHING");
+    cfg._enabled = env != nullptr && std::string_view{env} == "1";
+    return cfg;
+}
 
 /// @brief The handler table one host's shared server exposes to the fabric.
 struct fabric_endpoint {
@@ -76,6 +95,7 @@ struct fabric_endpoint {
     std::function<fabric_messages::timeout_now_response_type(
         const fabric_messages::timeout_now_request_type&)>
         _timeout_now;
+    std::function<fabric_batch_response(const fabric_batch_request&)> _append_entries_batch;
     bool _running{false};
 };
 
@@ -162,9 +182,16 @@ public:
         _not_implemented.insert({node, std::move(rpc)});
     }
 
+    /// @brief Undo `set_not_implemented`: `node` has been upgraded.
+    auto clear_not_implemented(std::uint64_t node, const std::string& rpc) -> void {
+        std::lock_guard lock(_mutex);
+        _not_implemented.erase({node, rpc});
+    }
+
     /// @brief Drop every `rpc` addressed to `node`, from any sender, until
     /// `unblock_rpc`. Other RPCs still flow, which is what lets a test let a
     /// candidate collect votes while no AppendEntries it sends can land.
+    /// Blocking "append_entries" blocks batches of them too.
     auto block_rpc(std::uint64_t node, std::string rpc) -> void {
         std::lock_guard lock(_mutex);
         _blocked.insert({node, std::move(rpc)});
@@ -199,7 +226,7 @@ public:
         {
             std::lock_guard lock(_mutex);
             if (_stopping.load() || _dead.contains(to) || _cut.contains({from, to}) ||
-                _blocked.contains({to, rpc})) {
+                is_blocked(to, rpc)) {
                 _dropped.fetch_add(1, std::memory_order_relaxed);
                 promise->setException(std::make_exception_ptr(
                     kythira::network_exception("fabric: unreachable node")));
@@ -239,6 +266,14 @@ public:
     }
 
 private:
+    /// A blocked AppendEntries stays blocked when it travels inside a batch:
+    /// a test that blocks "append_entries" means the messages, not the RPC
+    /// that happens to carry them. Caller holds `_mutex`.
+    [[nodiscard]] auto is_blocked(std::uint64_t to, const std::string& rpc) const -> bool {
+        return _blocked.contains({to, rpc}) ||
+               (rpc == "append_entries_batch" && _blocked.contains({to, "append_entries"}));
+    }
+
     auto run() -> void {
         for (;;) {
             std::function<void()> task;
@@ -271,8 +306,9 @@ private:
 
 /// @brief The one shared client a `multi_raft` host owns.
 ///
-/// Satisfies `network_client` plus the pre-vote, log-fetch and TimeoutNow
-/// extensions, so that the group-scoped views over it advertise them too.
+/// Satisfies `network_client` plus the pre-vote, log-fetch, TimeoutNow and
+/// batched AppendEntries extensions, so that the group-scoped views over it
+/// advertise them too.
 class fabric_client {
 public:
     fabric_client() = default;
@@ -332,6 +368,19 @@ public:
             [](const fabric_endpoint& e) { return e._timeout_now; });
     }
 
+    /// @brief One batch of AppendEntries, carried as one fabric message.
+    ///
+    /// A node marked `set_not_implemented(node, "append_entries_batch")`
+    /// answers like a peer on a build from before batching, which is how the
+    /// rolling-upgrade case mixes old and new hosts.
+    auto send_append_entries_batch(std::uint64_t target, const fabric_batch_request& req,
+                                   std::chrono::milliseconds)
+        -> kythira::future_default<fabric_batch_response> {
+        return _fabric->deliver<fabric_batch_response>(
+            _self, target, "append_entries_batch", req,
+            [](const fabric_endpoint& e) { return e._append_entries_batch; });
+    }
+
 private:
     message_fabric* _fabric{nullptr};
     std::uint64_t _self{0};
@@ -339,8 +388,8 @@ private:
 
 /// @brief The one shared server a `multi_raft` host owns.
 ///
-/// Satisfies `network_server` plus the pre-vote, log-fetch and TimeoutNow
-/// extensions.
+/// Satisfies `network_server` plus the pre-vote, log-fetch, TimeoutNow and
+/// batched AppendEntries extensions.
 /// `multi_group_network_server` wraps one of these and installs exactly one
 /// handler per RPC type on it, which is what makes the fabric node-addressed
 /// and the demultiplex group-addressed.
@@ -388,6 +437,12 @@ public:
                                           const fabric_messages::timeout_now_request_type&)>
                                           h) -> void {
         _endpoint._timeout_now = std::move(h);
+        publish();
+    }
+
+    auto register_append_entries_batch_handler(
+        std::function<fabric_batch_response(const fabric_batch_request&)> h) -> void {
+        _endpoint._append_entries_batch = std::move(h);
         publish();
     }
 

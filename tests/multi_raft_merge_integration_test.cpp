@@ -391,6 +391,7 @@ private:
         cfg.hibernation = hibernation_mode::off;
         KYTHIRA_TEST_STATE_ENGINE(cfg);
         cfg.executor_stripes = 2;
+        cfg.batching = kythira::testing::fabric_batching_config();
         cfg.route_retry_backoff = std::chrono::milliseconds{2};
         if (_tweak) {
             _tweak(cfg);
@@ -444,6 +445,7 @@ public:
         cfg.hibernation = hibernation_mode::off;
         KYTHIRA_TEST_STATE_ENGINE(cfg);
         cfg.executor_stripes = 2;
+        cfg.batching = kythira::testing::fabric_batching_config();
         cfg.route_retry_backoff = std::chrono::milliseconds{1};
         cfg.metrics = concurrent_recording_metrics{_recorder};
         if (tweak) {
