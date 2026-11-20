@@ -27,6 +27,8 @@
 #include <boost/beast/http.hpp>
 #include <boost/beast/ssl.hpp>
 
+#include <raft/beast_deadline.hpp>
+
 #include <openssl/ssl.h>
 
 #include <chrono>
@@ -135,20 +137,21 @@ public:
 private:
     peer_client_config _config;
 
+    // Every step runs asynchronously under the stream's deadline
+    // (beast_deadline.hpp): a blocking Beast call ignores it, so a dial to
+    // an address nothing answers waited out the kernel's SYN retries.
     template<typename Stream, typename Request>
-    [[nodiscard]] auto send(Stream& stream, const Request& req) const
+    [[nodiscard]] auto send(boost::asio::io_context& ioc, Stream& stream, const Request& req) const
         -> std::optional<peer_response> {
         namespace http = boost::beast::http;
-        boost::beast::error_code ec;
-        http::write(stream, req, ec);
-        if (ec) {
+        using beast_deadline::run;
+        if (run(ioc, [&](auto h) { http::async_write(stream, req, std::move(h)); })) {
             return std::nullopt;
         }
         boost::beast::flat_buffer buffer;
         http::response_parser<http::string_body> parser;
         parser.body_limit(_config._max_body_bytes);
-        http::read(stream, buffer, parser, ec);
-        if (ec) {
+        if (run(ioc, [&](auto h) { http::async_read(stream, buffer, parser, std::move(h)); })) {
             return std::nullopt;
         }
         auto res = parser.release();
@@ -161,8 +164,8 @@ private:
     /// seconds, and each forwarded write would wait it out
     /// (bounded_resolver.hpp). The resolver answers from its last lookup at
     /// once, and a failed dial tells it the address went stale.
-    [[nodiscard]] auto connect(boost::beast::tcp_stream& stream, const std::string& host,
-                               const std::string& port) const -> bool {
+    [[nodiscard]] auto connect(boost::asio::io_context& ioc, boost::beast::tcp_stream& stream,
+                               const std::string& host, const std::string& port) const -> bool {
         const auto dialled_at = std::chrono::steady_clock::now();
         const auto addresses = net_resolve::resolve(host, port, SOCK_STREAM, _config._timeout);
         if (!addresses || addresses->empty()) {
@@ -179,9 +182,8 @@ private:
             ep.resize(a.len);
             endpoints.push_back(ep);
         }
-        boost::beast::error_code ec;
-        stream.connect(endpoints, ec);
-        if (ec) {
+        if (beast_deadline::run(ioc,
+                                [&](auto h) { stream.async_connect(endpoints, std::move(h)); })) {
             net_resolve::mark_unreachable(host, port, SOCK_STREAM, dialled_at);
             return false;
         }
@@ -194,11 +196,11 @@ private:
         boost::asio::io_context ioc;
         boost::beast::tcp_stream stream(ioc);
         stream.expires_after(_config._timeout);
-        boost::beast::error_code ec;
-        if (!connect(stream, host, port)) {
+        if (!connect(ioc, stream, host, port)) {
             return std::nullopt;
         }
-        auto out = send(stream, req);
+        auto out = send(ioc, stream, req);
+        boost::beast::error_code ec;
         (void)stream.socket().shutdown(boost::asio::ip::tcp::socket::shutdown_both, ec);
         return out;
     }
@@ -226,16 +228,17 @@ private:
         stream.set_verify_callback(ssl::host_name_verification(host));
         auto& lowest = boost::beast::get_lowest_layer(stream);
         lowest.expires_after(_config._timeout);
-        boost::beast::error_code ec;
-        if (!connect(lowest, host, port)) {
+        if (!connect(ioc, lowest, host, port)) {
             return std::nullopt;
         }
-        (void)stream.handshake(ssl::stream_base::client, ec);
-        if (ec) {
+        if (beast_deadline::run(ioc, [&](auto h) {
+                stream.async_handshake(ssl::stream_base::client, std::move(h));
+            })) {
             return std::nullopt;
         }
-        auto out = send(stream, req);
-        (void)stream.shutdown(ec);  // a peer that drops the connection is fine
+        auto out = send(ioc, stream, req);
+        // A peer that drops the connection is fine; never past the deadline.
+        (void)beast_deadline::run(ioc, [&](auto h) { stream.async_shutdown(std::move(h)); });
         return out;
     }
 };
