@@ -3,6 +3,21 @@
 Chronological log of notable changes to Kythira, newest first. For the
 current list of outstanding work, see [TODO.md](TODO.md).
 
+### What Changed (November 27, 2026)
+
+- **Persistent Raft groups compact their logs on RocksDB again.** A memory
+  profiling pass found that DynamoDB, KMS, HSM and ledger groups never
+  compacted their Raft logs on the RocksDB engine. The node compacts only up
+  to the durable applied index and asks the state machine to sync first,
+  but these group state machines offered no `sync_durable()`, and RocksDB's
+  WAL is unsynced, so the log grew in memory until the node restarted. Under
+  a steady DynamoDB workload the leader's heap reached 176 MB in five
+  minutes and was still rising; it is now a sawtooth between about 7 and
+  70 MB, mostly RocksDB memtable. The same pass found no leaks, removed a
+  heap allocation per RPC from the serializers' `media_type()`, and left
+  its tools in `scripts/memory-profile/`. See
+  [memory_profiling.md](memory_profiling.md).
+
 ### What Changed (November 26, 2026)
 
 - **Redis gateways find their front ends in the layer membership group,
