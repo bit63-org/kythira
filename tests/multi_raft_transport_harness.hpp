@@ -984,6 +984,11 @@ struct kv_cluster_options {
     /// A cloud row points this at the volume whose class and IOPS the
     /// provenance records (Requirement 3.4).
     std::filesystem::path _data_dir{};
+
+    /// Batched AppendEntries (.kiro/specs/multi-raft-message-batching/). Off
+    /// by default, so every earlier row is measured as it was; on a transport
+    /// without the batch RPC, turning it on changes nothing.
+    kythira::batching_config _batching{};
 };
 
 /// @brief `_nodes` hosts, each holding a replica of every one of `_groups`
@@ -1465,6 +1470,7 @@ private:
         cfg.automatic_split_merge_enabled = false;
         cfg.heartbeat_interval = std::chrono::milliseconds{0};
         cfg.partitioner = kythira::make_partitioner<key_type>(kv_partitioner{});
+        cfg.batching = _options._batching;
         // **No batch controller.** There used to be one here, fanned out across
         // this host's per-group handles, and it was the only thing in this
         // codebase that opened a batch. `.kiro/specs/durable-append-barrier/`

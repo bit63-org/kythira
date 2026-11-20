@@ -1954,6 +1954,32 @@ endif()
 # encodings.
 add_raft_completion_test(append_entries_batch_serializer_test append_entries_batch_serializer_test.cpp)
 
+# Task 7: the `/v1/raft/append_entries_batch` endpoint on each HTTP transport
+# the build has, wire-level and under a multi_raft cluster.
+if(TARGET httplib::httplib)
+    add_raft_completion_test(http_append_entries_batch_test http_append_entries_batch_test.cpp)
+    target_include_directories(http_append_entries_batch_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+    target_link_libraries(http_append_entries_batch_test PRIVATE httplib::httplib)
+    if(KYTHIRA_BUILD_BOOST_BEAST_TRANSPORT)
+        target_compile_definitions(http_append_entries_batch_test PRIVATE KYTHIRA_BENCH_HAS_BEAST)
+        target_link_libraries(http_append_entries_batch_test PRIVATE Boost::beast)
+    endif()
+    if(KYTHIRA_BUILD_PROXYGEN_TRANSPORT)
+        target_compile_definitions(http_append_entries_batch_test PRIVATE KYTHIRA_BENCH_HAS_PROXYGEN)
+        target_link_libraries(http_append_entries_batch_test PRIVATE
+            proxygen::proxygen proxygen::proxygenhttpserver Folly::folly)
+    endif()
+    if(KYTHIRA_BUILD_BOOST_BEAST_TRANSPORT OR KYTHIRA_BUILD_PROXYGEN_TRANSPORT)
+        set_target_properties(http_append_entries_batch_test PROPERTIES JOB_POOL_COMPILE heavy_tu)
+    endif()
+    if(TARGET OpenSSL::SSL)
+        target_link_libraries(http_append_entries_batch_test PRIVATE OpenSSL::SSL OpenSSL::Crypto)
+    endif()
+    if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+        target_link_libraries(http_append_entries_batch_test PRIVATE atomic)
+    endif()
+endif()
+
 # Peer-to-peer log replication (gossip catch-up) — .kiro/specs/peer2peer-log-replication/
 add_raft_completion_test(peer2peer_replication_unit_test peer2peer_replication_unit_test.cpp)
 add_raft_completion_test(peer2peer_catch_up_property_test peer2peer_catch_up_property_test.cpp)

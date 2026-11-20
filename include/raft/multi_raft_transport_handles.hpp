@@ -60,9 +60,23 @@ struct rpc_snapshot {
     std::uint64_t _entries{0};
     std::uint64_t _request_vote{0};
     std::uint64_t _install_snapshot{0};
+    /// Batched AppendEntries requests (.kiro/specs/multi-raft-message-batching/),
+    /// and the members they carried. Each member is also counted in
+    /// `_append_entries` (and `_entries` / `_append_entries_empty`), so the
+    /// message-level figures mean the same with batching on or off; a member
+    /// a batch fallback resends alone is counted twice, which only happens
+    /// against a peer that refused the batch.
+    std::uint64_t _append_entries_batches{0};
+    std::uint64_t _batched_members{0};
 
     [[nodiscard]] auto total_rpcs() const -> std::uint64_t {
         return _append_entries + _request_vote + _install_snapshot;
+    }
+
+    /// @brief Requests that actually went on the wire: a batch is one request
+    ///        however many members it carried.
+    [[nodiscard]] auto wire_rpcs() const -> std::uint64_t {
+        return total_rpcs() - std::min(total_rpcs(), _batched_members) + _append_entries_batches;
     }
 
     /// @brief AppendEntries that actually carried log entries.
@@ -86,6 +100,8 @@ struct rpc_snapshot {
             ._entries = a._entries - b._entries,
             ._request_vote = a._request_vote - b._request_vote,
             ._install_snapshot = a._install_snapshot - b._install_snapshot,
+            ._append_entries_batches = a._append_entries_batches - b._append_entries_batches,
+            ._batched_members = a._batched_members - b._batched_members,
         };
     }
 };
@@ -112,6 +128,8 @@ struct rpc_counters {
     std::atomic<std::uint64_t> _entries{0};
     std::atomic<std::uint64_t> _request_vote{0};
     std::atomic<std::uint64_t> _install_snapshot{0};
+    std::atomic<std::uint64_t> _append_entries_batches{0};
+    std::atomic<std::uint64_t> _batched_members{0};
 
     [[nodiscard]] auto snapshot() const -> rpc_snapshot {
         return rpc_snapshot{
@@ -120,6 +138,8 @@ struct rpc_counters {
             ._entries = _entries.load(std::memory_order_relaxed),
             ._request_vote = _request_vote.load(std::memory_order_relaxed),
             ._install_snapshot = _install_snapshot.load(std::memory_order_relaxed),
+            ._append_entries_batches = _append_entries_batches.load(std::memory_order_relaxed),
+            ._batched_members = _batched_members.load(std::memory_order_relaxed),
         };
     }
 };
@@ -167,13 +187,7 @@ public:
             // Counted on the way out, before the transport can fail it. An RPC
             // the leader issued is a cost it paid whether or not a response
             // came back, and "RPCs per committed entry" is a cost ratio.
-            _counters->_append_entries.fetch_add(1, std::memory_order_relaxed);
-            const auto entries = request.entries().size();
-            if (entries == 0) {
-                _counters->_append_entries_empty.fetch_add(1, std::memory_order_relaxed);
-            } else {
-                _counters->_entries.fetch_add(entries, std::memory_order_relaxed);
-            }
+            count_append_entries(request);
         }
         return _client->send_append_entries(target, request, timeout);
     }
@@ -212,9 +226,37 @@ public:
         return _client->send_timeout_now(target, request, timeout);
     }
 
+    auto send_append_entries_batch(
+        const NodeId& target,
+        const kythira::append_entries_batch_request<kythira::append_entries_request<NodeId>>&
+            request,
+        std::chrono::milliseconds timeout)
+    requires kythira::network_client_with_append_entries_batch<Client, NodeId>
+    {
+        if (_counters != nullptr) {
+            _counters->_append_entries_batches.fetch_add(1, std::memory_order_relaxed);
+            _counters->_batched_members.fetch_add(request.members().size(),
+                                                  std::memory_order_relaxed);
+            for (const auto& member : request.members()) {
+                count_append_entries(member);
+            }
+        }
+        return _client->send_append_entries_batch(target, request, timeout);
+    }
+
     [[nodiscard]] auto underlying() noexcept -> Client& { return *_client; }
 
 private:
+    auto count_append_entries(const kythira::append_entries_request<NodeId>& request) -> void {
+        _counters->_append_entries.fetch_add(1, std::memory_order_relaxed);
+        const auto entries = request.entries().size();
+        if (entries == 0) {
+            _counters->_append_entries_empty.fetch_add(1, std::memory_order_relaxed);
+        } else {
+            _counters->_entries.fetch_add(entries, std::memory_order_relaxed);
+        }
+    }
+
     Client* _client;
     /// Null when nobody is counting — every non-benchmark construction site,
     /// which is why the parameter is defaulted rather than required.
@@ -274,6 +316,15 @@ public:
     requires kythira::network_server_with_timeout_now<Server, NodeId>
     {
         _server->register_timeout_now_handler(std::move(handler));
+    }
+
+    auto register_append_entries_batch_handler(
+        std::function<kythira::append_entries_batch_response<kythira::append_entries_response<>>(
+            const kythira::append_entries_batch_request<kythira::append_entries_request<NodeId>>&)>
+            handler) -> void
+    requires kythira::network_server_with_append_entries_batch<Server, NodeId>
+    {
+        _server->register_append_entries_batch_handler(std::move(handler));
     }
 
     auto start() -> void { _server->start(); }

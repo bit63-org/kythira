@@ -37,6 +37,9 @@ constexpr const char* beast_endpoint_install_snapshot = "/v1/raft/install_snapsh
 constexpr const char* beast_endpoint_fetch_log_entries = "/v1/raft/fetch_log_entries";
 constexpr const char* beast_endpoint_request_pre_vote = "/v1/raft/request_pre_vote";
 constexpr const char* beast_endpoint_timeout_now = "/v1/raft/timeout_now";
+// .kiro/specs/multi-raft-message-batching/; spelled out again in the header,
+// where the client's inline sender names it.
+constexpr const char* beast_endpoint_append_entries_batch = "/v1/raft/append_entries_batch";
 
 // NOTE: `beast_content_type_for_serializer` lived here, deriving the
 // Content-Type from the serializer's `name()` by substring match. Removed with
@@ -1032,6 +1035,9 @@ auto boost_beast_client<Types, NodeId>::send_rpc(NodeId target, std::string_view
     } else if (endpoint == beast_endpoint_timeout_now) {
         rpc_type = "timeout_now";
         extension_rpc = true;
+    } else if (endpoint == beast_endpoint_append_entries_batch) {
+        rpc_type = "append_entries_batch";
+        extension_rpc = true;
     }
 
     try {
@@ -1206,6 +1212,12 @@ auto boost_beast_client<Types, NodeId>::send_rpc(NodeId target, std::string_view
                 // ordinary error.
                 if (extension_rpc && (status == 404 || status == 501)) {
                     throw kythira::rpc_not_implemented_for(rpc_type, target);
+                }
+                // A batch the peer will not take whole: its batcher resends
+                // the members one by one, and keeps batching to this peer.
+                if (rpc_type == "append_entries_batch" && status == 413) {
+                    throw kythira::rpc_payload_too_large_exception(
+                        std::format("HTTP 413 on append_entries_batch: {}", resp.body()));
                 }
                 if (status >= 400 && status < 500) {
                     // Carry `Accept-Post` on the exception: this transport's 415
@@ -2116,6 +2128,28 @@ auto boost_beast_server<Types, NodeId>::dispatch(
             response_body = std::format("Bad Request: {}", e.what());
             return;
         }
+        if constexpr (std::same_as<Request, append_entries_batch_request_type>) {
+            // Refused whole, before any member reaches a group
+            // (multi-raft-message-batching Requirement 5.4).
+            if (request._members.size() > _config.max_append_entries_batch_members) {
+                status_code = 413;
+                response_body =
+                    std::format("Batch carries {} members; the limit is {}",
+                                request._members.size(), _config.max_append_entries_batch_members);
+                return;
+            }
+            // `sender` reads the first member, so every member must name the
+            // same leader: the certificate check below binds one sender, and
+            // a batch that mixed senders would let one peer speak for another.
+            if (request._members.empty() ||
+                std::ranges::any_of(request._members, [&](const auto& m) {
+                    return m.leader_id() != request._members.front().leader_id();
+                })) {
+                status_code = 400;
+                response_body = "Bad Request: a batch needs members, all from one leader";
+                return;
+            }
+        }
         // Before the peer-seen handler too: a certificate that is not the
         // sender must not teach the client where the sender is.
         if (_peer_binding && !_peer_binding(presented, sender(request))) {
@@ -2188,6 +2222,16 @@ auto boost_beast_server<Types, NodeId>::dispatch(
         operator()<kythira::timeout_now_request<NodeId>, kythira::timeout_now_response<>>(
             _timeout_now_handler, "timeout_now",
             [](const kythira::timeout_now_request<NodeId>& r) { return r.leader_id(); }, true);
+    } else if (target == beast_endpoint_append_entries_batch && k_batches_append_entries) {
+        if constexpr (k_batches_append_entries) {
+            handle.template
+            operator()<append_entries_batch_request_type, append_entries_batch_response_type>(
+                _append_entries_batch_handler, "append_entries_batch",
+                [](const append_entries_batch_request_type& r) {
+                    return r._members.front().leader_id();
+                },
+                true);
+        }
     } else {
         status_code = 404;
         response_body = "Not Found";
