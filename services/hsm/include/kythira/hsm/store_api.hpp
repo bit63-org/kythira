@@ -121,6 +121,9 @@ struct catalog_view {
     std::optional<catalog_record> record;
     std::vector<token_entry> tokens;
     std::vector<std::pair<std::string, std::uint64_t>> bindings;
+    /// The crypto member list in identity order; empty until seeded. A
+    /// crypto-only node checks share requests and delivers shares by it.
+    std::vector<std::string> crypto_members;
 };
 
 /// A token group as a store member had it after a barrier on it.
@@ -165,7 +168,9 @@ inline auto get_optional(byte_reader& r) -> std::optional<std::string> {
 /// `a` on the wire.
 [[nodiscard]] inline auto encode_store_read_answer(const store_read_answer& a) -> std::string {
     byte_writer w;
-    w.u8(1).u8(static_cast<std::uint8_t>(a.status));
+    // Version 2 added the crypto member list; nothing ever read version 1
+    // outside the tests, since hsm_node had no crypto-only node then.
+    w.u8(2).u8(static_cast<std::uint8_t>(a.status));
     detail::put_optional(w, a.seal_state ? std::optional(a.seal_state->encode()) : std::nullopt);
     // Catalog view.
     detail::put_optional(
@@ -177,6 +182,10 @@ inline auto get_optional(byte_reader& r) -> std::optional<std::string> {
     w.u32(static_cast<std::uint32_t>(a.catalog.bindings.size()));
     for (const auto& [identity, token] : a.catalog.bindings) {
         w.str(identity).u64(token);
+    }
+    w.u32(static_cast<std::uint32_t>(a.catalog.crypto_members.size()));
+    for (const auto& identity : a.catalog.crypto_members) {
+        w.str(identity);
     }
     // Token view.
     detail::put_optional(w,
@@ -199,7 +208,7 @@ inline auto get_optional(byte_reader& r) -> std::optional<std::string> {
     store_read_answer out;
     try {
         byte_reader r(body);
-        if (r.u8() != 1) {
+        if (r.u8() != 2) {
             return {};
         }
         const auto status = r.u8();
@@ -219,6 +228,9 @@ inline auto get_optional(byte_reader& r) -> std::optional<std::string> {
         for (auto n = r.u32(); n > 0; --n) {
             auto identity = r.str();
             out.catalog.bindings.emplace_back(std::move(identity), r.u64());
+        }
+        for (auto n = r.u32(); n > 0; --n) {
+            out.catalog.crypto_members.push_back(r.str());
         }
         if (auto t = detail::get_optional(r)) {
             out.token.record = token_record::decode(*t);
@@ -257,6 +269,7 @@ template<typename HsmHost>
         out.catalog.record = out.seal_state;
         out.catalog.tokens = host.tokens();
         out.catalog.bindings = host.bindings();
+        out.catalog.crypto_members = host.crypto_members();
         return out;
     }
     if (!host.token(group)) {

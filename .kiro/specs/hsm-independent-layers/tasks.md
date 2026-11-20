@@ -5,7 +5,7 @@ core pieces (layer identity, route cache) come from
 `.kiro/specs/kinesis-independent-layers/`; a task that needs one first
 builds it to that spec's design. Each task is one PR unless noted.
 
-- [ ] 1. Roles and validation
+- [x] 1. Roles and validation
   - `KYTHIRA_HSM_ROLES`; no vault, unseal or share without `crypto`; no
     engine or groups without `store`; start-time validation
   - Role set, per-layer plan and start-time check in `hsm_roles.hpp`
@@ -13,9 +13,10 @@ builds it to that spec's design. Each task is one PR unless noted.
   - `hsm_config` and `hsm_module`: store-only members, endpoint-only
     relays, `KYTHIRA_HSM_STORE_CLIENTS`, `KYTHIRA_HSM_CRYPTO_URLS` for
     share delivery and node unseal to the crypto member list (done)
-  - A crypto node without `store` running over `remote_hsm_store`
-    (refused at start until then), and a relay health check that asks
-    whether each crypto node is unsealed rather than only reachable
+  - A crypto node without `store` running over `remote_hsm_store`, its
+    operator API through `remote_admin_host`, and a relay health check
+    that asks whether each crypto node is unsealed rather than only
+    reachable (done)
   - _Requirements: 1.1, 2.1-2.5_
 
 - [x] 2. Crypto member list
