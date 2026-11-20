@@ -1926,6 +1926,22 @@ auto cache_http_front_end<Host, Logger>::relay(connection& c, Down& down,
     if (ec) {
         return false;
     }
+    // ...and here is where it does, now that the leader is connected. A
+    // client that sent `Expect: 100-continue` holds its body until it hears
+    // `100 Continue` or its own timer runs out: curl's is one second, and it
+    // sends the header for every upload over 1 MiB or of unknown size.
+    // Without this, every such PUT to a node that was not the shard's
+    // leader, two in three with round-robin over three nodes, sat out that
+    // second before sending a byte (GitHub issue 942). An interim response,
+    // so `downstream_written` stays false: a failure below can still answer.
+    if (!parser.is_done() && boost::beast::iequals(in[http::field::expect], "100-continue")) {
+        http::response<http::empty_body> cont{http::status::continue_, in.version()};
+        lowest(down).expires_after(_config._io_timeout);
+        ec = drive(c._ioc, [&](auto h) { http::async_write(down, cont, std::move(h)); });
+        if (ec) {
+            return false;
+        }
+    }
     while (!parser.is_done()) {
         parser.get().body().data = scratch.data();
         parser.get().body().size = scratch.size();
