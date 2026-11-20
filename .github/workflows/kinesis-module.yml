@@ -92,7 +92,7 @@ concurrency:
 jobs:
   boundary:
     name: Kinesis module boundary check
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.event.pull_request.head.repo.fork && 'ubuntu-24.04') || vars.KYTHIRA_X64_RUNNER || 'bit63' }}
     timeout-minutes: 10
     steps:
       - name: Checkout
@@ -112,7 +112,7 @@ jobs:
     # In the same digest-pinned Gradle image the KCL sample's Dockerfile
     # builds in, so there is one JDK and Gradle version to keep current.
     name: KCL lease layer tests
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.event.pull_request.head.repo.fork && 'ubuntu-24.04') || vars.KYTHIRA_X64_RUNNER || 'bit63' }}
     timeout-minutes: 30
     steps:
       - name: Checkout
@@ -147,7 +147,7 @@ jobs:
 
   build:
     name: Kinesis module on and off (clang++-18, x64)
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.event.pull_request.head.repo.fork && 'ubuntu-24.04') || vars.KYTHIRA_X64_RUNNER || 'bit63' }}
     # A warm vcpkg tree and sccache make this minutes. A cold vcpkg tree is
     # config-variants' 78-minute install, which this job shares by key.
     timeout-minutes: 180
@@ -308,7 +308,7 @@ jobs:
 
   container:
     name: Kinesis cluster in containers (${{ matrix.runtime }})
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (matrix.runtime == 'podman' && 'ubuntu-24.04') || (github.event.pull_request.head.repo.fork && 'ubuntu-24.04') || vars.KYTHIRA_X64_RUNNER || 'bit63' }}
     timeout-minutes: 180
     environment: ${{ github.ref == 'refs/heads/main' && 'build-cache-write' || '' }}
     strategy:

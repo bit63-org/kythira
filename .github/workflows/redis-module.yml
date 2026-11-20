@@ -108,7 +108,7 @@ concurrency:
 jobs:
   boundary:
     name: Module boundary check
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.event.pull_request.head.repo.fork && 'ubuntu-24.04') || vars.KYTHIRA_X64_RUNNER || 'bit63' }}
     timeout-minutes: 10
     steps:
       - name: Checkout
@@ -127,7 +127,7 @@ jobs:
   # its sccache objects instead of paying for cold builds of their own.
   module-off:
     name: Module off (ci_no_redis_defconfig)
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.event.pull_request.head.repo.fork && 'ubuntu-24.04') || vars.KYTHIRA_X64_RUNNER || 'bit63' }}
     # A full build with the module's objects missing from sccache is the
     # worst case; ci.yml's config-variants job is sized the same way.
     timeout-minutes: 300
@@ -300,7 +300,7 @@ jobs:
 
   module-tests:
     name: Module tests (ci_full_defconfig)
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.event.pull_request.head.repo.fork && 'ubuntu-24.04') || vars.KYTHIRA_X64_RUNNER || 'bit63' }}
     timeout-minutes: 300
     environment: ${{ github.ref == 'refs/heads/main' && 'build-cache-write' || '' }}
     steps:
@@ -428,7 +428,7 @@ jobs:
   # binaries, then runs the suite against a live stack.
   containers:
     name: Container scenarios (${{ matrix.runtime }})
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (matrix.runtime == 'podman' && 'ubuntu-24.04') || (github.event.pull_request.head.repo.fork && 'ubuntu-24.04') || vars.KYTHIRA_X64_RUNNER || 'bit63' }}
     timeout-minutes: 180
     environment: ${{ github.ref == 'refs/heads/main' && 'build-cache-write' || '' }}
     strategy:
@@ -619,7 +619,7 @@ jobs:
   # cache and sccache objects that job writes are what this one reads.
   engine-containers:
     name: Engine storage scenarios (${{ matrix.runtime }})
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (matrix.runtime == 'podman' && 'ubuntu-24.04') || (github.event.pull_request.head.repo.fork && 'ubuntu-24.04') || vars.KYTHIRA_X64_RUNNER || 'bit63' }}
     timeout-minutes: 240
     environment: ${{ github.ref == 'refs/heads/main' && 'build-cache-write' || '' }}
     strategy:

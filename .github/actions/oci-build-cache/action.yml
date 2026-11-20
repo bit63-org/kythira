@@ -180,11 +180,24 @@ runs:
         # than assumed: it is present on ubuntu-24.04 and ubuntu-24.04-arm
         # today, and if a future image drops it every port would rebuild from
         # source with only a per-port warning to say so.
+        #
+        # On a self-hosted runner (bit63) the image is not GitHub's and
+        # may not carry the CLI. There the bucket is only the fallback for
+        # when the kythira cache is unset or down, so a missing CLI turns the
+        # vcpkg binary cache off with a warning instead of failing the job;
+        # sccache talks S3 itself and keeps working.
+        vcpkg_source=on
         if ! command -v aws >/dev/null 2>&1; then
-          echo "::error::the AWS CLI is not on this runner; vcpkg's x-aws backend cannot work"
-          exit 1
+          if [ "${RUNNER_ENVIRONMENT:-}" = "self-hosted" ]; then
+            echo "::warning::the AWS CLI is not on this self-hosted runner; vcpkg binary cache off for this job (sccache still uses the bucket)"
+            vcpkg_source=off
+          else
+            echo "::error::the AWS CLI is not on this runner; vcpkg's x-aws backend cannot work"
+            exit 1
+          fi
+        else
+          aws --version
         fi
-        aws --version
 
         # Every upload is one PutObject, never a multipart upload. OCI asks
         # for OBJECT_CREATE *and* OBJECT_OVERWRITE on CreateMultipartUpload
@@ -219,7 +232,9 @@ runs:
           # byte-identical round-trip with when_required.
           echo "AWS_REQUEST_CHECKSUM_CALCULATION=when_required"
           echo "AWS_RESPONSE_CHECKSUM_VALIDATION=when_required"
-          echo "VCPKG_BINARY_SOURCES=clear;x-aws,s3://${BUCKET}/vcpkg/${TRIPLET}/,${mode}"
+          if [ "$vcpkg_source" = on ]; then
+            echo "VCPKG_BINARY_SOURCES=clear;x-aws,s3://${BUCKET}/vcpkg/${TRIPLET}/,${mode}"
+          fi
           # Stated, not inferred, for other consumers of these credentials
           # (the clang-tidy result cache): readwrite or read.
           echo "OCI_BUILD_CACHE_MODE=${mode}"
@@ -313,7 +328,16 @@ runs:
         # Fatal on purpose — see above.
         echo "${sha}  ${tmp}/${tarball}" | sha256sum -c -
         tar xzf "${tmp}/${tarball}" -C "$tmp"
-        sudo install -m 0755 "${tmp}/sccache-v${SCCACHE_VERSION}-${target}/sccache" /usr/local/bin/sccache
+        # A self-hosted runner image may not carry sudo; install for this
+        # job only in that case.
+        if command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
+          sudo install -m 0755 "${tmp}/sccache-v${SCCACHE_VERSION}-${target}/sccache" /usr/local/bin/sccache
+        else
+          mkdir -p "${RUNNER_TEMP}/sccache-bin"
+          install -m 0755 "${tmp}/sccache-v${SCCACHE_VERSION}-${target}/sccache" "${RUNNER_TEMP}/sccache-bin/sccache"
+          echo "${RUNNER_TEMP}/sccache-bin" >> "$GITHUB_PATH"
+          export PATH="${RUNNER_TEMP}/sccache-bin:${PATH}"
+        fi
         rm -rf "$tmp"
         sccache --version
 

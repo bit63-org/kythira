@@ -62,7 +62,7 @@ concurrency:
 jobs:
   container-scenarios:
     name: Container scenarios (${{ matrix.runtime }})
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (matrix.runtime == 'podman' && 'ubuntu-24.04') || (github.event.pull_request.head.repo.fork && 'ubuntu-24.04') || vars.KYTHIRA_X64_RUNNER || 'bit63' }}
     timeout-minutes: 180
 
     strategy:

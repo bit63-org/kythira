@@ -127,7 +127,7 @@ permissions:
 jobs:
   measure:
     name: Measure ${{ github.event.inputs.label || 'coap' }} @ ${{ github.event.inputs.compiler || 'clang++-18' }}/${{ github.event.inputs.arch || 'x64' }}
-    runs-on: ${{ github.event.inputs.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
+    runs-on: ${{ github.event.inputs.arch == 'arm64' && 'ubuntu-24.04-arm' || ((github.event.pull_request.head.repo.fork && 'ubuntu-24.04') || vars.KYTHIRA_X64_RUNNER || 'bit63') }}
     timeout-minutes: 240
     # The read-write build-cache key is an environment secret of
     # build-cache-write, whose deployment branches are main only, so a
