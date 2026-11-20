@@ -258,6 +258,8 @@ struct fixture {
     std::map<std::string, bucket> buckets;
     fake_catalog catalog;
     std::vector<std::string> catalog_arns;
+    /// The SSE-KMS key each object was written with, by `<bucket>/<key>`.
+    std::map<std::string, std::optional<std::string>> sse;
     delivery_t delivery{cluster, service, delivery_config()};
     std::string arn;
 
@@ -276,8 +278,10 @@ struct fixture {
                                const kin::channel_access&) -> std::optional<kin::channel_bucket> {
             kin::channel_bucket t;
             t._put = [this, name](const std::string& k, std::string_view b,
-                                  const kin::channel_put_options&) {
+                                  const kin::channel_put_options& o) {
                 buckets[name][k] = std::string(b);
+                sse[name + "/" + k] = o._sse_kms_key_id;
+                BOOST_TEST(o._metadata.empty());
             };
             t._get = [this, name](const std::string& k) -> std::optional<std::string> {
                 const auto& b = buckets[name];
@@ -325,7 +329,8 @@ struct fixture {
                                {"Data", kin::channel_detail::base64(data)}});
     }
 
-    auto channel(std::string_view compression = "SNAPPY", json::object table_extra = {}) -> void {
+    auto channel(std::string_view compression = "SNAPPY", json::object table_extra = {},
+                 std::string_view kms_key = {}) -> void {
         (void)ok("CreateStream",
                  {{"StreamName", "clicks"}, {"StreamModeDetails", {{"StreamMode", "ON_DEMAND"}}}});
         json::object table{{"TableBucketARN", k_table_bucket},
@@ -335,23 +340,26 @@ struct fixture {
         for (const auto& [k, v] : table_extra) {
             table[k] = v;
         }
-        const auto created =
-            ok("CreateChannel",
-               {{"ChannelName", "to-tables"},
-                {"ServiceExecutionRoleARN", k_role},
-                {"StreamConfigurationList",
-                 json::array{{{"StreamARN", "arn:aws:kinesis:us-east-1:" + std::string(k_account) +
-                                                ":stream/clicks"},
-                              {"RecordConfiguration",
-                               {{"RecordFormatType", "GSR_JSON"},
-                                {"GSRSchemaARN",
-                                 "arn:aws:glue:us-east-1:111122223333:schema/registry/clicks"}}}}}},
-                {"S3TablesDestinationConfiguration",
-                 {{"DeadLetterQueueS3Configuration",
-                   {{"BucketARN", "arn:aws:s3:::dead-letters"},
-                    {"ExpectedBucketOwner", k_account},
-                    {"ErrorOutputPrefix", "bad/"}}},
-                  {"S3TablesConfigurationList", json::array{table}}}}});
+        json::object in{
+            {"ChannelName", "to-tables"},
+            {"ServiceExecutionRoleARN", k_role},
+            {"StreamConfigurationList",
+             json::array{{{"StreamARN", "arn:aws:kinesis:us-east-1:" + std::string(k_account) +
+                                            ":stream/clicks"},
+                          {"RecordConfiguration",
+                           {{"RecordFormatType", "GSR_JSON"},
+                            {"GSRSchemaARN",
+                             "arn:aws:glue:us-east-1:111122223333:schema/registry/clicks"}}}}}},
+            {"S3TablesDestinationConfiguration",
+             {{"DeadLetterQueueS3Configuration",
+               {{"BucketARN", "arn:aws:s3:::dead-letters"},
+                {"ExpectedBucketOwner", k_account},
+                {"ErrorOutputPrefix", "bad/"}}},
+              {"S3TablesConfigurationList", json::array{table}}}}};
+        if (!kms_key.empty()) {
+            in["EncryptionConfiguration"] = {{"EncryptionType", "KMS"}, {"KeyId", kms_key}};
+        }
+        const auto created = ok("CreateChannel", in);
         arn =
             std::string(created.at("ChannelDescription").as_object().at("ChannelARN").as_string());
         clock += 1000;
@@ -755,6 +763,36 @@ BOOST_AUTO_TEST_CASE(a_missing_table_is_retried) {
     stats = f.delivery.run_once();
     BOOST_TEST(stats._records == 1U);
     BOOST_TEST(ids(f.rows()) == (std::multiset<std::int64_t>{1}));
+}
+
+// Requirement 18.4: an Iceberg reader opens data files straight from the
+// table bucket, so an encrypted channel asks the store for SSE-KMS under its
+// key on every write (data files, manifest, manifest list, dead letters),
+// whatever KINESIS_CHANNEL_ENCRYPTION says and with no key provider.
+BOOST_AUTO_TEST_CASE(an_encrypted_channel_asks_for_sse_kms_on_every_file) {
+    for (const std::string_view key : {"", "alias/tables-key"}) {
+        BOOST_TEST_CONTEXT("key '" << key << "'") {
+            fixture f;
+            f.channel("SNAPPY", {}, key);
+            f.put(R"({"id":1,"event_time":"2025-11-10T12:00:01Z"})");
+            f.put("not json");
+            f.clock += 300'000;
+            const auto stats = f.delivery.run_once();
+            BOOST_TEST(stats._failures == 0U, stats._last_failure);
+            BOOST_TEST(stats._records == 1U);
+            BOOST_TEST(stats._dead_letters == 1U);
+            BOOST_TEST(f.catalog._commits == 1);
+            // A data file, the manifest, the manifest list, a dead letter.
+            BOOST_TEST(f.sse.size() >= 4U);
+            for (const auto& [object, sse] : f.sse) {
+                if (key.empty()) {
+                    BOOST_TEST(!sse.has_value(), object);
+                } else {
+                    BOOST_TEST(sse.value_or("") == key, object);
+                }
+            }
+        }
+    }
 }
 
 BOOST_AUTO_TEST_CASE(a_node_without_a_catalog_leaves_tables_channels_alone) {

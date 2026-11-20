@@ -45,6 +45,12 @@
 /// `ZSTD` (when libzstd was). A channel whose compression this build cannot
 /// write is set to FAILED with the reason, rather than silently not
 /// delivering.
+///
+/// Encryption (Requirement 18.4): a channel with an `EncryptionConfiguration`
+/// has each object and dead letter sealed after compression under a data
+/// key from the node's key provider (`channel_encryption::envelope`, see
+/// `channel_detail::seal_object`), or asks S3 for SSE-KMS under its key
+/// (`channel_encryption::sse_kms`, and always for S3 Tables).
 
 #include <kythira/kinesis/kinesis_avro.hpp>
 #include <kythira/kinesis/kinesis_channels.hpp>
@@ -91,6 +97,30 @@ namespace kythira::kinesis {
 struct channel_put_options {
     std::string _storage_class;
     std::string _expected_owner;
+    /// User metadata (`x-amz-meta-<name>`, by `<name>`): an envelope-sealed
+    /// object's wrapped data key and nonce (`channel_detail::seal_object`).
+    std::map<std::string, std::string> _metadata{};
+    /// Asks S3 to encrypt the object with SSE-KMS under this key
+    /// (`x-amz-server-side-encryption: aws:kms`); nullopt asks nothing.
+    std::optional<std::string> _sse_kms_key_id{};
+};
+
+/// How a node carries out a channel's `EncryptionConfiguration`
+/// (`KINESIS_CHANNEL_ENCRYPTION`) for general purpose S3 destinations.
+/// S3 Tables destinations always ask for SSE-KMS: an Iceberg reader opens
+/// data files straight from storage, so only the store can decrypt them.
+enum class channel_encryption : std::uint8_t {
+    /// The node seals each object (and dead-letter object) under an
+    /// AES-256-GCM data key from its own key provider (`KINESIS_KMS`:
+    /// kythira, aws, local or pkcs11), asked for as the channel's
+    /// execution role, the way a stream is encrypted at rest. Works on any
+    /// S3-compatible store; readers unwrap the data key through the same
+    /// provider.
+    envelope = 0,
+    /// The node sends plaintext and asks S3 to encrypt it with SSE-KMS
+    /// under the channel's `KeyId`, as AWS's own delivery does: the store's
+    /// KMS must know the key, and readers need nothing beyond `GetObject`.
+    sse_kms = 1,
 };
 
 /// One destination bucket: `_put` writes `bytes` at `key` (from the
@@ -157,6 +187,18 @@ struct channel_delivery_config {
     /// Whether this node can write a `CompressionType`; unset asks what
     /// the build has (`channel_detail::can_compress`). Tests narrow it.
     std::function<bool(std::string_view)> _can_compress;
+    /// How channels with an `EncryptionConfiguration` are encrypted.
+    channel_encryption _encryption = channel_encryption::envelope;
+    /// The key provider envelope encryption asks for data keys (the
+    /// node's `KINESIS_KMS`). Empty: an S3 channel with an
+    /// `EncryptionConfiguration` is set to FAILED in envelope mode, never
+    /// delivered in plaintext.
+    key_provider _kms{};
+    /// How long one data key seals a channel's objects before the provider
+    /// is asked for another: AWS reuses a stream's data keys for five
+    /// minutes, and it bounds how late a disabled key or a revoked grant
+    /// stops deliveries. 0 asks for a key per object.
+    std::int64_t _data_key_reuse_ms = std::int64_t{5} * 60 * 1000;
 };
 
 struct channel_delivery_stats {
@@ -395,6 +437,201 @@ inline constexpr std::string_view k_default_key_template =
     return "";
 }
 
+// ── encryption of delivered objects (Requirement 18.4) ─────────────────────
+//
+// Envelope encryption lays an object out as the Amazon S3 Encryption
+// Client's version 2 format does: the body is AES-256-GCM ciphertext then
+// its 16-byte tag, with no additional data, and the user metadata carries
+// the rest:
+//
+// | Metadata | Value |
+// |---|---|
+// | `x-amz-key-v2` | the wrapped data key, base64 |
+// | `x-amz-iv` | the 12-byte nonce, base64 |
+// | `x-amz-cek-alg` | `AES/GCM/NoPadding` |
+// | `x-amz-wrap-alg` | `kms+context` |
+// | `x-amz-tag-len` | `128` |
+// | `x-amz-matdesc` | the encryption context, JSON |
+// | `x-amz-unencrypted-content-length` | the plaintext's length |
+// | `kythira-kms-key-id` | the provider's id for the wrapping key |
+//
+// The encryption context names the content algorithm, as that format's
+// `kms+context` wrapping requires, and the channel, so a data key copied
+// to another channel's object does not unwrap for it. With `KINESIS_KMS=aws`
+// the wrapped key is a real KMS ciphertext blob; the local and PKCS#11
+// providers' blobs open only through a Kythira provider with the same
+// passphrase or token.
+
+inline constexpr std::string_view k_cek_alg = "AES/GCM/NoPadding";
+
+/// The channel's customer managed key, when its `EncryptionConfiguration`
+/// asks for KMS encryption; nullopt for an unencrypted channel.
+[[nodiscard]] inline auto channel_key_id(const channel_record& c) -> std::optional<std::string> {
+    if (c._encryption_config.empty()) {
+        return std::nullopt;
+    }
+    boost::system::error_code ec;
+    const auto v = boost::json::parse(c._encryption_config, ec);
+    if (ec || !v.is_object()) {
+        return std::nullopt;
+    }
+    const auto* type = v.as_object().if_contains("EncryptionType");
+    const auto* key = v.as_object().if_contains("KeyId");
+    if (type == nullptr || !type->is_string() || type->as_string() != "KMS" || key == nullptr ||
+        !key->is_string() || key->as_string().empty()) {
+        return std::nullopt;
+    }
+    return std::string(key->as_string());
+}
+
+/// The encryption context a channel's data keys are wrapped under.
+[[nodiscard]] inline auto object_context(const channel_record& c) -> encryption_context {
+    return encryption_context{{"aws:x-amz-cek-alg", std::string(k_cek_alg)},
+                              {"kinesis:channel-id", channel_id_text(c._id)}};
+}
+
+/// Base64 back to bytes; nullopt when `in` is not padded base64.
+[[nodiscard]] inline auto unbase64(std::string_view in) -> std::optional<std::string> {
+    const auto value = [](char c) -> int {
+        if (c >= 'A' && c <= 'Z') {
+            return c - 'A';
+        }
+        if (c >= 'a' && c <= 'z') {
+            return c - 'a' + 26;
+        }
+        if (c >= '0' && c <= '9') {
+            return c - '0' + 52;
+        }
+        if (c == '+') {
+            return 62;
+        }
+        if (c == '/') {
+            return 63;
+        }
+        return -1;
+    };
+    if (in.size() % 4 != 0) {
+        return std::nullopt;
+    }
+    std::string out;
+    out.reserve(in.size() / 4 * 3);
+    for (std::size_t i = 0; i < in.size(); i += 4) {
+        std::uint32_t v = 0;
+        int pad = 0;
+        for (std::size_t j = 0; j < 4; ++j) {
+            const char c = in[i + j];
+            if (c == '=' && i + 4 == in.size() && j >= 2) {
+                ++pad;
+                v <<= 6U;
+                continue;
+            }
+            const int d = value(c);
+            if (d < 0 || pad > 0) {
+                return std::nullopt;
+            }
+            v = (v << 6U) | static_cast<std::uint32_t>(d);
+        }
+        out.push_back(static_cast<char>((v >> 16U) & 0xFFU));
+        if (pad < 2) {
+            out.push_back(static_cast<char>((v >> 8U) & 0xFFU));
+        }
+        if (pad < 1) {
+            out.push_back(static_cast<char>(v & 0xFFU));
+        }
+    }
+    return out;
+}
+
+/// An envelope-sealed object: its body and the user metadata it is written
+/// with.
+struct sealed_object {
+    std::string _body;
+    std::map<std::string, std::string> _metadata;
+};
+
+/// `plain` sealed under `key` (wrapped under `context`), with a fresh nonce.
+[[nodiscard]] inline auto seal_object(const generated_data_key& key,
+                                      const encryption_context& context, std::string_view plain)
+    -> sealed_object {
+    std::array<unsigned char, kms_detail::k_nonce_len> nonce{};
+    kms_detail::random_fill(nonce);
+    std::vector<std::byte> sealed;
+    sealed.reserve(plain.size() + kms_detail::k_tag_len);
+    kms_detail::gcm_seal(key._plaintext, nonce, {},
+                         std::as_bytes(std::span(plain.data(), plain.size())), sealed);
+    boost::json::object matdesc;
+    for (const auto& [k, v] : context) {
+        matdesc[k] = v;
+    }
+    sealed_object out;
+    out._body.assign(reinterpret_cast<const char*>(sealed.data()), sealed.size());
+    out._metadata = {
+        {"x-amz-key-v2", base64(key._wrapped)},
+        {"x-amz-iv",
+         base64(std::string_view(reinterpret_cast<const char*>(nonce.data()), nonce.size()))},
+        {"x-amz-cek-alg", std::string(k_cek_alg)},
+        {"x-amz-wrap-alg", "kms+context"},
+        {"x-amz-tag-len", std::to_string(kms_detail::k_tag_len * 8)},
+        {"x-amz-matdesc", boost::json::serialize(matdesc)},
+        {"x-amz-unencrypted-content-length", std::to_string(plain.size())},
+        {"kythira-kms-key-id", key._key_id},
+    };
+    return out;
+}
+
+/// The plaintext of an object `seal_object` sealed, from its body and user
+/// metadata (names without `x-amz-meta-`, any case), its data key unwrapped
+/// through `kms` for `caller`. Throws the provider's `kms_error`, or
+/// `record_open_error` when the metadata is incomplete or the body fails
+/// its tag.
+[[nodiscard]] inline auto open_object(const key_provider& kms,
+                                      const std::map<std::string, std::string>& metadata,
+                                      std::string_view body, const kms_caller& caller = {})
+    -> std::string {
+    const auto meta = [&](std::string_view name) -> std::string {
+        for (const auto& [k, v] : metadata) {
+            if (k.size() == name.size() &&
+                std::equal(k.begin(), k.end(), name.begin(), [](char a, char b) {
+                    return std::tolower(static_cast<unsigned char>(a)) == b;
+                })) {
+                return v;
+            }
+        }
+        throw record_open_error("kinesis channel object: no " + std::string(name) + " metadata");
+    };
+    if (meta("x-amz-cek-alg") != k_cek_alg || meta("x-amz-wrap-alg") != "kms+context") {
+        throw record_open_error("kinesis channel object: not AES/GCM under a kms+context key");
+    }
+    const auto wrapped = unbase64(meta("x-amz-key-v2"));
+    const auto nonce = unbase64(meta("x-amz-iv"));
+    if (!wrapped || !nonce || nonce->size() != kms_detail::k_nonce_len) {
+        throw record_open_error("kinesis channel object: malformed key or nonce metadata");
+    }
+    boost::system::error_code ec;
+    const auto matdesc = boost::json::parse(meta("x-amz-matdesc"), ec);
+    if (ec || !matdesc.is_object()) {
+        throw record_open_error("kinesis channel object: malformed x-amz-matdesc");
+    }
+    encryption_context context;
+    for (const auto& [k, v] : matdesc.as_object()) {
+        if (!v.is_string()) {
+            throw record_open_error("kinesis channel object: malformed x-amz-matdesc");
+        }
+        context.emplace(std::string(k), std::string(v.as_string()));
+    }
+    auto key = kms.decrypt_data_key(meta("kythira-kms-key-id"), *wrapped, context, caller);
+    auto plain = kms_detail::gcm_open(
+        key, std::span(reinterpret_cast<const unsigned char*>(nonce->data()), nonce->size()), {},
+        std::as_bytes(std::span(body.data(), body.size())));
+    OPENSSL_cleanse(key.data(), key.size());
+    if (!plain) {
+        throw record_open_error("kinesis channel object: the body failed its tag");
+    }
+    std::string out(reinterpret_cast<const char*>(plain->data()), plain->size());
+    OPENSSL_cleanse(plain->data(), plain->size());
+    return out;
+}
+
 }  // namespace channel_detail
 
 /// `Service` is a `kinesis_service` (its `read_for_delivery`).
@@ -410,6 +647,7 @@ public:
         if (!_config._destination) {
             return stats;
         }
+        _data_keys.prune(_cluster.now_ms(), _config._data_key_reuse_ms);
         for (const auto& job : jobs()) {
             try {
                 channel(job, stats);
@@ -429,9 +667,124 @@ private:
         std::vector<std::pair<channel_stream, stream_record>> _sources;
     };
 
+    /// Data keys sealing channels' objects, by channel id and `KeyId`, with
+    /// when each was made. Only `run_once` touches it, from one thread.
+    class data_key_cache {
+    public:
+        struct entry {
+            generated_data_key _key;
+            std::int64_t _made_ms = 0;
+        };
+
+        data_key_cache() = default;
+        data_key_cache(const data_key_cache&) = delete;
+        data_key_cache(data_key_cache&&) = delete;
+        auto operator=(const data_key_cache&) -> data_key_cache& = delete;
+        auto operator=(data_key_cache&&) -> data_key_cache& = delete;
+        ~data_key_cache() {
+            for (auto& [k, e] : _entries) {
+                OPENSSL_cleanse(e._key._plaintext.data(), e._key._plaintext.size());
+            }
+        }
+
+        [[nodiscard]] auto find(std::uint64_t channel, const std::string& key_id, std::int64_t now,
+                                std::int64_t reuse_ms) -> const generated_data_key* {
+            const auto it = _entries.find({channel, key_id});
+            if (it == _entries.end() || now - it->second._made_ms >= reuse_ms) {
+                return nullptr;
+            }
+            return &it->second._key;
+        }
+
+        auto put(std::uint64_t channel, const std::string& key_id, generated_data_key key,
+                 std::int64_t now) -> const generated_data_key* {
+            auto& e = _entries[{channel, key_id}];
+            OPENSSL_cleanse(e._key._plaintext.data(), e._key._plaintext.size());
+            e = entry{._key = std::move(key), ._made_ms = now};
+            return &e._key;
+        }
+
+        /// Forgets keys past their reuse, so a deleted channel's go too.
+        auto prune(std::int64_t now, std::int64_t reuse_ms) -> void {
+            for (auto it = _entries.begin(); it != _entries.end();) {
+                if (now - it->second._made_ms >= reuse_ms) {
+                    OPENSSL_cleanse(it->second._key._plaintext.data(),
+                                    it->second._key._plaintext.size());
+                    it = _entries.erase(it);
+                } else {
+                    ++it;
+                }
+            }
+        }
+
+    private:
+        std::map<std::pair<std::uint64_t, std::string>, entry> _entries;
+    };
+
+    /// What one S3 batch's writes do under the channel's
+    /// `EncryptionConfiguration`: nothing, seal (envelope), or ask S3.
+    struct object_sealer {
+        const generated_data_key* _key = nullptr;
+        encryption_context _context;
+        std::optional<std::string> _sse_kms_key_id;
+
+        /// `bytes` as written, with `options` set to match.
+        [[nodiscard]] auto apply(std::string bytes, channel_put_options& options) const
+            -> std::string {
+            if (_key != nullptr) {
+                auto sealed = channel_detail::seal_object(*_key, _context, bytes);
+                options._metadata = std::move(sealed._metadata);
+                return std::move(sealed._body);
+            }
+            options._sse_kms_key_id = _sse_kms_key_id;
+            return bytes;
+        }
+    };
+
     Cluster& _cluster;
     Service& _service;
     channel_delivery_config _config;
+    data_key_cache _data_keys;
+
+    /// The sealer for a batch of `c`'s: nullopt when its data key could not
+    /// be had (counted, with the KMS's reason; the batch is retried on the
+    /// next pass, as AWS retries a delivery the key refused).
+    auto sealer_for(const channel_record& c, channel_delivery_stats& stats)
+        -> std::optional<object_sealer> {
+        object_sealer out;
+        const auto key_id = channel_detail::channel_key_id(c);
+        if (!key_id) {
+            return out;
+        }
+        if (_config._encryption == channel_encryption::sse_kms) {
+            out._sse_kms_key_id = key_id;
+            return out;
+        }
+        if (!_config._kms) {
+            ++stats._failures;
+            stats._last_failure = "No key provider (KINESIS_KMS) for an encrypted channel.";
+            return std::nullopt;
+        }
+        out._context = channel_detail::object_context(c);
+        const auto now = _cluster.now_ms();
+        out._key = _data_keys.find(c._id, *key_id, now, _config._data_key_reuse_ms);
+        if (out._key == nullptr) {
+            // Asked for as the channel's execution role, as its reads are:
+            // the role's grants on the key decide whether it delivers.
+            const auto as = channel_detail::channel_principal(c);
+            try {
+                out._key = _data_keys.put(c._id, *key_id,
+                                          _config._kms.generate_data_key(
+                                              *key_id, out._context, kms_caller{._principal = &as}),
+                                          now);
+            } catch (const kms_error& e) {
+                ++stats._failures;
+                stats._last_failure = "KMS refused a data key under " + *key_id + ": " + e.what();
+                return std::nullopt;
+            }
+        }
+        return out;
+    }
 
     template<typename F> auto read_catalog(F&& f) -> bool {
         return _cluster.read(next_id_key(), [&f](const auto& sm) { f(sm); });
@@ -509,6 +862,18 @@ private:
                     c,
                     "CompressionType " + compression + " is not supported by this Kythira build.",
                     stats);
+            }
+            return;
+        }
+        if (c._destination == channel_destination::s3 &&
+            _config._encryption == channel_encryption::envelope &&
+            channel_detail::channel_key_id(c) && !_config._kms) {
+            // Never deliver an encrypted channel's records in plaintext.
+            if (_cluster.leads(channel_key(c._account, c._name))) {
+                fail_channel(c,
+                             "EncryptionConfiguration needs a key provider (KINESIS_KMS) on the "
+                             "nodes that deliver this channel.",
+                             stats);
             }
             return;
         }
@@ -635,8 +1000,8 @@ private:
             const auto* v = o.if_contains(k);
             return v != nullptr && v->is_string() ? std::string(v->as_string()) : std::string();
         };
-        const channel_put_options options{._storage_class = text(storage, "StorageClass"),
-                                          ._expected_owner = text(storage, "ExpectedBucketOwner")};
+        channel_put_options options{._storage_class = text(storage, "StorageClass"),
+                                    ._expected_owner = text(storage, "ExpectedBucketOwner")};
         const auto format = std::string(
             boost::json::parse(src._record_config).as_object().at("RecordFormatType").as_string());
         std::string body;
@@ -683,6 +1048,11 @@ private:
             ++stats._failures;
             return false;
         }
+        // Encryption comes after compression: ciphertext does not compress.
+        const auto sealer = sealer_for(c, stats);
+        if (!sealer) {
+            return false;
+        }
         try {
             if (has_body) {
                 const auto store = _config._destination(bucket, access_of(c));
@@ -690,10 +1060,11 @@ private:
                     ++stats._failures;
                     return false;
                 }
+                const auto bytes = sealer->apply(std::move(*payload), options);
                 store->_put(channel_detail::expand_template(tpl, first._arrival_ms, c._name,
                                                             src._stream, shard_id) +
                                 name + std::string(ext),
-                            *payload, options);
+                            bytes, options);
                 ++stats._objects;
             }
             if (dead_count > 0) {
@@ -717,10 +1088,12 @@ private:
                     ++stats._failures;
                     return false;
                 }
+                // Dead letters hold the records' bytes: sealed like the rest.
+                const auto bytes = sealer->apply(std::move(dead), dlq_options);
                 store->_put(channel_detail::expand_template(prefix, first._arrival_ms, c._name,
                                                             src._stream, shard_id) +
                                 name + ".json",
-                            dead, dlq_options);
+                            bytes, dlq_options);
                 stats._dead_letters += dead_count;
             }
         } catch (const std::exception& e) {
@@ -898,6 +1271,12 @@ private:
                            channel_delivery_stats& stats) -> bool {
         const auto target = table_target_of(dest);
         const auto access = access_of(c);
+        // An Iceberg reader opens the files straight from the table bucket,
+        // so an encrypted channel asks the store for SSE-KMS under its key
+        // on every file it writes, dead letters included.
+        const auto sse = channel_detail::channel_key_id(c);
+        const channel_put_options table_options{
+            ._storage_class = {}, ._expected_owner = {}, ._metadata = {}, ._sse_kms_key_id = sse};
         const auto catalog = _config._tables(target._arn, access);
         if (!catalog) {
             ++stats._failures;
@@ -1001,7 +1380,9 @@ private:
                     channel_put_options{._storage_class = {},
                                         ._expected_owner = owner != nullptr && owner->is_string()
                                                                ? std::string(owner->as_string())
-                                                               : std::string()});
+                                                               : std::string(),
+                                        ._metadata = {},
+                                        ._sse_kms_key_id = sse});
                 stats._dead_letters += dead_count;
             }
             if (groups.empty()) {
@@ -1020,7 +1401,7 @@ private:
                     {{"iceberg.schema", boost::json::serialize(table->_schema)}});
                 const auto key = key_prefix + "data/" + iceberg::partition_path(spec, g.first) +
                                  name + "-" + std::to_string(part_index) + ".parquet";
-                store->_put(key, bytes, channel_put_options{});
+                store->_put(key, bytes, table_options);
                 files.push_back(
                     iceberg::data_file{._path = "s3://" + location->first + "/" + key,
                                        ._partition = g.first,
@@ -1031,7 +1412,7 @@ private:
             }
             const auto manifest = iceberg::write_manifest(*table, spec, files, snapshot_id, name);
             const auto manifest_key = key_prefix + "metadata/" + name + "-m0.avro";
-            store->_put(manifest_key, manifest, channel_put_options{});
+            store->_put(manifest_key, manifest, table_options);
             const auto manifest_uri = "s3://" + location->first + "/" + manifest_key;
 
             for (int attempt = 0; attempt < _config._commit_attempts; ++attempt) {
@@ -1044,7 +1425,7 @@ private:
                     first, parent, snapshot_id, table->_main_snapshot, sequence, name);
                 const auto list_key = key_prefix + "metadata/snap-" + std::to_string(snapshot_id) +
                                       "-" + std::to_string(sequence) + "-" + name + ".avro";
-                store->_put(list_key, list, channel_put_options{});
+                store->_put(list_key, list, table_options);
 
                 auto snapshot = snapshot_of(*table, snapshot_id, sequence,
                                             "s3://" + location->first + "/" + list_key, files,

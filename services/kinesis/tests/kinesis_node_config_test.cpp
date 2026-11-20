@@ -344,6 +344,18 @@ BOOST_AUTO_TEST_CASE(channel_delivery_settings) {
     vars["KINESIS_CHANNEL_ROLE"] = "service";
     BOOST_TEST(refused_naming(vars, "KINESIS_CHANNEL_ROLE"));
     vars["KINESIS_CHANNEL_ROLE"] = "assume";
+
+    // Encrypted channels: sealed on the node unless told to ask S3.
+    BOOST_TEST(!o._channel_sse_kms);
+    BOOST_TEST(kn::describe(o).find("encryption=envelope") != std::string::npos);
+    vars["KINESIS_CHANNEL_ENCRYPTION"] = "sse-kms";
+    o = kn::from_env(lookup(vars));
+    BOOST_TEST(o._channel_sse_kms);
+    BOOST_TEST(kn::describe(o).find("encryption=sse-kms") != std::string::npos);
+    vars["KINESIS_CHANNEL_ENCRYPTION"] = "client";
+    BOOST_TEST(refused_naming(vars, "KINESIS_CHANNEL_ENCRYPTION"));
+    vars.erase("KINESIS_CHANNEL_ENCRYPTION");
+    vars["KINESIS_CHANNEL_ROLE"] = "assume";
     vars["KINESIS_CHANNEL_STS_ENDPOINT"] = "iam:8443";
     BOOST_TEST(refused_naming(vars, "KINESIS_CHANNEL_STS_ENDPOINT"));
     vars.erase("KINESIS_CHANNEL_STS_ENDPOINT");
