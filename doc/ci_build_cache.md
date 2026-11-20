@@ -304,6 +304,7 @@ stays in service for every job that is not on that runner.
 |---|---|---|
 | x86-64, push / schedule / dispatch / same-repo PR | `bit63` | kythira cache |
 | x86-64, pull request from a fork | `ubuntu-24.04` | OCI, no secrets (off) |
+| x86-64, rootless Podman legs (see below) | `ubuntu-24.04` | OCI bucket |
 | arm64 | `ubuntu-24.04-arm` | OCI bucket |
 | any job, after the kill switch below | `ubuntu-24.04` | OCI bucket |
 
@@ -316,6 +317,42 @@ runs-on: ${{ (github.event.pull_request.head.repo.fork && 'ubuntu-24.04') || var
 ```
 
 so a fork's pull request always lands on a GitHub-hosted runner.
+
+**Runner image.** The scale set runs the stock `actions-runner` image,
+which lacks most of what GitHub's `ubuntu-24.04` image ships. Every x86-64
+job calls `.github/actions/self-hosted-baseline` right after checkout; on a
+self-hosted runner it installs Python and pip, jq, gh, the AWS CLI,
+shellcheck, g++-13/14 and the usual archive and build tools, skipping any the
+image already has, and on GitHub-hosted runners it does nothing. Baking those
+into a custom runner image would only make that step faster. The step also
+sets `TMPDIR` to `RUNNER_TEMP`: Docker runs in a dind sidecar that shares
+only the work volume with the job, and bind mounts resolve on the daemon's
+side, so fixtures a test writes to `/tmp` and mounts into a container would
+not exist there. When the scale set mounts a memory-backed scratch volume
+at `/home/runner/tmp` in both containers, `TMPDIR` points there instead:
+the work volume's consumer NVMe takes ~9 ms per fsync under load, too slow
+for the cache chunk store's fsync-heavy tests.
+
+Finally it puts an `nproc` first on `PATH` that follows the host's load.
+Every pod sees all of the host's CPUs, and the workflows build with
+`-j"$(nproc)"`, so up to ten concurrent jobs each ran a full-width build
+and the host thrashed. The shim reports the CPUs left idle (usable CPUs,
+after any cgroup limit, minus the one-minute load average), clamped
+between a floor of the usable CPUs divided by `KYTHIRA_RUNNER_SLOTS`
+(default 10, the scale set's maximum) and a ceiling of half of them, so
+a lone job runs wide and a full host shares. `nproc --all` and other
+arguments still reach the real one. Do not add `ninja -l` on top: the
+load average is the host's, so once it passes the CPU count every job's
+ninja drops to one compile at a time at once. That was tried, and a cold
+g++-13 leg ran out its 3-hour timeout at about one compile at a time.
+
+**Rootless Podman stays on GitHub.** Inside an ARC pod, `newuidmap`
+cannot write a user namespace's `uid_map` (`Operation not permitted`), so
+rootless Podman cannot start there. The `podman` leg of every
+`matrix.runtime` job puts `(matrix.runtime == 'podman' && 'ubuntu-24.04')`
+first in its `runs-on:`, and "DynamoDB module on and off", which runs its
+Podman scenarios inline after the Docker ones, is pinned to `ubuntu-24.04`.
+The `docker` legs use the pod's dind daemon on `bit63`.
 
 **Kill switch.** Set the repository variable `KYTHIRA_X64_RUNNER` to
 `ubuntu-24.04` and every x86-64 job goes back to GitHub-hosted runners on

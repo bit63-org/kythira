@@ -153,6 +153,8 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Self-hosted runner baseline
+        uses: ./.github/actions/self-hosted-baseline
 
       # ── System dependencies ───────────────────────────────────────────────
       # Retries the whole update+install cycle: the ubuntu-24.04-arm runner
@@ -727,6 +729,8 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Self-hosted runner baseline
+        uses: ./.github/actions/self-hosted-baseline
 
       - name: Install system dependencies
         run: |
@@ -930,6 +934,8 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Self-hosted runner baseline
+        uses: ./.github/actions/self-hosted-baseline
 
       - name: Install system dependencies
         run: |
@@ -1188,6 +1194,8 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Self-hosted runner baseline
+        uses: ./.github/actions/self-hosted-baseline
 
       - name: Install system dependencies
         run: |
@@ -1501,6 +1509,8 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Self-hosted runner baseline
+        uses: ./.github/actions/self-hosted-baseline
 
       - name: Install system dependencies
         run: |
@@ -1776,6 +1786,8 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Self-hosted runner baseline
+        uses: ./.github/actions/self-hosted-baseline
 
       - name: Install system dependencies
         run: |
@@ -1798,10 +1810,26 @@ jobs:
             echo "::warning::apt-get install failed (attempt ${attempt}/3), retrying in 30s..."
             sleep 30
           done
-          sudo systemctl disable --now named
           # The package starts the daemon on install; make sure, and fail here
           # rather than as 24 DNSSDExceptions in the Poco test if it did not.
-          sudo systemctl start avahi-daemon
+          # Self-hosted runner pods have no systemd (PID 1 is the runner, and
+          # policy-rc.d stops the packages starting anything), so there named
+          # was never started and avahi-daemon is started by hand behind its
+          # own system D-Bus, which libavahi-client talks to.
+          if [ -d /run/systemd/system ]; then
+            sudo systemctl disable --now named
+            sudo systemctl start avahi-daemon
+          else
+            if [ ! -S /run/dbus/system_bus_socket ]; then
+              sudo mkdir -p /run/dbus
+              sudo dbus-daemon --system --fork
+            fi
+            avahi-daemon --check 2>/dev/null || sudo avahi-daemon --daemonize --no-drop-root --no-chroot
+            for _ in 1 2 3 4 5 6 7 8 9 10; do
+              avahi-daemon --check 2>/dev/null && break
+              sleep 1
+            done
+          fi
           avahi-daemon --check
           if [ -e /etc/apparmor.d/usr.sbin.named ] && [ -d /sys/kernel/security/apparmor ]; then
             sudo apparmor_parser -R /etc/apparmor.d/usr.sbin.named
@@ -2004,6 +2032,8 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Self-hosted runner baseline
+        uses: ./.github/actions/self-hosted-baseline
 
       - name: Install system dependencies
         run: |
@@ -2270,6 +2300,8 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Self-hosted runner baseline
+        uses: ./.github/actions/self-hosted-baseline
 
       - name: Install system dependencies
         run: |
@@ -2551,6 +2583,8 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Self-hosted runner baseline
+        uses: ./.github/actions/self-hosted-baseline
 
       - name: Install system dependencies
         run: |
@@ -2698,6 +2732,8 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Self-hosted runner baseline
+        uses: ./.github/actions/self-hosted-baseline
 
       # Debug + LLVM source-based coverage instrumentation (-g, no
       # optimization, -fprofile-instr-generate/-fcoverage-mapping) produces
@@ -2736,11 +2772,16 @@ jobs:
           # Bounded and retried, like every other install step. This one had
           # neither, and hung for its full 3-hour job budget without ever
           # reaching a compiler.
+          # libclang-rt-18-dev holds libclang_rt.profile, which
+          # -fprofile-instr-generate links. GitHub's image has it from its
+          # full LLVM install; without it every try_compile fails to link and
+          # configure dies at "Could NOT find Threads".
           for attempt in 1 2 3; do
             if timeout 300 sudo apt-get update -q \
                && timeout 600 sudo apt-get install -y --no-install-recommends \
                  clang-18 \
                  llvm-18 \
+                 libclang-rt-18-dev \
                  cmake \
                  ninja-build \
                  libfiu-dev \
@@ -3156,6 +3197,8 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Self-hosted runner baseline
+        uses: ./.github/actions/self-hosted-baseline
 
       - name: Install system dependencies
         run: |
@@ -3541,6 +3584,8 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Self-hosted runner baseline
+        uses: ./.github/actions/self-hosted-baseline
 
       - name: Install system dependencies
         run: |
@@ -3746,6 +3791,13 @@ jobs:
       - name: Add swap headroom and report resources
         run: |
           echo "── before ──"; df -h /; free -h
+          # A self-hosted runner pod cannot swapon (no CAP_SYS_ADMIN, and
+          # swap belongs to the host's kubelet anyway); there the host's
+          # memory is the headroom, so only report it.
+          if [ "${{ runner.environment }}" = "self-hosted" ]; then
+            nproc
+            exit 0
+          fi
           sudo swapoff -a || true
           sudo rm -f /mnt/swapfile /swapfile || true
           sudo fallocate -l 24G /mnt/swapfile
@@ -3960,6 +4012,8 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Self-hosted runner baseline
+        uses: ./.github/actions/self-hosted-baseline
 
       # Every network command is bounded and retried. Unbounded, this step hung
       # for its whole 15-minute job budget and reported as a Packer failure —
@@ -4047,6 +4101,8 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Self-hosted runner baseline
+        uses: ./.github/actions/self-hosted-baseline
       - name: Install kconfiglib
         run: pip3 install --user -r scripts/kconfig/requirements.txt
       - name: Every defconfig loads against Kconfig without a warning
@@ -4071,6 +4127,8 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Self-hosted runner baseline
+        uses: ./.github/actions/self-hosted-baseline
       - name: No workflow may declare more than 25 workflow_dispatch inputs
         run: |
           python3 - <<'PY'
@@ -4142,6 +4200,8 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Self-hosted runner baseline
+        uses: ./.github/actions/self-hosted-baseline
       - name: Lint the AWS CI bundle policies
         run: python3 scripts/ci-cloud-credentials/aws/render-ci-policy.py --check
 
@@ -4158,6 +4218,8 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Self-hosted runner baseline
+        uses: ./.github/actions/self-hosted-baseline
 
       # Bounded and retried. Unbounded, this step hung for the docs job's whole
       # 30-minute budget without ever invoking Doxygen, and reported as a docs

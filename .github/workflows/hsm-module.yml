@@ -99,6 +99,8 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Self-hosted runner baseline
+        uses: ./.github/actions/self-hosted-baseline
       # The fixture tests first, so a broken checker cannot pass the tree by
       # reporting nothing (same order as ci.yml's kconfig-check).
       - name: Module boundary checker passes its fixture tests
@@ -122,6 +124,8 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Self-hosted runner baseline
+        uses: ./.github/actions/self-hosted-baseline
 
       - name: Install system dependencies
         run: |
@@ -248,9 +252,16 @@ jobs:
       # one just built, with vcpkg's static OpenSSL, as it ships.
       - name: Install the PKCS#11 consumers
         run: |
+          # GitHub's image ships Go and a JDK; the self-hosted runner image
+          # has neither, so take them from apt there. noble's Go is older
+          # than go.mod's, which go fetches itself (GOTOOLCHAIN=auto).
+          extra=()
+          command -v go >/dev/null 2>&1 || extra+=(golang-go)
+          command -v java >/dev/null 2>&1 || extra+=(default-jdk-headless)
           for attempt in 1 2 3; do
             if timeout 600 sudo apt-get install -y --no-install-recommends \
-                 opensc pkcs11-provider p11-kit p11-kit-modules gnutls-bin; then
+                 opensc pkcs11-provider p11-kit p11-kit-modules gnutls-bin \
+                 "${extra[@]}"; then
               break
             fi
             if (( attempt == 3 )); then
@@ -325,6 +336,8 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Self-hosted runner baseline
+        uses: ./.github/actions/self-hosted-baseline
 
       - name: Install system dependencies
         run: |
@@ -441,6 +454,8 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Self-hosted runner baseline
+        uses: ./.github/actions/self-hosted-baseline
 
       - name: Free disk space
         run: |

@@ -345,6 +345,8 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Self-hosted runner baseline
+        uses: ./.github/actions/self-hosted-baseline
 
       - name: Fail closed if AWS_CI_ROLE_ARN is unset
         if: ${{ vars.AWS_CI_ROLE_ARN == '' }}
@@ -1235,6 +1237,8 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Self-hosted runner baseline
+        uses: ./.github/actions/self-hosted-baseline
 
       - name: Fail closed if AWS_CI_ROLE_ARN is unset
         if: ${{ vars.AWS_CI_ROLE_ARN == '' }}
@@ -1528,6 +1532,8 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Self-hosted runner baseline
+        uses: ./.github/actions/self-hosted-baseline
 
       - name: Fail closed if AWS_CI_ROLE_ARN is unset
         if: ${{ vars.AWS_CI_ROLE_ARN == '' }}
@@ -1806,6 +1812,8 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Self-hosted runner baseline
+        uses: ./.github/actions/self-hosted-baseline
 
       - name: Fail closed if AWS_CI_ROLE_ARN is unset
         if: ${{ vars.AWS_CI_ROLE_ARN == '' }}
@@ -2050,6 +2058,8 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Self-hosted runner baseline
+        uses: ./.github/actions/self-hosted-baseline
 
       - name: Fail closed if Azure CI identity variables are unset
         if: ${{ vars.AZURE_CI_CLIENT_ID == '' || vars.AZURE_CI_TENANT_ID == '' || vars.AZURE_CI_SUBSCRIPTION_ID == '' }}
@@ -2824,6 +2834,8 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Self-hosted runner baseline
+        uses: ./.github/actions/self-hosted-baseline
 
       - name: Fail closed if GCP WIF variables are unset
         if: ${{ vars.GCP_CI_WORKLOAD_IDENTITY_PROVIDER == '' || vars.GCP_CI_SERVICE_ACCOUNT == '' }}
@@ -3286,6 +3298,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Self-hosted runner baseline
+        uses: ./.github/actions/self-hosted-baseline
 
       # Mirrors the AWS job's equivalent guard. A provider job with every
       # bundle off would run zero tests and report success, which is the
@@ -3846,6 +3860,8 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Self-hosted runner baseline
+        uses: ./.github/actions/self-hosted-baseline
 
       # Every provider job carries this guard because the failure it prevents
       # actually happened on the azure job: all bundles off means the job
@@ -4246,6 +4262,8 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Self-hosted runner baseline
+        uses: ./.github/actions/self-hosted-baseline
 
       - name: Fail closed if AWS_CI_ROLE_ARN is unset
         if: ${{ vars.AWS_CI_ROLE_ARN == '' }}
@@ -4284,6 +4302,8 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Self-hosted runner baseline
+        uses: ./.github/actions/self-hosted-baseline
 
       - name: Fail closed if Azure monitoring variables are unset
         if: ${{ vars.AZURE_CI_CLIENT_ID == '' || vars.AZURE_CI_TENANT_ID == '' || vars.AZURE_CI_SUBSCRIPTION_ID == '' || vars.AZURE_MONITORING_APP_ID == '' }}
@@ -4322,6 +4342,8 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Self-hosted runner baseline
+        uses: ./.github/actions/self-hosted-baseline
 
       - name: Fail closed if GCP WIF variables are unset
         if: ${{ vars.GCP_CI_WORKLOAD_IDENTITY_PROVIDER == '' || vars.GCP_CI_SERVICE_ACCOUNT == '' || vars.GCP_REAL_CLOUD_TESTS_PROJECT == '' }}
@@ -4365,6 +4387,8 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Self-hosted runner baseline
+        uses: ./.github/actions/self-hosted-baseline
 
       - name: Fail closed if OCI monitoring variables are unset
         run: |
@@ -4455,6 +4479,8 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Self-hosted runner baseline
+        uses: ./.github/actions/self-hosted-baseline
 
       - name: Fail closed if Alibaba monitoring variables are unset
         if: ${{ vars.ALIBABA_CMS_REMOTE_WRITE_URL == '' || vars.ALIBABA_CMS_PROM_QUERY_URL == '' }}

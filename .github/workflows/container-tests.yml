@@ -77,6 +77,8 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Self-hosted runner baseline
+        uses: ./.github/actions/self-hosted-baseline
 
       # The runner image is ~20 GB short of what a full build plus a dozen
       # images needs on a bad day; the coverage job in ci.yml has the same
