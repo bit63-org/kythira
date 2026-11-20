@@ -37,6 +37,7 @@
 #include <raft/raft.hpp>
 #include <raft/shard_exceptions.hpp>
 #include <raft/shard_map.hpp>
+#include <raft/append_entries_batcher.hpp>
 #include <raft/latency_digest.hpp>
 #include <raft/load_split_sampler.hpp>
 #include <raft/shard_placement_driver.hpp>
@@ -134,6 +135,13 @@ struct tick_report {
 
     /// @brief Whether the policy phase ran this tick (it runs on its own interval).
     bool _policy_ran{false};
+
+    /// @brief Batched AppendEntries sent while this tick ran, and the members
+    /// they carried (`.kiro/specs/multi-raft-message-batching/` Requirement
+    /// 6.1). Zero when batching is off. Counts the batcher's off-tick flushes
+    /// that happened to land inside the tick as well as the tick's own.
+    std::uint64_t _batches_sent{0};
+    std::uint64_t _batched_members{0};
 
     [[nodiscard]] auto total_duration() const -> std::chrono::nanoseconds {
         return _persist_duration + _send_duration + _apply_duration + _policy_duration;
@@ -539,6 +547,15 @@ struct multi_raft_config {
     /// before touching anything else, and the host never takes the sampler
     /// lock at all.
     load_split_sampler_config load_split{};
+
+    /// @brief Batched AppendEntries (`.kiro/specs/multi-raft-message-batching/`).
+    ///
+    /// Off by default. When on, and only when the shared client and server
+    /// both speak the batch RPC, each destination's AppendEntries from every
+    /// group are coalesced and flushed at the end of the send phase, after at
+    /// most `_max_delay` for sends outside it, or as soon as a queue is full.
+    /// On any other transport this field changes nothing.
+    batching_config batching{};
 
     /// @brief Sub-windows in each group's latency digest (design §6.1.4).
     ///
@@ -953,6 +970,13 @@ public:
     using demux_type = multi_group_network_server<shared_server_type, GroupId, messages_type>;
     using group_types = group_scoped_types<Types, GroupId, demux_type>;
     using group_node_type = node<group_types>;
+
+    /// @brief Whether this host's transport can batch AppendEntries at all
+    ///        (`.kiro/specs/multi-raft-message-batching/` Requirement 1.2).
+    static constexpr bool k_transport_batches =
+        append_entries_batching_client<shared_client_type, messages_type> &&
+        network_server_with_append_entries_batch<shared_server_type, node_id_type>;
+    using batcher_type = append_entries_batcher<shared_client_type, messages_type>;
 
     using descriptor_type = shard_descriptor<GroupId, Key, node_id_type>;
     using shard_map_type = shard_map<GroupId, Key, node_id_type>;
@@ -1575,6 +1599,14 @@ public:
     /// @brief Messages dropped for a tombstoned or unplaceable group.
     [[nodiscard]] auto stale_group_message_count() const -> std::uint64_t;
 
+    /// @brief Whether this host batches AppendEntries: enabled in its config
+    ///        and supported by its transport.
+    [[nodiscard]] auto batching_active() const -> bool { return _batcher != nullptr; }
+
+    /// @brief The AppendEntries batcher, or null when `batching_active()` is
+    ///        false. For metrics and tests.
+    [[nodiscard]] auto batcher() const -> const batcher_type* { return _batcher.get(); }
+
     [[nodiscard]] auto executor_stripe_count() const -> std::size_t;
 
     /// @brief Which stripe a group runs on. `npos` if the group is unknown.
@@ -2059,6 +2091,10 @@ private:
     config_type _cfg;
     shared_client_type _client;
     demux_type _demux;
+    /// Built only when batching is enabled on a transport that speaks it.
+    /// Declared after `_client` so it is destroyed first: its destructor
+    /// waits out batches still in flight on the client.
+    std::unique_ptr<batcher_type> _batcher;
 
     /// Stripe count is fixed for the host's lifetime so a group's stripe index
     /// stays valid across a stop/start cycle.

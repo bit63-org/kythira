@@ -20,6 +20,7 @@
 #include <string_view>
 #include <vector>
 #include <optional>
+#include <variant>
 #include <cstddef>
 #include <ranges>
 #include <chrono>
@@ -617,6 +618,60 @@ struct append_entries_response {
     [[nodiscard]] auto conflict_index() const -> std::optional<LogIndex> { return _conflict_index; }
     [[nodiscard]] auto conflict_term() const -> std::optional<TermId> { return _conflict_term; }
     [[nodiscard]] auto group_id() const -> GroupId { return _group_id; }
+};
+
+/// @page append_entries_batches Batched AppendEntries
+///
+/// `.kiro/specs/multi-raft-message-batching/`. A multi-Raft host that leads
+/// many groups whose replicas sit on the same peers sends each peer one
+/// AppendEntries per group per heartbeat. A batch carries several groups'
+/// AppendEntries to one destination in one request, and its response carries
+/// their answers in the same order. Members are the group-stamped requests
+/// exactly as they would travel alone, so a member's encoding inside a batch
+/// is its encoding on its own (Requirement 5.1).
+
+/// @brief Why the receiving host could not produce a batch member's response.
+///
+/// A member error never fails the rest of the batch (Requirement 2.3). The
+/// sending side turns it back into what the member would have seen sent
+/// alone: an `unknown_group` member gets the same refusal the receiver's
+/// demultiplexer builds for a lone message to a group it does not hold, and a
+/// `handler_failed` member fails its future with `network_exception`, as a
+/// lone message whose handler threw fails with the transport's error.
+struct batch_member_error {
+    enum class kind_type : std::uint8_t {
+        unknown_group = 0,
+        handler_failed = 1,
+    };
+
+    kind_type _kind{kind_type::handler_failed};
+    std::string _message{};
+
+    [[nodiscard]] auto kind() const -> kind_type { return _kind; }
+    [[nodiscard]] auto message() const -> const std::string& { return _message; }
+
+    friend auto operator==(const batch_member_error&, const batch_member_error&) -> bool = default;
+};
+
+/// @brief Several groups' AppendEntries for one destination node.
+/// @tparam Request The group-stamped AppendEntries request type.
+template<typename Request = append_entries_request<>> struct append_entries_batch_request {
+    using member_type = Request;
+
+    std::vector<Request> _members{};
+
+    [[nodiscard]] auto members() const -> const std::vector<Request>& { return _members; }
+};
+
+/// @brief The answers to an `append_entries_batch_request`, one per member, in
+///        the request's order.
+/// @tparam Response The AppendEntries response type.
+template<typename Response = append_entries_response<>> struct append_entries_batch_response {
+    using member_type = std::variant<Response, batch_member_error>;
+
+    std::vector<member_type> _members{};
+
+    [[nodiscard]] auto members() const -> const std::vector<member_type>& { return _members; }
 };
 
 /// @page install_snapshot_formats InstallSnapshot formats
