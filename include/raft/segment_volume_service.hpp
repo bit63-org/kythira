@@ -98,6 +98,10 @@ enum class op : std::uint8_t {
     streams = 16,
     stats = 17,
     max_record_bytes = 18,
+    /// The segment node's own storage, not a volume's: `[capacity,
+    /// available]` in bytes (task 10, Requirement 10.6). The volume and
+    /// epoch are ignored.
+    space = 19,
 };
 
 /// Whether `o` changes the volume, and so is fenced by epoch.
@@ -468,6 +472,12 @@ public:
             const auto o = static_cast<volume_wire::op>(r.uint());
             const auto id = r.text();
             const auto epoch = r.uint();
+            if (o == volume_wire::op::space) {
+                if (!r.at_end()) {
+                    throw std::invalid_argument("volume wire: trailing bytes in the request");
+                }
+                return space_reply();
+            }
             std::shared_ptr<record_segment_store> store;
             {
                 const std::shared_lock lock(_mu);
@@ -537,6 +547,17 @@ private:
         if (!detail::segments::fsync_dir(dir)) {
             throw record_segment_error(detail::segments::errno_text("fsync " + dir.string()));
         }
+    }
+
+    /// `[ok, capacity, available]` for the filesystem the volumes live on.
+    [[nodiscard]] auto space_reply() const -> std::vector<std::byte> {
+        const auto info = std::filesystem::space(_root);
+        volume_wire::writer w;
+        w.array(3);
+        w.uint(static_cast<std::uint64_t>(volume_wire::status::ok));
+        w.uint(static_cast<std::uint64_t>(info.capacity));
+        w.uint(static_cast<std::uint64_t>(info.available));
+        return w.take();
     }
 
     [[nodiscard]] static auto error(volume_wire::status s, std::string_view message)

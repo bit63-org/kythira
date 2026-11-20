@@ -369,6 +369,24 @@ BOOST_AUTO_TEST_CASE(an_unreachable_volume_throws_like_a_failed_disk) {
     BOOST_CHECK_THROW((void)node.open("missing", 1), kythira::record_segment_error);
 }
 
+// Task 10 (Requirement 10.6): the segment node's storage, for the data
+// node's capacity probe and disk guard. Not fenced: any epoch may ask.
+BOOST_AUTO_TEST_CASE(the_segment_node_reports_its_space_to_any_writer) {
+    scratch_dir d;
+    segment_node node(d.path());
+    node.service->assign("v", 2);
+    auto w = node.open("v", 2);
+    const auto [capacity, available] = w->space();
+    const auto fs_space = fs::space(d.path());
+    BOOST_TEST(capacity == static_cast<std::uint64_t>(fs_space.capacity));
+    BOOST_TEST(available > 0U);
+    BOOST_TEST(available <= capacity);
+    node.service->assign("v", 3);
+    BOOST_CHECK_NO_THROW((void)w->space());
+    node.reachable->store(false);
+    BOOST_CHECK_THROW((void)w->space(), kythira::record_segment_error);
+}
+
 BOOST_AUTO_TEST_CASE(a_segment_is_fetched_from_a_peer_into_the_volume) {
     scratch_dir d;
     auto peer_opts = small_segments();

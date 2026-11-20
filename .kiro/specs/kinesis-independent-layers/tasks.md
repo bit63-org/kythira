@@ -120,6 +120,22 @@ every role (7, 8, 10).
   - A lost or refused volume stops the replica and triggers replacement;
     test that acknowledged writes survive losing one segment node
   - Segment free space reported to the data layer's capacity policy
+  - Status: placement, the segment node and data nodes on volumes are on
+    `main`. `include/raft/segment_volume_placement.hpp` places each
+    replica's volume on a distinct segment node (placement groups spread,
+    most room first, epoch raised on replacement);
+    `KINESIS_SEGMENT_NODES` names the segment layer; `KINESIS_ROLES=segments`
+    is a segment node serving `POST /_kythira/kinesis/v1/volume`, and
+    `KINESIS_ROLES=data` (or with gateway and front end) keeps its segments
+    on the volume placed for it. The volume API's `space` op feeds the data
+    node's `capacity_probe` and disk guard. A lost volume halts the
+    replica's apply (the store throws) and fails `/healthz`; the
+    lose-one-segment-node case is `kinesis_stream_state_machine_test`'s
+    `segment_layer` suite. First placement comes from the settings, the
+    same on every node. Left for the rest of this task: the assignment
+    replicated in the catalog (`\0meta/kinesis/volumes/<node id>`) so a
+    replacement's new epoch reaches every node through Raft, and the
+    replacement triggered by placement when a replica stops
   - _Requirements: 9.4, 9.5, 9.8, 9.9, 10.6, 13.4_
 
 - [ ] 11. Layer membership group

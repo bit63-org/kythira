@@ -833,6 +833,11 @@ set_tests_properties(segment_volume_test PROPERTIES
     LABELS "unit;persistence;kinesis;layers"
 )
 
+# Where each data replica's segment volume goes
+# (.kiro/specs/kinesis-independent-layers/ task 10): distinct segment nodes,
+# placement groups preferred, room first, epochs on replacement. Header-only.
+add_raft_completion_test(segment_volume_placement_test segment_volume_placement_test.cpp)
+
 # Cloud key-object persistence: the generic engine and its conformance suite
 # (.kiro/specs/cloud-object-persistence/ tasks 1-2).
 #

@@ -16,6 +16,7 @@
 #include <raft/host_node_id.hpp>
 #include <raft/layer_roles.hpp>
 #include <raft/logger.hpp>
+#include <raft/segment_volume_placement.hpp>
 #include <raft/service_module.hpp>
 #include <raft/static_or_iam_authorizer.hpp>
 
@@ -104,6 +105,13 @@ struct node_options {
     /// kinesis-independent-layers task 4. Only for the Kinesis module:
     /// `composite_env` never fills it in.
     kythira::layers::role_set _roles{kythira::layers::role_set::all()};
+    /// `KINESIS_SEGMENT_NODES`: the segment layer, comma-separated
+    /// `id=host:port[@placement-group]` (kinesis-independent-layers task
+    /// 10). A data node without the `segments` role keeps its record
+    /// segments in a volume on one of them; a node with only `segments` is
+    /// one of them and serves those volumes. Empty: every data node keeps
+    /// its own segments.
+    std::vector<kythira::segment_node_info> _segment_nodes;
     /// `KINESIS_KMS`: the key provider encrypted streams use (task 14):
     /// `off` (StartStreamEncryption refused), `local` (data keys wrapped
     /// under `KINESIS_KMS_PASSPHRASE[_FILE]`, the same on every node) or
@@ -227,10 +235,24 @@ using env_lookup = std::function<const char*(const char*)>;
 [[nodiscard]] auto is_loopback_address(const std::string& address) -> bool;
 
 /// Why this build cannot serve `roles`, naming what is missing; nullopt
-/// when it can. All four roles, and `data,segments` (a voter that serves
-/// only the internal endpoints), are served today. The other sets need the
-/// later tasks of kinesis-independent-layers.
-[[nodiscard]] auto unserved_roles(kythira::layers::role_set roles) -> std::optional<std::string>;
+/// when it can. All four roles and `data,segments` (a voter that serves
+/// only the internal endpoints) are served; with a segment layer
+/// (`segment_layer`, `KINESIS_SEGMENT_NODES` set), so are `data` and
+/// `segments` alone. The other sets need the later tasks of
+/// kinesis-independent-layers.
+[[nodiscard]] auto unserved_roles(kythira::layers::role_set roles, bool segment_layer = false)
+    -> std::optional<std::string>;
+
+/// Whether `roles` make a segment node: `segments` and no `data`, so no
+/// Raft log, only the volumes it holds.
+[[nodiscard]] auto is_segment_node(kythira::layers::role_set roles) -> bool;
+
+/// Every data voter's volume (`KYTHIRA_PEERS` against
+/// `KINESIS_SEGMENT_NODES`), as `initial_volume_assignments` places them;
+/// empty without a segment layer. The same on every node that has the
+/// same settings.
+[[nodiscard]] auto volume_assignments(const node_options& o)
+    -> std::vector<kythira::volume_assignment>;
 
 /// One line per setting, secrets elided: what `--check-config` prints.
 [[nodiscard]] auto describe(const node_options& o) -> std::string;
