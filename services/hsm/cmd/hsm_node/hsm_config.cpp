@@ -333,8 +333,19 @@ auto from_env(const env_fn& env) -> hsm_options {
                        " URL (plaintext only with KYTHIRA_HSM_INSECURE_PLAINTEXT)");
         }
     }
-    o.relay_backends =
-        endpoints_of("KYTHIRA_HSM_RELAY_BACKENDS", get_opt(env, "KYTHIRA_HSM_RELAY_BACKENDS"));
+    // host:port, or host:port=URL of that crypto node's HSM listener, whose
+    // health route says whether it is unsealed (Requirement 6.2).
+    for (const auto& item : list_of(get_opt(env, "KYTHIRA_HSM_RELAY_BACKENDS"))) {
+        const auto eq = item.find("=http");
+        o.relay_backends.push_back(split_listen("KYTHIRA_HSM_RELAY_BACKENDS", item.substr(0, eq)));
+        o.relay_health_urls.push_back(eq == std::string::npos ? std::string()
+                                                              : item.substr(eq + 1));
+        if (!o.relay_health_urls.back().empty() &&
+            !o.relay_health_urls.back().starts_with(scheme)) {
+            throw fail("KYTHIRA_HSM_RELAY_BACKENDS: " + o.relay_health_urls.back() + " is not an " +
+                       scheme + " URL");
+        }
+    }
     if (!o.relay_backends.empty() && !plan.relays_clients()) {
         throw fail(
             "KYTHIRA_HSM_RELAY_BACKENDS is set, but only an endpoint without the crypto "
@@ -514,11 +525,6 @@ auto from_env(const env_fn& env) -> hsm_options {
     if (auto why = kythira::hsm::check_hsm_roles(in)) {
         throw fail(*why);
     }
-    if (plan.uses_remote_store()) {
-        throw fail("KYTHIRA_HSM_ROLES=" + kythira::hsm::hsm_role_names(o.roles) +
-                   ": a crypto node without the store role (remote_hsm_store) is not wired "
-                   "into hsm_node yet; add store");
-    }
     return o;
 }
 
@@ -530,14 +536,22 @@ auto usage_text() -> std::string_view {
                                      crypto, store (all three). Without crypto
                                      it is never unsealed, holds no share and
                                      serves no PKCS#11 client; without store
-                                     it is no group member
+                                     it is no group member, and a crypto node
+                                     reads and proposes through the members'
+                                     store API (they list it in
+                                     KYTHIRA_HSM_STORE_CLIENTS)
   KYTHIRA_HSM_API_URLS               id=https://host:port for every member, this
                                      node included when it has the store role
                                      (required): the voters of every HSM group
-                                     and where followers forward
-  KYTHIRA_HSM_RELAY_BACKENDS         host:port,... : the crypto nodes' client
-                                     listeners an endpoint without crypto
-                                     relays KYTHIRA_HSM_CLIENT_LISTEN to
+                                     and where followers and crypto nodes
+                                     without store send proposals and reads
+  KYTHIRA_HSM_RELAY_BACKENDS         host:port[=https://host:port],... : the
+                                     crypto nodes' client listeners an
+                                     endpoint without crypto relays
+                                     KYTHIRA_HSM_CLIENT_LISTEN to, each with
+                                     its HSM listener when given: only a node
+                                     that says it is unsealed gets new
+                                     connections (else any that accepts one)
   KYTHIRA_HSM_STORE_CLIENTS          crypto identities that may use this
                                      member's store API without membership
   KYTHIRA_HSM_CRYPTO_URLS            identity=https://host:port,... for every
@@ -545,7 +559,9 @@ auto usage_text() -> std::string_view {
                                      member list is seeded: where init and
                                      rekey deliver shares and node unseal
                                      asks for them; the seed is these
-                                     identities (else the members')
+                                     identities (else the members'). A
+                                     crypto node without store needs it for
+                                     node unseal, and the list seeded first
   KYTHIRA_HSM_API_LISTEN             host:port of the HSM listener (0.0.0.0:9443)
   KYTHIRA_HSM_TLS_CERT, _TLS_KEY     the listener's certificate and key, also
                                      presented when forwarding (default: the

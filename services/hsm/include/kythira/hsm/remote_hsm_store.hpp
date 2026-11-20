@@ -231,6 +231,13 @@ public:
         return false;
     }
 
+    /// The catalog's crypto member list, as the mirror has it.
+    [[nodiscard]] auto crypto_members() const -> std::vector<std::string> {
+        ensure_catalog();
+        const std::lock_guard lock(_mutex);
+        return _catalog ? _catalog->crypto_members : std::vector<std::string>{};
+    }
+
     /// A crypto-only node hosts no group; it serves every token the
     /// catalog names.
     [[nodiscard]] auto hosts(std::uint64_t token_id) const -> bool override {
@@ -596,6 +603,46 @@ private:
     std::condition_variable _run_cv;
     bool _stopping = false;
     std::thread _worker;
+};
+
+/// What admin_api (hsm_admin.hpp) reads and proposes, for a crypto node
+/// without the store role: the catalog through the remote store, so init,
+/// rekey, unseal and the token and crypto member commands run on the node
+/// that holds the vault while the store members keep only ciphertext.
+/// This node leads no group; `max_token_id` is the highest token id the
+/// store members' group space holds (theirs and this node's are the same
+/// module's), so a token that could never get a group is refused here as
+/// it is on a member.
+class remote_admin_host {
+public:
+    remote_admin_host(remote_hsm_store& store, std::uint64_t max_token_id)
+        : _store(&store), _max_token_id(max_token_id) {}
+
+    [[nodiscard]] auto catalog() const -> std::optional<catalog_record> {
+        return _store->catalog();
+    }
+    [[nodiscard]] auto tokens() const -> std::vector<token_entry> { return _store->tokens(); }
+    [[nodiscard]] auto hosts(std::uint64_t token_id) const -> bool {
+        return _store->hosts(token_id);
+    }
+    [[nodiscard]] auto crypto_members() const -> std::vector<std::string> {
+        return _store->crypto_members();
+    }
+    [[nodiscard]] auto fits(std::uint64_t token_id) const -> bool {
+        return token_id != 0 && token_id <= _max_token_id;
+    }
+    /// A crypto-only node is in no group, so it leads none.
+    [[nodiscard]] auto leads(std::uint64_t /*local_group*/) const -> bool { return false; }
+    /// A store read of the catalog: the member answers after a read-index
+    /// round, as a co-located catalog barrier does.
+    auto catalog_barrier() -> ck_result<void> { return _store->refresh_catalog(); }
+    auto propose_catalog(std::vector<std::byte> command) -> ck_result<std::vector<std::byte>> {
+        return _store->propose_catalog(std::move(command));
+    }
+
+private:
+    remote_hsm_store* _store;
+    std::uint64_t _max_token_id;
 };
 
 }  // namespace kythira::hsm

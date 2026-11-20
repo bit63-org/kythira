@@ -133,6 +133,10 @@ struct node_share_delivery {
     /// Stores `share` on the crypto member `identity`, once the catalog's
     /// crypto member list is seeded; false when it could not.
     std::function<bool(const std::string& identity, const shamir_share& share)> deliver_to;
+    /// Set on a node that has no member order to hand shares out by (a
+    /// crypto node without the store role): node unseal waits for the
+    /// crypto member list, and this says why.
+    std::string needs_crypto_members;
 };
 
 struct admin_request {
@@ -477,6 +481,9 @@ private:
                 }
             }
             return std::nullopt;
+        }
+        if (!_delivery.needs_crypto_members.empty()) {
+            return error(409, "not_seeded", _delivery.needs_crypto_members);
         }
         if (!_delivery.deliver) {
             return error(400, "bad_request", "node unseal is not available on this node");
