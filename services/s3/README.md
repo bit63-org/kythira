@@ -70,7 +70,8 @@ module's consumers (Requirement 17.3).
 | `include/kythira/s3/s3_workers.hpp` | `worker_runner`: the leader-side workers on a schedule, on metadata nodes only, gated by leadership; `s3_layers_test` | 16 |
 | `include/kythira/s3/s3_outbound.hpp` | SigV4-signed requests to KMS, SQS, SNS, Kinesis and S3 (endpoints, credentials, the principal forwarded to a Kythira KMS) behind the module's transport functions; `s3_layers_test` | 16 |
 | `include/kythira/s3/s3_node_config.hpp` | the daemon's `KYTHIRA_S3_*` settings and the checks that stop a node that cannot serve; `s3_layers_test` | 16 |
-| `cmd/s3_gateway_node/` | the daemon: the roles `KYTHIRA_S3_ROLES` names, the API, website and internal (mutual TLS, layer identities) listeners, the chunk store, the workers and the outbound transports; `--help` lists every setting, `--self-test` checks the operation table; `s3_gateway_node_test` runs it co-located and split | 1, 16 |
+| `cmd/s3_gateway_node/` | the daemon: the roles `KYTHIRA_S3_ROLES` names, the API, website and internal (mutual TLS, layer identities) listeners, the chunk store, the workers and the outbound transports (`s3_node.hpp`); `--help` lists every setting, `--self-test` checks the operation table; `s3_gateway_node_test` runs it co-located, split, and as three Raft members with a front end | 1, 16, 16a |
+| `cmd/s3_gateway_node/s3_module.hpp`, `run_raft.cpp`, `s3_module_registrar.cpp` | the index on Raft (`KYTHIRA_S3_RAFT_PEERS`): the S3 module on a `node_host` with RocksDB, run stand-alone over its own Beast Raft transport (`run_raft.cpp`) or by `kythira_node` (`KYTHIRA_SERVICES=s3`, `kythira_s3_module`); built where `raft_rocksdb_engine`, `certificate_authority` and the Beast transport are | 16a |
 
 ## Core targets and variables used
 
@@ -94,6 +95,8 @@ package to export.
 | `include/raft/layer_roles.hpp`, `layer_identity.hpp` | roles, layer identities in certificates, and the internal route guard |
 | `include/raft/static_key_authorizer.hpp`, `static_keys_file.hpp` | the daemon's access keys |
 | `include/raft/record_segment_store.hpp` | the daemon's change log store |
+| `include/raft/multi_raft_impl.hpp`, `node_host.hpp`, `node_core.hpp`, `module_registry.hpp` | the index group's Raft host and the module contract (`s3_raft_metadata.hpp`, `s3_module.hpp`) |
+| `include/raft/rocksdb_kv_engine.hpp`, `raft_rocksdb_engine`, `beast_http_transport_impl.hpp` | the Raft members' engine and transport (task 16a); without them the daemon keeps the index in memory |
 | `include/raft/kms_forwarding.hpp`, `sigv4_verifier.hpp` | signing outbound requests and forwarding the caller to a Kythira KMS |
 
 ## What a split would still need

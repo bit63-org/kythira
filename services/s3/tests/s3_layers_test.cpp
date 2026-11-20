@@ -679,7 +679,7 @@ BOOST_AUTO_TEST_CASE(a_co_located_node_needs_keys_and_tls_or_plaintext) {
                std::string::npos);
 }
 
-BOOST_AUTO_TEST_CASE(split_layouts_need_layer_identities_and_one_metadata_node) {
+BOOST_AUTO_TEST_CASE(split_layouts_need_layer_identities) {
     keys_file keys;
     const std::map<std::string, std::string, std::less<>> tls{
         {"KYTHIRA_S3_INTERNAL_TLS_CERT", "c.pem"},
@@ -691,9 +691,10 @@ BOOST_AUTO_TEST_CASE(split_layouts_need_layer_identities_and_one_metadata_node) 
                   {"KYTHIRA_S3_STATIC_KEYS_FILE", keys.path},
                   {"KYTHIRA_S3_METADATA_ENDPOINTS", "m1=https://meta:9443"}});
     BOOST_TEST(config_error(front).empty());
+    // Several metadata nodes: the members of one Raft group (task 16a).
     auto two = front;
     two["KYTHIRA_S3_METADATA_ENDPOINTS"] = "m1=https://a:1,m2=https://b:1";
-    BOOST_TEST(config_error(two).find("name one metadata node") != std::string::npos);
+    BOOST_TEST(config_error(two).empty());
     auto no_tls = front;
     no_tls.erase("KYTHIRA_S3_INTERNAL_TLS_CA");
     BOOST_TEST(config_error(no_tls).find("layer identity") != std::string::npos);
@@ -705,13 +706,63 @@ BOOST_AUTO_TEST_CASE(split_layouts_need_layer_identities_and_one_metadata_node) 
     auto listener_less = meta;
     listener_less.erase("KYTHIRA_S3_INTERNAL_LISTEN");
     BOOST_TEST(config_error(listener_less).find("INTERNAL_LISTEN") != std::string::npos);
-    auto hybrid = meta;
-    hybrid["KYTHIRA_S3_METADATA_ENDPOINTS"] = "m2=https://b:1";
-    BOOST_TEST(config_error(hybrid).find("hybrid") != std::string::npos);
+    // Endpoints on a metadata node only as a Raft member.
+    auto alone = meta;
+    alone["KYTHIRA_S3_METADATA_ENDPOINTS"] = "m2=https://b:1";
+    BOOST_TEST(config_error(alone).find("KYTHIRA_S3_RAFT_PEERS") != std::string::npos);
     BOOST_TEST(config_error({{"KYTHIRA_S3_ROLES", "gateway"}}).find("task 17") !=
                std::string::npos);
     BOOST_TEST(config_error({{"KYTHIRA_S3_ROLES", "blobs"}}).find("task 18") != std::string::npos);
     BOOST_TEST(config_error({{"KYTHIRA_S3_NODE_ID", "a/b"}}).find("NODE_ID") != std::string::npos);
+}
+
+BOOST_AUTO_TEST_CASE(raft_members_name_every_member_twice) {
+    keys_file keys;
+    const std::map<std::string, std::string, std::less<>> member{
+        {"KYTHIRA_S3_INTERNAL_TLS_CERT", "c.pem"},
+        {"KYTHIRA_S3_INTERNAL_TLS_KEY", "k.pem"},
+        {"KYTHIRA_S3_INTERNAL_TLS_CA", "ca.pem"},
+        {"KYTHIRA_S3_INSECURE_PLAINTEXT", "1"},
+        {"KYTHIRA_S3_STATIC_KEYS_FILE", keys.path},
+        {"KYTHIRA_S3_NODE_ID", "2"},
+        {"KYTHIRA_S3_INTERNAL_LISTEN", "0.0.0.0:9443"},
+        {"KYTHIRA_S3_RAFT_PEERS", "1=a:7801,2=b:7802,3=c:7803"},
+        {"KYTHIRA_S3_METADATA_ENDPOINTS", "1=https://a:9443,2=https://b:9443,3=https://c:9443"}};
+    auto r = s3::node_config_from_env(env_of(member));
+    BOOST_REQUIRE(std::holds_alternative<s3::node_config>(r));
+    const auto& c = std::get<s3::node_config>(r);
+    BOOST_TEST(c.raft());
+    BOOST_TEST(c.raft_peers.size() == 3U);
+    BOOST_TEST(c.raft_listen.bind == "0.0.0.0");
+    BOOST_TEST(c.raft_listen.port == 7802);
+
+    auto listen = member;
+    listen["KYTHIRA_S3_RAFT_LISTEN"] = "127.0.0.1:7900";
+    BOOST_TEST(
+        std::get<s3::node_config>(s3::node_config_from_env(env_of(listen))).raft_listen.port ==
+        7900);
+    auto missing_url = member;
+    missing_url["KYTHIRA_S3_METADATA_ENDPOINTS"] = "1=https://a:9443,2=https://b:9443";
+    BOOST_TEST(config_error(missing_url).find("member 3") != std::string::npos);
+    auto stranger = member;
+    stranger["KYTHIRA_S3_METADATA_ENDPOINTS"] =
+        "1=https://a:9443,2=https://b:9443,3=https://c:9443,9=https://z:1";
+    BOOST_TEST(config_error(stranger).find("9 is not a member") != std::string::npos);
+    auto not_me = member;
+    not_me["KYTHIRA_S3_NODE_ID"] = "7";
+    BOOST_TEST(config_error(not_me).find("own id 7") != std::string::npos);
+    auto twice = member;
+    twice["KYTHIRA_S3_RAFT_PEERS"] = "1=a:1,2=b:2,2=c:3";
+    BOOST_TEST(config_error(twice).find("named twice") != std::string::npos);
+    auto bad = member;
+    bad["KYTHIRA_S3_RAFT_PEERS"] = "1=nohostport";
+    BOOST_TEST(config_error(bad).find("id=host:port") != std::string::npos);
+    auto front_only = member;
+    front_only["KYTHIRA_S3_ROLES"] = "gateway,front_end";
+    BOOST_TEST(config_error(front_only).find("only metadata nodes") != std::string::npos);
+    auto no_internal = member;
+    no_internal.erase("KYTHIRA_S3_INTERNAL_LISTEN");
+    BOOST_TEST(config_error(no_internal).find("INTERNAL_LISTEN") != std::string::npos);
 }
 
 }  // namespace

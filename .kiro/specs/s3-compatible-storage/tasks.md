@@ -429,12 +429,9 @@ builds it to that design). Each task is one PR unless noted.
     notification and replication workers and the chunk sweeper, and SigV4
     transports to KMS (forwarding the caller to a Kythira KMS), SQS, SNS,
     Kinesis and S3 (`s3_outbound.hpp`). The core HTTPS server now keeps a
-    HEAD answer's Content-Length. Not built: the index on Raft (task
-    16a). A metadata node holds its group in process and in memory, so a
-    split layout has one metadata node, several metadata endpoints or a metadata node given
-    endpoints (hybrid in the daemon) are refused, and nothing in the index
-    survives a restart (as `dynamodb_gateway_node` without peers); the
-    leadership gate is always open until then. Also not here: IAM
+    HEAD answer's Content-Length. Without peers a metadata node holds
+    its group in process and in memory; the index on Raft, with several
+    metadata endpoints and restarts, is task 16a. Also not here: IAM
     authentication in the daemon (static keys; anonymous access through
     AllUsers grants only), cloud tiers in the daemon (the tier worker runs
     with none), streaming bodies (whole bodies up to
@@ -444,7 +441,7 @@ builds it to that design). Each task is one PR unless noted.
     split over mutual TLS with layer identity certificates, a wrong-role
     caller refused, 503 once the metadata node is gone).
 
-- [ ] 16a. Object index on Raft
+- [x] 16a. Object index on Raft
   - `raft_metadata`: the index state machine as `multi_raft` groups on the
     node's persistent `kv_engine` (RocksDB), a `metadata_access` that
     proposes on the owning group's leader and hops to the leader a
@@ -471,6 +468,45 @@ builds it to that design). Each task is one PR unless noted.
     log positions; and the node test's split layout with three metadata
     nodes, one stopped mid-run
   - _Requirements: 10.1-10.3, 14.2, 14.6, 14.7_
+  - Done: `s3_raft_metadata.hpp`. `raft_metadata<Host>` runs the index
+    state machine as one group over the whole engine on a `multi_raft`
+    host (a module has an engine of its own, so the group's range is all
+    of it). Writes propose on this member and, on a not-leader answer,
+    forward the entry to the named leader over the member-to-member
+    routes (`/_kythira/s3/group/v1/`, data roles only); every read first
+    takes a read barrier (a read-index round on the leader, or the
+    leader's commit index fetched and applied up to), so every member
+    reads linearizably, and a member that cannot reach a leader answers
+    `metadata_unavailable` (503 on the metadata routes) instead of a
+    stale read. Each member keeps its own change log segment store; a
+    member installing a snapshot fetches the active segment from a peer.
+    The daemon runs it when `KYTHIRA_S3_RAFT_PEERS` names the members
+    (id=host:port, the Raft listener, `KYTHIRA_S3_RAFT_LISTEN`), on
+    RocksDB under `KYTHIRA_S3_DATA_DIR`, over the Beast Raft transport
+    with the internal listener's mutual TLS material; a build without
+    RocksDB refuses the setting. `KYTHIRA_S3_METADATA_ENDPOINTS` may name
+    several members, and must name every member when this node is one;
+    a member serves its index itself whether or not it leads (the hop is
+    inside `raft_metadata`), so "hybrid" is a member with gateway roles.
+    Workers and change log cursors follow the group's leadership. The
+    module (`cmd/s3_gateway_node/s3_module.hpp`) is the same code for
+    the stand-alone daemon and `kythira_node` (`KYTHIRA_SERVICES=s3`,
+    registered through `KYTHIRA_NODE_MODULES`). Membership is the static
+    peer list: a member joining or leaving through a Raft configuration
+    change moves to task 19 (with `evacuate`), and splits stay with task
+    18. Tests: `s3_raft_metadata_test`
+    (three members in process: every member reads every acknowledged
+    write, multipart and listings through followers, a leader lost during
+    PUTs losing no acknowledged write with reference counts equal to a
+    recount, a cut-off member answering unavailable, workers and cursors
+    moving with leadership, restarts, and a snapshot-installed member
+    fetching its change log), `s3_layers_test` (the peer settings) and
+    `s3_gateway_node_test` (three RocksDB members and a front end: a
+    member SIGKILLed mid-run, the front end failing over, the member
+    restarted and catching up, then every member restarted with the
+    index and bytes intact). The S3 module workflow builds with
+    `configs/ci_dynamodb_defconfig` (RocksDB) so the node test runs the
+    Raft layout.
 
 - [ ] 17. Gateway and front end apart
   - Authenticated call with body streaming; prefix-affinity routing; role
@@ -484,6 +520,8 @@ builds it to that design). Each task is one PR unless noted.
 
 - [ ] 19. Migration operations
   - `evacuate` for metadata; placement switch co-located to pool and back
+  - Index group membership changes through Raft (a metadata node joining
+    or leaving the `KYTHIRA_S3_RAFT_PEERS` group), moved here from task 16a
   - _Requirements: 16.1-16.3_
 
 - [ ] 20. Migration path tests

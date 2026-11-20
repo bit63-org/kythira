@@ -8,3 +8,5 @@
 #
 # file                                         allowed core *_impl.hpp       why
 tests/s3_raft_metadata_test.cpp                multi_raft_impl.hpp           in-process index group for the Raft metadata tests
+cmd/s3_gateway_node/run_raft.cpp  beast_http_transport_impl.hpp  composition root: the Raft daemon's own Beast transport (task 16a)
+cmd/s3_gateway_node/s3_module.hpp  multi_raft_impl.hpp  composition root: the S3 module's index group on the node's Raft host (task 16a)

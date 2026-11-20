@@ -27,7 +27,11 @@
 #
 # s3_gateway_node serves from task 16; its end-to-end test
 # (s3_gateway_node_test, co-located and split over mutual TLS) carries the
-# s3 label and runs with the rest. The container job, which runs the
+# s3 label and runs with the rest. The module-on build applies
+# configs/ci_dynamodb_defconfig (ci_full_defconfig plus the RocksDB
+# engine), so the daemon runs its index on Raft (task 16a) and the test
+# adds three Raft members; ci.yml's ci_full build has no RocksDB and runs
+# the test without them. The container job, which runs the
 # module's compose scenario under rootful Docker and rootless Podman
 # (CLAUDE.md, "Container runtime compatibility"; Requirement 1.5), joins
 # with task 20's docker-chaos scenario, the first that needs several
@@ -47,6 +51,7 @@ on:
       - "scripts/tests/test_check_module_boundaries.py"
       - "configs/ci_full_defconfig"
       - "configs/ci_no_s3_defconfig"
+      - "configs/ci_dynamodb_defconfig"
       - "Kconfig"
       - "CMakeLists.txt"
       - ".github/workflows/s3-module.yml"
@@ -62,6 +67,14 @@ on:
       - "include/raft/mtls_https_client.hpp"
       - "include/raft/layer_identity.hpp"
       - "include/raft/layer_roles.hpp"
+      # The index group on Raft and the node host it runs in (task 16a).
+      - "include/raft/multi_raft_impl.hpp"
+      - "include/raft/node_host.hpp"
+      - "include/raft/node_core.hpp"
+      - "include/raft/module_registry.hpp"
+      - "include/raft/beast_http_transport_impl.hpp"
+      - "include/raft/rocksdb_kv_engine.hpp"
+      - "src/rocksdb_kv_engine.cpp"
   pull_request:
     branches: ['**']
     # Keep in step with the push list above.
@@ -74,6 +87,7 @@ on:
       - "scripts/tests/test_check_module_boundaries.py"
       - "configs/ci_full_defconfig"
       - "configs/ci_no_s3_defconfig"
+      - "configs/ci_dynamodb_defconfig"
       - "Kconfig"
       - "CMakeLists.txt"
       - ".github/workflows/s3-module.yml"
@@ -89,6 +103,14 @@ on:
       - "include/raft/mtls_https_client.hpp"
       - "include/raft/layer_identity.hpp"
       - "include/raft/layer_roles.hpp"
+      # The index group on Raft and the node host it runs in (task 16a).
+      - "include/raft/multi_raft_impl.hpp"
+      - "include/raft/node_host.hpp"
+      - "include/raft/node_core.hpp"
+      - "include/raft/module_registry.hpp"
+      - "include/raft/beast_http_transport_impl.hpp"
+      - "include/raft/rocksdb_kv_engine.hpp"
+      - "src/rocksdb_kv_engine.cpp"
   workflow_dispatch:
 
 permissions:
@@ -177,14 +199,14 @@ jobs:
           namespace: ${{ vars.OCI_BUILD_CACHE_NAMESPACE }}
           region: ${{ vars.OCI_CI_REGION }}
 
-      # Byte-identical to ci.yml's x64 clang++-18 key (config-variants and
-      # the clang build-and-test leg), so this job reuses their tree.
+      # Byte-identical to ci.yml's x64 clang++-18 rocksdb key (and to
+      # dynamodb-module.yml's), so this job reuses their tree.
       - name: Cache vcpkg packages
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         id: vcpkg-cache
         with:
           path: vcpkg_installed
-          key: vcpkg-${{ runner.os }}-${{ runner.arch }}-edhoc-clang++-18-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json', 'vcpkg-overlays/**') }}
+          key: vcpkg-${{ runner.os }}-${{ runner.arch }}-edhoc-rocksdb-clang++-18-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json', 'vcpkg-overlays/**') }}
 
       - name: Bootstrap vcpkg and install dependencies
         if: steps.vcpkg-cache.outputs.cache-hit != 'true'
@@ -196,7 +218,7 @@ jobs:
           git clone --filter=blob:none https://github.com/microsoft/vcpkg.git /tmp/vcpkg
           git -C /tmp/vcpkg checkout 9a7f7340a6c5f11f24c3d59f85e07143feb84e06
           /tmp/vcpkg/bootstrap-vcpkg.sh -disableMetrics
-          /tmp/vcpkg/vcpkg install --triplet ${{ steps.triplet.outputs.value }} --no-print-usage --x-feature=edhoc
+          /tmp/vcpkg/vcpkg install --triplet ${{ steps.triplet.outputs.value }} --no-print-usage --x-feature=edhoc --x-feature=rocksdb
         env:
           VCPKG_DEFAULT_TRIPLET: ${{ steps.triplet.outputs.value }}
 
@@ -205,12 +227,15 @@ jobs:
         if: steps.buildcache.outputs.enabled == 'true'
         run: scripts/oci-build-cache/start-sccache.sh
 
-      - name: Configure (module on, ci_full_defconfig, strict)
+      # ci_full_defconfig plus the RocksDB engine (configs/
+      # ci_dynamodb_defconfig), so s3_gateway_node runs the index on Raft
+      # and s3_gateway_node_test drives three Raft members (task 16a).
+      - name: Configure (module on, ci_dynamodb_defconfig, strict)
         run: |
           cmake -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_CXX_COMPILER=clang++-18 \
-            -DKYTHIRA_KCONFIG=configs/ci_full_defconfig \
+            -DKYTHIRA_KCONFIG=configs/ci_dynamodb_defconfig \
             -DKYTHIRA_KCONFIG_STRICT=ON \
             -DKYTHIRA_COMPILER_LAUNCHER=${{ steps.sccache.outputs.launcher || 'none' }} \
             -DKYTHIRA_LINKER=mold \

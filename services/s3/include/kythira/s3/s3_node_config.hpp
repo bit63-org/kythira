@@ -21,18 +21,24 @@
 ///    (`raft/layer_identity.hpp`), never in plaintext;
 ///  - the website listener needs its domains.
 ///
-/// **One metadata node.** Until the index groups run on Raft, a metadata
-/// node holds its group in process and nothing replicates it, so a split
-/// layout has exactly one metadata node and every front end names it in
-/// `KYTHIRA_S3_METADATA_ENDPOINTS`. Several metadata endpoints, or a
-/// metadata node that is also given one (hybrid access), would be two
-/// unrelated indexes, and are refused until then.
+/// **The index on Raft** (task 16a). With `KYTHIRA_S3_RAFT_PEERS` (every
+/// metadata node's Raft address, this one's included) a metadata node runs
+/// the index group on Raft with the others, keeps it in RocksDB under
+/// `KYTHIRA_S3_DATA_DIR`, and survives a restart; `--help` says whether the
+/// binary was built with it. Its `KYTHIRA_S3_METADATA_ENDPOINTS` then name
+/// every member's internal listener (the members forward to their leader
+/// and copy chunks to each other there), so a node with the front end and
+/// the metadata role uses the group in process and reaches the others
+/// through it (hybrid). Without peers a metadata node holds its group in
+/// process and in memory, alone: it may not be given endpoints, and
+/// nothing in its index survives a restart.
 
 #include <kythira/s3/s3_outbound.hpp>
 #include <kythira/s3/s3_roles.hpp>
 
 #include <raft/static_keys_file.hpp>
 
+#include <algorithm>
 #include <charconv>
 #include <chrono>
 #include <cstddef>
@@ -94,9 +100,21 @@ struct node_config {
     std::optional<listen_address> internal;
     tls_files internal_tls;
 
-    /// The metadata nodes a front end without the metadata role uses:
-    /// (node id, "https://host:port").
+    /// The metadata nodes' internal listeners, (node id,
+    /// "https://host:port"): the ones a front end without the metadata
+    /// role uses, and on a Raft member every member, this one included.
     std::vector<std::pair<std::string, std::string>> metadata_endpoints;
+
+    /// The index group's members, (node id, "host:port" of its Raft
+    /// listener), this node included: the index on Raft. Empty: the group
+    /// in process and in memory.
+    std::vector<std::pair<std::string, std::string>> raft_peers;
+    /// This node's Raft listener (default: all addresses, at its own
+    /// entry's port in `raft_peers`). Mutual TLS with the internal
+    /// listener's material.
+    listen_address raft_listen;
+
+    [[nodiscard]] auto raft() const noexcept -> bool { return !raft_peers.empty(); }
 
     /// Where this node's chunk store lives (blobs role).
     std::filesystem::path data_dir = "s3-data";
@@ -141,8 +159,17 @@ inline constexpr std::string_view node_env_help =
     "                                 identity kythira://s3/<cluster>/<id>?roles=..\n"
     "  KYTHIRA_S3_INTERNAL_TLS_KEY    its private key\n"
     "  KYTHIRA_S3_INTERNAL_TLS_CA     the cluster CA bundle\n"
-    "  KYTHIRA_S3_METADATA_ENDPOINTS  id=https://host:port of the metadata node\n"
-    "  KYTHIRA_S3_DATA_DIR            chunk store directory (s3-data)\n"
+    "  KYTHIRA_S3_METADATA_ENDPOINTS  id=https://host:port,... of the metadata\n"
+    "                                 nodes' internal listeners (on a Raft member:\n"
+    "                                 every member, this node included)\n"
+    "  KYTHIRA_S3_RAFT_PEERS          id=host:port,... of every metadata node's\n"
+    "                                 Raft listener, this one included: the index\n"
+    "                                 on Raft, kept in RocksDB (none: in process\n"
+    "                                 and in memory, one metadata node)\n"
+    "  KYTHIRA_S3_RAFT_LISTEN         Raft listener, host:port (0.0.0.0 at this\n"
+    "                                 node's port in KYTHIRA_S3_RAFT_PEERS)\n"
+    "  KYTHIRA_S3_DATA_DIR            chunks, and on a Raft member the index,\n"
+    "                                 its Raft logs and change log (s3-data)\n"
     "  KYTHIRA_S3_STATIC_KEYS_FILE    access keys, one per line:\n"
     "                                 access-key-id secret account name role\n"
     "  KYTHIRA_S3_ACCOUNT_NAMESPACES  1 gives each account its own bucket names\n"
@@ -306,6 +333,32 @@ namespace node_config_detail {
             c.metadata_endpoints.emplace_back(item.substr(0, eq), item.substr(eq + 1));
         }
     }
+    if (auto v = get("KYTHIRA_S3_RAFT_PEERS")) {
+        for (const auto& item : d::split(*v, ',')) {
+            const auto eq = item.find('=');
+            if (eq == std::string::npos || eq == 0 ||
+                !d::parse_listen(std::string_view(item).substr(eq + 1))) {
+                return "KYTHIRA_S3_RAFT_PEERS: expected id=host:port, got '" + item + "'";
+            }
+            c.raft_peers.emplace_back(item.substr(0, eq), item.substr(eq + 1));
+        }
+        if (c.raft_peers.empty()) {
+            return std::string("KYTHIRA_S3_RAFT_PEERS: names no member");
+        }
+    }
+    if (auto v = get("KYTHIRA_S3_RAFT_LISTEN")) {
+        auto a = d::parse_listen(*v);
+        if (!a) {
+            return "KYTHIRA_S3_RAFT_LISTEN: expected host:port, got '" + *v + "'";
+        }
+        c.raft_listen = *a;
+    } else {
+        for (const auto& [id, addr] : c.raft_peers) {
+            if (id == c.node_id) {
+                c.raft_listen.port = d::parse_listen(addr)->port;
+            }
+        }
+    }
     if (auto v = get("KYTHIRA_S3_DATA_DIR")) {
         c.data_dir = *v;
     }
@@ -377,13 +430,43 @@ namespace node_config_detail {
     if (auto why = check_layout({c.roles, !c.metadata_endpoints.empty()})) {
         return "KYTHIRA_S3_ROLES=" + s3_roles_string(c.roles) + ": " + *why;
     }
-    if (meta && !c.metadata_endpoints.empty()) {
-        return "KYTHIRA_S3_METADATA_ENDPOINTS: a metadata node holds its own index group; "
-               "hybrid access to other metadata nodes waits for the index groups to run on Raft";
-    }
-    if (c.metadata_endpoints.size() > 1) {
-        return "KYTHIRA_S3_METADATA_ENDPOINTS: name one metadata node; several would be "
-               "unrelated indexes until the index groups run on Raft";
+    if (c.raft()) {
+        if (!meta) {
+            return std::string("KYTHIRA_S3_RAFT_PEERS: only metadata nodes run the index group");
+        }
+        std::vector<std::string> ids;
+        for (const auto& [id, addr] : c.raft_peers) {
+            if (std::find(ids.begin(), ids.end(), id) != ids.end()) {
+                return "KYTHIRA_S3_RAFT_PEERS: member " + id + " is named twice";
+            }
+            ids.push_back(id);
+            const bool has_url =
+                std::any_of(c.metadata_endpoints.begin(), c.metadata_endpoints.end(),
+                            [&](const auto& e) { return e.first == id; });
+            if (!has_url) {
+                return "KYTHIRA_S3_METADATA_ENDPOINTS: has no internal listener for member " + id +
+                       " of KYTHIRA_S3_RAFT_PEERS (members forward to their leader there)";
+            }
+        }
+        if (std::find(ids.begin(), ids.end(), c.node_id) == ids.end()) {
+            return "KYTHIRA_S3_RAFT_PEERS must include this node's own id " + c.node_id;
+        }
+        for (const auto& [id, url] : c.metadata_endpoints) {
+            if (std::find(ids.begin(), ids.end(), id) == ids.end()) {
+                return "KYTHIRA_S3_METADATA_ENDPOINTS: " + id +
+                       " is not a member in KYTHIRA_S3_RAFT_PEERS; a Raft member's endpoints are "
+                       "the group's members";
+            }
+        }
+        if (!c.internal) {
+            return std::string(
+                "KYTHIRA_S3_INTERNAL_LISTEN: the index group's members reach each other on the "
+                "internal listener");
+        }
+    } else if (meta && !c.metadata_endpoints.empty()) {
+        return "KYTHIRA_S3_METADATA_ENDPOINTS: a metadata node without KYTHIRA_S3_RAFT_PEERS "
+               "holds its own index group alone; set KYTHIRA_S3_RAFT_PEERS to run it with other "
+               "metadata nodes";
     }
     if (front && !c.insecure_plaintext && (c.api_tls.cert.empty() || c.api_tls.key.empty())) {
         return "KYTHIRA_S3_TLS_CERT and KYTHIRA_S3_TLS_KEY are required (or "
