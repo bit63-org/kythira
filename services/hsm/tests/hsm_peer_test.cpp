@@ -83,6 +83,9 @@ struct fake_host {
     [[nodiscard]] auto bindings() const -> std::vector<std::pair<std::string, std::uint64_t>> {
         return {{"app-a", 1}};
     }
+    [[nodiscard]] auto crypto_members() const -> std::vector<std::string> {
+        return {"spiffe://hsm/crypto-1"};
+    }
     [[nodiscard]] auto token_record_of(std::uint64_t) const -> std::optional<hsm::token_record> {
         return hsm::token_record{};
     }
@@ -279,6 +282,7 @@ BOOST_AUTO_TEST_CASE(a_store_client_reads_and_proposes_but_is_no_member) {
     BOOST_TEST((a.status == hsm::store_read_status::ok));
     BOOST_TEST(a.seal_state.value_or(hsm::catalog_record{}).seal_epoch == 3U);
     BOOST_TEST(a.catalog.tokens.size() == 1U);
+    BOOST_TEST(a.catalog.crypto_members.size() == 1U);
     BOOST_TEST((client.propose(l.url(), 1, bytes_of("cmd")).result == wire::status::ok));
     // Without the store-client entry it is a stranger: refused before the
     // host is asked.
@@ -332,4 +336,31 @@ BOOST_AUTO_TEST_CASE(plaintext_works_only_when_both_sides_ask_for_it) {
     BOOST_TEST((client.propose(closed.url(false), 1, bytes_of("cmd")).result ==
                 wire::status::unavailable));
     BOOST_TEST(host.proposals == 1);
+}
+
+BOOST_AUTO_TEST_CASE(the_health_route_tells_a_verified_caller_the_seal_state) {
+    const auto p = policy();
+    const hsm::peer_caller relay{true, true, {"spiffe://hsm/endpoint"}, {}};
+    BOOST_TEST(!hsm::serve_health_peer(p, relay, "GET", "/v1/status", true).has_value());
+    const auto sealed = hsm::serve_health_peer(p, relay, "GET", hsm::peer_health_route, true);
+    BOOST_REQUIRE(sealed.has_value());
+    BOOST_TEST(sealed->status == 200U);
+    BOOST_TEST(sealed->body == "sealed");
+    BOOST_TEST(hsm::serve_health_peer(p, relay, "GET", hsm::peer_health_route, false)->body ==
+               "unsealed");
+    BOOST_TEST(hsm::serve_health_peer(p, relay, "POST", hsm::peer_health_route, false)->status ==
+               405U);
+    // No member list is needed, but a certificate from the CA is, and
+    // plaintext only where the policy allows it.
+    const hsm::peer_caller unverified{true, false, {"spiffe://hsm/endpoint"}, {}};
+    BOOST_TEST(
+        hsm::serve_health_peer(p, unverified, "GET", hsm::peer_health_route, false)->status ==
+        403U);
+    const hsm::peer_caller plain{false, false, {}, {}};
+    BOOST_TEST(hsm::serve_health_peer(p, plain, "GET", hsm::peer_health_route, false)->status ==
+               403U);
+    auto open = p;
+    open.allow_plaintext = true;
+    BOOST_TEST(hsm::serve_health_peer(open, plain, "GET", hsm::peer_health_route, false)->body ==
+               "unsealed");
 }

@@ -36,6 +36,14 @@
 //     through it to a crypto member, and with member 1 gone the relay
 //     places connections on member 2.
 //
+//   * a crypto node without store (task 1): beside the same members, a
+//     fourth process runs KYTHIRA_HSM_ROLES=crypto. It joins no group and
+//     reads, barriers and proposes through the members' store API (they
+//     list it in KYTHIRA_HSM_STORE_CLIENTS). The operator unseals it with
+//     the cluster's shares, the application makes and uses keys on it that
+//     every member then holds, a seal committed on a member seals it while
+//     idle, and with the store-only member killed it still serves.
+//
 // (Node unseal staying sealed with only k - 1 reachable members is
 // hsm_node_unseal_test's.)
 
@@ -78,6 +86,10 @@ namespace fs = std::filesystem;
 using namespace std::chrono_literals;
 
 namespace {
+
+/// The crypto-only node's identity, which every member lets use its store
+/// API.
+const std::string k_crypto_identity = "spiffe://test/crypto";
 
 auto slurp(const fs::path& p) -> std::string {
     std::ifstream in(p);
@@ -166,7 +178,7 @@ public:
         for (auto& m : _members) {
             stop(m);
         }
-        stop(_endpoint);
+        stop(_extra);
         if (std::getenv("KYTHIRA_HSM_CLUSTER_TEST_KEEP") == nullptr) {
             std::error_code ec;
             fs::remove_all(_dir, ec);
@@ -175,14 +187,17 @@ public:
 
     [[nodiscard]] auto size() const -> std::size_t override { return _members.size(); }
 
+    /// Member i's operator API; one past the members, the crypto node's
+    /// once start_crypto() ran.
     [[nodiscard]] auto api_url(std::size_t i) const -> std::string override {
-        return "https://localhost:" + std::to_string(_members[i].api);
+        return "https://localhost:" +
+               std::to_string(i < _members.size() ? _members[i].api : _extra.api);
     }
 
     /// Member i's client listener; one past the members, the endpoint's
-    /// relay once start_endpoint() ran.
+    /// relay or the crypto node's listener once started.
     [[nodiscard]] auto client_at(std::size_t i) const -> endpoint override {
-        return {"127.0.0.1", i < _members.size() ? _members[i].clients : _endpoint.clients};
+        return {"127.0.0.1", i < _members.size() ? _members[i].clients : _extra.clients};
     }
 
     [[nodiscard]] auto crypto(std::size_t i) const -> bool override {
@@ -223,6 +238,7 @@ public:
                 list("https://localhost:", [](const auto& q) { return q.api; }),
             "KYTHIRA_HSM_PEER_IDENTITIES=" + peers,
             std::string("KYTHIRA_HSM_OPERATORS=") + hsm::test::k_cluster_operator,
+            std::string("KYTHIRA_HSM_STORE_CLIENTS=") + k_crypto_identity,
             "KYTHIRA_HSM_CLIENT_LISTEN=127.0.0.1:" + std::to_string(m.clients),
             // CI runners cap RLIMIT_MEMLOCK; cheap PIN verifiers keep the
             // logins of many short sessions fast.
@@ -238,55 +254,34 @@ public:
     }
 
     /// A fourth process with KYTHIRA_HSM_ROLES=endpoint relaying to the
-    /// client listeners of `backends`. It joins no group: its node core
-    /// lists only itself.
+    /// client listeners of `backends`, each checked for being unsealed at
+    /// its HSM listener. It joins no group: its node core lists only
+    /// itself.
     void start_endpoint(const std::vector<std::size_t>& backends) {
-        const auto base = kythira::testing::free_port_block(3);
-        _endpoint.raft = base;
-        _endpoint.clients = static_cast<std::uint16_t>(base + 1);
-        _endpoint.metrics = static_cast<std::uint16_t>(base + 2);
-        _endpoint.tls =
-            pki.issue("endpoint", "DNS:localhost,IP:127.0.0.1,URI:spiffe://test/endpoint");
-        std::string api_urls;
-        std::string peers;
-        for (std::size_t q = 0; q < _members.size(); ++q) {
-            api_urls += (api_urls.empty() ? "" : ",") + std::to_string(q + 1) +
-                        "=https://localhost:" + std::to_string(_members[q].api);
-            peers += (peers.empty() ? "" : ",") + hsm::test::member_identity(q);
-        }
         std::string relay;
         for (const auto b : backends) {
             relay += (relay.empty() ? "" : ",") + std::string("127.0.0.1:") +
-                     std::to_string(_members[b].clients);
+                     std::to_string(_members[b].clients) + "=" + api_url(b);
         }
-        const auto dir = _dir / "endpoint";
-        fs::create_directories(dir);
-        const std::vector<std::string> env{
-            "KYTHIRA_NODE_ID=4",
-            "KYTHIRA_NODE_DATA_DIR=" + (dir / "data").string(),
-            "KYTHIRA_NODE_PEERS=4=127.0.0.1:" + std::to_string(_endpoint.raft),
-            "KYTHIRA_NODE_RAFT_BIND=127.0.0.1",
-            "KYTHIRA_NODE_RAFT_PORT=" + std::to_string(_endpoint.raft),
-            "KYTHIRA_NODE_TLS_CERT=" + _endpoint.tls.cert,
-            "KYTHIRA_NODE_TLS_KEY=" + _endpoint.tls.key,
-            "KYTHIRA_NODE_TLS_CA=" + pki.ca_path(),
-            "KYTHIRA_NODE_METRICS_BIND=127.0.0.1",
-            "KYTHIRA_NODE_METRICS_PORT=" + std::to_string(_endpoint.metrics),
-            "KYTHIRA_HSM_ROLES=endpoint",
-            "KYTHIRA_HSM_API_URLS=" + api_urls,
-            "KYTHIRA_HSM_PEER_IDENTITIES=" + peers,
-            std::string("KYTHIRA_HSM_OPERATORS=") + hsm::test::k_cluster_operator,
-            "KYTHIRA_HSM_CLIENT_LISTEN=127.0.0.1:" + std::to_string(_endpoint.clients),
-            "KYTHIRA_HSM_RELAY_BACKENDS=" + relay,
-            "PATH=/usr/bin:/bin",
-        };
-        _endpoint.pid = spawn(env, (dir / "node.log").string());
+        start_extra("endpoint", "spiffe://test/endpoint",
+                    {"KYTHIRA_HSM_ROLES=endpoint", "KYTHIRA_HSM_RELAY_BACKENDS=" + relay});
     }
 
-    /// The endpoint's log so far.
-    [[nodiscard]] auto endpoint_log() const -> std::string {
-        return slurp(_dir / "endpoint" / "node.log");
+    /// A fourth process with KYTHIRA_HSM_ROLES=crypto: no group member,
+    /// its store is the members' store API.
+    void start_crypto() {
+        start_extra("crypto", k_crypto_identity,
+                    {"KYTHIRA_HSM_ROLES=crypto",
+                     // CI runners cap RLIMIT_MEMLOCK, as for the members.
+                     "KYTHIRA_HSM_ALLOW_UNLOCKED_MEMORY=true", "KYTHIRA_HSM_PIN_COST_LOG2=10"});
     }
+
+    /// The fourth process's log so far.
+    [[nodiscard]] auto extra_log() const -> std::string {
+        return slurp(_dir / _extra_role / "node.log");
+    }
+
+    [[nodiscard]] auto endpoint_log() const -> std::string { return extra_log(); }
 
     void kill(std::size_t i) override {
         auto& m = _members[i];
@@ -312,6 +307,48 @@ public:
     }
 
 private:
+    /// The fourth process (node id 4) under `identity`, with `role_env`
+    /// added to what every non-member gets.
+    void start_extra(const std::string& role, const std::string& identity,
+                     const std::vector<std::string>& role_env) {
+        const auto base = kythira::testing::free_port_block(4);
+        _extra.raft = base;
+        _extra.clients = static_cast<std::uint16_t>(base + 1);
+        _extra.metrics = static_cast<std::uint16_t>(base + 2);
+        _extra.api = static_cast<std::uint16_t>(base + 3);
+        _extra.tls = pki.issue(role, "DNS:localhost,IP:127.0.0.1,URI:" + identity);
+        _extra_role = role;
+        std::string api_urls;
+        std::string peers;
+        for (std::size_t q = 0; q < _members.size(); ++q) {
+            api_urls += (api_urls.empty() ? "" : ",") + std::to_string(q + 1) +
+                        "=https://localhost:" + std::to_string(_members[q].api);
+            peers += (peers.empty() ? "" : ",") + hsm::test::member_identity(q);
+        }
+        const auto dir = _dir / role;
+        fs::create_directories(dir);
+        std::vector<std::string> env{
+            "KYTHIRA_NODE_ID=4",
+            "KYTHIRA_NODE_DATA_DIR=" + (dir / "data").string(),
+            "KYTHIRA_NODE_PEERS=4=127.0.0.1:" + std::to_string(_extra.raft),
+            "KYTHIRA_NODE_RAFT_BIND=127.0.0.1",
+            "KYTHIRA_NODE_RAFT_PORT=" + std::to_string(_extra.raft),
+            "KYTHIRA_NODE_TLS_CERT=" + _extra.tls.cert,
+            "KYTHIRA_NODE_TLS_KEY=" + _extra.tls.key,
+            "KYTHIRA_NODE_TLS_CA=" + pki.ca_path(),
+            "KYTHIRA_NODE_METRICS_BIND=127.0.0.1",
+            "KYTHIRA_NODE_METRICS_PORT=" + std::to_string(_extra.metrics),
+            "KYTHIRA_HSM_API_LISTEN=127.0.0.1:" + std::to_string(_extra.api),
+            "KYTHIRA_HSM_API_URLS=" + api_urls,
+            "KYTHIRA_HSM_PEER_IDENTITIES=" + peers,
+            std::string("KYTHIRA_HSM_OPERATORS=") + hsm::test::k_cluster_operator,
+            "KYTHIRA_HSM_CLIENT_LISTEN=127.0.0.1:" + std::to_string(_extra.clients),
+            "PATH=/usr/bin:/bin",
+        };
+        env.insert(env.end(), role_env.begin(), role_env.end());
+        _extra.pid = spawn(env, (dir / "node.log").string());
+    }
+
     void stop(member& m) {
         if (m.pid <= 0) {
             return;
@@ -338,16 +375,19 @@ private:
             const auto tail = log.size() > 6000 ? log.substr(log.size() - 6000) : log;
             BOOST_TEST_MESSAGE("---- hsm_node " << i + 1 << " log tail ----\n" << tail);
         }
-        if (_endpoint.pid > 0) {
-            const auto log = endpoint_log();
-            BOOST_TEST_MESSAGE("---- endpoint log tail ----\n"
+        if (_extra.pid > 0) {
+            const auto log = extra_log();
+            BOOST_TEST_MESSAGE("---- "
+                               << _extra_role << " log tail ----\n"
                                << (log.size() > 4000 ? log.substr(log.size() - 4000) : log));
         }
     }
 
     fs::path _dir;
     std::vector<member> _members;
-    member _endpoint;
+    /// The endpoint or crypto node started after the members, if any.
+    member _extra;
+    std::string _extra_role;
 };
 
 /// Members 1 and 2 run every layer, member 3 only the store.
@@ -563,8 +603,100 @@ BOOST_FIXTURE_TEST_CASE(a_store_only_member_and_an_endpoint, store_member_cluste
         std::chrono::seconds{60}));
     confirmed.insert(t::cluster_key_id(7, 2));
 
+    // Member 1 comes back sealed. It accepts connections, but the relay's
+    // health check asks whether it is unsealed, so every new session
+    // still lands on member 2 (a session on a sealed node fails its
+    // login), until member 1 is unsealed.
     start(0);
     BOOST_REQUIRE(t::eventually([&] { return status(0).has_value(); }, std::chrono::seconds{90}));
+    BOOST_REQUIRE(t::eventually(
+        [&] {
+            auto c = client(0);
+            return c != nullptr;
+        },
+        std::chrono::seconds{60}));
+    std::this_thread::sleep_for(3s);  // past the relay's next checks (every second)
+    for (int i = 0; i < 6; ++i) {
+        BOOST_TEST(t::user_session::open(*this, size()).has_value(),
+                   "session " << i << " through the relay reached an unsealed node");
+    }
     BOOST_REQUIRE(unseal(0, current, std::chrono::seconds{90}));
+    t::check_keys(*this, confirmed);
+}
+
+BOOST_FIXTURE_TEST_CASE(a_crypto_node_without_store, store_member_cluster) {
+    namespace t = hsm::test;
+    const auto crypto = size();  // the fourth process, by the driver's index
+    start_crypto();
+    BOOST_REQUIRE(t::eventually([&] { return extra_log().find(" ready: ") != std::string::npos; },
+                                std::chrono::seconds{60}));
+    BOOST_TEST(extra_log().find("roles=crypto") != std::string::npos);
+    // It reads the catalog through the store members and starts sealed,
+    // like any crypto node; the operator unseals it with the same shares.
+    const auto s = status(crypto);
+    BOOST_REQUIRE(s.has_value());
+    BOOST_TEST(s->flag("sealed"));
+    BOOST_TEST(!s->flag("catalog_leader"));
+    BOOST_REQUIRE(unseal(crypto, current));
+
+    // A key made on the crypto node is in every member's store, and a key
+    // made on a member signs on the crypto node.
+    std::set<std::string> confirmed;
+    std::vector<std::uint8_t> data{'s', 'p', 'l', 'i', 't'};
+    {
+        auto u = t::user_session::open(*this, crypto);
+        BOOST_REQUIRE(u.has_value());
+        BOOST_REQUIRE(u->generate(t::cluster_key_id(8, 0)) == CKR_OK);
+        confirmed.insert(t::cluster_key_id(8, 0));
+    }
+    {
+        auto u = t::user_session::open(*this, 0);
+        BOOST_REQUIRE(u.has_value());
+        BOOST_REQUIRE(u->generate(t::cluster_key_id(8, 1)) == CKR_OK);
+        confirmed.insert(t::cluster_key_id(8, 1));
+    }
+    t::check_keys(*this, confirmed);
+    BOOST_REQUIRE(t::eventually(
+        [&] {
+            auto u = t::user_session::open(*this, crypto);
+            if (!u) {
+                return false;
+            }
+            const auto priv = u->by_id(CKO_PRIVATE_KEY);
+            const auto pub = u->by_id(CKO_PUBLIC_KEY);
+            if (!priv || !pub || !priv->contains(t::cluster_key_id(8, 1))) {
+                return false;
+            }
+            const auto sig = u->sign(priv->at(t::cluster_key_id(8, 1)), data);
+            return sig && u->verify(pub->at(t::cluster_key_id(8, 1)), data, *sig) == CKR_OK;
+        },
+        std::chrono::seconds{60}));
+
+    // The store-only member is a voter, not a crypto dependency: with it
+    // killed, members 1 and 2 still commit what the crypto node proposes.
+    kill(2);
+    BOOST_REQUIRE(t::eventually(
+        [&] {
+            auto u = t::user_session::open(*this, crypto);
+            return u && u->generate(t::cluster_key_id(8, 2)) == CKR_OK;
+        },
+        std::chrono::seconds{90}));
+    confirmed.insert(t::cluster_key_id(8, 2));
+    start(2);
+
+    // A seal committed on a member reaches the idle crypto node through
+    // its watch: it drops its keys without a call being made to it.
+    const auto sealed = admin(0, "POST", "/v1/seal");
+    BOOST_REQUIRE((sealed && sealed->status == 200));
+    BOOST_TEST(t::eventually(
+        [&] {
+            const auto st = status(crypto);
+            return st && st->flag("sealed");
+        },
+        std::chrono::seconds{30}));
+    for (std::size_t i = 0; i < 2; ++i) {
+        BOOST_REQUIRE(unseal(i, current, std::chrono::seconds{90}));
+    }
+    BOOST_REQUIRE(unseal(crypto, current, std::chrono::seconds{90}));
     t::check_keys(*this, confirmed);
 }

@@ -157,6 +157,10 @@ template<typename NodeId, typename FromText>
 /// The node-mode share routes (task 8, served by node_unseal.hpp).
 inline constexpr std::string_view peer_share_route = "/v1/peer/share";
 inline constexpr std::string_view peer_share_request_route = "/v1/peer/share-request";
+/// A crypto node's seal state, for endpoint relays' health checks
+/// (hsm-independent-layers Requirement 6.2): GET answers "unsealed" or
+/// "sealed".
+inline constexpr std::string_view peer_health_route = "/v1/peer/health";
 
 struct peer_policy {
     /// The members' certificate identities (a URI or DNS SAN each).
@@ -213,6 +217,26 @@ struct peer_answer {
     unsigned status = 0;
     std::string body;
 };
+
+/// The health route on a crypto node; nothing for other targets. Any
+/// caller with a verified certificate from the cluster's CA may ask (or
+/// anyone on a plaintext listener the policy allows): whether a node is
+/// sealed is no secret, since a sealed node answers every PKCS#11 call
+/// CKR_DEVICE_ERROR anyway, and the relay asking is no member.
+[[nodiscard]] inline auto serve_health_peer(const peer_policy& policy, const peer_caller& caller,
+                                            std::string_view method, std::string_view target,
+                                            bool sealed) -> std::optional<peer_answer> {
+    if (target != peer_health_route) {
+        return std::nullopt;
+    }
+    if (caller.tls ? !caller.verified : !policy.allow_plaintext) {
+        return peer_answer{403, "a verified client certificate is required"};
+    }
+    if (method != "GET") {
+        return peer_answer{405, "GET only"};
+    }
+    return peer_answer{200, sealed ? "sealed" : "unsealed"};
+}
 
 /// Answers a peer request on `host`, or nothing when `target` is not a
 /// peer path. `to_text` writes the host's node ids.
@@ -291,6 +315,17 @@ public:
             return std::nullopt;
         }
         return std::move(res->second);
+    }
+
+    /// Whether the crypto node at `base_url` is unsealed: nothing when it
+    /// does not answer the health route.
+    [[nodiscard]] auto unsealed(std::string_view base_url) const -> std::optional<bool> {
+        const auto res = _client.request("GET", base_url, std::string(peer_health_route), {},
+                                         "text/plain", "kythira-hsm-relay");
+        if (!res || res->first != 200) {
+            return std::nullopt;
+        }
+        return res->second == "unsealed";
     }
 
     /// Hands a node-mode share (binary form) to the member at `base_url`

@@ -15,6 +15,9 @@
 //  - a destroy, and a seal, committed between two uses take effect on the
 //    crypto node's very next use, and an idle crypto node drops its keys
 //    after a seal through its watch;
+//  - operators init, unseal, add tokens, seed the crypto member list and
+//    seal through admin_api on the crypto node (remote_admin_host), and
+//    the store members apply each of it;
 //  - held objects are not fetched again; proposals reach the leader from
 //    any member through not_leader hints; a crypto node cut off from every
 //    store member answers CKR_DEVICE_ERROR, never a stale result.
@@ -24,6 +27,7 @@
 
 #include "hsm_raft_cluster.hpp"
 
+#include <kythira/hsm/hsm_admin.hpp>
 #include <kythira/hsm/hsm_peer.hpp>
 #include <kythira/hsm/remote_hsm_store.hpp>
 #include <kythira/hsm/store_api.hpp>
@@ -31,6 +35,8 @@
 #if !defined(KYTHIRA_FUTURE_BACKEND_STDEXEC) && !defined(KYTHIRA_FUTURE_BACKEND_BOOST)
 #include <folly/init/Init.h>
 #endif
+
+#include <boost/json.hpp>
 
 #include <atomic>
 #include <charconv>
@@ -251,6 +257,7 @@ BOOST_AUTO_TEST_CASE(store_reads_round_trip_and_anything_malformed_is_refused) {
     a.catalog.record = cat;
     a.catalog.tokens.push_back({5, "alpha", 4, {1, 2, 3}});
     a.catalog.bindings.emplace_back("app-a", 5);
+    a.catalog.crypto_members = {"spiffe://hsm/crypto-1", "spiffe://hsm/crypto-2"};
     hsm::token_record t;
     t.label = "alpha";
     t.user_failures = 2;
@@ -272,11 +279,12 @@ BOOST_AUTO_TEST_CASE(store_reads_round_trip_and_anything_malformed_is_refused) {
     BOOST_TEST(got.catalog.tokens[0].label == "alpha");
     BOOST_TEST((got.catalog.tokens[0].sealed_tk == hsm::sealed_bytes{1, 2, 3}));
     BOOST_TEST(got.catalog.bindings.at(0).first == "app-a");
+    BOOST_TEST((got.catalog.crypto_members == a.catalog.crypto_members));
     BOOST_TEST(got.token.record.value_or(hsm::token_record{}).user_failures == 2U);
     BOOST_TEST((got.token.live == a.token.live));
     BOOST_REQUIRE(got.token.changed.size() == 1U);
     BOOST_TEST((got.token.changed[0].sealed == o.sealed));
-    for (const auto& bad : {std::string(), std::string("\x02") + wire.substr(1), wire + "x",
+    for (const auto& bad : {std::string(), std::string("\x01") + wire.substr(1), wire + "x",
                             wire.substr(0, wire.size() - 1)}) {
         BOOST_TEST(
             (hsm::decode_store_read_answer(bad).status == hsm::store_read_status::unavailable));
@@ -449,4 +457,71 @@ BOOST_AUTO_TEST_CASE(a_crypto_node_cut_off_from_the_store_answers_device_error) 
     BOOST_TEST(n.store->stats().read_failures > 0U);
     n.cut = false;
     BOOST_TEST(cluster::await([&] { return sign(*n.client, s, priv, "back").has_value(); }));
+}
+
+BOOST_AUTO_TEST_CASE(operators_run_the_hsm_through_a_crypto_only_node) {
+    cluster c;  // not initialized: the crypto node's operators do it
+    crypto_node n(c);
+    const std::string op = "spiffe://ops/alice";
+    hsm::remote_admin_host host(*n.store, 64);
+    hsm::admin_policy policy;
+    policy.operators = {op};
+    policy.store_members = {k_crypto_identity};
+    hsm::admin_api<hsm::remote_admin_host> admin(host, n.vault, policy);
+    admin.set_seal_hook([&n] { n.layer->seal(); });
+    const auto call = [&](const std::string& method, const std::string& path,
+                          const std::string& body = "") {
+        return admin.handle({method, path, body, {op}});
+    };
+    const auto json = [](const hsm::admin_response& r) {
+        return boost::json::parse(r.body).as_object();
+    };
+
+    // Init generates and splits the master key here; the members keep
+    // only its check value.
+    hsm::admin_response init;
+    BOOST_REQUIRE(cluster::await([&] {
+        init = call("POST", "/v1/init", R"({"mode": "operator", "k": 2, "n": 3})");
+        return init.status == 200U;
+    }));
+    std::vector<std::string> shares;
+    const auto answer = json(init);
+    for (const auto& v : answer.at("shares").as_array()) {
+        shares.emplace_back(v.as_string());
+    }
+    BOOST_REQUIRE(shares.size() == 3U);
+    for (std::uint64_t id = 1; id <= k_members; ++id) {
+        BOOST_TEST(cluster::await([&] { return c.at(id).host->catalog().has_value(); }));
+        BOOST_TEST(c.at(id).vault.sealed());
+    }
+    BOOST_TEST(json(call("GET", "/v1/status")).at("catalog_leader") == false);
+
+    for (const auto& share : {shares[0], shares[2]}) {
+        BOOST_REQUIRE(call("POST", "/v1/unseal",
+                           boost::json::serialize(boost::json::object{{"share", share}}))
+                          .status == 200U);
+    }
+    BOOST_REQUIRE(!n.vault.sealed());
+
+    // A token made here is created on every member; one outside the
+    // store's group space is refused before anything is proposed.
+    BOOST_TEST(call("POST", "/v1/tokens", R"({"id": 65, "label": "far"})").status == 400U);
+    BOOST_REQUIRE(call("POST", "/v1/tokens", R"({"id": 2, "label": "split"})").status == 201U);
+    for (std::uint64_t id = 1; id <= k_members; ++id) {
+        BOOST_TEST(cluster::await([&] { return c.at(id).host->hosts(2); }));
+    }
+    BOOST_TEST(json(call("GET", "/v1/tokens")).at("tokens").as_array().size() == 1U);
+
+    // The crypto member list reaches the crypto node through the store
+    // API, as share delivery and share requests read it.
+    BOOST_REQUIRE(call("POST", "/v1/crypto-members/seed").status == 200U);
+    BOOST_TEST((c.at(1).host->crypto_members() == std::vector<std::string>{k_crypto_identity}));
+    BOOST_TEST(cluster::await(
+        [&] { return host.crypto_members() == std::vector<std::string>{k_crypto_identity}; }));
+
+    // A seal is committed through the store and seals this node.
+    BOOST_REQUIRE(call("POST", "/v1/seal").status == 200U);
+    BOOST_TEST(n.vault.sealed());
+    BOOST_TEST(cluster::await(
+        [&] { return c.at(2).host->catalog().value_or(hsm::catalog_record{}).seal_epoch == 1U; }));
 }
