@@ -723,6 +723,37 @@ template<shard_key Key> struct hot_key_sample {
     }
 };
 
+/// @brief Load over one bucket: a contiguous key range inside a shard
+///        (`.kiro/specs/multi-raft-load-buckets/`).
+///
+/// A bucket is TiKV RFC 0082's sub-shard unit of load statistics. Rates mean
+/// exactly what `shard_stats`'s own load figures mean (keyed requests counted
+/// at the routing layer, per second), so a policy can compare a bucket's
+/// share with the shard's total directly. They cover a sliding window, never
+/// the shard's lifetime.
+///
+/// Bounds are `std::optional<Key>` for the reason `shard_range` uses them: the
+/// first and last bucket are open towards the shard's own ends, and those
+/// ends move on split and merge. `nullopt` therefore means "wherever the
+/// shard's range starts or ends", which for an edge shard is unbounded.
+template<shard_key Key> struct bucket_stats {
+    std::optional<Key> _start;  ///< `nullopt` == the shard's own start.
+    std::optional<Key> _end;    ///< `nullopt` == the shard's own end.
+    double _read_qps{0.0};
+    double _write_qps{0.0};
+    double _read_bytes_per_sec{0.0};
+    double _write_bytes_per_sec{0.0};
+
+    /// @brief Reads plus writes per second, the "busiest" order of the
+    ///        report's top buckets and of the hottest-bucket share.
+    [[nodiscard]] auto qps() const -> double { return _read_qps + _write_qps; }
+
+    /// @brief This bucket's bounds as a range.
+    [[nodiscard]] auto range() const -> shard_range<Key> {
+        return shard_range<Key>{._start = _start, ._end = _end};
+    }
+};
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Statistics
 // ─────────────────────────────────────────────────────────────────────────────
@@ -803,6 +834,19 @@ struct shard_stats {
 
     // ── load-split sampler output; empty when sampling is off or inconclusive ─
     std::vector<hot_key_sample<Key>> _hot_key_samples{};
+
+    // ── load buckets (.kiro/specs/multi-raft-load-buckets/) ──────────────────
+    //
+    // Appended last so every designated initialiser written before buckets
+    // existed keeps compiling. Empty, and version zero, whenever buckets are
+    // disabled or this replica has not led the shard long enough to have
+    // built a set: a policy that ignores them behaves exactly as before.
+
+    /// @brief Sub-shard load, left to right, tiling the shard's range.
+    std::vector<bucket_stats<Key>> _buckets{};
+    /// @brief Bumped whenever the shard's bucket boundaries change, so a
+    ///        consumer can tell a re-cut from a change in load.
+    std::uint64_t _buckets_version{0};
 
     [[nodiscard]] auto descriptor() const -> const shard_descriptor<GroupId, Key, NodeId>& {
         return _descriptor;

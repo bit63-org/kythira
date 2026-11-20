@@ -66,6 +66,10 @@ multi_raft<Types, Key, GroupId>::multi_raft(config_type cfg)
             "construction argument, so one cannot be derived from a prototype");
     }
 
+    // Clamped once, here, so every later reader sees legal counts and the
+    // routing path's `_enabled` test reads a member nothing writes again.
+    _cfg.buckets = normalized(_cfg.buckets);
+
     if (!_cfg.host_data_dir.empty()) {
         std::filesystem::create_directories(_cfg.host_data_dir);
         _tombstones = tombstone_set_type::load_from_file(_cfg.host_data_dir / "tombstones");

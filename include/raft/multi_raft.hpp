@@ -39,6 +39,7 @@
 #include <raft/shard_map.hpp>
 #include <raft/append_entries_batcher.hpp>
 #include <raft/latency_digest.hpp>
+#include <raft/load_buckets.hpp>
 #include <raft/load_split_sampler.hpp>
 #include <raft/shard_placement_driver.hpp>
 #include <raft/shard_types.hpp>
@@ -556,6 +557,14 @@ struct multi_raft_config {
     /// most `_max_delay` for sends outside it, or as soon as a queue is full.
     /// On any other transport this field changes nothing.
     batching_config batching{};
+
+    /// @brief Sub-shard load buckets (`.kiro/specs/multi-raft-load-buckets/`).
+    ///
+    /// Off by default, and one predictable branch per routed request when off
+    /// (Requirement 1.2). The constructor clamps the counts into range and
+    /// refuses an enabled config with a non-positive duration; see
+    /// `normalized(bucket_config)`.
+    bucket_config buckets{};
 
     /// @brief Sub-windows in each group's latency digest (design §6.1.4).
     ///
