@@ -23,6 +23,9 @@
 #include "switchable_persistence.hpp"
 
 #include <raft/httplib_listeners.hpp>
+#include <raft/multi_raft_transport_handles.hpp>
+
+#include <sys/resource.h>
 
 #include <httplib.h>
 
@@ -41,13 +44,17 @@ namespace kythira::bench {
 
 template<typename Host> class control_server {
 public:
+    /// `counters` is the host's sent-RPC counters under `--count-rpcs 1`,
+    /// else null; `/stats` reports them as null then.
     control_server(Host& host, const node_options& options, std::string transport_name,
-                   std::string bind_address, std::uint16_t port)
+                   std::string bind_address, std::uint16_t port,
+                   const kythira::rpc_counters* counters = nullptr)
         : _host(host),
           _options(options),
           _transport(std::move(transport_name)),
           _bind(std::move(bind_address)),
           _port(port),
+          _counters(counters),
           _started(std::chrono::steady_clock::now()) {}
 
     ~control_server() { stop(); }
@@ -177,6 +184,15 @@ public:
                     << R"(,"groups":)" << groups << R"(,"term_sum":)" << total << '}';
                 res.set_content(out.str(), "application/json");
             });
+
+            // Cumulative figures a driver differences around a window: this
+            // process's CPU time, the RPCs it has sent (null unless
+            // `--count-rpcs 1`), and its AppendEntries batching counters
+            // (.kiro/specs/multi-raft-message-batching/ task 9). Read before
+            // and after a window, never inside one.
+            server.Get("/stats", [this](const httplib::Request&, httplib::Response& res) {
+                res.set_content(stats_json(), "application/json");
+            });
         };
         _port = _servers.bind(_bind, _port, configure, "control_server");
         _servers.start();
@@ -191,6 +207,31 @@ public:
     }
 
 private:
+    [[nodiscard]] auto stats_json() const -> std::string {
+        rusage usage{};
+        getrusage(RUSAGE_SELF, &usage);
+        const auto seconds = [](const timeval& tv) {
+            return static_cast<double>(tv.tv_sec) + static_cast<double>(tv.tv_usec) / 1e6;
+        };
+        const auto batching = _host.batching_statistics();
+        std::ostringstream out;
+        out << R"({"node_id":)" << kythira::node_id_json(_options._node_id)
+            << R"(,"cpu_user_seconds":)" << seconds(usage.ru_utime) << R"(,"cpu_system_seconds":)"
+            << seconds(usage.ru_stime) << R"(,"batching":)"
+            << (_host.batching_active() ? "true" : "false") << R"(,"batches_sent":)"
+            << batching._batches_sent << R"(,"batched_members":)" << batching._members_sent
+            << R"(,"batch_fallbacks":)" << batching._fallbacks;
+        if (_counters != nullptr) {
+            const auto rpcs = _counters->snapshot();
+            out << R"(,"rpcs":)" << rpcs.total_rpcs() << R"(,"wire_rpcs":)" << rpcs.wire_rpcs()
+                << R"(,"append_entries":)" << rpcs._append_entries;
+        } else {
+            out << R"(,"rpcs":null,"wire_rpcs":null,"append_entries":null)";
+        }
+        out << '}';
+        return out.str();
+    }
+
     /// @brief Round-trip time and bandwidth to every peer, measured now.
     ///
     /// Round trip is the median of `k_rtt_samples` empty requests, not the
@@ -395,6 +436,7 @@ private:
     std::string _transport;
     std::string _bind;
     std::uint16_t _port;
+    const kythira::rpc_counters* _counters;
     std::chrono::steady_clock::time_point _started;
     kythira::net_bind::httplib_listeners<> _servers;
     std::atomic<bool> _stopped{false};

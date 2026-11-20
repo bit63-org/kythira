@@ -288,10 +288,10 @@ template<typename Stack> struct host_types {
 
     // The harness's non-owning handles, not references and not values. A
     // reference member would make `multi_raft_config` non-assignable, and the
-    // transports are not movable. Constructed with a null counter pointer:
-    // `.kiro/specs/multi-raft-performance/` Requirement 8.2 keeps measurement
-    // counters out of the measured process, so this host counts nothing about
-    // itself.
+    // transports are not movable. Constructed with a null counter pointer
+    // unless `--count-rpcs 1`: `.kiro/specs/multi-raft-performance/`
+    // Requirement 8.2 keeps measurement counters out of the measured process,
+    // so by default this host counts nothing about itself.
     using network_client_type =
         kythira::testing::transport_client_handle<typename Stack::client_type, node_id_type>;
     using network_server_type =
@@ -353,10 +353,14 @@ auto run_host(const node_options& opt, Capacity capacity = {}) -> int {
         kythira::shard_descriptor<std::uint64_t, std::string, kythira::host_node_id>;
 
     Stack stack{opt};
+    // Outlives the host, whose client handle points at it.
+    kythira::rpc_counters rpc_counts;
 
     config_type cfg{
         .node_id = opt._node_id,
-        .network_client = typename types::network_client_type{stack.client()},
+        .network_client =
+            typename types::network_client_type{stack.client(),
+                                                opt._count_rpcs ? &rpc_counts : nullptr},
         .network_server = typename types::network_server_type{stack.server()},
         .store_factory =
             [&opt](const std::uint64_t& group) { return kythira::bench::make_store(opt, group); },
@@ -377,6 +381,7 @@ auto run_host(const node_options& opt, Capacity capacity = {}) -> int {
     cfg.automatic_split_merge_enabled = false;
     cfg.heartbeat_interval = std::chrono::milliseconds{0};
     cfg.partitioner = kythira::make_partitioner<std::string>(kythira::testing::kv_partitioner{});
+    cfg.batching._enabled = opt._batching;
     capacity.configure(cfg, opt);
 
     auto host = std::make_unique<host_type>(std::move(cfg));
@@ -430,14 +435,19 @@ auto run_host(const node_options& opt, Capacity capacity = {}) -> int {
     kythira::bench::kv_data_server<host_type> data{*host,           opt._bind_address,
                                                    opt._data_port,  node_serializer.media_type(),
                                                    opt._op_timeout, opt._data_threads};
-    kythira::bench::control_server<host_type> control{*host, opt, std::string(Stack::k_name),
-                                                      opt._bind_address, opt._control_port};
+    kythira::bench::control_server<host_type> control{*host,
+                                                      opt,
+                                                      std::string(Stack::k_name),
+                                                      opt._bind_address,
+                                                      opt._control_port,
+                                                      opt._count_rpcs ? &rpc_counts : nullptr};
     data.start();
     control.start();
 
     std::cout << "multi_raft_node " << opt._node_id << " ready: raft=" << opt._raft_port
               << " data=" << opt._data_port << " control=" << opt._control_port
-              << " transport=" << Stack::k_name << " groups=" << opt._groups << std::endl;
+              << " transport=" << Stack::k_name << " groups=" << opt._groups
+              << " batching=" << (host->batching_active() ? "on" : "off") << std::endl;
 
     wait_for_stop();
 

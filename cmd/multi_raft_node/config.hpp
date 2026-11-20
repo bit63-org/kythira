@@ -205,6 +205,16 @@ struct node_options {
 
     std::size_t _executor_stripes{4};
 
+    /// `--batching 0|1`: batch AppendEntries per destination
+    /// (.kiro/specs/multi-raft-message-batching/). Off by default until the
+    /// task 9 measurement says it pays; the transport must also speak it.
+    bool _batching{false};
+    /// `--count-rpcs 0|1`: count the RPCs this host sends, for `/stats`.
+    /// Off by default because `.kiro/specs/multi-raft-performance/`
+    /// Requirement 8.2 keeps measurement counters out of the measured
+    /// process; a comparison that turns it on turns it on for both arms.
+    bool _count_rpcs{false};
+
     /// @brief Threads the data-path server will use to serve client requests.
     ///
     /// **A swept axis, because it turned out to be one.** cpp-httplib defaults
