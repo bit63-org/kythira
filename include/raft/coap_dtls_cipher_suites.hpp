@@ -102,6 +102,16 @@ inline auto apply_default_dtls_cipher_list(SSL_CTX* ctx, const std::string& list
     return list;
 }
 
+// A configured list may name finite-field DHE suites
+// ("TLS_DHE_RSA_WITH_AES_128_GCM_SHA256"), which dtls_cipher_list() accepts
+// because OpenSSL knows them. A server can only choose one if it has DH
+// parameters, and none of the CoAP backends ever set any, so those suites
+// were accepted and then never negotiated: a DHE-only list failed every
+// handshake with "no shared cipher". Asking OpenSSL to pick the parameters
+// itself (the RFC 7919 groups, sized to the certificate's security level)
+// makes them usable. It changes nothing on a client, and nothing for an
+// ECDHE or PSK suite.
+
 /// Restrict `ctx` to `list` (from dtls_cipher_list()); a no-op for "".
 inline auto apply_dtls_cipher_list(SSL_CTX* ctx, const std::string& list) -> void {
     if (list.empty()) {
@@ -111,11 +121,19 @@ inline auto apply_dtls_cipher_list(SSL_CTX* ctx, const std::string& list) -> voi
         throw coap_security_config_error("failed to apply the configured DTLS cipher suites ('" +
                                          list + "')");
     }
+    SSL_CTX_set_dh_auto(ctx, 1);
 }
 
 /// Restrict one connection to `list`; returns false if OpenSSL refused it.
 [[nodiscard]] inline auto apply_dtls_cipher_list(SSL* ssl, const std::string& list) -> bool {
-    return list.empty() || SSL_set_cipher_list(ssl, list.c_str()) == 1;
+    if (list.empty()) {
+        return true;
+    }
+    if (SSL_set_cipher_list(ssl, list.c_str()) != 1) {
+        return false;
+    }
+    SSL_set_dh_auto(ssl, 1);
+    return true;
 }
 
 }  // namespace kythira::detail
