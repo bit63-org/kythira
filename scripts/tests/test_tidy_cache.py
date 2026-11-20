@@ -13,6 +13,7 @@ Run: python3 scripts/tests/test_tidy_cache.py
 
 from __future__ import annotations
 
+import base64
 import datetime as dt
 import http.server
 import importlib.util
@@ -24,6 +25,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest import mock
 from pathlib import Path
 
 SCRIPT = Path(__file__).resolve().parents[1] / "tidy-cache.py"
@@ -45,6 +47,9 @@ class StubS3(http.server.ThreadingHTTPServer):
         self.head_status: int | None = None
         self.create_only = False
         self.delay = 0.0
+        # When set, the stub plays the kythira cache's HTTP front end: it
+        # wants this exact Basic header instead of a SigV4 signature.
+        self.basic: str | None = None
         self.lock = threading.Lock()
         threading.Thread(target=self.serve_forever, daemon=True).start()
 
@@ -76,7 +81,13 @@ class StubHandler(http.server.BaseHTTPRequestHandler):
             s.requests.append((method, self.path))
         if s.delay:
             time.sleep(s.delay)
-        if "AWS4-HMAC-SHA256 Credential=" not in self.headers.get("authorization", ""):
+        auth = self.headers.get("authorization", "")
+        if s.basic is not None:
+            if auth != s.basic:
+                self._reply(401, b"unauthorized", head=method == "HEAD")
+                return False
+            return True
+        if "AWS4-HMAC-SHA256 Credential=" not in auth:
             self._reply(403, b"unsigned", head=method == "HEAD")
             return False
         return True
@@ -251,6 +262,50 @@ class DriverS3Test(unittest.TestCase):
         d = make_driver(s3(self.stub))
         d.run(["a.cpp"])
         self.assertEqual(d.stats["backend_errors"], 0)
+
+
+class HttpBackendTest(unittest.TestCase):
+    """The self-hosted kythira cache: same keys, Basic auth, no bucket."""
+
+    def setUp(self):
+        self.stub = StubS3()
+        self.stub.basic = "Basic " + base64.b64encode(b"ci-main:fixture-pw").decode()
+
+    def tearDown(self):
+        self.stub.shutdown()
+        self.stub.server_close()
+
+    def http(self, password="fixture-pw", writable=True):
+        return tc.HttpBackend(self.stub.endpoint + "/", "ci-main", password, writable,
+                              timeout=2, backoff=(0, 0))
+
+    def test_miss_then_store_then_hit_without_a_bucket_segment(self):
+        d = make_driver(self.http())
+        self.assertEqual(d.run(["a.cpp"]), 0)
+        self.assertEqual(list(self.stub.objects), ["/clang-tidy/k-a.cpp"])
+        d2 = make_driver(self.http())
+        self.assertEqual(d2.run(["a.cpp"]), 0)
+        self.assertEqual(d2.stats["hits"], 1)
+
+    def test_wrong_password_is_a_lookup_error_not_a_failure(self):
+        d = make_driver(self.http(password="wrong"), requested=False)
+        self.assertEqual(d.run(["a.cpp"]), 0)
+        self.assertEqual(d.analysed, ["a.cpp"])
+        # The lookup and the store are both refused, and neither is fatal.
+        self.assertEqual((d.stats["backend_errors"], d.stats["stores"]), (2, 0))
+        self.assertEqual(self.stub.objects, {})
+
+    def test_from_env_and_cli_pick_http_when_url_is_set(self):
+        env = {"KYTHIRA_CACHE_HTTP_URL": self.stub.endpoint,
+               "KYTHIRA_CACHE_HTTP_USER": "ci-main",
+               "KYTHIRA_CACHE_HTTP_PASSWORD": "fixture-pw"}
+        with mock.patch.dict(os.environ, env):
+            b = tc.HttpBackend.from_env(writable=False)
+        self.assertFalse(b.lookup("nope"))
+        b.close()
+        with mock.patch.dict(os.environ, {"KYTHIRA_CACHE_HTTP_URL": "http://x"}, clear=True):
+            with self.assertRaises(ValueError):
+                tc.HttpBackend.from_env(writable=False)
 
 
 class DriverLocalTest(unittest.TestCase):
