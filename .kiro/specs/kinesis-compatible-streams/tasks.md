@@ -593,3 +593,13 @@ asked.
     for its wheels) reads every record back and checks that no batch was
     committed twice or overlaps another in its shard. Left: differential
     checks, KMS, a run against real S3 Tables (needs Clark's go).
+  - Progress (November 19, 2026): differential checks. The differential
+    tool's `channels` suite runs the five operations, tags, ChannelCount
+    and the documented errors, and checks each raw answer against the
+    botocore model (output shapes, declared errors); `--out` and
+    `--recording` record and compare it like the seeded mix. It found the
+    required `DeadLetterQueueS3Configuration` missing from an S3 channel's
+    description, now filled with the default (the destination bucket under
+    `errors/`). The scenario's differential case runs it. Left: KMS for
+    delivered objects, AWS recordings of channels and a run against real
+    S3 Tables (both need Clark's go).
