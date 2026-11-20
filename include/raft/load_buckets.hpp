@@ -17,7 +17,7 @@
 /// leader starts with an empty window and builds its own boundaries.
 ///
 /// **The request path.** `count()` runs on every keyed request the routing
-/// layer serves, so it takes no lock: one atomic load of the layout, one
+/// layer serves, so it takes no lock: one atomic load of the layout pointer, one
 /// binary search, relaxed `fetch_add`s on the current slot's counters, and
 /// one in `_reservoir_stride` requests a store into a bounded reservoir. That
 /// is why a layout is immutable once published and replaced whole: a refresh
@@ -234,9 +234,9 @@ public:
           _range(std::move(range)),
           _reservoir(_cfg._reservoir_size, _cfg._seed),
           _slot_started(_cfg._window_slots, now) {
-        _layout.store(make_layout(
-            normalize_boundaries(std::move(boundaries), _range, _cfg._target_buckets - 1),
-            version));
+        _owned = make_layout(
+            normalize_boundaries(std::move(boundaries), _range, _cfg._target_buckets - 1), version);
+        _current.store(_owned.get(), std::memory_order_release);
     }
 
     bucket_set(const bucket_set&) = delete;
@@ -248,9 +248,16 @@ public:
     ///
     /// Lock-free except one request in `_reservoir_stride`, which offers the
     /// key to the reservoir under its own mutex.
+    ///
+    /// The stride counts per thread, not per set: a shared counter would be
+    /// one more cache line every routing thread writes on every request, and
+    /// task 8's measurement showed exactly that kind of line dominating the
+    /// contended cost. One in N of each thread's requests is as uniform a
+    /// sample as one in N of the set's.
     auto count(const Key& key, std::uint64_t bytes, bool is_read) -> void {
         add(key, 1, bytes, is_read);
-        if (_stride.fetch_add(1, std::memory_order_relaxed) % _cfg._reservoir_stride == 0) {
+        thread_local std::uint64_t stride = 0;
+        if (stride++ % _cfg._reservoir_stride == 0) {
             std::lock_guard lock(_reservoir_mutex);
             _reservoir.offer(key);
         }
@@ -282,7 +289,8 @@ public:
             return false;
         }
         const auto next = (current + 1) % _cfg._window_slots;
-        auto layout = _layout.load();
+        reclaim(now);
+        const auto& layout = _owned;
         // Zeroed BEFORE `_slot` names it: a count that reads the new index
         // then lands on an already-cleared slot. A count still holding the old
         // index lands in the slot just closed, which is where it belongs.
@@ -313,11 +321,10 @@ public:
         std::lock_guard lock(_policy_mutex);
         auto boundaries =
             normalize_boundaries(std::move(candidates), _range, _cfg._target_buckets - 1);
-        const auto old = _layout.load();
-        if (boundaries == old->boundaries) {
+        if (boundaries == _owned->boundaries) {
             return false;
         }
-        _layout.store(make_layout(std::move(boundaries), old->version + 1));
+        publish(make_layout(std::move(boundaries), _owned->version + 1), now);
         _slot_started[_slot.load(std::memory_order_relaxed)] = now;
         _complete = 0;
         return true;
@@ -334,8 +341,10 @@ public:
     auto reset(shard_range<Key> range, std::vector<Key> boundaries, clock::time_point now) -> void {
         std::lock_guard lock(_policy_mutex);
         _range = std::move(range);
-        _layout.store(make_layout(
-            normalize_boundaries(std::move(boundaries), _range, _cfg._target_buckets - 1), 1));
+        publish(
+            make_layout(
+                normalize_boundaries(std::move(boundaries), _range, _cfg._target_buckets - 1), 1),
+            now);
         std::fill(_slot_started.begin(), _slot_started.end(), now);
         _complete = 0;
         std::lock_guard reservoir_lock(_reservoir_mutex);
@@ -363,7 +372,7 @@ public:
     /// opens. Left to right, one entry per bucket.
     [[nodiscard]] auto window_counts() const -> std::vector<bucket_counts> {
         std::lock_guard lock(_policy_mutex);
-        return window_counts_locked(*_layout.load());
+        return window_counts_locked(*_owned);
     }
 
     /// @brief How long the window's complete slots cover; zero until the
@@ -380,7 +389,7 @@ public:
     /// never as a division by zero.
     [[nodiscard]] auto snapshot() const -> std::vector<bucket_stats<Key>> {
         std::lock_guard lock(_policy_mutex);
-        const auto layout = _layout.load();
+        const auto& layout = _owned;
         const auto counts = window_counts_locked(*layout);
         const auto seconds = std::chrono::duration<double>(covered_locked()).count();
         const auto rate = [seconds](std::uint64_t n) {
@@ -403,9 +412,23 @@ public:
         return out;
     }
 
-    [[nodiscard]] auto boundaries() const -> std::vector<Key> { return _layout.load()->boundaries; }
-    [[nodiscard]] auto version() const -> std::uint64_t { return _layout.load()->version; }
-    [[nodiscard]] auto bucket_count() const -> std::size_t { return _layout.load()->bucket_count; }
+    [[nodiscard]] auto boundaries() const -> std::vector<Key> {
+        std::lock_guard lock(_policy_mutex);
+        return _owned->boundaries;
+    }
+    [[nodiscard]] auto version() const -> std::uint64_t {
+        std::lock_guard lock(_policy_mutex);
+        return _owned->version;
+    }
+    [[nodiscard]] auto bucket_count() const -> std::size_t {
+        std::lock_guard lock(_policy_mutex);
+        return _owned->bucket_count;
+    }
+    /// @brief Replaced layouts not yet freed; see `publish()`. For tests.
+    [[nodiscard]] auto retired_layouts() const -> std::size_t {
+        std::lock_guard lock(_policy_mutex);
+        return _retired.size();
+    }
     [[nodiscard]] auto range() const -> shard_range<Key> {
         std::lock_guard lock(_policy_mutex);
         return _range;
@@ -576,7 +599,7 @@ private:
     }
 
     auto add(const Key& key, std::uint64_t requests, std::uint64_t bytes, bool is_read) -> void {
-        const auto layout = _layout.load(std::memory_order_acquire);
+        const auto* layout = _current.load(std::memory_order_acquire);
         auto& c = layout->at(_slot.load(std::memory_order_acquire),
                              bucket_index(layout->boundaries, key));
         if (is_read) {
@@ -609,6 +632,38 @@ private:
         return out;
     }
 
+    /// @brief Make `next` the layout `count()` uses, keeping the old one
+    ///        alive until no count can still hold it. Under `_policy_mutex`.
+    ///
+    /// The request path loads a raw pointer, which costs one acquire load and
+    /// nothing else. The first version used `std::atomic<std::shared_ptr>`,
+    /// which libstdc++ implements with a spin lock plus a reference count
+    /// both bumped on every load: task 8 measured it at about 68 ns a count
+    /// on one thread and about 1.5 us with four threads on one shard, against
+    /// a few nanoseconds for this.
+    ///
+    /// Safety comes from the shape of `count()`: it loads the pointer, does a
+    /// binary search and a few relaxed adds, and returns, with no lock, wait
+    /// or allocation in between. A replaced layout is kept for `retire_after()`
+    /// (two slots, at least a second), many orders of magnitude longer than
+    /// any count, and freed by a later policy-phase call. This is the epoch
+    /// swap the design named for the case where the shared pointer showed.
+    auto publish(std::shared_ptr<layout> next, clock::time_point now) -> void {
+        _retired.emplace_back(now, std::move(_owned));
+        _owned = std::move(next);
+        _current.store(_owned.get(), std::memory_order_release);
+        reclaim(now);
+    }
+
+    [[nodiscard]] auto retire_after() const -> clock::duration {
+        return std::max<clock::duration>(2 * _cfg._slot_duration, std::chrono::seconds{1});
+    }
+
+    /// Frees retired layouts old enough that no count can still hold them.
+    auto reclaim(clock::time_point now) -> void {
+        std::erase_if(_retired, [&](const auto& r) { return now - r.first >= retire_after(); });
+    }
+
     [[nodiscard]] auto covered_locked() const -> clock::duration {
         if (_complete == 0) {
             return clock::duration::zero();
@@ -622,14 +677,11 @@ private:
     bucket_config _cfg;
     shard_range<Key> _range;
 
-    /// The request path's one shared load. libstdc++ implements it with a
-    /// small spin lock; task 8 of the spec measures whether that shows.
-    std::atomic<std::shared_ptr<layout>> _layout;
+    /// The request path's one shared load: the layout `count()` writes into.
+    /// Always `_owned.get()`; see `publish()` for why a raw pointer is safe.
+    std::atomic<layout*> _current{nullptr};
     /// Index of the slot being filled. Written only by `roll()`.
     std::atomic<std::size_t> _slot{0};
-    /// Counts keyed requests, to pick the one in `_reservoir_stride` that
-    /// feeds the reservoir.
-    std::atomic<std::uint64_t> _stride{0};
 
     mutable std::mutex _reservoir_mutex;
     key_reservoir<Key> _reservoir;
@@ -638,6 +690,10 @@ private:
     /// phase. Never taken by `count()`.
     mutable std::mutex _policy_mutex;
     std::vector<clock::time_point> _slot_started;
+    /// The current layout, owned; `_current` points into it.
+    std::shared_ptr<layout> _owned;
+    /// Replaced layouts and when they were replaced, freed by `reclaim()`.
+    std::vector<std::pair<clock::time_point, std::shared_ptr<layout>>> _retired;
     /// Complete slots in the window since the layout was published, at most
     /// `_window_slots - 1`.
     std::size_t _complete{0};

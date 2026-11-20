@@ -989,6 +989,12 @@ struct kv_cluster_options {
     /// by default, so every earlier row is measured as it was; on a transport
     /// without the batch RPC, turning it on changes nothing.
     kythira::batching_config _batching{};
+
+    /// Load buckets (.kiro/specs/multi-raft-load-buckets/ task 8). Off by
+    /// default, so every earlier row runs exactly as it did. On, the policy
+    /// phase runs once a second so leaders cut their buckets: a set that was
+    /// never cut would measure a binary search over nothing.
+    kythira::bucket_config _buckets{};
 };
 
 /// @brief `_nodes` hosts, each holding a replica of every one of `_groups`
@@ -1468,6 +1474,10 @@ private:
         cfg.policy_interval = std::chrono::hours{1};
         cfg.split_merge_interval = std::chrono::hours{1};
         cfg.automatic_split_merge_enabled = false;
+        cfg.buckets = _options._buckets;
+        if (_options._buckets._enabled) {
+            cfg.policy_interval = std::chrono::seconds{1};
+        }
         cfg.heartbeat_interval = std::chrono::milliseconds{0};
         cfg.partitioner = kythira::make_partitioner<key_type>(kv_partitioner{});
         cfg.batching = _options._batching;
