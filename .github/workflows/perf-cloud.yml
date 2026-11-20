@@ -112,6 +112,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Self-hosted runner baseline
+        uses: ./.github/actions/self-hosted-baseline
 
       # A single run-scoped tag value is the contract the teardown and the
       # audit both key off. Generated once, here, so that a re-run of the job

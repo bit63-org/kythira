@@ -297,6 +297,7 @@ stays in service for every job that is not on that runner.
 |---|---|---|
 | x86-64, push / schedule / dispatch / same-repo PR | `bit63` | kythira cache |
 | x86-64, pull request from a fork | `ubuntu-24.04` | OCI, no secrets (off) |
+| x86-64, rootless Podman legs (see below) | `ubuntu-24.04` | OCI bucket |
 | arm64 | `ubuntu-24.04-arm` | OCI bucket |
 | any job, after the kill switch below | `ubuntu-24.04` | OCI bucket |
 
@@ -309,6 +310,26 @@ runs-on: ${{ (github.event.pull_request.head.repo.fork && 'ubuntu-24.04') || var
 ```
 
 so a fork's pull request always lands on a GitHub-hosted runner.
+
+**Runner image.** The scale set runs the stock `actions-runner` image,
+which lacks most of what GitHub's `ubuntu-24.04` image ships. Every x86-64
+job calls `.github/actions/self-hosted-baseline` right after checkout; on a
+self-hosted runner it installs Python and pip, jq, gh, the AWS CLI,
+shellcheck, g++-13/14 and the usual archive and build tools, skipping any the
+image already has, and on GitHub-hosted runners it does nothing. Baking those
+into a custom runner image would only make that step faster. The step also
+sets `TMPDIR` to `RUNNER_TEMP`: Docker runs in a dind sidecar that shares
+only the work volume with the job, and bind mounts resolve on the daemon's
+side, so fixtures a test writes to `/tmp` and mounts into a container would
+not exist there.
+
+**Rootless Podman stays on GitHub.** Inside an ARC pod, `newuidmap`
+cannot write a user namespace's `uid_map` (`Operation not permitted`), so
+rootless Podman cannot start there. The `podman` leg of every
+`matrix.runtime` job puts `(matrix.runtime == 'podman' && 'ubuntu-24.04')`
+first in its `runs-on:`, and "DynamoDB module on and off", which runs its
+Podman scenarios inline after the Docker ones, is pinned to `ubuntu-24.04`.
+The `docker` legs use the pod's dind daemon on `bit63`.
 
 **Kill switch.** Set the repository variable `KYTHIRA_X64_RUNNER` to
 `ubuntu-24.04` and every x86-64 job goes back to GitHub-hosted runners on

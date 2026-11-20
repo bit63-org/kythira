@@ -1,0 +1,107 @@
+# Copyright (c) 2026 Clark Rawlins
+# SPDX-License-Identifier: Apache-2.0
+#
+# Gives a self-hosted runner the tools this repository's jobs take for
+# granted on GitHub's ubuntu-24.04 image, and does nothing anywhere else.
+#
+# The bit63 ARC scale set runs the stock actions-runner image: Ubuntu
+# 24.04 with sudo, apt, git and the Docker CLI (dind), and very little
+# else. GitHub's image ships hundreds of tools, and the workflows here were
+# written against it -- the first self-hosted run died at `pip3: command not
+# found` in every job. Each job installs its own compilers and libraries
+# with apt already; this action adds only the general tooling those
+# workflows assume without installing: Python with pip, jq, the gh and AWS
+# CLIs, shellcheck, archive tools and the usual build basics.
+#
+# It is a no-op on GitHub-hosted runners (RUNNER_ENVIRONMENT=github-hosted),
+# so arm64 jobs, fork pull requests and the KYTHIRA_X64_RUNNER kill switch
+# behave exactly as before. A runner image that already has a tool skips
+# installing it, so baking these into a custom image later just makes this
+# step faster.
+
+name: Self-hosted runner baseline
+description: Install the GitHub ubuntu-24.04 tools this repository's jobs assume, on self-hosted runners only
+
+runs:
+  using: composite
+  steps:
+    - name: Install baseline tools (self-hosted only)
+      if: runner.environment == 'self-hosted'
+      shell: bash
+      run: |
+        set -euo pipefail
+        export DEBIAN_FRONTEND=noninteractive
+
+        # Packages whose command is already present are skipped, so a
+        # richer image pays nothing.
+        want=()
+        need() { command -v "$1" >/dev/null 2>&1 || want+=("${@:2}"); }
+        need python3     python3
+        need pip3        python3-pip python3-venv
+        need jq          jq
+        need gh          gh
+        need shellcheck  shellcheck
+        need unzip       unzip
+        need zip         zip
+        need xz          xz-utils
+        need zstd        zstd
+        need curl        curl ca-certificates
+        need wget        wget
+        need file        file
+        need rsync       rsync
+        need make        build-essential
+        need pkg-config  pkg-config
+        need lsb_release lsb-release
+        need gpg         gnupg
+        need git-lfs     git-lfs
+        need g++-13      g++-13
+        need g++-14      g++-14
+        # dind pods carry the Docker CLI but not always the compose plugin.
+        if command -v docker >/dev/null 2>&1 && ! docker compose version >/dev/null 2>&1; then
+          want+=(docker-compose-v2)
+        fi
+
+        pkgs=("${want[@]}")
+        if [ "${#pkgs[@]}" -gt 0 ]; then
+          echo "installing: ${pkgs[*]}"
+          for attempt in 1 2 3; do
+            if timeout 300 sudo apt-get update -q \
+               && timeout 900 sudo apt-get install -y -q --no-install-recommends "${pkgs[@]}"; then
+              break
+            fi
+            [ "$attempt" -eq 3 ] && { echo "::error::baseline apt-get install failed after 3 attempts"; exit 1; }
+            echo "::warning::baseline apt-get install failed (attempt ${attempt}/3), retrying in 20s"
+            sleep 20
+          done
+        else
+          echo "baseline tools already present"
+        fi
+
+        # GitHub's image lets `pip3 install --user` write to the user site
+        # despite Ubuntu 24.04's PEP 668 marker; the workflows rely on it.
+        echo "PIP_BREAK_SYSTEM_PACKAGES=1" >> "$GITHUB_ENV"
+        mkdir -p "$HOME/.local/bin"
+        echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+        # Temporary files go under RUNNER_TEMP, not /tmp. The scale set runs
+        # Docker in a dind sidecar that shares only the work volume
+        # (/home/runner/_work, which holds RUNNER_TEMP) with this container,
+        # and a bind mount is resolved on the daemon's side. A test that
+        # writes fixtures to std::filesystem::temp_directory_path() and
+        # mounts them (the ledger and HSM chaos scenarios' PKI) otherwise
+        # hands the daemon a path that does not exist there, and the
+        # containers start with an empty directory instead.
+        echo "TMPDIR=${RUNNER_TEMP}" >> "$GITHUB_ENV"
+
+        # The AWS CLI is not packaged for noble. vcpkg's x-aws backend and
+        # the real-cloud jobs call `aws`; install it from PyPI into a venv
+        # (a pinned major version, fetched over PyPI's TLS, rather than an
+        # unverified zip). Version 1 also never sends the aws-chunked uploads
+        # that OCI's S3 API refuses.
+        if ! command -v aws >/dev/null 2>&1; then
+          venv="$HOME/.awscli-venv"
+          python3 -m venv "$venv"
+          "$venv/bin/pip" install -q 'awscli>=1.36,<2'
+          ln -sf "$venv/bin/aws" "$HOME/.local/bin/aws"
+          "$HOME/.local/bin/aws" --version
+        fi
