@@ -20,6 +20,9 @@
 /// - Bodies in `aws-chunked` encoding (the Java SDK v2's default for
 ///   PutObject, e.g. from the Iceberg REST catalog's S3FileIO) are decoded
 ///   before they are stored.
+/// - User metadata (`x-amz-meta-*`) and the server-side encryption headers
+///   (`x-amz-server-side-encryption*`) a PUT sends are kept and sent back
+///   on GET; nothing is encrypted.
 /// - DELETE `/<bucket>/<key>`, with `If-Match`.
 /// - GET `/<bucket>?list-type=2`: ListObjectsV2 with `prefix`, `max-keys` and
 ///   `continuation-token`.
@@ -48,6 +51,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -69,6 +73,9 @@ public:
     struct stored_object {
         std::string body;
         std::string etag;  ///< Quoted, as S3 sends it.
+        /// `x-amz-meta-*` and `x-amz-server-side-encryption*` headers of
+        /// the PUT, by lower-case name.
+        std::map<std::string, std::string> headers{};
     };
 
     s3_stateful_mock() : s3_stateful_mock("localhost", 0) {}
@@ -323,11 +330,27 @@ private:
                 return;
             }
         }
-        stored_object stored{std::move(body), "\"" + hex + "\""};
+        stored_object stored{std::move(body), "\"" + hex + "\"", kept_headers(req)};
         res.set_header("ETag", stored.etag);
         objects[key] = std::move(stored);
         _put_log.push_back(key);
         res.status = 200;
+    }
+
+    /// The PUT's headers an object keeps: user metadata and SSE.
+    [[nodiscard]] static auto kept_headers(const httplib::Request& req)
+        -> std::map<std::string, std::string> {
+        std::map<std::string, std::string> out;
+        for (const auto& [name, value] : req.headers) {
+            std::string lower(name);
+            std::transform(lower.begin(), lower.end(), lower.begin(),
+                           [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            if (lower.starts_with("x-amz-meta-") ||
+                lower.starts_with("x-amz-server-side-encryption")) {
+                out[lower] = value;
+            }
+        }
+        return out;
     }
 
     /// The AWS SDKs for Java v2 (and others, over plain HTTP or with
@@ -383,6 +406,9 @@ private:
             return;
         }
         res.set_header("ETag", it->second.etag);
+        for (const auto& [name, value] : it->second.headers) {
+            res.set_header(name, value);
+        }
         res.set_content(it->second.body, "application/octet-stream");
     }
 
