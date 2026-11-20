@@ -43,8 +43,13 @@ defaults to false and no binary turns it on.
     is the fabric's existing `set_not_implemented`, plus
     `clear_not_implemented` for the upgrade.
 
-- [ ] 6. JSON and CBOR encodings
+- [x] 6. JSON and CBOR encodings
   - Batch request and response; round-trip tests with member byte equality.
+  - Done: each member is encoded by the existing standalone encoder and
+    spliced in, so a member's bytes inside a batch are its lone bytes
+    (`tests/append_entries_batch_serializer_test.cpp`). Registries gained
+    `handles<T>`; a transport offers batches only when every serializer in
+    its registry encodes them, so protobuf and Ion builds fall back.
   - _Requirements: 5.1, 7.3_
 
 - [ ] 7. HTTP transports

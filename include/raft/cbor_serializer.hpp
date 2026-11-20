@@ -15,6 +15,7 @@
 #include <string_view>
 #include <type_traits>
 #include <utility>
+#include <variant>
 #include <vector>
 
 namespace kythira {
@@ -620,46 +621,7 @@ public:
         -> append_entries_request<NodeId, TermId, LogIndex, LogEntry, GroupId> {
         auto buf = to_buffer(data);
         decode_cursor cur{buf.data(), buf.data() + buf.size()};
-
-        auto pairs = read_map_header(cur);
-        require_discriminant(cur, pairs, "append_entries_request");
-
-        append_entries_request<NodeId, TermId, LogIndex, LogEntry, GroupId> req;
-        bool have_term = false, have_leader = false, have_pli = false, have_plt = false,
-             have_commit = false, have_entries = false;
-        for (std::size_t i = 1; i < pairs; ++i) {
-            auto key = read_text_string(cur);
-            if (key == "term") {
-                req._term = read_narrowed<TermId>(cur);
-                have_term = true;
-            } else if (key == "leader_id") {
-                req._leader_id = read_id<NodeId>(cur);
-                have_leader = true;
-            } else if (key == "prev_log_index") {
-                req._prev_log_index = read_narrowed<LogIndex>(cur);
-                have_pli = true;
-            } else if (key == "prev_log_term") {
-                req._prev_log_term = read_narrowed<TermId>(cur);
-                have_plt = true;
-            } else if (key == "leader_commit") {
-                req._leader_commit = read_narrowed<LogIndex>(cur);
-                have_commit = true;
-            } else if (key == "entries") {
-                req._entries = read_entries<TermId, LogIndex, LogEntry>(cur);
-                have_entries = true;
-            } else if (key == "group_id") {
-                // Absent from any payload recorded before multi-Raft. The
-                // default value is exactly "the single group", so a missing
-                // key is not an error and carries no required-field flag.
-                req._group_id = read_id<GroupId>(cur);
-            } else {
-                throw serialization_exception("Unexpected key in append_entries_request: " + key);
-            }
-        }
-        if (!have_term || !have_leader || !have_pli || !have_plt || !have_commit || !have_entries) {
-            throw serialization_exception("Missing required field in append_entries_request");
-        }
-        return req;
+        return read_append_entries_request<NodeId, TermId, LogIndex, LogEntry, GroupId>(cur);
     }
 
     // Deserialize AppendEntries Response
@@ -669,37 +631,145 @@ public:
         -> append_entries_response<TermId, LogIndex, GroupId> {
         auto buf = to_buffer(data);
         decode_cursor cur{buf.data(), buf.data() + buf.size()};
+        return read_append_entries_response<TermId, LogIndex, GroupId>(cur);
+    }
 
-        auto pairs = read_map_header(cur);
-        require_discriminant(cur, pairs, "append_entries_response");
+    // ── batched AppendEntries (.kiro/specs/multi-raft-message-batching/) ────
+    //
+    // {type: "append_entries_batch_request", members: [<AE request>, ...]}
+    // {type: "append_entries_batch_response",
+    //  members: [{ok: <AE response>} | {err: {kind, message}}, ...]}
+    //
+    // Members are spliced in as their standalone encodings, byte for byte
+    // (Requirement 5.1): a CBOR array item is any complete data item, so the
+    // lone message's bytes are a valid member as they stand.
 
-        append_entries_response<TermId, LogIndex, GroupId> resp;
-        bool have_term = false, have_success = false;
-        for (std::size_t i = 1; i < pairs; ++i) {
-            auto key = read_text_string(cur);
-            if (key == "term") {
-                resp._term = read_narrowed<TermId>(cur);
-                have_term = true;
-            } else if (key == "success") {
-                resp._success = read_bool(cur);
-                have_success = true;
-            } else if (key == "conflict_index") {
-                resp._conflict_index = read_narrowed<LogIndex>(cur);
-            } else if (key == "conflict_term") {
-                resp._conflict_term = read_narrowed<TermId>(cur);
-            } else if (key == "group_id") {
-                // Absent from any payload recorded before multi-Raft. The
-                // default value is exactly "the single group", so a missing
-                // key is not an error and carries no required-field flag.
-                resp._group_id = read_id<GroupId>(cur);
+    template<typename NodeId = std::uint64_t, typename TermId = std::uint64_t,
+             typename LogIndex = std::uint64_t, typename LogEntry = log_entry<TermId, LogIndex>,
+             typename GroupId = std::uint64_t>
+    [[nodiscard]] auto serialize(
+        const append_entries_batch_request<
+            append_entries_request<NodeId, TermId, LogIndex, LogEntry, GroupId>>& batch) const
+        -> Data {
+        std::vector<std::byte> out;
+        write_map_header(out, 2);
+        write_discriminant(out, "append_entries_batch_request");
+        write_text_string(out, "members");
+        write_array_header(out, batch.members().size());
+        for (const auto& member : batch.members()) {
+            const auto bytes = serialize(member);
+            out.insert(out.end(), std::ranges::begin(bytes), std::ranges::end(bytes));
+        }
+        return to_data(out);
+    }
+
+    template<typename TermId = std::uint64_t, typename LogIndex = std::uint64_t,
+             typename GroupId = std::uint64_t>
+    [[nodiscard]] auto serialize(
+        const append_entries_batch_response<append_entries_response<TermId, LogIndex, GroupId>>&
+            batch) const -> Data {
+        std::vector<std::byte> out;
+        write_map_header(out, 2);
+        write_discriminant(out, "append_entries_batch_response");
+        write_text_string(out, "members");
+        write_array_header(out, batch.members().size());
+        for (const auto& member : batch.members()) {
+            write_map_header(out, 1);
+            if (const auto* ok = std::get_if<0>(&member)) {
+                write_text_string(out, "ok");
+                const auto bytes = serialize(*ok);
+                out.insert(out.end(), std::ranges::begin(bytes), std::ranges::end(bytes));
             } else {
-                throw serialization_exception("Unexpected key in append_entries_response: " + key);
+                const auto& err = std::get<1>(member);
+                write_text_string(out, "err");
+                write_map_header(out, 2);
+                write_text_string(out, "kind");
+                write_text_string(out, err.kind() == batch_member_error::kind_type::unknown_group
+                                           ? "unknown_group"
+                                           : "handler_failed");
+                write_text_string(out, "message");
+                write_text_string(out, err.message());
             }
         }
-        if (!have_term || !have_success) {
-            throw serialization_exception("Missing required field in append_entries_response");
+        return to_data(out);
+    }
+
+    template<typename NodeId = std::uint64_t, typename TermId = std::uint64_t,
+             typename LogIndex = std::uint64_t, typename LogEntry = log_entry<TermId, LogIndex>,
+             typename GroupId = std::uint64_t>
+    [[nodiscard]] auto deserialize_append_entries_batch_request(const Data& data) const
+        -> append_entries_batch_request<
+            append_entries_request<NodeId, TermId, LogIndex, LogEntry, GroupId>> {
+        auto buf = to_buffer(data);
+        decode_cursor cur{buf.data(), buf.data() + buf.size()};
+        auto pairs = read_map_header(cur);
+        require_discriminant(cur, pairs, "append_entries_batch_request");
+        append_entries_batch_request<
+            append_entries_request<NodeId, TermId, LogIndex, LogEntry, GroupId>>
+            batch;
+        bool have_members = false;
+        for (std::size_t i = 1; i < pairs; ++i) {
+            auto key = read_text_string(cur);
+            if (key != "members" || have_members) {
+                throw serialization_exception("Unexpected key in append_entries_batch_request: " +
+                                              key);
+            }
+            const auto count = read_array_header(cur);
+            batch._members.reserve(count);
+            for (std::size_t m = 0; m < count; ++m) {
+                batch._members.push_back(
+                    read_append_entries_request<NodeId, TermId, LogIndex, LogEntry, GroupId>(cur));
+            }
+            have_members = true;
         }
-        return resp;
+        if (!have_members) {
+            throw serialization_exception("Missing required field in append_entries_batch_request");
+        }
+        return batch;
+    }
+
+    template<typename TermId = std::uint64_t, typename LogIndex = std::uint64_t,
+             typename GroupId = std::uint64_t>
+    [[nodiscard]] auto deserialize_append_entries_batch_response(const Data& data) const
+        -> append_entries_batch_response<append_entries_response<TermId, LogIndex, GroupId>> {
+        auto buf = to_buffer(data);
+        decode_cursor cur{buf.data(), buf.data() + buf.size()};
+        auto pairs = read_map_header(cur);
+        require_discriminant(cur, pairs, "append_entries_batch_response");
+        append_entries_batch_response<append_entries_response<TermId, LogIndex, GroupId>> batch;
+        bool have_members = false;
+        for (std::size_t i = 1; i < pairs; ++i) {
+            auto key = read_text_string(cur);
+            if (key != "members" || have_members) {
+                throw serialization_exception("Unexpected key in append_entries_batch_response: " +
+                                              key);
+            }
+            const auto count = read_array_header(cur);
+            batch._members.reserve(count);
+            for (std::size_t m = 0; m < count; ++m) {
+                if (read_map_header(cur) != 1) {
+                    throw serialization_exception(
+                        "CBOR decode: batch member must hold exactly one of 'ok' or 'err'");
+                }
+                const auto slot = read_text_string(cur);
+                if (slot == "ok") {
+                    batch._members.emplace_back(
+                        std::in_place_index<0>,
+                        read_append_entries_response<TermId, LogIndex, GroupId>(cur));
+                } else if (slot == "err") {
+                    batch._members.emplace_back(std::in_place_index<1>, read_member_error(cur));
+                } else {
+                    throw serialization_exception("CBOR decode: unexpected batch member key: " +
+                                                  slot);
+                }
+            }
+            have_members = true;
+        }
+        if (!have_members) {
+            throw serialization_exception(
+                "Missing required field in append_entries_batch_response");
+        }
+        return batch;
     }
 
     // Deserialize InstallSnapshot Request
@@ -1046,6 +1116,12 @@ public:
             return deserialize_append_entries_request<N>(data);
         } else if constexpr (std::same_as<T, append_entries_response<>>) {
             return deserialize_append_entries_response(data);
+        } else if constexpr (std::same_as<
+                                 T, append_entries_batch_request<append_entries_request<N>>>) {
+            return deserialize_append_entries_batch_request<N>(data);
+        } else if constexpr (std::same_as<
+                                 T, append_entries_batch_response<append_entries_response<>>>) {
+            return deserialize_append_entries_batch_response(data);
         } else if constexpr (std::same_as<T, install_snapshot_request<N>>) {
             return deserialize_install_snapshot_request<N>(data);
         } else if constexpr (std::same_as<T, install_snapshot_response<>>) {
@@ -1305,6 +1381,118 @@ private:
         // buffer is malformed.
         require_available(cur, pairs);
         return static_cast<std::size_t>(pairs);
+    }
+
+    // The body of an AppendEntries request at `cur`; shared by the lone
+    // message and the batch so their decodings cannot drift apart.
+    template<typename NodeId, typename TermId, typename LogIndex, typename LogEntry,
+             typename GroupId>
+    static auto read_append_entries_request(decode_cursor& cur)
+        -> append_entries_request<NodeId, TermId, LogIndex, LogEntry, GroupId> {
+        auto pairs = read_map_header(cur);
+        require_discriminant(cur, pairs, "append_entries_request");
+
+        append_entries_request<NodeId, TermId, LogIndex, LogEntry, GroupId> req;
+        bool have_term = false, have_leader = false, have_pli = false, have_plt = false,
+             have_commit = false, have_entries = false;
+        for (std::size_t i = 1; i < pairs; ++i) {
+            auto key = read_text_string(cur);
+            if (key == "term") {
+                req._term = read_narrowed<TermId>(cur);
+                have_term = true;
+            } else if (key == "leader_id") {
+                req._leader_id = read_id<NodeId>(cur);
+                have_leader = true;
+            } else if (key == "prev_log_index") {
+                req._prev_log_index = read_narrowed<LogIndex>(cur);
+                have_pli = true;
+            } else if (key == "prev_log_term") {
+                req._prev_log_term = read_narrowed<TermId>(cur);
+                have_plt = true;
+            } else if (key == "leader_commit") {
+                req._leader_commit = read_narrowed<LogIndex>(cur);
+                have_commit = true;
+            } else if (key == "entries") {
+                req._entries = read_entries<TermId, LogIndex, LogEntry>(cur);
+                have_entries = true;
+            } else if (key == "group_id") {
+                // Absent from any payload recorded before multi-Raft. The
+                // default value is exactly "the single group", so a missing
+                // key is not an error and carries no required-field flag.
+                req._group_id = read_id<GroupId>(cur);
+            } else {
+                throw serialization_exception("Unexpected key in append_entries_request: " + key);
+            }
+        }
+        if (!have_term || !have_leader || !have_pli || !have_plt || !have_commit || !have_entries) {
+            throw serialization_exception("Missing required field in append_entries_request");
+        }
+        return req;
+    }
+
+    template<typename TermId, typename LogIndex, typename GroupId>
+    static auto read_append_entries_response(decode_cursor& cur)
+        -> append_entries_response<TermId, LogIndex, GroupId> {
+        auto pairs = read_map_header(cur);
+        require_discriminant(cur, pairs, "append_entries_response");
+
+        append_entries_response<TermId, LogIndex, GroupId> resp;
+        bool have_term = false, have_success = false;
+        for (std::size_t i = 1; i < pairs; ++i) {
+            auto key = read_text_string(cur);
+            if (key == "term") {
+                resp._term = read_narrowed<TermId>(cur);
+                have_term = true;
+            } else if (key == "success") {
+                resp._success = read_bool(cur);
+                have_success = true;
+            } else if (key == "conflict_index") {
+                resp._conflict_index = read_narrowed<LogIndex>(cur);
+            } else if (key == "conflict_term") {
+                resp._conflict_term = read_narrowed<TermId>(cur);
+            } else if (key == "group_id") {
+                // Absent from any payload recorded before multi-Raft. The
+                // default value is exactly "the single group", so a missing
+                // key is not an error and carries no required-field flag.
+                resp._group_id = read_id<GroupId>(cur);
+            } else {
+                throw serialization_exception("Unexpected key in append_entries_response: " + key);
+            }
+        }
+        if (!have_term || !have_success) {
+            throw serialization_exception("Missing required field in append_entries_response");
+        }
+        return resp;
+    }
+
+    static auto read_member_error(decode_cursor& cur) -> batch_member_error {
+        const auto pairs = read_map_header(cur);
+        batch_member_error err;
+        bool have_kind = false, have_message = false;
+        for (std::size_t i = 0; i < pairs; ++i) {
+            const auto key = read_text_string(cur);
+            if (key == "kind") {
+                const auto kind = read_text_string(cur);
+                if (kind == "unknown_group") {
+                    err._kind = batch_member_error::kind_type::unknown_group;
+                } else if (kind == "handler_failed") {
+                    err._kind = batch_member_error::kind_type::handler_failed;
+                } else {
+                    throw serialization_exception("CBOR decode: unknown batch member error kind: " +
+                                                  kind);
+                }
+                have_kind = true;
+            } else if (key == "message") {
+                err._message = read_text_string(cur);
+                have_message = true;
+            } else {
+                throw serialization_exception("Unexpected key in batch member error: " + key);
+            }
+        }
+        if (!have_kind || !have_message) {
+            throw serialization_exception("Missing required field in batch member error");
+        }
+        return err;
     }
 
     /// Read and verify the leading `"type"` discriminant of a message map.
