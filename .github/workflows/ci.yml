@@ -3707,7 +3707,36 @@ jobs:
         # diagnoses of this leg were lost. A build that times out on its own
         # terms also leaves the `always()` reporting steps to run, instead of
         # being skipped by the platform killing the job.
-        run: cmake --build build-${{ matrix.backend }} -j3
+        #
+        # November 20, 2026: it recurred, and the advice above is now wired
+        # in rather than left as advice. From ~04:55Z the stdexec leg lost its
+        # runner ~48 minutes into this step on every run that needed a real
+        # rebuild (#903 three times, #840, #863), while warm ~23-minute runs
+        # stayed green. GitHub reported "The hosted runner lost communication
+        # with the server" and kept NO log -- the job's log 404s -- so the
+        # TU that tipped it over cannot be read from those runs. What could
+        # be ruled out: the runner image (ubuntu-24.04 20261116.133.1), disk
+        # and memory are byte-for-byte the same on the green runs of
+        # November 18 and the failing ones, so the growth is in the tree.
+        #
+        # scripts/bounded-build.sh changes both halves of that:
+        #
+        # - The build, and the sccache server that actually forks the
+        #   compilers (--adopt), run in a cgroup with memory.max ~2.5 GiB
+        #   under physical RAM. Over it the kernel swaps the compilers, not
+        #   the runner agent, so the agent keeps reporting. The worst case
+        #   becomes a slow build that the time limit ends inside this job's
+        #   300 minutes, with the log and the `always()` steps intact.
+        #
+        # - It samples memory into this log every 30 s and ends with the
+        #   peak compiler RSS of the 25 heaviest TUs it saw compile. Read
+        #   that table before moving anything into the `heavy_tu` pool.
+        #
+        # The time limit leaves ~60 minutes of the 300 for testing; a cold
+        # build at -j3 with the pool measured 1 h 51 m.
+        run: >-
+          scripts/bounded-build.sh --adopt sccache --time-limit 230m --
+          cmake --build build-${{ matrix.backend }} -j3
 
       # Same check as build-and-test's; see scripts/check-linker.sh.
       - name: Assert binaries were linked by mold
