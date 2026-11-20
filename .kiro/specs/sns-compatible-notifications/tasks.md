@@ -81,10 +81,30 @@ first builds it to that design). Each task is one PR unless noted.
     host with task 4's handlers; the rate limiter that uses the profile's
     rates plugs into the admission hook there too.
 
-- [ ] 4. Topic, subscription and publish API
+- [x] 4. Topic, subscription and publish API
   - Operations, confirmation tokens, attributes, message structure,
     `PublishBatch`
   - _Requirements: 4.1, 4.2, 5.1-5.4_
+  - Part done (November 19, 2026): `sns_service.hpp` with the 12 topic
+    operations (CreateTopic, DeleteTopic, Get/SetTopicAttributes,
+    ListTopics, Tag/Untag/ListTagsForResource, Add/RemovePermission,
+    Get/PutDataProtectionPolicy) over a `topic_store` (a local one over a
+    single state machine; routing topics to groups is task 9), and
+    `sns_service_test` through the front end.
+  - Part done (November 19, 2026): the 7 subscription operations.
+    HTTP/HTTPS, email and cross-account SQS subscriptions wait for a
+    256-hex-character token valid three days; same-account SQS, Lambda
+    and Firehose do not (Requirement 4.2). Sending the confirmation
+    message is delivery's (task 6). Subscription ARNs end in the topic and
+    subscription ids in UUID form, so they are never reused.
+  - Done (November 19, 2026): Publish and PublishBatch. A message id is
+    answered after the publish command commits (Requirement 5.1) and
+    never waits for delivery (5.4); subject, `MessageStructure` json and
+    message attributes are checked as SNS does and kept in the record
+    (`sns_message.hpp`, 5.2); FIFO topics need a group id, deduplicate on
+    an explicit id or the body's SHA-256 for five minutes, and hash groups
+    to log partitions (5.3). PublishBatch reports each entry. The daemon
+    serving these handlers comes with the gateway work of task 6 or 9.
 
 - [ ] 5. Filter policies
   - _Requirements: 6.2_

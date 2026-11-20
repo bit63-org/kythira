@@ -6,3 +6,24 @@
 # listed in doc/unsupported.md; tools/check_coverage.py (the ctest
 # sns_model_coverage) enforces it. A task that implements an operation moves
 # it from there to here.
+AddPermission
+CreateTopic
+DeleteTopic
+GetDataProtectionPolicy
+GetTopicAttributes
+ListTagsForResource
+ListTopics
+PutDataProtectionPolicy
+RemovePermission
+SetTopicAttributes
+TagResource
+UntagResource
+ConfirmSubscription
+GetSubscriptionAttributes
+ListSubscriptions
+ListSubscriptionsByTopic
+SetSubscriptionAttributes
+Subscribe
+Unsubscribe
+Publish
+PublishBatch

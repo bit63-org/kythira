@@ -881,6 +881,18 @@ public:
         return out;
     }
 
+    /// Every subscription by id, after `after_id`, at most `limit`
+    /// (ListSubscriptions pages through them).
+    [[nodiscard]] auto subscriptions_after(std::uint64_t after_id, std::size_t limit) const
+        -> std::vector<const subscription_record*> {
+        std::vector<const subscription_record*> out;
+        for (auto it = _subscription_index.upper_bound(after_id);
+             it != _subscription_index.end() && out.size() < limit; ++it) {
+            out.push_back(&_subscriptions.at(std::pair{it->second, it->first}));
+        }
+        return out;
+    }
+
     /// The subscriptions one delivery partition serves.
     [[nodiscard]] auto subscriptions_in(const delivery_partition& p) const
         -> std::vector<const subscription_record*> {

@@ -27,7 +27,8 @@
 ///   4. Admission: the throttling hook, when the composition root sets one
 ///      (`sns_compat_profile` holds the rates), may refuse with Throttled.
 ///   5. The topic the request acts on: `TopicArn`, `ResourceArn` (the tag
-///      operations), the topic inside `SubscriptionArn`, or for
+///      operations), `TargetArn` (Publish), the topic inside
+///      `SubscriptionArn`, or for
 ///      CreateTopic the ARN `Name` would have. A value that is not such an
 ///      ARN is InvalidParameter before anything is authorized.
 ///   6. Authorization: the operation's `sns:` action (`sns:Publish` for
@@ -412,7 +413,10 @@ private:
             }
             return std::nullopt;
         }
-        for (const auto* key : {"TopicArn", "ResourceArn"}) {
+        // Publish may name its topic as TargetArn; a platform endpoint ARN
+        // there (mobile push, out of scope) is not a topic ARN, so it is
+        // InvalidParameter.
+        for (const auto* key : {"TopicArn", "ResourceArn", "TargetArn"}) {
             if (const auto arn = in.get(key)) {
                 if (!parse_topic_arn(*arn)) {
                     return invalid_parameter(key);
