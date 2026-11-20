@@ -106,6 +106,19 @@ kythira_kms_test(kms_job_lease_test kms_job_lease_test.cpp)
 set_tests_properties(kms_job_lease_test PROPERTIES
     LABELS "unit;kms;kms-module" TIMEOUT 120)
 
+# kms-independent-layers task 3, Requirements 3.1, 3.3, 4.1-4.3 and 9.2:
+# the data layer's catalog API and the remote catalog access (every query
+# answered as the replica does, read-index points, failover, an
+# unreachable data layer never answered as "not found"); and the API
+# suites again in the split layout, their handlers on a front end that
+# reaches the catalog only through that API: the same binaries, run again
+# with KMS_API_FIXTURE_LAYOUT=split (kms_api_fixture.hpp). Each split run
+# is registered after its suite's target (below), so it is added at the
+# end of this file.
+kythira_kms_test(kms_catalog_api_test kms_catalog_api_test.cpp)
+set_tests_properties(kms_catalog_api_test PROPERTIES
+    LABELS "unit;kms;kms-module" TIMEOUT 120)
+
 # Task 5, Requirements 3.4, 4.1, 4.4, 4.5 and 9.2-9.4: two-step key
 # creation and the leader's jobs over an in-memory PKCS#11 backend, with
 # the scan of the catalog's log, engine and checkpoint for generated
@@ -249,3 +262,17 @@ if(KYTHIRA_KMS_NODE_DAEMON)
 endif()
 
 kythira_scale_test_timeouts()
+
+# kms-independent-layers task 3: the API suites in the split layout.
+foreach(_kms_suite IN ITEMS kms_api_test kms_crypto_test kms_asymmetric_test kms_grants_test
+                            kms_policy_test kms_managed_test kms_rotation_test kms_quotas_test
+                            kms_audit_test kms_client_test kms_job_lease_test)
+    if(TARGET ${_kms_suite})
+        string(REPLACE "_test" "_split_test" _kms_split "${_kms_suite}")
+        add_test(NAME ${_kms_split} COMMAND ${_kms_suite})
+        set_tests_properties(${_kms_split} PROPERTIES
+            ENVIRONMENT "KMS_API_FIXTURE_LAYOUT=split"
+            WORKING_DIRECTORY "${CMAKE_BINARY_DIR}/tests"
+            LABELS "unit;kms;kms-module" TIMEOUT 300)
+    endif()
+endforeach()
