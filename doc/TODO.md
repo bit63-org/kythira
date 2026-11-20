@@ -5176,7 +5176,14 @@ as the Cloud Provider Support requirement above.
     `safety_assertions_test`) plus `network_degradation_test` and
     `leader_crash_and_reelection` itself — passing cleanly on real
     arm64 hardware.
-- [ ] **Memory usage profiling** — optional optimization pass
+- [x] **Memory usage profiling** — optional optimization pass. Done
+  November 20, 2026: `kythira_node` with the DynamoDB and KMS modules on a
+  three-node cluster under steady load, under heaptrack. Found and fixed
+  persistent groups (DynamoDB, KMS, HSM, ledger) never compacting their
+  Raft logs on RocksDB, and a per-RPC allocation in the serializers'
+  `media_type()`; no leaks. Kinesis, Redis, SQS and SNS were not covered
+  (Folly-only or not yet on `main`). Results, method and tools:
+  [memory_profiling.md](memory_profiling.md), `scripts/memory-profile/`.
 
 ---
 
