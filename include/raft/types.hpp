@@ -1555,6 +1555,10 @@ requires node_id<First>
 struct rpc_message_node_id<Message<First, Rest...>> {
     using type = First;
 };
+/// A batch is named by its members' node id type.
+template<typename Request> struct rpc_message_node_id<append_entries_batch_request<Request>> {
+    using type = typename rpc_message_node_id<Request>::type;
+};
 template<typename T> using rpc_message_node_id_t = typename rpc_message_node_id<T>::type;
 
 }  // namespace kythira

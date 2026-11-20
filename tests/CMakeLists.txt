@@ -1950,6 +1950,10 @@ if(TARGET httplib::httplib)
     endif()
 endif()
 
+# .kiro/specs/multi-raft-message-batching/ task 6: the batch's JSON and CBOR
+# encodings.
+add_raft_completion_test(append_entries_batch_serializer_test append_entries_batch_serializer_test.cpp)
+
 # Peer-to-peer log replication (gossip catch-up) — .kiro/specs/peer2peer-log-replication/
 add_raft_completion_test(peer2peer_replication_unit_test peer2peer_replication_unit_test.cpp)
 add_raft_completion_test(peer2peer_catch_up_property_test peer2peer_catch_up_property_test.cpp)
