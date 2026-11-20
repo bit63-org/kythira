@@ -977,6 +977,12 @@ auto multi_raft<Types, Key, GroupId>::tick() -> tick_report {
     maybe_heartbeat();
 
     evaluate_hibernation(ready);
+    if (_batcher) {
+        // `_cfg.metrics` is shared with the transaction metrics, which other
+        // threads emit under this mutex.
+        std::lock_guard lock(_txn_metrics_mutex);
+        _batching_metrics.publish(*_batcher, _cfg.metrics);
+    }
     return report;
 }
 
@@ -4419,6 +4425,17 @@ auto multi_raft<Types, Key, GroupId>::read_state(const Key& key, std::chrono::mi
 template<raft_types Types, shard_key Key, raft_group_id GroupId>
 auto multi_raft<Types, Key, GroupId>::stale_group_message_count() const -> std::uint64_t {
     return _demux.stale_group_message_count();
+}
+
+template<raft_types Types, shard_key Key, raft_group_id GroupId>
+auto multi_raft<Types, Key, GroupId>::batching_statistics() const -> batching_stats {
+    if (!_batcher) {
+        return {};
+    }
+    return {._batches_sent = _batcher->batches_sent(),
+            ._members_sent = _batcher->members_sent(),
+            ._fallbacks = _batcher->fallbacks(),
+            ._marked_destinations = _batcher->marked_destinations()};
 }
 
 template<raft_types Types, shard_key Key, raft_group_id GroupId>
