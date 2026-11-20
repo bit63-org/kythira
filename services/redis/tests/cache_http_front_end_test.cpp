@@ -874,6 +874,34 @@ BOOST_AUTO_TEST_CASE(chunked_transfer_encoding_and_expect, *boost::unit_test::ti
     BOOST_CHECK(got._body == value);
 }
 
+// GitHub issue 942: the same `Expect: 100-continue` upload, sent to a node
+// that is not the shard's leader. curl sends that header for any body over
+// 1 MiB and then holds the body until it hears `100 Continue` or a second
+// passes. The relaying node used to strip the header and never answer it,
+// so two in three round-robin PUTs waited out curl's timer. Here the client
+// waits for the interim answer the way curl does, but without a timer of
+// its own to fall back on: no 100, no body, and the case fails.
+BOOST_AUTO_TEST_CASE(a_follower_answers_expect_before_relaying, *boost::unit_test::timeout(120)) {
+    cluster c(3, small_chunks());
+    BOOST_REQUIRE(c.await_leaders(std::chrono::seconds{20}));
+    const auto follower = c.a_follower_of(k_sccache_group);
+    http_client client(c.port(follower));
+    const auto value = pattern(150 * 1024 + 5, 9);
+    std::string req = "PUT /sccache/expect/far HTTP/1.1\r\nHost: t\r\nAuthorization: " + farm() +
+                      "\r\nContent-Length: " + std::to_string(value.size()) +
+                      "\r\nExpect: 100-continue\r\n\r\n";
+    BOOST_REQUIRE(client.send(req));
+    BOOST_REQUIRE_EQUAL(client.read_response(false, true)._status, 100);
+    BOOST_REQUIRE(client.send(value));
+    BOOST_CHECK_EQUAL(client.read_response()._status, 201);
+    BOOST_CHECK_GE(c.front_end(follower).stats()._forwards.load(), 1U);
+    BOOST_REQUIRE(c.await_key(follower, k_sccache_group, "sccache/expect/far"));
+    http_client again(c.port(follower));
+    auto got = again.call("GET", "/sccache/expect/far");
+    BOOST_CHECK_EQUAL(got._status, 200);
+    BOOST_CHECK(got._body == value);
+}
+
 // Requirement 8: no credentials, bad credentials, a read-only user's write
 // (403, and nothing reaches the log), and a key outside the user's prefixes.
 BOOST_AUTO_TEST_CASE(authentication_and_authorization, *boost::unit_test::timeout(120)) {
