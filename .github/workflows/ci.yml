@@ -3844,7 +3844,12 @@ jobs:
           packer validate -syntax-only packer/ca_cluster_node/ca_cluster_node.pkr.hcl
 
       - name: shellcheck
-        run: shellcheck packer/ca_cluster_node/scripts/*.sh
+        run: shellcheck packer/ca_cluster_node/scripts/*.sh scripts/ami-retention/*.sh
+
+      # .kiro/specs/ca-cluster-node-ami-retention/ task 3: the AMI pruner's
+      # keep rules and failure rules, against a fake `aws` (no credentials).
+      - name: AMI retention stub test
+        run: scripts/ami-retention/test-prune-amis.sh
 
       - name: Secret-absence check
         run: |
