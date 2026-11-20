@@ -1,20 +1,24 @@
 # Implementation Plan — Multi-Raft load buckets
 
-## Status: Not started (spec only, written 2026-11-19)
+## Status: In progress (tasks 1-2 done; Clark's go 2026-11-20)
 
-Follow-up to `.kiro/specs/multi-raft/` Phase 9 and open question 4. Building
-it needs Clark's call.
+Follow-up to `.kiro/specs/multi-raft/` Phase 9 and open question 4.
 
-- [ ] 1. Types and config
+- [x] 1. Types and config
   - `bucket_stats<Key>` in `shard_types.hpp`; `_buckets` and
     `_buckets_version` appended to `shard_stats`; `bucket_config` in
     `multi_raft_config`, clamped and validated.
   - _Requirements: 1.1, 5.1_
 
-- [ ] 2. `bucket_set<Key>` in `include/raft/load_buckets.hpp`
+- [x] 2. `bucket_set<Key>` in `include/raft/load_buckets.hpp`
   - Immutable layout swapped whole, lock-free `count`, slot window and
     `roll`, reservoir, `refresh`, `snapshot`.
   - Unit and property tests.
+  - Deviation: the reservoir has its own mutex inside the set rather than
+    borrowing the host's `_sampler_mutex`, so buckets work with sampling off;
+    it is taken one keyed request in `_reservoir_stride`, as designed.
+    `add_bytes` attributes a read's size after it completes, without counting
+    a second request.
   - _Requirements: 2.3, 2.4, 3.2, 3.3, 7.1, 7.2_
 
 - [ ] 3. Count at the routing layer
