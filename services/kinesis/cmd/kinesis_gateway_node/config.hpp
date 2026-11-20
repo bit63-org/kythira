@@ -222,6 +222,13 @@ struct node_options {
     /// objects as its `ServiceExecutionRoleARN`, through STS `AssumeRole`,
     /// as AWS does.
     bool _channel_assume_role{false};
+    /// `KINESIS_CHANNEL_ENCRYPTION`: how a channel's
+    /// `EncryptionConfiguration` is carried out on general purpose S3
+    /// destinations. `envelope` (the default) seals each object on the node
+    /// under a data key from `KINESIS_KMS`, asked for as the channel's
+    /// execution role; `sse-kms` asks S3 for SSE-KMS under the channel's
+    /// key instead. S3 Tables destinations always ask for SSE-KMS.
+    bool _channel_sse_kms{false};
     /// `KINESIS_CHANNEL_STS_ENDPOINT`: STS's URL for `assume` (AWS's in the
     /// channel S3 region when empty; Kythira's IAM service also answers).
     std::string _channel_sts_endpoint;

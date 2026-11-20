@@ -528,6 +528,11 @@ public:
         }
         kinesis::channel_delivery_config channels;
         channels._max_delay_ms = _opt._channel_max_delay_ms;
+        // Encrypted channels (Requirement 18.4): the provider streams are
+        // encrypted at rest with, or SSE-KMS in the bucket.
+        channels._encryption = _opt._channel_sse_kms ? kinesis::channel_encryption::sse_kms
+                                                     : kinesis::channel_encryption::envelope;
+        channels._kms = _channel_kms;
         if (_channel_destinations) {
             channels._destination = [d = _channel_destinations.get()](
                                         const std::string& b, const kinesis::channel_access& a) {
@@ -1208,6 +1213,8 @@ private:
         // name (KMS task 15).
         sc._kms = make_kms_provider(_opt._kms);
         sc._kms_name = _opt._kms;
+        // Channels seal delivered objects with the same provider (task 19).
+        _channel_kms = sc._kms;
         sc._kms_caller_ttl = _opt._kms_caller_ttl;
         if (_opt._kms_previous != "off") {
             sc._kms_previous.emplace(_opt._kms_previous, make_kms_provider(_opt._kms_previous));
@@ -1432,6 +1439,9 @@ private:
     std::thread _driver;
     std::unique_ptr<kinesis::stream_maintenance<cluster_type>> _maintenance;
     std::unique_ptr<channel_destinations> _channel_destinations;
+    /// The key provider envelope-encrypted channels seal with (the one
+    /// streams are encrypted at rest with).
+    kinesis::key_provider _channel_kms;
     std::unique_ptr<kinesis::channel_delivery<cluster_type, kinesis::kinesis_service<cluster_type>>>
         _channels;
     std::unique_ptr<kinesis::on_demand_controller<cluster_type>> _on_demand;

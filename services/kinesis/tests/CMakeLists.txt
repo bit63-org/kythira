@@ -255,6 +255,10 @@ kythira_kinesis_test(kinesis_iceberg_test kinesis_iceberg_test.cpp)
 # DLQ rows, FAILED tables). Set KINESIS_TABLES_TEST_EXPORT to export a
 # table for tests/iceberg/read_exported_table.py.
 kythira_kinesis_test(kinesis_channel_tables_test kinesis_channel_tables_test.cpp)
+# Task 19, Requirement 18.4: encrypted channels (objects and dead letters
+# sealed through the local, AWS and Kythira key providers as the execution
+# role, data key reuse, refused keys, no provider, SSE-KMS mode).
+kythira_kinesis_test(kinesis_channel_encryption_test kinesis_channel_encryption_test.cpp)
 # Task 14: encryption at rest (the local key provider, sealed records, the
 # AWS KMS adapter against a fake KMS, Start/StopStreamEncryption).
 kythira_kinesis_test(kinesis_encryption_test kinesis_encryption_test.cpp)
