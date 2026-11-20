@@ -902,6 +902,31 @@ BOOST_AUTO_TEST_CASE(a_follower_answers_expect_before_relaying, *boost::unit_tes
     BOOST_CHECK(got._body == value);
 }
 
+// GitHub issue 942: read-your-writes through a follower. rclone sends a
+// PROPFIND for every file right after its PUT, to the same node; a follower
+// that had not yet applied the commit answered 404, and rclone counted the
+// upload as failed and sent it again. Now the relaying follower answers the
+// PUT only once its own replica has applied it, so an immediate read there
+// finds the key, and a DELETE likewise leaves nothing behind to read.
+BOOST_AUTO_TEST_CASE(a_follower_reads_its_relayed_writes_at_once, *boost::unit_test::timeout(180)) {
+    cluster c(3, small_chunks());
+    BOOST_REQUIRE(c.await_leaders(std::chrono::seconds{20}));
+    const auto follower = c.a_follower_of(k_sccache_group);
+    for (int i = 0; i < 10; ++i) {
+        const std::string path = "/sccache/ryw/" + std::to_string(i);
+        const auto value = pattern(40 * 1024 + static_cast<std::size_t>(i), 20 + i);
+        http_client put(c.port(follower));
+        BOOST_REQUIRE_EQUAL(put.call("PUT", path, value)._status, 201);
+        http_client head(c.port(follower));
+        BOOST_CHECK_EQUAL(head.call("HEAD", path)._status, 200);
+        http_client del(c.port(follower));
+        BOOST_REQUIRE_EQUAL(del.call("DELETE", path)._status, 204);
+        http_client gone(c.port(follower));
+        BOOST_CHECK_EQUAL(gone.call("HEAD", path)._status, 404);
+    }
+    BOOST_CHECK_GE(c.front_end(follower).stats()._relay_apply_waits.load(), 20U);
+}
+
 // Requirement 8: no credentials, bad credentials, a read-only user's write
 // (403, and nothing reaches the log), and a key outside the user's prefixes.
 BOOST_AUTO_TEST_CASE(authentication_and_authorization, *boost::unit_test::timeout(120)) {
