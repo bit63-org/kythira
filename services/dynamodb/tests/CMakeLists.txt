@@ -90,6 +90,15 @@ set_tests_properties(dynamodb_api_test PROPERTIES
 find_package(Threads REQUIRED)
 kythira_dynamodb_test(dynamodb_gateway_test dynamodb_gateway_test.cpp)
 target_link_libraries(dynamodb_gateway_test PRIVATE Threads::Threads)
+# In the `heavy_tu` pool (top-level CMakeLists.txt) with
+# dynamodb_raft_backend_test: Beast, asio and the whole backend in one TU.
+# The two measure 4,072 and 3,927 MiB of compiler RSS under g++-13 -O2 on
+# the Boost future backend, against 2,445 for the next DynamoDB test, and
+# the stdexec backend multiplies TUs like these by 1.9 to 3.4x. When a
+# shared header change made every DynamoDB test miss the compiler cache,
+# compiling side by side they got the 16 GiB runners of the g++ arm64,
+# g++-14 and stdexec full-suite legs killed mid-build.
+set_target_properties(dynamodb_gateway_test PROPERTIES JOB_POOL_COMPILE heavy_tu)
 set_tests_properties(dynamodb_gateway_test PROPERTIES
     LABELS "unit;dynamodb;dynamodb-module" TIMEOUT 60)
 
@@ -146,6 +155,8 @@ set_tests_properties(dynamodb_lsi_test PROPERTIES
 # from kythira_test_support.
 kythira_dynamodb_test(dynamodb_raft_backend_test dynamodb_raft_backend_test.cpp)
 target_link_libraries(dynamodb_raft_backend_test PRIVATE kythira_test_support)
+# In the `heavy_tu` pool: see dynamodb_gateway_test above.
+set_target_properties(dynamodb_raft_backend_test PROPERTIES JOB_POOL_COMPILE heavy_tu)
 set_tests_properties(dynamodb_raft_backend_test PROPERTIES
     LABELS "integration;dynamodb;dynamodb-module" TIMEOUT 300)
 # The invariants services/dynamodb/doc/invariants.md collects from the AWS
