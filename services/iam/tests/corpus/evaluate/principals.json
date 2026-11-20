@@ -309,7 +309,7 @@
       "expect": "allow"
     },
     {
-      "name": "anonymous caller is not AWS:*",
+      "name": "anonymous caller allowed by AWS:* (equivalent to *)",
       "kind": "evaluate",
       "principal": "anonymous",
       "action": "s3:GetObject",
@@ -329,7 +329,7 @@
           }
         ]
       },
-      "expect": "implicit_deny"
+      "expect": "allow"
     },
     {
       "name": "anonymous caller without a resource policy",

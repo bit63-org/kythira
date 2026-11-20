@@ -49,6 +49,9 @@ on:
       - include/raft/txn_*.hpp
       - include/raft/asio_listeners.hpp
       - include/raft/credential_verifier.hpp
+      # The chunk store under the build cache, core since the S3 service
+      # began sharing it.
+      - include/raft/chunk_store.hpp
       # Engine storage (the engine-containers job): the persistent state
       # machine seam, the RocksDB engine, the format-1 snapshot stream, and
       # the defconfig that job builds.
@@ -77,6 +80,9 @@ on:
       - include/raft/txn_*.hpp
       - include/raft/asio_listeners.hpp
       - include/raft/credential_verifier.hpp
+      # The chunk store under the build cache, core since the S3 service
+      # began sharing it.
+      - include/raft/chunk_store.hpp
       # Engine storage (the engine-containers job): the persistent state
       # machine seam, the RocksDB engine, the format-1 snapshot stream, and
       # the defconfig that job builds.

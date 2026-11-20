@@ -193,26 +193,38 @@ public:
         if (!parsed) {
             return parsed.error();
         }
-        const auto& c = *parsed;
+        auto r = resolve(*parsed, rules.protocol);
+        if (!r) {
+            return r.error();
+        }
+        if (!sigv4::verify(*parsed, r->key)) {
+            return sigv4::signature_mismatch(rules.protocol);
+        }
+        return r->who;
+    }
+
+    /// The key's principal and its signing key for the claim's scope
+    /// (`aws_claim_resolver`).
+    [[nodiscard]] auto resolve(const sigv4::claim& c, sigv4::error_protocol protocol)
+        -> resolve_result {
         if (c.security_token.has_value() || c.access_key_id.starts_with("ASIA")) {
-            return sigv4::invalid_client_token_id(rules.protocol);
+            return sigv4::invalid_client_token_id(protocol);
         }
         const auto it = _keys.find(c.access_key_id);
         if (it == _keys.end()) {
-            return sigv4::invalid_client_token_id(rules.protocol);
-        }
-        if (!sigv4::verify(c, sigv4::derive_signing_key(it->second.secret, c.scope))) {
-            return sigv4::signature_mismatch(rules.protocol);
+            return sigv4::invalid_client_token_id(protocol);
         }
         const auto& k = it->second;
-        principal_context p;
+        resolved_claim out;
+        out.key = sigv4::derive_signing_key(k.secret, c.scope);
+        auto& p = out.who;
         p.type = principal_type::user;
         p.account = k.account;
         p.username = k.name.empty() ? k.access_key_id : k.name;
         p.arn = "arn:" + _partition + ":iam::" + k.account + ":user/" + p.username;
         p.userid = k.access_key_id;
         p.access_key_id = k.access_key_id;
-        return p;
+        return out;
     }
 
     [[nodiscard]] auto authorize(const principal_context& who, const authz_request& r)
@@ -276,5 +288,6 @@ private:
 };
 
 static_assert(aws_request_authorizer<static_key_authorizer>);
+static_assert(aws_claim_resolver<static_key_authorizer>);
 
 }  // namespace kythira::aws_auth

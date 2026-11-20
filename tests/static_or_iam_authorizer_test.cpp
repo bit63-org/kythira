@@ -197,3 +197,61 @@ BOOST_AUTO_TEST_CASE(a_key_id_both_know_is_refused) {
     // Static mode never asks IAM.
     BOOST_TEST(make_authorizer()->conflicting_keys().empty());
 }
+
+// resolve() chooses as authenticate() does; IAM without a resolve hook
+// refuses rather than guessing.
+BOOST_AUTO_TEST_CASE(resolve_follows_the_mode) {
+    const auto req = signed_request("AKIDADMIN");
+    const auto parsed = sv4::parse(req.view(), rules(), k_now);
+    BOOST_REQUIRE(parsed.has_value());
+    auto iam_claim = *parsed;
+    iam_claim.access_key_id = "AKIDIAM";
+
+    auto a = make_authorizer();
+    const auto st = a->resolve(*parsed, sv4::error_protocol::s3);
+    BOOST_REQUIRE(st.has_value());
+    BOOST_TEST(sv4::verify(*parsed, st->key));
+
+    fake_iam iam;
+    auto hooks = iam.hooks();
+    a->set_mode(az::auth_mode::both, hooks);
+    BOOST_TEST(a->resolve(iam_claim, sv4::error_protocol::s3).error().code == "NotImplemented");
+    auto resolved = std::make_shared<int>(0);
+    hooks.resolve = [resolved](const sv4::claim& c, sv4::error_protocol) -> az::resolve_result {
+        ++*resolved;
+        az::resolved_claim out;
+        out.who.access_key_id = c.access_key_id;
+        out.who.account = "444455556666";
+        return out;
+    };
+    a->set_mode(az::auth_mode::both, hooks);
+    const auto by_iam = a->resolve(iam_claim, sv4::error_protocol::s3);
+    BOOST_REQUIRE(by_iam.has_value());
+    BOOST_TEST(by_iam->who.account == "444455556666");
+    BOOST_TEST(a->resolve(*parsed, sv4::error_protocol::s3).has_value());
+    BOOST_TEST(*resolved == 1);  // the static key stayed local
+
+    iam.known->insert("AKIDADMIN");
+    BOOST_TEST(a->resolve(*parsed, sv4::error_protocol::s3).error().code == "InvalidAccessKeyId");
+}
+
+// Anonymous requests: IAM's answer when it is in use and has the hook,
+// nothing from static keys.
+BOOST_AUTO_TEST_CASE(anonymous_requests_go_to_iam_or_nowhere) {
+    auto a = make_authorizer();
+    BOOST_TEST(!a->authorize_anonymous(action("dynamodb:GetItem")).allowed);
+    fake_iam iam;
+    auto hooks = iam.hooks();
+    a->set_mode(az::auth_mode::iam, hooks);
+    BOOST_TEST(!a->authorize_anonymous(action("dynamodb:GetItem")).allowed);
+    hooks.authorize_anonymous = [](const az::authz_request& r) {
+        az::authz_decision d;
+        d.allowed = r.action == "dynamodb:GetItem";
+        return d;
+    };
+    a->set_mode(az::auth_mode::both, hooks);
+    BOOST_TEST(a->authorize_anonymous(action("dynamodb:GetItem")).allowed);
+    BOOST_TEST(!a->authorize_anonymous(action("dynamodb:PutItem")).allowed);
+    a->set_mode(az::auth_mode::static_keys, std::nullopt);
+    BOOST_TEST(!a->authorize_anonymous(action("dynamodb:GetItem")).allowed);
+}
