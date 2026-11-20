@@ -179,6 +179,10 @@ struct cache_http_stats {
     std::atomic<std::uint64_t> _put_body_ns{0};
     std::atomic<std::uint64_t> _put_chunk_wait_ns{0};
     std::atomic<std::uint64_t> _put_commit_ns{0};
+    /// Relayed writes this follower held until its own replica applied
+    /// them (read-your-writes, GitHub issue 942), and the time that took.
+    std::atomic<std::uint64_t> _relay_apply_waits{0};
+    std::atomic<std::uint64_t> _relay_apply_wait_ns{0};
     std::atomic<std::uint64_t> _aborted_gets{0};
     std::atomic<std::uint64_t> _chunk_serves{0};
     std::atomic<std::uint64_t> _connections_accepted{0};
@@ -187,6 +191,12 @@ struct cache_http_stats {
 };
 
 namespace cache_http_detail {
+
+/// On a `PUT` or `DELETE` a follower relayed, the leader's applied index
+/// once the write applied. The relaying follower waits until its own
+/// replica has applied that far before it answers, so a client reading its
+/// write back from the same node finds it (GitHub issue 942).
+inline constexpr std::string_view applied_index_header = "X-Kythira-Applied-Index";
 
 namespace beast = boost::beast;
 namespace http = boost::beast::http;
@@ -582,6 +592,9 @@ private:
         /// The connection's read buffer, so a refusal can drain a small body
         /// and keep the connection.
         boost::beast::flat_buffer* _buffer = nullptr;
+        /// Set by a write handler on the leader for a relayed request; the
+        /// next `reply` sends it as `applied_index_header` and clears it.
+        std::optional<std::uint64_t> _applied_index;
     };
 
     /// Who sent a request: an ACL identity, or the internal secret.
@@ -645,12 +658,18 @@ private:
     template<typename Stream>
     auto drain_body(connection& c, Stream& stream, boost::beast::flat_buffer& buffer,
                     request_parser& parser) -> bool;
+    /// `write_key`, for a relayed `PUT` or `DELETE`: the key whose local
+    /// replica must catch up with the leader before the client is answered.
     template<typename Stream>
     auto forward(connection& c, Stream& stream, boost::beast::flat_buffer& buffer,
-                 request_parser& parser, const node_id_type& to) -> std::optional<after>;
+                 request_parser& parser, const node_id_type& to,
+                 const std::string* write_key = nullptr) -> std::optional<after>;
     template<typename Down, typename Up>
     auto relay(connection& c, Down& down, boost::beast::flat_buffer& buffer, request_parser& parser,
-               Up& up, bool& downstream_written) -> bool;
+               Up& up, bool& downstream_written, const std::string* write_key) -> bool;
+    /// Wait, up to the command timeout, until this node's replica of
+    /// `key`'s shard has applied through `index`.
+    void await_local_apply(const std::string& key, std::uint64_t index);
 
     Host& _host;
     const redis_acl& _acl;
@@ -1163,6 +1182,10 @@ auto cache_http_front_end<Host, Logger>::reply(connection& c, Stream& stream,
     if (status == http::status::service_unavailable) {
         res.set(http::field::retry_after, "1");
     }
+    if (c._applied_index) {
+        res.set(cache_http_detail::applied_index_header, std::to_string(*c._applied_index));
+        c._applied_index.reset();
+    }
     // A request whose body was not read cannot be followed by another one.
     const bool keep = req.keep_alive() && parser.is_done();
     res.keep_alive(keep);
@@ -1500,7 +1523,7 @@ auto cache_http_front_end<Host, Logger>::handle_put(connection& c, Stream& strea
     }
     if (node == nullptr) {
         if (forward_to && !forwarded) {
-            if (auto r = forward(c, stream, buffer, parser, *forward_to)) {
+            if (auto r = forward(c, stream, buffer, parser, *forward_to, &key)) {
                 return *r;
             }
         }
@@ -1648,6 +1671,9 @@ auto cache_http_front_end<Host, Logger>::handle_put(connection& c, Stream& strea
     if (_on_access) {
         _on_access(key, false);
     }
+    if (forwarded) {
+        c._applied_index = static_cast<std::uint64_t>(node->progress()._applied);
+    }
     return reply(c, stream, parser, http::status::created);
 }
 
@@ -1667,7 +1693,7 @@ auto cache_http_front_end<Host, Logger>::handle_delete(connection& c, Stream& st
     }
     if (node == nullptr) {
         if (forward_to && !forwarded) {
-            if (auto r = forward(c, stream, buffer, parser, *forward_to)) {
+            if (auto r = forward(c, stream, buffer, parser, *forward_to, &key)) {
                 return *r;
             }
         }
@@ -1692,6 +1718,9 @@ auto cache_http_front_end<Host, Logger>::handle_delete(connection& c, Stream& st
     ++_stats._deletes;
     if (_on_access) {
         _on_access(key, true);
+    }
+    if (forwarded) {
+        c._applied_index = static_cast<std::uint64_t>(node->progress()._applied);
     }
     return reply(c, stream, parser, http::status::no_content);
 }
@@ -1781,6 +1810,8 @@ auto cache_http_front_end<Host, Logger>::handle_metrics(connection& c, Stream& s
     line("put_body_ns", _stats._put_body_ns);
     line("put_chunk_wait_ns", _stats._put_chunk_wait_ns);
     line("put_commit_ns", _stats._put_commit_ns);
+    line("relay_apply_waits", _stats._relay_apply_waits);
+    line("relay_apply_wait_ns", _stats._relay_apply_wait_ns);
     line("aborted_gets", _stats._aborted_gets);
     line("chunk_serves", _stats._chunk_serves);
     line("connections_current", _stats._connections_current);
@@ -1800,7 +1831,8 @@ template<typename Host, typename Logger>
 template<typename Stream>
 auto cache_http_front_end<Host, Logger>::forward(connection& c, Stream& stream,
                                                  boost::beast::flat_buffer& buffer,
-                                                 request_parser& parser, const node_id_type& to)
+                                                 request_parser& parser, const node_id_type& to,
+                                                 const std::string* write_key)
     -> std::optional<after> {
     namespace beast = boost::beast;
     namespace ssl = boost::asio::ssl;
@@ -1843,9 +1875,9 @@ auto cache_http_front_end<Host, Logger>::forward(connection& c, Stream& stream,
         if (ec) {
             return fail();
         }
-        ok = relay(c, stream, buffer, parser, tls_up, written);
+        ok = relay(c, stream, buffer, parser, tls_up, written, write_key);
     } else {
-        ok = relay(c, stream, buffer, parser, up, written);
+        ok = relay(c, stream, buffer, parser, up, written, write_key);
     }
     if (ok) {
         return after::close;  // one forwarded exchange per connection
@@ -1925,6 +1957,32 @@ auto cache_http_front_end<Host, Logger>::fetch_chunk(const node_id_type& peer, c
     return exchange(up);
 }
 
+template<typename Host, typename Logger>
+void cache_http_front_end<Host, Logger>::await_local_apply(const std::string& key,
+                                                           std::uint64_t index) {
+    using clock = std::chrono::steady_clock;
+    const auto started = clock::now();
+    const auto deadline = started + _config._command_timeout;
+    std::optional<node_id_type> ignored;
+    // Polled: the follower applies when the leader's next AppendEntries
+    // carries the commit, at most a heartbeat away, and a millisecond's
+    // sleep costs nothing next to that. A replica that does not catch up in
+    // time (cut off, or the shard moved) gets the answer anyway: the write
+    // is committed, only this node's view of it is late.
+    while (clock::now() < deadline) {
+        auto* node = locate(key, ignored);
+        if (node == nullptr || static_cast<std::uint64_t>(node->progress()._applied) >= index) {
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds{1});
+    }
+    ++_stats._relay_apply_waits;
+    _stats._relay_apply_wait_ns.fetch_add(
+        static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(clock::now() - started).count()),
+        std::memory_order_relaxed);
+}
+
 /// Send `parser`'s request (header, then its body as it arrives from the
 /// client) to `up`, then copy the answer back, header then body. False if
 /// it failed; `downstream_written` says whether the client saw any of it.
@@ -1933,7 +1991,8 @@ template<typename Down, typename Up>
 auto cache_http_front_end<Host, Logger>::relay(connection& c, Down& down,
                                                boost::beast::flat_buffer& buffer,
                                                request_parser& parser, Up& up,
-                                               bool& downstream_written) -> bool {
+                                               bool& downstream_written,
+                                               const std::string* write_key) -> bool {
     namespace http = boost::beast::http;
     using cache_http_detail::drive;
     using cache_http_detail::lowest;
@@ -2013,7 +2072,26 @@ auto cache_http_front_end<Host, Logger>::relay(connection& c, Down& down,
     if (ec) {
         return false;
     }
+    // Read-your-writes through a follower. The leader answers once the
+    // write has applied there, but this node may not have applied it yet;
+    // a client that reads it back from here at once would get a 404. rclone
+    // does exactly that, a PROPFIND after every upload, and took the 404 as
+    // a failed upload and sent the file again (GitHub issue 942). So wait
+    // for this replica to catch up to the leader's index first. Stripped
+    // from the answer: it is between the two nodes.
+    if (write_key != nullptr) {
+        if (const auto it = rp.get().find(cache_http_detail::applied_index_header);
+            it != rp.get().end()) {
+            std::uint64_t index = 0;
+            const auto text = it->value();
+            const auto [end, err] = std::from_chars(text.data(), text.data() + text.size(), index);
+            if (err == std::errc{} && end == text.data() + text.size()) {
+                await_local_apply(*write_key, index);
+            }
+        }
+    }
     http::response<http::buffer_body> res{rp.get().base()};
+    res.erase(cache_http_detail::applied_index_header);
     res.keep_alive(false);
     http::response_serializer<http::buffer_body> rsr{res};
     res.body().data = nullptr;

@@ -501,6 +501,7 @@ from host-wide disk and CPU figures:
 | `cache_put_chunk_wait_ms`, `cache_put_commit_ms` | Leader time spent waiting for `put_chunk` proposals (one in flight per request) and for the `commit`. High means the shard is the limit. |
 | `cache_puts`, `cache_put_bytes`, `cache_put_chunks` | What those times were spent on. A forwarded `PUT` is timed on the leader it went to. |
 | `cache_forwards` | Requests this node relayed to a shard leader. |
+| `cache_relay_apply_waits`, `cache_relay_apply_wait_ms` | Relayed `PUT`s and `DELETE`s this node held until its own replica had applied them, and the total time. A client that writes through a follower can read the result back from that follower at once. |
 | `cache_log_append_bytes`, `cache_log_append_ms` | Raft log bytes written on this node over every shard replica, and the time spent framing and writing them. |
 | `cache_log_fsyncs`, `cache_log_fsync_ms` | Log fsync rounds (concurrent appends share one) and their total time. |
 | `cache_disk_write_bytes` | This process's bytes written to storage (`/proc/self/io`). |
