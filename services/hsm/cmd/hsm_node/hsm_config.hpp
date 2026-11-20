@@ -37,6 +37,9 @@ struct hsm_options {
     /// KYTHIRA_HSM_RELAY_BACKENDS: the crypto nodes' client listeners an
     /// endpoint without the crypto role relays to.
     std::vector<std::pair<std::string, std::uint16_t>> relay_backends;
+    /// Per relay backend, its HSM listener's URL for the unsealed check, or
+    /// empty (connect-only).
+    std::vector<std::string> relay_health_urls;
     /// KYTHIRA_HSM_STORE_CLIENTS: crypto identities that may use this
     /// store member's store API without being members (peer_policy).
     std::set<std::string> store_clients;

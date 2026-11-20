@@ -100,6 +100,21 @@ BOOST_AUTO_TEST_CASE(an_endpoint_needs_backends_and_is_no_member) {
     BOOST_REQUIRE(o.client_listen.has_value());
     BOOST_TEST(o.client_listen->first == "127.0.0.1");
 
+    BOOST_TEST(o.relay_health_urls.size() == 2U);
+    BOOST_TEST(o.relay_health_urls[0].empty());  // connect-only
+
+    // A backend may name its HSM listener, whose health route says whether
+    // it is unsealed.
+    const auto checked =
+        read(with(v, "KYTHIRA_HSM_RELAY_BACKENDS", "b:9444=http://b:9443, c:9445"));
+    BOOST_REQUIRE(checked.relay_backends.size() == 2U);
+    BOOST_TEST(checked.relay_backends[0].first == "b");
+    BOOST_TEST(checked.relay_backends[0].second == 9444);
+    BOOST_TEST(checked.relay_health_urls[0] == "http://b:9443");
+    BOOST_TEST(checked.relay_health_urls[1].empty());
+    BOOST_TEST(refusal(with(v, "KYTHIRA_HSM_RELAY_BACKENDS", "b:9444=https://b:9443"))
+                   .find("is not an http://") != std::string::npos);
+
     BOOST_TEST(refusal(with(v, "KYTHIRA_HSM_CLIENT_LISTEN", "off")).find("relays clients") !=
                std::string::npos);
     BOOST_TEST(refusal(with(v, "KYTHIRA_HSM_API_URLS", "1=http://a:9443,2=http://b:9443"))
@@ -116,10 +131,21 @@ BOOST_AUTO_TEST_CASE(an_endpoint_beside_a_store_member_relays_too) {
     BOOST_TEST(o.client_listen.has_value());
 }
 
-BOOST_AUTO_TEST_CASE(a_crypto_node_without_store_waits_for_the_remote_store_wiring) {
+BOOST_AUTO_TEST_CASE(a_crypto_node_without_store_reads_through_the_store_members) {
     auto v = with(base(), "KYTHIRA_HSM_ROLES", "crypto");
-    v["KYTHIRA_HSM_API_URLS"] = "2=http://b:9443";
-    BOOST_TEST(refusal(v).find("not wired into hsm_node yet") != std::string::npos);
+    v["KYTHIRA_HSM_API_URLS"] = "2=http://b:9443,3=http://c:9443";
+    v["KYTHIRA_HSM_CRYPTO_URLS"] = "spiffe://crypto-1=http://a:9443";
+    const auto o = read(v);
+    const hsm::hsm_role_plan plan{o.roles};
+    BOOST_TEST(plan.uses_remote_store());
+    BOOST_TEST(!plan.relays_clients());
+    BOOST_TEST(o.api_urls.size() == 2U);
+    // It is no member, so it must not list itself among them, and it
+    // needs at least one store member to read through.
+    BOOST_TEST(refusal(with(v, "KYTHIRA_HSM_API_URLS", "1=http://a:9443,2=http://b:9443"))
+                   .find("no member") != std::string::npos);
+    BOOST_TEST(refusal(with(v, "KYTHIRA_HSM_RELAY_BACKENDS", "c:9444"))
+                   .find("only an endpoint without the crypto role relays") != std::string::npos);
     BOOST_TEST(refusal(with(base(), "KYTHIRA_HSM_ROLES", "crypto,vault")).find("\"vault\"") !=
                std::string::npos);
     BOOST_TEST(refusal(with(base(), "KYTHIRA_HSM_ROLES", "")).find("names no role") !=
