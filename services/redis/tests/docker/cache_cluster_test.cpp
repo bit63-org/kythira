@@ -677,6 +677,39 @@ BOOST_AUTO_TEST_CASE(a_500_mb_object_round_trips, *boost::unit_test::timeout(900
     BOOST_TEST(r.exit_code == 0);
 }
 
+// GitHub issue 942: aggregate PUT throughput over 1/4/16/32 writers and
+// 64 KiB and 2 MiB objects, plus 1 and 4 writers of 256 MiB objects, and
+// each node's bytes written per byte stored over the run. Like the 500 MB
+// round trip, the numbers are reported, not asserted: CI machines vary too
+// much for a floor to mean anything. What is asserted is that every PUT
+// was stored, and that the amplification stays near the design's double
+// write (log, then chunk store) rather than drifting upward unnoticed. The
+// bound is loose: compaction rewrites, snapshots and pack sidecars add a
+// little on top of the 2x.
+BOOST_AUTO_TEST_CASE(write_throughput_matrix, *boost::unit_test::timeout(1800)) {
+    auto r = run_client("matrix");
+    const auto cells = r.all("MATRIX");
+    BOOST_REQUIRE(!cells.empty());
+    for (const auto& c : cells) {
+        BOOST_TEST_MESSAGE("writers=" << c.at("writers") << " size=" << c.at("size") << ": "
+                                      << c.at("mib_per_s") << " MiB/s (" << c.at("ok") << "/"
+                                      << c.at("puts") << " PUTs in " << c.at("seconds") << " s)");
+        BOOST_TEST(c.at("ok") == c.at("puts"));
+    }
+    const auto nodes = r.all("AMPLIFICATION");
+    BOOST_REQUIRE_EQUAL(nodes.size(), 3u);
+    for (const auto& n : nodes) {
+        const double ratio = std::stod(n.at("ratio"));
+        BOOST_TEST_MESSAGE(n.at("node") << ": " << n.at("disk_bytes") << " bytes written for "
+                                        << n.at("store_bytes") << " stored = " << ratio << "x");
+        // 0 means the kernel has no task I/O accounting; nothing to check.
+        if (ratio > 0) {
+            BOOST_TEST(ratio < 3.5);
+        }
+    }
+    BOOST_TEST(r.exit_code == 0);
+}
+
 // ── chaos scenarios (task 10) ─────────────────────────────────────────────────
 
 // Requirement 12.3: the leader of the key's shard is killed (SIGKILL) while
