@@ -152,6 +152,7 @@
 #include <aws/s3/model/ServerSideEncryption.h>
 #include <aws/s3/model/StorageClass.h>
 
+#include <map>
 #include <memory>
 #include <optional>
 #include <sstream>
@@ -308,6 +309,12 @@ struct s3_put_options {
     std::string expected_bucket_owner;
     /// `Content-Type`; `application/octet-stream` when empty.
     std::string content_type;
+    /// User metadata, sent as `x-amz-meta-<name>` by `<name>`.
+    std::map<std::string, std::string> metadata{};
+    /// SSE-KMS under this key (`x-amz-server-side-encryption: aws:kms`;
+    /// an empty id leaves the key to the bucket's default); nullopt asks
+    /// for no server-side encryption.
+    std::optional<std::string> sse_kms_key_id{};
 };
 
 /// @brief The object operations the persistence engine needs, over the AWS SDK.
@@ -399,7 +406,7 @@ public:
         -> put_result {
         fiu_do_on("raft/aws/s3/put_object",
                   throw std::runtime_error("chaos: raft/aws/s3/put_object " + key););
-        return send_put(bucket, key, bytes, std::nullopt, std::nullopt, &options);
+        return send_put(bucket, key, bytes, std::nullopt, options.sse_kms_key_id, &options);
     }
 
     /// @brief PUT one object only if `pre` holds, throwing
@@ -537,6 +544,11 @@ private:
         }
         if (options != nullptr && !options->expected_bucket_owner.empty()) {
             req.SetExpectedBucketOwner(aws_s3_detail::to_aws(options->expected_bucket_owner));
+        }
+        if (options != nullptr) {
+            for (const auto& [name, value] : options->metadata) {
+                req.AddMetadata(aws_s3_detail::to_aws(name), aws_s3_detail::to_aws(value));
+            }
         }
         req.SetContentMD5(aws_s3_detail::content_md5_base64(bytes));
         if (sse_kms_key) {

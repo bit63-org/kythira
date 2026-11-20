@@ -313,8 +313,8 @@ BOOST_AUTO_TEST_CASE(a_hostname_endpoint_is_also_addressed_path_style) {
 }
 
 // put_object_with (Kinesis channel delivery): the storage class, the
-// expected bucket owner and the content type ride as S3's headers, and a
-// plain put_object sends none of them.
+// expected bucket owner, the content type, user metadata and SSE-KMS ride
+// as S3's headers, and a plain put_object sends none of them.
 BOOST_AUTO_TEST_CASE(put_object_with_sends_its_optional_headers) {
     MockS3 mock;
     for (int i = 0; i < 2; ++i) {
@@ -329,7 +329,9 @@ BOOST_AUTO_TEST_CASE(put_object_with_sends_its_optional_headers) {
     (void)client.put_object_with("b", "k", "hello",
                                  s3_put_options{.storage_class = "INTELLIGENT_TIERING",
                                                 .expected_bucket_owner = "111122223333",
-                                                .content_type = "application/x-ndjson"});
+                                                .content_type = "application/x-ndjson",
+                                                .metadata = {{"x-amz-iv", "bm9uY2U="}},
+                                                .sse_kms_key_id = "alias/channel"});
     (void)client.put_object("b", "k2", "hello");
 
     const auto reqs = mock.requests();
@@ -337,7 +339,11 @@ BOOST_AUTO_TEST_CASE(put_object_with_sends_its_optional_headers) {
     BOOST_TEST(reqs[0].header("x-amz-storage-class") == "INTELLIGENT_TIERING");
     BOOST_TEST(reqs[0].header("x-amz-expected-bucket-owner") == "111122223333");
     BOOST_TEST(reqs[0].header("Content-Type") == "application/x-ndjson");
+    BOOST_TEST(reqs[0].header("x-amz-meta-x-amz-iv") == "bm9uY2U=");
+    BOOST_TEST(reqs[0].header("x-amz-server-side-encryption") == "aws:kms");
+    BOOST_TEST(reqs[0].header("x-amz-server-side-encryption-aws-kms-key-id") == "alias/channel");
     BOOST_TEST(reqs[1].header("x-amz-storage-class").empty());
+    BOOST_TEST(reqs[1].header("x-amz-server-side-encryption").empty());
     BOOST_TEST(reqs[1].header("x-amz-expected-bucket-owner").empty());
     BOOST_TEST(reqs[1].header("Content-Type") == "application/octet-stream");
 }
