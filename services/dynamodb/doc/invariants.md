@@ -223,6 +223,7 @@ all fixed with it:
 
 | A resource policy is at most 20 KB, whitespace counted | Limits | `dynamodb_policy_insights_test` |
 | A global table's replicas settle on the same items: a write applies elsewhere only if its (time, region) stamp is newer than the item's, a write made after seeing another wins whatever the clocks say, deletes are stamped too, and a new replica's copy keeps each item's stamp | Global tables | `dynamodb_global_table_test` |
+| A replica's overrides change only its own region's table, and a replica goes UPDATING to ACTIVE only after its region applied them (or refused, with the reason kept); `DeleteTable` of a replica removes it from every other replica's list and leaves their tables serving | Global tables | `dynamodb_global_table_test` |
 
 ## Deferred
 

@@ -379,6 +379,132 @@ inline void set_on_demand(std::vector<on_demand_limit>& all, on_demand_limit l) 
     return invalid("OnDemandThroughput can only be specified when BillingMode is PAY_PER_REQUEST");
 }
 
+/// A replica's `ProvisionedThroughputOverride.ReadCapacityUnits`, or its
+/// `OnDemandThroughputOverride.MaxReadRequestUnits`, from `o` (the
+/// replica or one of its GSIs) onto `read` and `max_read`, checked against
+/// the table's billing mode.
+[[nodiscard]] inline auto read_overrides_from(const boost::json::object& o, billing_mode billing,
+                                              std::uint64_t& read, std::int64_t& max_read)
+    -> std::optional<aws_json::error> {
+    if (const auto* p = o.if_contains("ProvisionedThroughputOverride")) {
+        if (billing != billing_mode::provisioned) {
+            return invalid(
+                "ProvisionedThroughputOverride can only be specified for a table in "
+                "PROVISIONED billing mode");
+        }
+        const auto* r = p->is_object() ? p->as_object().if_contains("ReadCapacityUnits") : nullptr;
+        if (r == nullptr || !r->is_number() || r->to_number<std::int64_t>() < 1) {
+            return invalid("ProvisionedThroughputOverride needs ReadCapacityUnits of at least 1");
+        }
+        read = static_cast<std::uint64_t>(r->to_number<std::int64_t>());
+    }
+    if (const auto* p = o.if_contains("OnDemandThroughputOverride")) {
+        if (billing != billing_mode::pay_per_request) {
+            return invalid(
+                "OnDemandThroughputOverride can only be specified for a table in "
+                "PAY_PER_REQUEST billing mode");
+        }
+        const auto* r =
+            p->is_object() ? p->as_object().if_contains("MaxReadRequestUnits") : nullptr;
+        const auto n = r != nullptr && r->is_number() ? r->to_number<std::int64_t>() : 0;
+        if (n != -1 && n < 1) {
+            return invalid(
+                "OnDemandThroughputOverride needs MaxReadRequestUnits of -1 or at "
+                "least 1");
+        }
+        max_read = n;
+    }
+    return std::nullopt;
+}
+
+/// A replica's settings from a `ReplicaUpdates` `Create` or `Update`
+/// body, over `base` (its settings so far): what the body names replaces
+/// them, the rest is kept.
+[[nodiscard]] inline auto replica_overrides_from(const boost::json::object& o,
+                                                 const table_descriptor& table,
+                                                 replica_overrides base)
+    -> aws_json::result<replica_overrides> {
+    for (const auto& [member, value] : o) {
+        if (member != "RegionName" && member != "KMSMasterKeyId" &&
+            member != "ProvisionedThroughputOverride" && member != "OnDemandThroughputOverride" &&
+            member != "GlobalSecondaryIndexes" && member != "TableClassOverride") {
+            return validation_error("Unknown member of a replica update: " + std::string(member));
+        }
+    }
+    if (auto e = read_overrides_from(o, table.billing, base.read_capacity, base.max_read)) {
+        return *e;
+    }
+    if (const auto* c = o.if_contains("TableClassOverride")) {
+        if (!c->is_string() ||
+            (c->as_string() != "STANDARD" && c->as_string() != "STANDARD_INFREQUENT_ACCESS")) {
+            return invalid("TableClassOverride must be STANDARD or STANDARD_INFREQUENT_ACCESS");
+        }
+        base.table_class = c->as_string() == "STANDARD" ? 1 : 2;
+    }
+    if (const auto* list = o.if_contains("GlobalSecondaryIndexes")) {
+        if (!list->is_array()) {
+            return invalid("GlobalSecondaryIndexes must be a list");
+        }
+        for (const auto& v : list->as_array()) {
+            const auto* g = v.is_object() ? &v.as_object() : nullptr;
+            const auto* n = g != nullptr ? g->if_contains("IndexName") : nullptr;
+            if (n == nullptr || !n->is_string()) {
+                return invalid("A replica's GlobalSecondaryIndexes entry needs IndexName");
+            }
+            const std::string name(n->as_string());
+            if (std::ranges::none_of(maintained_indexes(table.gsis),
+                                     [&](const global_index& x) { return x.name == name; })) {
+                return modeled("IndexNotFoundException",
+                               "Requested resource not found: Index: " + name + " not found");
+            }
+            auto at = std::ranges::find(base.indexes, name, &replica_index_override::index);
+            if (at == base.indexes.end()) {
+                base.indexes.push_back(replica_index_override{name});
+                at = std::prev(base.indexes.end());
+            }
+            if (auto e = read_overrides_from(*g, table.billing, at->read_capacity, at->max_read)) {
+                return *e;
+            }
+            if (at->read_capacity == 0 && at->max_read == -1) {
+                base.indexes.erase(at);
+            }
+        }
+    }
+    return base;
+}
+
+/// A replica's settings as `DescribeTable` shows them in `Replicas`.
+inline void describe_replica_overrides(const replica_overrides& o, boost::json::object& out) {
+    if (o.read_capacity != 0) {
+        out["ProvisionedThroughputOverride"] =
+            boost::json::object{{"ReadCapacityUnits", o.read_capacity}};
+    }
+    if (o.max_read != -1) {
+        out["OnDemandThroughputOverride"] =
+            boost::json::object{{"MaxReadRequestUnits", o.max_read}};
+    }
+    if (o.table_class != 0) {
+        out["ReplicaTableClassSummary"] = boost::json::object{
+            {"TableClass", o.table_class == 2 ? "STANDARD_INFREQUENT_ACCESS" : "STANDARD"}};
+    }
+    if (!o.indexes.empty()) {
+        boost::json::array list;
+        for (const auto& i : o.indexes) {
+            boost::json::object g{{"IndexName", i.index}};
+            if (i.read_capacity != 0) {
+                g["ProvisionedThroughputOverride"] =
+                    boost::json::object{{"ReadCapacityUnits", i.read_capacity}};
+            }
+            if (i.max_read != -1) {
+                g["OnDemandThroughputOverride"] =
+                    boost::json::object{{"MaxReadRequestUnits", i.max_read}};
+            }
+            list.push_back(std::move(g));
+        }
+        out["GlobalSecondaryIndexes"] = std::move(list);
+    }
+}
+
 }  // namespace table_api_detail
 
 /// A descriptor as a `TableDescription`.
@@ -832,12 +958,14 @@ template<typename TypeOf>
         for (const auto& r : d.replicas) {
             boost::json::object o{{"RegionName", r.region},
                                   {"ReplicaStatus", replica_status_name(r.status)}};
-            if (r.status == replica_status::creation_failed && !r.failure.empty()) {
+            // Why creating it failed, or why its last update was refused.
+            if (!r.failure.empty()) {
                 o["ReplicaStatusDescription"] = r.failure;
             }
             if (!r.kms_key.empty()) {
                 o["KMSMasterKeyId"] = r.kms_key;
             }
+            describe_replica_overrides(r.overrides, o);
             replicas.push_back(std::move(o));
         }
         out["Replicas"] = std::move(replicas);
@@ -1861,11 +1989,9 @@ public:
         c.op = catalog_command::kind::delete_table;
         c.table.name = ctx.table_name(in.at("TableName").as_string());
         if (const auto d = _backend.describe(c.table.name); d && !d->replicas.empty()) {
-            // Kythira's deviation: a replica of a global table goes by
-            // `ReplicaUpdates` from another region, so its peers hear of it.
-            return validation_error("Table " + c.table.name +
-                                    " is a global table: delete its replicas with UpdateTable "
-                                    "ReplicaUpdates first");
+            if (auto e = leave_global_table(*d)) {
+                return *e;
+            }
         }
         c.now_ms = _backend.now_ms();
         if (auto e = within_table_limits(_backend, ctx, false)) {
@@ -1921,6 +2047,13 @@ public:
 
     /// The peer regions `ReplicaUpdates` may name (task 22); unset, none.
     void set_peers(std::function<bool(std::string_view)> known) { _peer_known = std::move(known); }
+
+    /// Asks the replica in a region to drop this region's replica of a
+    /// global table (`global_table_replicator::leave`); unset, a global
+    /// table cannot be deleted.
+    using peer_leave =
+        std::function<std::optional<aws_json::error>(const table_descriptor&, const std::string&)>;
+    void set_peer_leave(peer_leave leave) { _peer_leave = std::move(leave); }
 
     /// `UpdateTable` with `SSESpecification` (KMS task 16): the table's key
     /// re-wrapped under the key the request names, alone in its request.
@@ -2344,10 +2477,7 @@ private:
                     "Delete");
             }
             const auto& [kind, body] = *u.as_object().begin();
-            if (kind == "Update") {
-                return unsupported("ReplicaUpdates Update (per-replica settings)");
-            }
-            if ((kind != "Create" && kind != "Delete") || !body.is_object()) {
+            if ((kind != "Create" && kind != "Update" && kind != "Delete") || !body.is_object()) {
                 return validation_error(
                     "Each ReplicaUpdates element must have exactly one of Create, Update or "
                     "Delete");
@@ -2359,10 +2489,9 @@ private:
                 return validation_error("RegionName is required");
             }
             const std::string region(region_value->as_string());
-            // Of the per-replica overrides, only the replica's own KMS key
-            // (KMS task 17, Requirement 12.8).
-            std::string replica_key;
-            if (const auto* k = o.if_contains("KMSMasterKeyId"); kind == "Create" && k != nullptr) {
+            // The replica's own KMS key (KMS task 17, Requirement 12.8).
+            std::optional<std::string> replica_key;
+            if (const auto* k = o.if_contains("KMSMasterKeyId"); kind != "Delete" && k != nullptr) {
                 if (!k->is_string() || k->as_string().empty()) {
                     return validation_error("KMSMasterKeyId must be a non-empty string");
                 }
@@ -2371,16 +2500,17 @@ private:
                         "A replica's KMSMasterKeyId needs the table to be encrypted with a KMS "
                         "key; the table uses an AWS owned key or none");
                 }
-                replica_key = k->as_string();
+                replica_key = std::string(k->as_string());
             }
-            if (o.size() > (replica_key.empty() ? 1U : 2U)) {
-                return unsupported("replica overrides");
+            if (kind == "Delete" && o.size() > 1) {
+                return validation_error("A replica Delete takes only RegionName");
             }
             // As AWS asks: the replica action too, on the table.
             if (ctx.authorize) {
                 aws_auth::authz_request az;
-                az.action = kind == "Create" ? "dynamodb:CreateTableReplica"
-                                             : "dynamodb:DeleteTableReplica";
+                az.action = kind == "Create"   ? "dynamodb:CreateTableReplica"
+                            : kind == "Update" ? "dynamodb:UpdateTableReplica"
+                                               : "dynamodb:DeleteTableReplica";
                 az.resource = ctx.table_arn(name);
                 if (auto denied = ctx.authorize(std::move(az))) {
                     return *denied;
@@ -2399,8 +2529,38 @@ private:
                     return validation_error("Region " + region +
                                             " is not one of this cluster's peer regions");
                 }
-                c.table.replicas.push_back(
-                    table_replica{.region = region, .kms_key = std::move(replica_key)});
+                auto overrides = replica_overrides_from(o, *current, {});
+                if (!overrides) {
+                    return overrides.error();
+                }
+                c.table.replicas.push_back(table_replica{.region = region,
+                                                         .kms_key = replica_key.value_or(""),
+                                                         .overrides = std::move(*overrides)});
+            } else if (kind == "Update") {
+                auto* have = global_replica(c.table.replicas, region);
+                if (have == nullptr) {
+                    return validation_error("Cannot update replica in " + region + ": table " +
+                                            name + " has no replica there");
+                }
+                if (have->status != replica_status::active) {
+                    return table_api_detail::in_use_message("Replica in " + region +
+                                                            " is not ACTIVE");
+                }
+                auto overrides = replica_overrides_from(o, *current, have->overrides);
+                if (!overrides) {
+                    return overrides.error();
+                }
+                if (*overrides == have->overrides &&
+                    (!replica_key || *replica_key == have->kms_key)) {
+                    continue;  // nothing to change
+                }
+                have->overrides = std::move(*overrides);
+                if (replica_key) {
+                    have->kms_key = *replica_key;
+                }
+                // The replicator applies the settings in that region, then
+                // marks the replica ACTIVE again.
+                have->status = replica_status::updating;
             } else {
                 if (current->replica_in(region) == nullptr) {
                     return validation_error("Cannot delete replica in " + region + ": table " +
@@ -2410,12 +2570,70 @@ private:
                               [&](const table_replica& r) { return r.region == region; });
             }
         }
+        if (c.table.replicas == current->replicas) {
+            return boost::json::object{{"TableDescription", table_description(*current, ctx)}};
+        }
         c.now_ms = _backend.now_ms();
         const auto r = _backend.catalog(c);
         if (!r.ok()) {
             return error_of(r);
         }
         return boost::json::object{{"TableDescription", table_description(*r.table, ctx)}};
+    }
+
+    /// `DeleteTable` of a replica of a global table, as on AWS: the other
+    /// replicas drop this one. One reachable ACTIVE replica is told, its
+    /// replicator then tells the rest (`LeaveReplica`), and the caller
+    /// deletes the table here. Checked first so that nothing is asked of a
+    /// peer for a delete the catalog would refuse.
+    auto leave_global_table(const table_descriptor& d) -> std::optional<aws_json::error> {
+        using namespace table_api_detail;
+        if (d.strong) {
+            return validation_error("Table " + call_context::bare_name(d.name) +
+                                    " is multi-region strongly consistent: delete the other "
+                                    "regions' members with UpdateTable ReplicaUpdates first");
+        }
+        if (d.status != table_status::active) {
+            return in_use_message(
+                "Table is being " +
+                std::string(d.status == table_status::deleting ? "deleted" : "updated") + ": " +
+                call_context::bare_name(d.name));
+        }
+        if (d.deletion_protection) {
+            return validation_error(
+                "Resource cannot be deleted as it is currently protected against deletion. "
+                "Disable deletion protection first.");
+        }
+        if (std::ranges::any_of(d.replicas, [](const table_replica& r) {
+                return r.status != replica_status::active;
+            })) {
+            return modeled("LimitExceededException",
+                           "Only one replica can be created, updated or deleted at a time per "
+                           "table");
+        }
+        std::optional<aws_json::error> last;
+        for (const auto& r : d.replicas) {
+            if (!_peer_leave) {
+                break;
+            }
+            last = _peer_leave(d, r.region);
+            if (!last) {
+                return std::nullopt;
+            }
+        }
+        aws_json::error e;
+        e.status = 500;
+        e.type = dynamodb_error_style().service_prefix + "InternalServerError";
+        e.message =
+            "No other replica of " + call_context::bare_name(d.name) + " could take its leave" +
+            (last ? ": " + last->message.value_or(last->type) : std::string()) + "; try again";
+        return e;
+    }
+
+    static auto global_replica(std::vector<table_replica>& list, const std::string& region)
+        -> table_replica* {
+        const auto it = std::ranges::find(list, region, &table_replica::region);
+        return it == list.end() ? nullptr : &*it;
     }
 
     static auto not_found(std::string_view name) -> aws_json::error {
@@ -2505,6 +2723,7 @@ private:
     const table_keys* _keys = nullptr;
     std::vector<std::string> _strong_regions;
     std::function<bool(std::string_view)> _peer_known;
+    peer_leave _peer_leave;
 };
 
 }  // namespace kythira::dynamodb
