@@ -738,7 +738,15 @@ BOOST_AUTO_TEST_CASE(a_rolling_upgrade_keeps_every_shard_replicating,
         BOOST_REQUIRE(b != nullptr);
         BOOST_CHECK_GT(b->batches_sent(), 0U);
         BOOST_CHECK_GT(b->fallbacks(), 0U);
+        // The same figures through the accessor for callers without a sink.
+        const auto stats = c.host(id).batching_statistics();
+        BOOST_CHECK_GT(stats._batches_sent, 0U);
+        BOOST_CHECK_GE(stats._members_sent, stats._batches_sent);
+        BOOST_CHECK_GT(stats._fallbacks, 0U);
     }
+    // The pre-batching host has no batcher, and reports nothing.
+    BOOST_CHECK(!c.host(k_old).batching_active());
+    BOOST_CHECK_EQUAL(c.host(k_old).batching_statistics()._batches_sent, 0U);
 
     // Host 3 is upgraded: it takes batches now. Writes go on throughout.
     c.fabric().clear_not_implemented(k_old, "append_entries_batch");
