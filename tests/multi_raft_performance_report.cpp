@@ -484,6 +484,17 @@ auto build_catalog(const selection& sel) -> catalog {
                   rows::write_beast_json, write_row_spec{._in_flight = 1, ._routing = routing});
     }
 
+    // .kiro/specs/multi-raft-load-buckets/ task 8: the routing-path cost of
+    // counting load buckets. Fabric rows, so no wire hides it; the same
+    // closed loop with buckets off and on.
+    for (const bool on : {false, true}) {
+        auto cluster = kythira::testing::standard_cluster_options();
+        cluster._buckets._enabled = on;
+        add_write("load-buckets", std::string{"fabric/none/128B/16/buckets-"} + (on ? "on" : "off"),
+                  deployment_tier::a_fabric, rows::write_fabric,
+                  write_row_spec{._cluster = cluster});
+    }
+
     // Requirement 4.1 and 4.2's open loop. Not in the CTest suite because the
     // rate has to be one the machine can sustain, and a CI runner's cannot be
     // known in advance; here it is a command-line parameter and the row reports

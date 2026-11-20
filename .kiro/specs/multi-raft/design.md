@@ -99,6 +99,7 @@ include/raft/group_storage.hpp        group_scoped_persistence, batching ext,
 include/raft/split_merge_policy.hpp   the policy concept, threshold_* default,
                                       composite_split_merge_policy
 include/raft/load_split_sampler.hpp   RFC-0045 sampler
+include/raft/load_buckets.hpp         RFC-0082 load buckets (bucket_set)
 include/raft/latency_digest.hpp       windowed fixed-bucket latency histogram
 include/raft/shard_placement_driver.hpp   PD concept + no_op default
 include/raft/multi_raft.hpp           the host: registry, tick, arbiter,
@@ -1210,6 +1211,45 @@ Two of these branches are the interesting ones:
 split whose children's leaders both land on the machine that was already hot
 has accomplished exactly nothing.
 
+#### 6.3.1 Load buckets beside the sampler
+
+`.kiro/specs/multi-raft-load-buckets/` adds TiKV RFC 0082's buckets
+(`include/raft/load_buckets.hpp`, configured by `multi_raft_config::buckets`,
+a `bucket_config`). Off by default; when off the routing path pays one branch
+on that immutable member, the same rule as the sampler.
+
+A leader cuts each shard it leads into at most `_target_buckets` contiguous
+ranges, at keys from `suggest_split_keys` (filtered by range and
+`can_split_at`) or, without those hooks, at quantiles of a reservoir of
+routed keys. It counts every keyed request the routing layer already counts
+into the bucket holding the key, over a sliding window of `_window_slots`
+slots of `_slot_duration`, and re-cuts every `_refresh_interval`. Nothing is
+replicated or persisted: a new leader starts empty, a split hands each child
+the parent's boundaries inside its range, and a merge survivor takes both
+lists plus the old shared bound, trimmed by load. `shard_stats::_buckets`
+carries the per-bucket rates, `shard_report::_hot_buckets` the busiest
+`_report_top_buckets`, and one gauge per shard,
+`kythira.multiraft.shard.hottest_bucket_share`, the busiest bucket's share.
+
+**How the two load-split paths relate.** The sampler starts from nothing each
+time a shard crosses its threshold and needs a full `_load_split_duration` of
+uninterrupted heat to aim a cut. Buckets already hold a window, so the default
+policy can aim at the boundary that best balances it as soon as the window
+spans `_load_split_duration` and its average is over threshold, even when the
+heat comes in bursts the sampler keeps abandoning. Both share every guard:
+
+- the sampler's hot key keeps priority: if it has just produced a sample, the
+  policy uses it, and buckets are the faster first guess, not a replacement;
+- the one-sided rule: when every boundary leaves more than
+  `_load_split_one_sided_fraction` on one side, the policy declines, and the
+  host restricts the sampler's candidates to the hottest bucket
+  (`load_split_sampler::restrict_to`), so the sampler searches where the load
+  is while its balance and back-off still see the whole shard;
+- the back-off: a single-hot-key verdict suppresses bucket proposals too
+  (`shard_stats::_load_split_backoff`);
+- the reasons and the scatter: `read_load` / `write_load`, with
+  `_scatter_children` set.
+
 ### 6.4 Channel (c) — state-machine hints and the veto
 
 ```cpp
@@ -1572,7 +1612,8 @@ methods and one enum.
 4. **Buckets.** TiKV RFC 0082's sub-shard statistics unit would sharpen the
    load signal considerably. `shard_stats` is shaped so it can be added as a
    field without breaking the policy concept, and it is deliberately out of
-   scope for this pass. Now specified in `.kiro/specs/multi-raft-load-buckets/`.
+   scope for this pass. Since built from `.kiro/specs/multi-raft-load-buckets/`
+   (§6.3.1).
 5. **Per-key reads.** `read_state` returns the whole state-machine blob, so
    read latency and read bytes/sec both scale with shard size rather than with
    how busy a shard is (§6.1.4). Until there is a read that names a key the way
