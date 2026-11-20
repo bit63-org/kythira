@@ -5389,6 +5389,17 @@ set_tests_properties(aws_json_cbor_test PROPERTIES
 
 # Kinesis spec task 2: event-stream framing (SubscribeToShard), against
 # vectors botocore's parser accepts.
+# include/raft/crc32.hpp's slicing-by-8 loop against a bitwise reference
+# (GitHub issue 942): logs and packs already on disk depend on the result.
+add_executable(crc32_unit_test crc32_unit_test.cpp)
+target_link_libraries(crc32_unit_test PRIVATE kythira_core_headers Boost::unit_test_framework)
+target_compile_features(crc32_unit_test PRIVATE cxx_std_23)
+add_test(NAME crc32_unit_test COMMAND crc32_unit_test)
+set_tests_properties(crc32_unit_test PROPERTIES
+    TIMEOUT 30
+    LABELS "unit;persistence"
+)
+
 add_executable(aws_eventstream_test aws_eventstream_test.cpp)
 target_link_libraries(aws_eventstream_test PRIVATE Boost::unit_test_framework)
 target_compile_features(aws_eventstream_test PRIVATE cxx_std_23)

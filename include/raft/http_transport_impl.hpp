@@ -1472,11 +1472,8 @@ auto cpp_httplib_client<Types, NodeId>::send_rpc_now(const NodeId& target,
             auto serialized_data = _registry.encode_with(content_type, request);
 
             // Convert bytes to string for HTTP body
-            std::string body;
-            body.reserve(serialized_data.size());
-            for (auto b : serialized_data) {
-                body.push_back(static_cast<char>(b));
-            }
+            std::string body(reinterpret_cast<const char*>(serialized_data.data()),
+                             serialized_data.size());
 
             httplib::Headers headers;
             headers.emplace(header_content_type, content_type);
@@ -1638,11 +1635,10 @@ auto cpp_httplib_client<Types, NodeId>::send_rpc_now(const NodeId& target,
 
             // Success - deserialize response
             try {
-                std::vector<std::byte> response_data;
-                response_data.reserve(result->body.size());
-                for (char c : result->body) {
-                    response_data.push_back(static_cast<std::byte>(c));
-                }
+                const auto* response_bytes =
+                    reinterpret_cast<const std::byte*>(result->body.data());
+                const std::vector<std::byte> response_data(response_bytes,
+                                                           response_bytes + result->body.size());
 
                 Response response =
                     _registry.template decode_with<Response>(response_media_type, response_data);
@@ -2370,11 +2366,9 @@ auto cpp_httplib_server<Types, NodeId>::handle_rpc_endpoint(
         }
 
         // Convert request body to bytes
-        std::vector<std::byte> request_data;
-        request_data.reserve(http_req.body.size());
-        for (char c : http_req.body) {
-            request_data.push_back(static_cast<std::byte>(c));
-        }
+        const auto* request_bytes = reinterpret_cast<const std::byte*>(http_req.body.data());
+        const std::vector<std::byte> request_data(request_bytes,
+                                                  request_bytes + http_req.body.size());
 
         // Deserialize request through the registry, in the media type the peer
         // declared rather than whichever serializer this server was built with.
@@ -2408,11 +2402,8 @@ auto cpp_httplib_server<Types, NodeId>::handle_rpc_endpoint(
         auto serialized_response = _registry.encode_with(*output_media_type, response);
 
         // Convert bytes to string for HTTP body
-        std::string response_body;
-        response_body.reserve(serialized_response.size());
-        for (auto b : serialized_response) {
-            response_body.push_back(static_cast<char>(b));
-        }
+        std::string response_body(reinterpret_cast<const char*>(serialized_response.data()),
+                                  serialized_response.size());
 
         http_resp.status = 200;
         http_resp.body = std::move(response_body);

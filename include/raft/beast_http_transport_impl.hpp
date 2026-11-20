@@ -1181,11 +1181,13 @@ auto boost_beast_client<Types, NodeId>::send_rpc(NodeId target, std::string_view
                         throw kythira::unsupported_media_type_error(response_media_type);
                     }
 
-                    std::vector<std::byte> response_data;
-                    response_data.reserve(resp.body().size());
-                    for (char c : resp.body()) {
-                        response_data.push_back(static_cast<std::byte>(c));
-                    }
+                    // One bulk copy: a byte-at-a-time push_back here ran
+                    // every 4 MiB AppendEntries body through a bounds check
+                    // per byte (GitHub issue 942).
+                    const auto* response_bytes =
+                        reinterpret_cast<const std::byte*>(resp.body().data());
+                    const std::vector<std::byte> response_data(response_bytes,
+                                                               response_bytes + resp.body().size());
                     try {
                         auto decoded = _registry.template decode_with<Response>(response_media_type,
                                                                                 response_data);
@@ -1608,11 +1610,12 @@ private:
         // continuation that actually completes the write holds it instead.
         auto self = this->shared_from_this();
         std::string target(_req.target());
-        std::vector<std::byte> body;
-        body.reserve(_req.body().size());
-        for (char c : _req.body()) {
-            body.push_back(static_cast<std::byte>(c));
-        }
+        // One bulk copy, not a push_back per byte: this is every
+        // AppendEntries body a follower takes, 4 MiB per chunk entry on a
+        // disk-backed cache, and the per-byte loop was the hottest user-space
+        // function in a profile of a three-node write run (GitHub issue 942).
+        const auto* request_bytes = reinterpret_cast<const std::byte*>(_req.body().data());
+        std::vector<std::byte> body(request_bytes, request_bytes + _req.body().size());
 
         // Header mechanics live here (this owns the request); negotiation
         // policy lives in dispatch(). An absent Content-Type means a peer that
