@@ -310,9 +310,9 @@ public:
     ///
     /// @return Whether a new layout was published.
     auto refresh(std::vector<Key> candidates, clock::time_point now) -> bool {
+        std::lock_guard lock(_policy_mutex);
         auto boundaries =
             normalize_boundaries(std::move(candidates), _range, _cfg._target_buckets - 1);
-        std::lock_guard lock(_policy_mutex);
         const auto old = _layout.load();
         if (boundaries == old->boundaries) {
             return false;
@@ -323,15 +323,35 @@ public:
         return true;
     }
 
+    /// @brief Start over on `range` with `boundaries`: version 1, an empty
+    ///        window and an empty reservoir.
+    ///
+    /// What a replica does when it starts leading the shard (Requirement 4.1),
+    /// and what a split child or merge survivor does once its range has
+    /// changed (Requirements 4.2, 4.3). The set is reused rather than rebuilt
+    /// so the host can hold it by plain pointer: the request path then pays
+    /// one atomic load (the layout's), not two.
+    auto reset(shard_range<Key> range, std::vector<Key> boundaries, clock::time_point now) -> void {
+        std::lock_guard lock(_policy_mutex);
+        _range = std::move(range);
+        _layout.store(make_layout(
+            normalize_boundaries(std::move(boundaries), _range, _cfg._target_buckets - 1), 1));
+        std::fill(_slot_started.begin(), _slot_started.end(), now);
+        _complete = 0;
+        std::lock_guard reservoir_lock(_reservoir_mutex);
+        _reservoir.clear();
+    }
+
     /// @brief Boundaries cut from the traffic the reservoir has seen: its
     ///        quantiles at `i / _target_buckets`, normalised.
     ///
     /// The fallback when the state machine cannot say where its data is
     /// (Requirement 2.2). Empty until the reservoir holds a key.
     [[nodiscard]] auto reservoir_boundaries() const -> std::vector<Key> {
+        std::lock_guard lock(_policy_mutex);
         std::vector<Key> keys;
         {
-            std::lock_guard lock(_reservoir_mutex);
+            std::lock_guard reservoir_lock(_reservoir_mutex);
             keys = _reservoir.quantiles(_cfg._target_buckets);
         }
         return normalize_boundaries(std::move(keys), _range, _cfg._target_buckets - 1);
@@ -386,7 +406,10 @@ public:
     [[nodiscard]] auto boundaries() const -> std::vector<Key> { return _layout.load()->boundaries; }
     [[nodiscard]] auto version() const -> std::uint64_t { return _layout.load()->version; }
     [[nodiscard]] auto bucket_count() const -> std::size_t { return _layout.load()->bucket_count; }
-    [[nodiscard]] auto range() const -> const shard_range<Key>& { return _range; }
+    [[nodiscard]] auto range() const -> shard_range<Key> {
+        std::lock_guard lock(_policy_mutex);
+        return _range;
+    }
     [[nodiscard]] auto config() const -> const bucket_config& { return _cfg; }
 
     /// @brief Index of the bucket holding `key`: the number of boundaries at
@@ -422,6 +445,88 @@ public:
             out.push_back(std::move(keys[((2 * i + 1) * n) / (2 * max_boundaries)]));
         }
         return out;
+    }
+
+    /// @brief Drop boundaries until at most `max_boundaries` remain, each time
+    ///        the one whose two adjacent buckets carry the least combined load.
+    ///
+    /// `loads` has one entry per bucket (`boundaries.size() + 1`). Dropping a
+    /// boundary merges its two buckets, so their loads are summed for the
+    /// next round. Ties go to the leftmost boundary, which keeps the result
+    /// deterministic for a given input.
+    [[nodiscard]] static auto trim_by_load(std::vector<Key> boundaries,
+                                           std::vector<std::uint64_t> loads,
+                                           std::size_t max_boundaries) -> std::vector<Key> {
+        loads.resize(boundaries.size() + 1, 0);
+        while (boundaries.size() > max_boundaries) {
+            std::size_t drop = 0;
+            for (std::size_t i = 1; i < boundaries.size(); ++i) {
+                if (loads[i] + loads[i + 1] < loads[drop] + loads[drop + 1]) {
+                    drop = i;
+                }
+            }
+            loads[drop] += loads[drop + 1];
+            loads.erase(loads.begin() + static_cast<std::ptrdiff_t>(drop) + 1);
+            boundaries.erase(boundaries.begin() + static_cast<std::ptrdiff_t>(drop));
+        }
+        return boundaries;
+    }
+
+    /// @brief A merge survivor's boundaries (Requirement 4.3).
+    ///
+    /// The union of the survivor's own boundaries, the absorbed shard's, and
+    /// the old bound between the two ranges, trimmed to `max_boundaries` by
+    /// least combined load. Only the survivor's own buckets have loads here:
+    /// its leader never measured the absorbed shard, so those buckets count
+    /// as zero and are coarsened first. The next refresh re-cuts anyway.
+    ///
+    /// @param merged      The survivor's range after the merge.
+    /// @param own_range   The survivor's range before it.
+    /// @param own         The survivor's boundaries before it.
+    /// @param own_counts  The survivor's window counts, one per own bucket;
+    ///                    empty counts as zero load.
+    /// @param absorbed    The absorbed shard's boundaries, if this replica
+    ///                    knows them; empty otherwise.
+    [[nodiscard]] static auto merge_boundaries(const shard_range<Key>& merged,
+                                               const shard_range<Key>& own_range,
+                                               const std::vector<Key>& own,
+                                               const std::vector<bucket_counts>& own_counts,
+                                               const std::vector<Key>& absorbed,
+                                               std::size_t max_boundaries) -> std::vector<Key> {
+        std::vector<Key> keys = own;
+        keys.insert(keys.end(), absorbed.begin(), absorbed.end());
+        // The old shared bound: whichever of the survivor's old bounds is now
+        // strictly inside the merged range.
+        if (own_range._start.has_value() && merged.is_interior(*own_range._start)) {
+            keys.push_back(*own_range._start);
+        }
+        if (own_range._end.has_value() && merged.is_interior(*own_range._end)) {
+            keys.push_back(*own_range._end);
+        }
+        // The size is read BEFORE the call: the order in which a call's
+        // arguments are evaluated is unspecified, and clang moves `keys` out
+        // first, which made the cap zero and every merge lose its cut.
+        const auto all = keys.size();
+        keys = normalize_boundaries(std::move(keys), merged, all);
+
+        std::vector<std::uint64_t> loads(keys.size() + 1, 0);
+        for (std::size_t b = 0; b < loads.size(); ++b) {
+            // A bucket inside the survivor's old range is exactly one of its
+            // old buckets: the absorbed boundaries and the shared bound all
+            // lie outside or on the edge of that range.
+            const std::optional<Key> start =
+                b == 0 ? merged._start : std::optional<Key>{keys[b - 1]};
+            const bool own_side =
+                start.has_value() ? own_range.contains(*start) : !own_range._start.has_value();
+            if (!own_side) {
+                continue;
+            }
+            const auto i = start.has_value() ? bucket_index(own, *start) : std::size_t{0};
+            if (i < own_counts.size()) {
+                loads[b] = own_counts[i].requests();
+            }
+        }
+        return trim_by_load(std::move(keys), std::move(loads), max_boundaries);
     }
 
 private:

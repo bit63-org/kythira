@@ -1451,6 +1451,8 @@ target_compile_definitions(multi_raft_merge_integration_persistent_test PRIVATE
 target_link_libraries(multi_raft_merge_integration_persistent_test PRIVATE OpenSSL::Crypto)
 add_raft_completion_test(split_merge_policy_unit_test split_merge_policy_unit_test.cpp)
 add_raft_completion_test(multi_raft_arbiter_unit_test multi_raft_arbiter_unit_test.cpp)
+# .kiro/specs/multi-raft-load-buckets/ tasks 3-5: buckets wired into the host.
+add_raft_completion_test(multi_raft_load_buckets_test multi_raft_load_buckets_test.cpp)
 # elastic-shard-capacity spec, tasks 1-2: the quorum-manager shadow, the split
 # capacity gate, the allocation-suggestion counter, operator feedback and the
 # empty-registry heartbeat.
