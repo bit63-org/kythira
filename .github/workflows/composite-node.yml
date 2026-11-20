@@ -99,7 +99,7 @@ concurrency:
 jobs:
   container:
     name: Composite cluster in containers (${{ matrix.runtime }})
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (matrix.runtime == 'podman' && 'ubuntu-24.04') || (github.event.pull_request.head.repo.fork && 'ubuntu-24.04') || vars.KYTHIRA_X64_RUNNER || 'bit63' }}
     timeout-minutes: 180
     environment: ${{ github.ref == 'refs/heads/main' && 'build-cache-write' || '' }}
     strategy:
@@ -230,7 +230,7 @@ jobs:
   # unknown service is refused.
   module-legs:
     name: kythira_node with ${{ matrix.leg }}
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.event.pull_request.head.repo.fork && 'ubuntu-24.04') || vars.KYTHIRA_X64_RUNNER || 'bit63' }}
     timeout-minutes: 150
     environment: ${{ github.ref == 'refs/heads/main' && 'build-cache-write' || '' }}
     strategy:
