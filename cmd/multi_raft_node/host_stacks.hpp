@@ -72,6 +72,7 @@
 #include <cstdint>
 #include <iostream>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -134,12 +135,11 @@ template<typename Serializer> struct beast_stack {
     using server_type = kythira::boost_beast_server<bundle, kythira::host_node_id>;
     static constexpr std::string_view k_name = "beast";
 
-    explicit beast_stack(const node_options& opt)
-        : _work(boost::asio::make_work_guard(*_ioc)),
-          _server(*_ioc, opt._bind_address, opt._raft_port, kythira::boost_beast_server_config{},
-                  kythira::noop_metrics{}),
-          _client(*_ioc, url_map(opt), kythira::boost_beast_client_config{},
-                  kythira::noop_metrics{}, _ioc) {
+    explicit beast_stack(const node_options& opt) : _work(boost::asio::make_work_guard(*_ioc)) {
+        _server.emplace(*_ioc, opt._bind_address, opt._raft_port,
+                        kythira::boost_beast_server_config{}, kythira::noop_metrics{});
+        _client.emplace(*_ioc, url_map(opt), kythira::boost_beast_client_config{},
+                        kythira::noop_metrics{}, _ioc);
         const auto threads = std::max(2U, std::thread::hardware_concurrency() / 2);
         for (unsigned i = 0; i < threads; ++i) {
             _io_threads.emplace_back([this] { _ioc->run(); });
@@ -150,11 +150,19 @@ template<typename Serializer> struct beast_stack {
     beast_stack(const beast_stack&) = delete;
     auto operator=(const beast_stack&) -> beast_stack& = delete;
 
-    auto server() -> server_type& { return _server; }
-    auto client() -> client_type& { return _client; }
+    auto server() -> server_type& { return *_server; }
+    auto client() -> client_type& { return *_client; }
 
     /// Called only after the host has been stopped: a running host still has
-    /// RPCs on these threads. `_ioc` is deliberately not reset — dropping this
+    /// RPCs on these threads.
+    ///
+    /// The client and server are destroyed BEFORE the io_context stops, the
+    /// harness's `beast_http_transport::shutdown()` order. `~boost_beast_client`
+    /// closes its connections and waits for each in-flight operation's handler
+    /// to run; with the context already stopped those handlers never run, and
+    /// a host that still had an RPC (or a pooled connection's read) in flight
+    /// at shutdown hung forever in that wait. Seen with 100 groups on Beast,
+    /// where something is nearly always in flight. `_ioc` is deliberately not reset — dropping this
     /// object's reference is all shutdown owes, and the context is destroyed by
     /// whichever reference goes last. That is `.kiro/specs/multi-raft-
     /// performance/` task 5a's finding, and it applies here for the same
@@ -163,6 +171,8 @@ template<typename Serializer> struct beast_stack {
         if (_stopped.exchange(true)) {
             return;
         }
+        _client.reset();
+        _server.reset();
         _work.reset();
         _ioc->stop();
         for (auto& t : _io_threads) {
@@ -175,8 +185,9 @@ template<typename Serializer> struct beast_stack {
 
     std::shared_ptr<boost::asio::io_context> _ioc{std::make_shared<boost::asio::io_context>()};
     boost::asio::executor_work_guard<boost::asio::io_context::executor_type> _work;
-    server_type _server;
-    client_type _client;
+    // Optional so `shutdown()` can destroy them while the context still runs.
+    std::optional<server_type> _server;
+    std::optional<client_type> _client;
     std::vector<std::thread> _io_threads;
     std::atomic<bool> _stopped{false};
 };
