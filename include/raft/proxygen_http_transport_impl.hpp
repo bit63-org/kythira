@@ -253,6 +253,9 @@ auto proxygen_rpc_type_name(std::string_view endpoint) -> std::string {
     if (endpoint == proxygen_detail::proxygen_endpoint_timeout_now) {
         return "timeout_now";
     }
+    if (endpoint == proxygen_detail::proxygen_endpoint_append_entries_batch) {
+        return "append_entries_batch";
+    }
     return "unknown";
 }
 
@@ -260,7 +263,8 @@ auto proxygen_rpc_type_name(std::string_view endpoint) -> std::string {
 // or 501 to `rpc_not_implemented_exception`: a peer missing a mandatory RPC is
 // misconfigured, not older.
 auto proxygen_is_extension_rpc(std::string_view rpc_type) -> bool {
-    return rpc_type == "request_pre_vote" || rpc_type == "timeout_now";
+    return rpc_type == "request_pre_vote" || rpc_type == "timeout_now" ||
+           rpc_type == "append_entries_batch";
 }
 
 // The `default` here is a genuine hazard: it labels any status this switch does
@@ -280,6 +284,8 @@ auto proxygen_status_reason(unsigned status_code) -> std::string {
             return "Not Found";
         case 406:
             return "Not Acceptable";
+        case 413:
+            return "Payload Too Large";
         case 415:
             return "Unsupported Media Type";
         case 501:
@@ -1421,6 +1427,12 @@ auto proxygen_client<Types, NodeId>::send_rpc_generic_bridge(NodeId target,
                             (resp.status_code == 404 || resp.status_code == 501)) {
                             throw kythira::rpc_not_implemented_for(rpc_type, target);
                         }
+                        // A batch the peer will not take whole: its batcher
+                        // resends the members one by one.
+                        if (rpc_type == "append_entries_batch" && resp.status_code == 413) {
+                            throw kythira::rpc_payload_too_large_exception(
+                                std::format("HTTP 413 on append_entries_batch: {}", resp.body));
+                        }
                         if (resp.status_code >= 400 && resp.status_code < 500) {
                             // Carry `Accept-Post` on the exception: the 415
                             // retry runs in a `thenError` continuation, where
@@ -1610,6 +1622,12 @@ auto proxygen_client<Types, NodeId>::send_rpc_folly_fast_path(NodeId target,
                         if (proxygen_is_extension_rpc(rpc_type) &&
                             (resp.status_code == 404 || resp.status_code == 501)) {
                             throw kythira::rpc_not_implemented_for(rpc_type, target);
+                        }
+                        // A batch the peer will not take whole: its batcher
+                        // resends the members one by one.
+                        if (rpc_type == "append_entries_batch" && resp.status_code == 413) {
+                            throw kythira::rpc_payload_too_large_exception(
+                                std::format("HTTP 413 on append_entries_batch: {}", resp.body));
                         }
                         if (resp.status_code >= 400 && resp.status_code < 500) {
                             // Carry `Accept-Post` on the exception: the 415
@@ -2446,6 +2464,17 @@ auto proxygen_server<Types, NodeId>::dispatch(std::string_view target,
             response_body = std::format("Bad Request: {}", e.what());
             return;
         }
+        if constexpr (std::same_as<Request, append_entries_batch_request_type>) {
+            // Refused whole, before any member reaches a group
+            // (multi-raft-message-batching Requirement 5.4).
+            if (request._members.size() > _config.max_append_entries_batch_members) {
+                status_code = 413;
+                response_body =
+                    std::format("Batch carries {} members; the limit is {}",
+                                request._members.size(), _config.max_append_entries_batch_members);
+                return;
+            }
+        }
         try {
             Response response = handler(request);
             // Encoded in the negotiated type, which need not match the
@@ -2494,6 +2523,13 @@ auto proxygen_server<Types, NodeId>::dispatch(std::string_view target,
         handle.template
         operator()<kythira::timeout_now_request<NodeId>, kythira::timeout_now_response<>>(
             _timeout_now_handler, "timeout_now", true);
+    } else if (target == proxygen_detail::proxygen_endpoint_append_entries_batch &&
+               k_batches_append_entries) {
+        if constexpr (k_batches_append_entries) {
+            handle.template
+            operator()<append_entries_batch_request_type, append_entries_batch_response_type>(
+                _append_entries_batch_handler, "append_entries_batch", true);
+        }
     } else {
         status_code = 404;
         response_body = "Not Found";

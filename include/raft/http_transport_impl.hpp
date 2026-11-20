@@ -45,6 +45,9 @@ constexpr const char* endpoint_install_snapshot = "/v1/raft/install_snapshot";
 constexpr const char* endpoint_fetch_log_entries = "/v1/raft/fetch_log_entries";
 constexpr const char* endpoint_request_pre_vote = "/v1/raft/request_pre_vote";
 constexpr const char* endpoint_timeout_now = "/v1/raft/timeout_now";
+// .kiro/specs/multi-raft-message-batching/ Requirement 5.2. Spelled out again
+// in http_transport.hpp, where the client's inline sender names it.
+constexpr const char* endpoint_append_entries_batch = "/v1/raft/append_entries_batch";
 constexpr const char* header_content_type = "Content-Type";
 constexpr const char* header_content_length = "Content-Length";
 constexpr const char* header_user_agent = "User-Agent";
@@ -1432,6 +1435,9 @@ auto cpp_httplib_client<Types, NodeId>::send_rpc_now(const NodeId& target,
         } else if (endpoint == endpoint_timeout_now) {
             rpc_type = "timeout_now";
             extension_rpc = true;
+        } else if (endpoint == endpoint_append_entries_batch) {
+            rpc_type = "append_entries_batch";
+            extension_rpc = true;
         }
 
         // Latency is measured across the whole operation, retries included: it
@@ -1707,6 +1713,13 @@ auto cpp_httplib_client<Types, NodeId>::send_rpc_now(const NodeId& target,
             if (extension_rpc && result->status == 404) {
                 return make_future_with_exception<Types, Response>(
                     kythira::rpc_not_implemented_for(rpc_type, target));
+            }
+            // A batch the peer will not take whole: its batcher resends the
+            // members one by one, and keeps batching to this peer.
+            if (endpoint == endpoint_append_entries_batch && result->status == 413) {
+                return make_future_with_exception<Types, Response>(
+                    kythira::rpc_payload_too_large_exception(
+                        std::format("HTTP 413 on {}: {}", endpoint, result->body)));
             }
 
             return make_future_with_exception<Types, Response>(kythira::http_client_error(
@@ -2247,6 +2260,9 @@ auto cpp_httplib_server<Types, NodeId>::handle_rpc_endpoint(
     } else if (endpoint == endpoint_timeout_now) {
         rpc_type = "timeout_now";
         extension_rpc = true;
+    } else if (endpoint == endpoint_append_entries_batch) {
+        rpc_type = "append_entries_batch";
+        extension_rpc = true;
     }
 
     try {
@@ -2363,6 +2379,26 @@ auto cpp_httplib_server<Types, NodeId>::handle_rpc_endpoint(
         // Deserialize request through the registry, in the media type the peer
         // declared rather than whichever serializer this server was built with.
         Request request = _registry.template decode_with<Request>(request_media_type, request_data);
+
+        // A batch over the member limit is refused whole, before any member
+        // reaches a group (multi-raft-message-batching Requirement 5.4).
+        if constexpr (std::same_as<Request, append_entries_batch_request_type>) {
+            if (request._members.size() > _config.max_append_entries_batch_members) {
+                auto error_metric = _metrics;
+                error_metric.set_metric_name("http.server.error");
+                error_metric.add_dimension("error_type", "too_many_batch_members");
+                error_metric.add_dimension("endpoint", endpoint);
+                error_metric.add_one();
+                error_metric.emit();
+
+                http_resp.status = 413;
+                http_resp.body =
+                    std::format("Batch carries {} members; the limit is {}",
+                                request._members.size(), _config.max_append_entries_batch_members);
+                http_resp.set_header(header_content_type, "text/plain");
+                return;
+            }
+        }
 
         // Invoke handler
         Response response = handler(request);
@@ -2516,6 +2552,16 @@ auto cpp_httplib_server<Types, NodeId>::setup_endpoints(httplib::Server& server)
         this->handle_rpc_endpoint<kythira::timeout_now_request<NodeId>,
                                   kythira::timeout_now_response<>>(req, resp, _timeout_now_handler);
     });
+
+    // Batched AppendEntries, when every serializer here can carry a batch.
+    if constexpr (k_batches_append_entries) {
+        server.Post(endpoint_append_entries_batch,
+                    [this](const httplib::Request& req, httplib::Response& resp) {
+                        this->handle_rpc_endpoint<append_entries_batch_request_type,
+                                                  append_entries_batch_response_type>(
+                            req, resp, _append_entries_batch_handler);
+                    });
+    }
 }
 
 // Start server

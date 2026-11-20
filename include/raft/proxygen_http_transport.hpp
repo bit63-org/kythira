@@ -164,6 +164,10 @@ struct proxygen_server_config {
     /// Either way the handler never sees the request and the connection is
     /// closed after the 413.
     std::size_t max_request_body_size{10 * 1024 * 1024};  // 10 MB
+    /// Most members a batched AppendEntries may carry; a larger batch is
+    /// answered `413` before any member is dispatched
+    /// (.kiro/specs/multi-raft-message-batching/ Requirement 5.4).
+    std::size_t max_append_entries_batch_members{256};
     std::chrono::seconds request_timeout{30};
     bool enable_ssl{false};
     std::string ssl_cert_path{};
@@ -193,6 +197,8 @@ constexpr const char* proxygen_endpoint_install_snapshot = "/v1/raft/install_sna
 constexpr const char* proxygen_endpoint_fetch_log_entries = "/v1/raft/fetch_log_entries";
 constexpr const char* proxygen_endpoint_request_pre_vote = "/v1/raft/request_pre_vote";
 constexpr const char* proxygen_endpoint_timeout_now = "/v1/raft/timeout_now";
+// .kiro/specs/multi-raft-message-batching/
+constexpr const char* proxygen_endpoint_append_entries_batch = "/v1/raft/append_entries_batch";
 
 /// @brief Accumulated client-side response -- status code plus the fully
 ///     read body. Proxygen delivers the body across one or more `onBody`
@@ -624,6 +630,29 @@ public:
                           std::chrono::milliseconds timeout)
         -> future_template<kythira::timeout_now_response<>>;
 
+    // Batched AppendEntries (.kiro/specs/multi-raft-message-batching/), on
+    // `/v1/raft/append_entries_batch`, offered when every serializer in the
+    // registry can encode a batch. 404/501 fail the future with
+    // `rpc_not_implemented_exception`, 413 with
+    // `rpc_payload_too_large_exception`.
+    using append_entries_batch_request_type =
+        kythira::append_entries_batch_request<kythira::append_entries_request<NodeId>>;
+    using append_entries_batch_response_type =
+        kythira::append_entries_batch_response<kythira::append_entries_response<>>;
+    static constexpr bool k_batches_append_entries =
+        serializer_registry_type::template handles<append_entries_batch_request_type> &&
+        serializer_registry_type::template handles<append_entries_batch_response_type>;
+
+    auto send_append_entries_batch(const NodeId& target,
+                                   const append_entries_batch_request_type& request,
+                                   std::chrono::milliseconds timeout)
+        -> future_template<append_entries_batch_response_type>
+    requires k_batches_append_entries
+    {
+        return send_rpc<append_entries_batch_request_type, append_entries_batch_response_type>(
+            target, proxygen_detail::proxygen_endpoint_append_entries_batch, request, timeout);
+    }
+
     /// @brief Validates the configured TLS material, then retires the
     ///     current `folly::SSLContext` (kept alive, not destroyed -- an
     ///     in-flight `HTTPUpstreamSession` may still reference it, Property
@@ -803,6 +832,24 @@ public:
         std::function<kythira::timeout_now_response<>(const kythira::timeout_now_request<NodeId>&)>
             handler) -> void;
 
+    // Batched AppendEntries; see the client's note.
+    using append_entries_batch_request_type =
+        kythira::append_entries_batch_request<kythira::append_entries_request<NodeId>>;
+    using append_entries_batch_response_type =
+        kythira::append_entries_batch_response<kythira::append_entries_response<>>;
+    static constexpr bool k_batches_append_entries =
+        serializer_registry_type::template handles<append_entries_batch_request_type> &&
+        serializer_registry_type::template handles<append_entries_batch_response_type>;
+
+    auto register_append_entries_batch_handler(
+        std::function<append_entries_batch_response_type(const append_entries_batch_request_type&)>
+            handler) -> void
+    requires k_batches_append_entries
+    {
+        std::lock_guard<std::mutex> lock(_mutex);
+        _append_entries_batch_handler = std::move(handler);
+    }
+
     auto start() -> void;
     auto stop() -> void;
     [[nodiscard]] auto is_running() const -> bool;
@@ -921,6 +968,8 @@ private:
         _request_pre_vote_handler;
     std::function<kythira::timeout_now_response<>(const kythira::timeout_now_request<NodeId>&)>
         _timeout_now_handler;
+    std::function<append_entries_batch_response_type(const append_entries_batch_request_type&)>
+        _append_entries_batch_handler;
 
     std::mutex _requests_mutex;
     std::size_t _live_requests{0};
