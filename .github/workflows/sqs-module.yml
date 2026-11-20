@@ -12,7 +12,11 @@
 #     test labelled sqs), so a module change gets an answer in minutes
 #     instead of after the full build-and-test legs;
 #   - a module-off configure (configs/ci_no_sqs_defconfig) that asserts
-#     no SQS target or sqs-module test exists with the switch off.
+#     no SQS target or sqs-module test exists with the switch off;
+#   - the client suites (services/sqs/tests/clients/): the AWS CLI, boto3
+#     on both protocols, Kombu, the Go, JavaScript and Java SDKs (v2, and v1
+#     on query), JMS, Spring Cloud AWS and the Extended Client against the
+#     sqs_node the build job made.
 #
 # The module-off configure does not build core: ci.yml's config-variants job
 # already builds every target of minimal_defconfig, where CONFIG_SQS is
@@ -24,9 +28,11 @@
 # request. Whoever merges a pull request that touches the module waits for
 # this workflow too (services/README.md).
 #
-# The container job, which runs the module's compose scenario under rootful
-# Docker and rootless Podman (CLAUDE.md, "Container runtime compatibility";
-# Requirement 1.3), joins with the first task whose daemon serves requests.
+#   - the container scenario (services/sqs/tests/docker/, task 11): the
+#     migration path from co-located to three layers and back, with a node
+#     of every layer killed, under rootful Docker and rootless Podman
+#     (CLAUDE.md, "Container runtime compatibility"; Requirement 1.3), on
+#     the sqs_node the build job made.
 
 name: SQS Module
 
@@ -41,6 +47,7 @@ on:
       - "scripts/check_module_boundaries.py"
       - "scripts/tests/test_check_module_boundaries.py"
       - "configs/ci_full_defconfig"
+      - "configs/ci_dynamodb_defconfig"
       - "configs/ci_no_sqs_defconfig"
       - "Kconfig"
       - "CMakeLists.txt"
@@ -56,6 +63,7 @@ on:
       - "scripts/check_module_boundaries.py"
       - "scripts/tests/test_check_module_boundaries.py"
       - "configs/ci_full_defconfig"
+      - "configs/ci_dynamodb_defconfig"
       - "configs/ci_no_sqs_defconfig"
       - "Kconfig"
       - "CMakeLists.txt"
@@ -148,14 +156,16 @@ jobs:
           namespace: ${{ vars.OCI_BUILD_CACHE_NAMESPACE }}
           region: ${{ vars.OCI_CI_REGION }}
 
-      # Byte-identical to ci.yml's x64 clang++-18 key (config-variants and
-      # the clang build-and-test leg), so this job reuses their tree.
+      # With RocksDB, which the durable sqs_node keeps its replica in: the
+      # module tests, the split client suites and the container scenario
+      # all run it. Byte-identical to dynamodb-module.yml's key and ci.yml's
+      # rocksdb config variant, so this job reuses their tree.
       - name: Cache vcpkg packages
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         id: vcpkg-cache
         with:
           path: vcpkg_installed
-          key: vcpkg-${{ runner.os }}-${{ runner.arch }}-edhoc-clang++-18-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json', 'vcpkg-overlays/**') }}
+          key: vcpkg-${{ runner.os }}-${{ runner.arch }}-edhoc-rocksdb-clang++-18-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json', 'vcpkg-overlays/**') }}
 
       - name: Bootstrap vcpkg and install dependencies
         if: steps.vcpkg-cache.outputs.cache-hit != 'true'
@@ -167,7 +177,7 @@ jobs:
           git clone --filter=blob:none https://github.com/microsoft/vcpkg.git /tmp/vcpkg
           git -C /tmp/vcpkg checkout 9a7f7340a6c5f11f24c3d59f85e07143feb84e06
           /tmp/vcpkg/bootstrap-vcpkg.sh -disableMetrics
-          /tmp/vcpkg/vcpkg install --triplet ${{ steps.triplet.outputs.value }} --no-print-usage --x-feature=edhoc
+          /tmp/vcpkg/vcpkg install --triplet ${{ steps.triplet.outputs.value }} --no-print-usage --x-feature=edhoc --x-feature=rocksdb
         env:
           VCPKG_DEFAULT_TRIPLET: ${{ steps.triplet.outputs.value }}
 
@@ -176,12 +186,14 @@ jobs:
         if: steps.buildcache.outputs.enabled == 'true'
         run: scripts/oci-build-cache/start-sccache.sh
 
-      - name: Configure (module on, ci_full_defconfig, strict)
+      # ci_full_defconfig plus the RocksDB engine (ci_dynamodb_defconfig,
+      # which keeps CONFIG_SQS=y), so sqs_node is built durable.
+      - name: Configure (module on, ci_dynamodb_defconfig, strict)
         run: |
           cmake -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_CXX_COMPILER=clang++-18 \
-            -DKYTHIRA_KCONFIG=configs/ci_full_defconfig \
+            -DKYTHIRA_KCONFIG=configs/ci_dynamodb_defconfig \
             -DKYTHIRA_KCONFIG_STRICT=ON \
             -DKYTHIRA_COMPILER_LAUNCHER=${{ steps.sccache.outputs.launcher || 'none' }} \
             -DKYTHIRA_LINKER=mold \
@@ -214,6 +226,15 @@ jobs:
       - name: Run the module's tests
         run: ctest --test-dir build -L '^sqs$' --output-on-failure --no-tests=error
 
+      # The client suites run in their own job, on this build's daemon.
+      - name: Hand sqs_node to the client suites
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: sqs-node
+          path: build/sqs_node
+          retention-days: 1
+          if-no-files-found: error
+
       - name: Configure (module off, ci_no_sqs_defconfig, strict)
         run: |
           cmake -B build-off -G Ninja \
@@ -245,3 +266,255 @@ jobs:
             rc=1
           fi
           exit $rc
+
+  clients:
+    # Task 12 (Requirements 13.1, 13.2): real SQS clients against the
+    # sqs_node this run built (in-memory, then durable in the split
+    # layouts of task 10), through
+    # services/sqs/tests/clients/run_suite.sh. Every client is pinned: the
+    # Python ones by requirements files, the AWS CLI by version, Go by
+    # go.sum, JavaScript by package-lock.json, the Java ones by their
+    # Gradle builds, which run in the digest-pinned Gradle
+    # image the Kinesis module uses so there is one JDK and Gradle to keep
+    # current.
+    name: SQS client suites
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Fetch sqs_node
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: sqs-node
+          path: ${{ runner.temp }}/sqs
+
+      - name: Install system dependencies
+        run: |
+          ./scripts/drop-unused-apt-repos.sh
+          # libcurl's headers build pycurl, which Kombu's SQS transport needs.
+          for attempt in 1 2 3; do
+            if timeout 300 sudo apt-get update -q \
+                 && timeout 600 sudo apt-get install -y --no-install-recommends \
+                 libcurl4-openssl-dev libssl-dev python3-venv unzip; then
+              exit 0
+            fi
+            echo "::warning::apt-get install failed (attempt ${attempt}/3), retrying in 30s..."
+            sleep 30
+          done
+          echo "::error::apt-get install failed after 3 attempts" >&2
+          exit 1
+
+      - name: Python clients
+        run: |
+          python3 -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/pip" install -q -r services/sqs/tests/clients/requirements.txt
+          python3 -m venv "$RUNNER_TEMP/venvq"
+          "$RUNNER_TEMP/venvq/bin/pip" install -q -r services/sqs/tests/evidence/requirements-query.txt
+
+      - name: AWS CLI v2 (2.31.0, the evidence pin)
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/awscli.zip" \
+            https://awscli.amazonaws.com/awscli-exe-linux-x86_64-2.31.0.zip
+          unzip -q "$RUNNER_TEMP/awscli.zip" -d "$RUNNER_TEMP/awscli-src"
+          "$RUNNER_TEMP/awscli-src/aws/install" -i "$RUNNER_TEMP/awscli" -b "$RUNNER_TEMP/awsbin"
+          "$RUNNER_TEMP/awsbin/aws" --version
+
+      - name: Java clients
+        env:
+          GRADLE_IMAGE: gradle:8.14.3-jdk21@sha256:21bd311ed01360c189b8870c6b6e988199ff10f72d445d02fb39d3cff9da91d7
+        run: |
+          # One worker: Maven Central answers bursts of parallel downloads
+          # with 429s.
+          for dir in services/sqs/tests/evidence/clients/java services/sqs/tests/clients/java; do
+            docker run --rm --user "$(id -u):$(id -g)" \
+              -e GRADLE_USER_HOME=/work/.gradle-home \
+              -v "$PWD:/work" -w "/work/$dir" \
+              "$GRADLE_IMAGE" gradle --no-daemon --max-workers=1 installDist
+          done
+
+      - name: Go and JavaScript clients
+        env:
+          GO_IMAGE: golang:1.24.7-bookworm@sha256:b8bae5bd9ba9b1f89b635c91c24cc75cea335a16fb5076310f38566fc674b1ec
+          NODE_IMAGE: node:22.21.1-bookworm-slim@sha256:25b3eb23a00590b7499f2a2ce939322727fcce1b15fdd69754fcd09536a3ae2c
+        run: |
+          # Built in pinned images, run on the runner: a static Go binary,
+          # and the lockfile's node_modules for the runner's Node.
+          docker run --rm --user "$(id -u):$(id -g)" \
+            -e GOCACHE=/work/.go-cache -e GOMODCACHE=/work/.go-mod -e CGO_ENABLED=0 \
+            -v "$PWD:/work" -v "$RUNNER_TEMP:/out" -w /work/services/sqs/tests/clients/go \
+            "$GO_IMAGE" go build -o /out/sqs-suite-go .
+          docker run --rm --user "$(id -u):$(id -g)" -e npm_config_cache=/work/.npm-cache \
+            -v "$PWD:/work" -w /work/services/sqs/tests/clients/js \
+            "$NODE_IMAGE" npm ci --no-audit --no-fund
+
+      - name: Run the client suites
+        env:
+          SUITE_GO: ${{ runner.temp }}/sqs-suite-go
+          SQS_NODE: ${{ runner.temp }}/sqs/sqs_node
+          SUITE_PYTHON: ${{ runner.temp }}/venv/bin/python
+          QUERY_PYTHON: ${{ runner.temp }}/venvq/bin/python
+          AWS_CLI: ${{ runner.temp }}/awsbin/aws
+          JAVA_CLIENTS: ${{ github.workspace }}/services/sqs/tests/evidence/clients/java/build/install/sqs-evidence-java/bin
+          SUITE_JAVA_CLIENTS: ${{ github.workspace }}/services/sqs/tests/clients/java/build/install/sqs-suite-spring/bin
+        run: |
+          chmod +x "$SQS_NODE"
+          # The start scripts were built for the image's JDK 21; run them on
+          # the runner's.
+          export JAVA_HOME=$JAVA_HOME_21_X64
+          services/sqs/tests/clients/run_suite.sh
+
+      # Task 10: the same clients through a gateway, a front end and three
+      # data nodes, on plaintext and over TLS with layer identities.
+      - name: Run the client suites on the split layouts
+        env:
+          SUITE_GO: ${{ runner.temp }}/sqs-suite-go
+          SQS_NODE: ${{ runner.temp }}/sqs/sqs_node
+          SUITE_PYTHON: ${{ runner.temp }}/venv/bin/python
+          QUERY_PYTHON: ${{ runner.temp }}/venvq/bin/python
+          AWS_CLI: ${{ runner.temp }}/awsbin/aws
+          JAVA_CLIENTS: ${{ github.workspace }}/services/sqs/tests/evidence/clients/java/build/install/sqs-evidence-java/bin
+          SUITE_JAVA_CLIENTS: ${{ github.workspace }}/services/sqs/tests/clients/java/build/install/sqs-suite-spring/bin
+        run: |
+          export JAVA_HOME=$JAVA_HOME_21_X64
+          for layout in split split-tls; do
+            echo "### $layout"
+            SQS_SUITE_LAYOUT=$layout services/sqs/tests/clients/run_suite.sh
+          done
+
+      # Task 13: the differential mix against a node at SQS's default
+      # limits, self-checked, then compared with every checked-in recording
+      # of real SQS (services/sqs/tests/differential/recordings/).
+      - name: Replay the SQS differential
+        env:
+          SQS_NODE: ${{ runner.temp }}/sqs/sqs_node
+          SUITE_PYTHON: ${{ runner.temp }}/venv/bin/python
+        run: services/sqs/tests/differential/run_replay.sh
+
+  container:
+    # Task 11 (Requirements 12.1-12.3): doc/migration.md's whole path in
+    # containers, addressed by service name only. The build job's sqs_node
+    # is staged into the node image, and the scenario harness, which needs
+    # only Boost.Test and Boost.JSON, is compiled here against Ubuntu's
+    # Boost, so this job builds nothing of Kythira itself.
+    # The docker-sqs-node-tests target runs the same scenario locally.
+    name: SQS migration path in containers (${{ matrix.runtime }})
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        runtime: [docker, podman]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Fetch sqs_node
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: sqs-node
+          path: services/sqs/docker/sqs_node/dist
+
+      - name: Install system dependencies
+        run: |
+          ./scripts/drop-unused-apt-repos.sh
+          for attempt in 1 2 3; do
+            if timeout 300 sudo apt-get update -q \
+                 && timeout 600 sudo apt-get install -y --no-install-recommends \
+                 g++ libboost-test-dev libboost-json-dev; then
+              exit 0
+            fi
+            echo "::warning::apt-get install failed (attempt ${attempt}/3), retrying in 30s..."
+            sleep 30
+          done
+          echo "::error::apt-get install failed after 3 attempts" >&2
+          exit 1
+
+      # Rootless Podman as kinesis-module.yml's container job sets it up:
+      # netavark and aardvark-dns so service names resolve, and `podman
+      # compose` driving the runner's docker-compose through Podman's API
+      # socket. This scenario shapes no traffic, so no kernel modules are
+      # loaded.
+      - name: Set up rootless Podman
+        if: matrix.runtime == 'podman'
+        run: |
+          sudo apt-get install -y --no-install-recommends \
+            podman netavark aardvark-dns slirp4netns uidmap
+          export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+          echo "XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR" >> "$GITHUB_ENV"
+          provider=""
+          for p in /usr/libexec/docker/cli-plugins/docker-compose \
+                   /usr/local/lib/docker/cli-plugins/docker-compose \
+                   "$(command -v docker-compose || true)"; do
+            if [ -n "$p" ] && [ -x "$p" ]; then provider="$p"; break; fi
+          done
+          test -n "$provider"
+          mkdir -p ~/.config/containers
+          cat > ~/.config/containers/containers.conf <<EOF
+          [network]
+          network_backend = "netavark"
+
+          [engine]
+          compose_providers = ["$provider"]
+          compose_warning_logs = false
+          EOF
+          if ! podman unshare true; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+            podman unshare true
+          fi
+          podman system reset --force
+          test "$(podman info --format '{{.Host.Security.Rootless}}')" = true
+          test "$(podman info --format '{{.Host.NetworkBackend}}')" = netavark
+          sock="$(podman info --format '{{.Host.RemoteSocket.Path}}')"
+          mkdir -p "$(dirname "$sock")"
+          setsid nohup podman system service --time=0 "unix://$sock" \
+            > "$RUNNER_TEMP/podman-service.log" 2>&1 < /dev/null &
+          for _ in $(seq 1 30); do [ -S "$sock" ] && break; sleep 1; done
+          test -S "$sock"
+
+      - name: Verify the container runtime
+        run: |
+          ${{ matrix.runtime }} version
+          ${{ matrix.runtime }} compose version
+
+      # What docker-sqs-node-image does, with the artifact for the build.
+      - name: Build the node and client images
+        env:
+          RUNTIME: ${{ matrix.runtime }}
+        run: |
+          chmod +x services/sqs/docker/sqs_node/dist/sqs_node
+          format=()
+          if [ "$RUNTIME" = podman ]; then format=(--format docker); fi
+          "$RUNTIME" build "${format[@]}" --file services/sqs/docker/sqs_node/Dockerfile \
+            --tag kythira-sqs-node:dev .
+          "$RUNTIME" build "${format[@]}" --file services/sqs/docker/sqs_clients/Dockerfile \
+            --tag kythira-sqs-clients:dev .
+
+      - name: Build the scenario
+        run: |
+          g++ -std=c++23 -O1 -DBOOST_TEST_DYN_LINK -Itests/docker_chaos \
+            services/sqs/tests/docker/sqs_path_scenario_test.cpp \
+            -o "$RUNNER_TEMP/sqs_path_scenario_test" \
+            -lboost_unit_test_framework -lboost_json
+
+      - name: Run the migration-path scenario
+        env:
+          KYTHIRA_CONTAINER_RUNTIME: ${{ matrix.runtime }}
+          KYTHIRA_SQS_COMPOSE_FILE: services/sqs/tests/docker/compose.yml
+        run: |
+          "$RUNNER_TEMP/sqs_path_scenario_test" --log_level=message
+
+      - name: Podman service log
+        if: always() && matrix.runtime == 'podman'
+        run: tail -n 200 "$RUNNER_TEMP/podman-service.log" || true
+
+      - name: Leftover containers
+        if: always()
+        run: ${{ matrix.runtime }} ps -a

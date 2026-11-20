@@ -8,37 +8,22 @@ here with its reason and the exact error it returns.
 operation is in neither list, so a model upgrade that adds one fails until it
 is placed.
 
-Until the gateway exists (task 3) no request is served at all. Once it does,
-an operation listed here is answered like an action the model does not have:
+An operation listed here is answered like an action the model does not have:
 `UnknownOperationException` with HTTP status 400 on AWS JSON 1.0 (with the
 query-compatible code in `x-amzn-query-error`), and `InvalidAction` with HTTP
 status 400 on the query protocol. Task 13's recorded SQS responses pin the
 exact bodies.
 
-Every operation in the model is planned; none is left out of the spec.
+Every operation in the pinned model is implemented today, so the table is
+empty. A model upgrade that adds an operation adds its row here until a task
+builds it.
 
 | Operation | Planned | Reason | Error |
 |---|---|---|---|
-| `AddPermission` | task 3 | Not built yet (queue policies and authorization). | `UnknownOperationException` (JSON) or `InvalidAction` (query), HTTP 400 |
-| `CancelMessageMoveTask` | task 6 | Not built yet (dead-letter queues and move tasks). | `UnknownOperationException` (JSON) or `InvalidAction` (query), HTTP 400 |
-| `ChangeMessageVisibility` | task 4 | Not built yet (queue and message API). | `UnknownOperationException` (JSON) or `InvalidAction` (query), HTTP 400 |
-| `ChangeMessageVisibilityBatch` | task 4 | Not built yet (queue and message API). | `UnknownOperationException` (JSON) or `InvalidAction` (query), HTTP 400 |
-| `CreateQueue` | task 4 | Not built yet (queue and message API). | `UnknownOperationException` (JSON) or `InvalidAction` (query), HTTP 400 |
-| `DeleteMessage` | task 4 | Not built yet (queue and message API). | `UnknownOperationException` (JSON) or `InvalidAction` (query), HTTP 400 |
-| `DeleteMessageBatch` | task 4 | Not built yet (queue and message API). | `UnknownOperationException` (JSON) or `InvalidAction` (query), HTTP 400 |
-| `DeleteQueue` | task 4 | Not built yet (queue and message API). | `UnknownOperationException` (JSON) or `InvalidAction` (query), HTTP 400 |
-| `GetQueueAttributes` | task 4 | Not built yet (queue and message API). | `UnknownOperationException` (JSON) or `InvalidAction` (query), HTTP 400 |
-| `GetQueueUrl` | task 4 | Not built yet (queue and message API). | `UnknownOperationException` (JSON) or `InvalidAction` (query), HTTP 400 |
-| `ListDeadLetterSourceQueues` | task 6 | Not built yet (dead-letter queues and move tasks). | `UnknownOperationException` (JSON) or `InvalidAction` (query), HTTP 400 |
-| `ListMessageMoveTasks` | task 6 | Not built yet (dead-letter queues and move tasks). | `UnknownOperationException` (JSON) or `InvalidAction` (query), HTTP 400 |
-| `ListQueueTags` | task 4 | Not built yet (queue and message API). | `UnknownOperationException` (JSON) or `InvalidAction` (query), HTTP 400 |
-| `ListQueues` | task 4 | Not built yet (queue and message API). | `UnknownOperationException` (JSON) or `InvalidAction` (query), HTTP 400 |
-| `PurgeQueue` | task 4 | Not built yet (queue and message API). | `UnknownOperationException` (JSON) or `InvalidAction` (query), HTTP 400 |
-| `ReceiveMessage` | task 4 | Not built yet (queue and message API). | `UnknownOperationException` (JSON) or `InvalidAction` (query), HTTP 400 |
-| `RemovePermission` | task 3 | Not built yet (queue policies and authorization). | `UnknownOperationException` (JSON) or `InvalidAction` (query), HTTP 400 |
-| `SendMessage` | task 4 | Not built yet (queue and message API). | `UnknownOperationException` (JSON) or `InvalidAction` (query), HTTP 400 |
-| `SendMessageBatch` | task 4 | Not built yet (queue and message API). | `UnknownOperationException` (JSON) or `InvalidAction` (query), HTTP 400 |
-| `SetQueueAttributes` | task 4 | Not built yet (queue and message API). | `UnknownOperationException` (JSON) or `InvalidAction` (query), HTTP 400 |
-| `StartMessageMoveTask` | task 6 | Not built yet (dead-letter queues and move tasks). | `UnknownOperationException` (JSON) or `InvalidAction` (query), HTTP 400 |
-| `TagQueue` | task 4 | Not built yet (queue and message API). | `UnknownOperationException` (JSON) or `InvalidAction` (query), HTTP 400 |
-| `UntagQueue` | task 4 | Not built yet (queue and message API). | `UnknownOperationException` (JSON) or `InvalidAction` (query), HTTP 400 |
+
+## Behaviour that differs from SQS
+
+| Behaviour | SQS | Kythira | Why |
+|---|---|---|---|
+| `DeduplicationScope` back to `queue` on a high-throughput FIFO queue | allowed (with `FifoThroughputLimit` back to `perQueue`) | `InvalidAttributeValue` | A high-throughput queue spans 16 partitions, each with its own deduplication records, and a group always maps to one partition. Queue-wide deduplication would need the records in one place; moving groups would break their order. Create a new queue instead. |
+| FIFO request rates (300 a second per action, per partition in high-throughput mode) | per queue | per queue on each front end | Each front end counts its own requests, so Kythira never refuses a request SQS would take but may take some SQS would refuse. `kythira:compat:fifo-throughput=off` turns the limit off. |

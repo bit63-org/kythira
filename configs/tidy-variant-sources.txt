@@ -99,5 +99,9 @@ rocksdb services/kms/tests/kythira_node_kms_test.cpp
 rocksdb services/kms/tests/kms_backing_softhsm_test.cpp
 rocksdb services/iam/tests/kythira_node_kms_kinesis_test.cpp
 rocksdb services/hsm/tests/hsm_tpm2_sealer_test.cpp
+rocksdb services/sqs/cmd/sqs_node/sqs_module_registrar.cpp
+rocksdb services/sqs/tests/sqs_module_test.cpp
+rocksdb services/sqs/tests/sqs_migration_test.cpp
+rocksdb services/sqs/tests/docker/sqs_path_scenario_test.cpp
 
 no-cloud tests/multi_raft_node_s3_unavailable_test.cpp
