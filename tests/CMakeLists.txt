@@ -1908,6 +1908,9 @@ add_raft_completion_test(latency_digest_unit_test latency_digest_unit_test.cpp)
 add_raft_completion_test(composite_policy_unit_test composite_policy_unit_test.cpp)
 add_raft_completion_test(shard_placement_driver_unit_test shard_placement_driver_unit_test.cpp)
 add_raft_completion_test(multi_raft_placement_driver_test multi_raft_placement_driver_test.cpp)
+# .kiro/specs/multi-raft-message-batching/ tasks 2 and 4: the AppendEntries
+# batcher and the demultiplexer's batch handler over fakes.
+add_raft_completion_test(append_entries_batcher_unit_test append_entries_batcher_unit_test.cpp)
 add_raft_completion_test(leader_transfer_test leader_transfer_test.cpp)
 # .kiro/specs/http-coap-pre-vote-timeout-now/ tasks 5.4 and 6: PreVote and
 # TimeoutNow end to end over cpp-httplib, three multi_raft hosts on real

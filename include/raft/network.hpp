@@ -195,4 +195,38 @@ concept network_server_with_timeout_now = requires(
     { server.register_timeout_now_handler(handler) } -> std::same_as<void>;
 };
 
+// ============================================================================
+// Optional batched AppendEntries extension
+// (.kiro/specs/multi-raft-message-batching/) — NOT required by the base
+// network concepts. A multi-Raft host batches its groups' AppendEntries per
+// destination only when its shared client and server both satisfy these, and
+// sends exactly as before otherwise (Requirement 1.2). `node<Types>` never
+// sees a batch: batching lives between `group_scoped_client` and the shared
+// client (Requirement 1.3).
+// ============================================================================
+
+// Satisfied by a network_client that can send a batch of AppendEntries to one
+// destination in one request.
+template<typename C, typename NodeId = std::uint64_t>
+concept network_client_with_append_entries_batch = requires(
+    C client, NodeId target,
+    const kythira::append_entries_batch_request<kythira::append_entries_request<NodeId>>& req,
+    std::chrono::milliseconds timeout) {
+    {
+        client.send_append_entries_batch(target, req, timeout)
+    }
+    -> kythira::future<kythira::append_entries_batch_response<kythira::append_entries_response<>>>;
+};
+
+// Satisfied by a network_server that can register a batched AppendEntries
+// handler.
+template<typename S, typename NodeId = std::uint64_t>
+concept network_server_with_append_entries_batch = requires(
+    S server,
+    std::function<kythira::append_entries_batch_response<kythira::append_entries_response<>>(
+        const kythira::append_entries_batch_request<kythira::append_entries_request<NodeId>>&)>
+        handler) {
+    { server.register_append_entries_batch_handler(handler) } -> std::same_as<void>;
+};
+
 }  // namespace kythira
