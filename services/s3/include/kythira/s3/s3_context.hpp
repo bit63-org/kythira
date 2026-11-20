@@ -30,6 +30,7 @@
 
 #include <kythira/s3/s3_access.hpp>
 #include <kythira/s3/s3_compat.hpp>
+#include <kythira/s3/s3_cors_rules.hpp>
 #include <kythira/s3/s3_data_path.hpp>
 #include <kythira/s3/s3_encryption.hpp>
 #include <kythira/s3/s3_event_sinks.hpp>
@@ -38,6 +39,7 @@
 #include <kythira/s3/s3_http.hpp>
 #include <kythira/s3/s3_metadata.hpp>
 #include <kythira/s3/s3_replication_rules.hpp>
+#include <kythira/s3/s3_website_rules.hpp>
 
 #include <raft/aws_rest_xml_protocol.hpp>
 
@@ -50,6 +52,7 @@
 #include <string>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 namespace kythira::s3 {
 
@@ -88,6 +91,10 @@ struct service_options {
     /// Where `PutBucketNotificationConfiguration` sends its `s3:TestEvent`
     /// (`s3_event_sinks.hpp`); none skips the destination check.
     notification_sink notifications;
+    /// The website endpoints' domains (`s3_website.hpp`): a request whose
+    /// `Host` is `<bucket>.<domain>` for one of them is served as a static
+    /// website, as `<bucket>.s3-website-<region>.amazonaws.com` is.
+    std::vector<std::string> website_domains;
 };
 
 /// The handlers' shared state.
@@ -208,6 +215,10 @@ struct bucket_state {
     std::optional<lifecycle_configuration> lifecycle;
     /// `PutBucketReplication`; none when not set.
     std::optional<replication_configuration> replication;
+    /// `PutBucketCors`; none when not set.
+    std::optional<cors_configuration> cors;
+    /// `PutBucketWebsite`; none when not set.
+    std::optional<website_configuration> website;
     compat_profile profile;
     access_context access;  ///< for `authorize_check`; its `bucket_acl` points at `acl`
 
@@ -256,6 +267,12 @@ void load_bucket_state(const handler_context<M>& ctx, bucket_descriptor desc, bu
     }
     if (auto it = cfg.find("replication"); it != cfg.end()) {
         out.replication = load_replication(it->second);
+    }
+    if (auto it = cfg.find("cors"); it != cfg.end()) {
+        out.cors = load_cors(it->second);
+    }
+    if (auto it = cfg.find("website"); it != cfg.end()) {
+        out.website = load_website(it->second);
     }
     out.profile = for_bucket(ctx.options.profile, out.tags);
 

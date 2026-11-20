@@ -368,8 +368,33 @@ builds it to that design). Each task is one PR unless noted.
     `s3_notifications_test`, the change log cases in the index test, the
     notification and replication cases in `s3_service_test`.
 
-- [ ] 15. CORS and website hosting
+- [x] 15. CORS and website hosting
   - _Requirements: 12.4_
+  - Done: CORS (`s3_cors_rules.hpp`, `s3_cors.hpp`): Put/Get/Delete
+    BucketCors with S3's checks (1-100 rules, an origin and a method per
+    rule, only GET/PUT/POST/DELETE/HEAD, one wildcard per origin or
+    allowed header, none in exposed headers, Content-MD5 required).
+    Preflights (`OPTIONS`) are never authenticated and answer from the
+    catalog entry alone: the first rule whose origin (case-sensitive),
+    method and every requested header (case-insensitive) match, with S3's
+    `BadRequest` and `AccessForbidden` "CORSResponse" errors otherwise.
+    Every other answer from a bucket with CORS, errors and browser POST
+    uploads included, carries the matching rule's headers and `Vary`.
+    Website (`s3_website_rules.hpp`, `s3_website.hpp`): Put/Get/Delete
+    BucketWebsite with S3's checks (index suffix without `/`,
+    `RedirectAllRequestsTo` alone, up to 50 routing rules, 3XX redirect
+    codes, 4XX/5XX conditions, one key replacement). The website endpoint
+    is `<bucket>.<domain>` for `service_options::website_domains` (no
+    path style, as on S3): GET and HEAD only, every read checked as the
+    anonymous principal, redirect-all, routing rules before the read and
+    after an error, index documents, `302` from `k` to `k/` when
+    `k/<suffix>` exists, `x-amz-website-redirect-location`, `404` or
+    `403` for a missing key by whether anyone may list, then the error
+    document (served whole, with the error's status) or S3's HTML error
+    page. CORS preflights work there too. Website redirects use the
+    listener's scheme (`secure_transport`); the daemon's website listener
+    and domain flags are task 16's. Tests: `s3_website_rules_test`, the
+    CORS and website cases in `s3_service_test`.
 
 ### Phase 3: independent layers
 
