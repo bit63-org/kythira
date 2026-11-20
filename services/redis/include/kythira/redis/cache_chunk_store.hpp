@@ -284,6 +284,11 @@ struct cache_chunk_store_stats {
     /// Reads whose bytes did not hash to their name (Requirement 10.1).
     std::uint64_t _hash_failures = 0;
     std::uint64_t _compactions = 0;
+    /// Bytes this store has written since it opened: new loose chunks,
+    /// pack records, and the live records compaction copies. Against the
+    /// chunk bytes the node was asked to store, it is the store's share of
+    /// the write amplification (GitHub issue 942).
+    std::uint64_t _bytes_written = 0;
 
     [[nodiscard]] auto bytes_on_disk() const noexcept -> std::uint64_t {
         return _loose_bytes + _pack_bytes;
@@ -638,7 +643,9 @@ public:
 
     [[nodiscard]] auto stats() const -> cache_chunk_store_stats {
         const std::lock_guard lock(_mu);
-        return _stats;
+        auto out = _stats;
+        out._bytes_written = _bytes_written.load(std::memory_order_relaxed);
+        return out;
     }
 
     /// Free bytes and inodes on the store's filesystem.
@@ -704,9 +711,10 @@ private:
         return (static_cast<std::uint64_t>(get_u32(p)) << 32U) | get_u32(p + 4);
     }
 
-    /// Write all of `bytes` at `offset`, or throw.
-    static void pwrite_all(int fd, std::span<const std::byte> bytes, std::uint64_t offset,
-                           const std::filesystem::path& path) {
+    /// Write all of `bytes` at `offset`, or throw. Counts what it wrote in
+    /// `_bytes_written`, outside `_mu`: loose writes happen without it.
+    void pwrite_all(int fd, std::span<const std::byte> bytes, std::uint64_t offset,
+                    const std::filesystem::path& path) {
         std::size_t done = 0;
         while (done < bytes.size()) {
             const auto n = ::pwrite(fd, bytes.data() + done, bytes.size() - done,
@@ -718,6 +726,7 @@ private:
                 throw cache_chunk_store_error(errno_message("write to " + path.string()));
             }
             done += static_cast<std::size_t>(n);
+            _bytes_written.fetch_add(static_cast<std::uint64_t>(n), std::memory_order_relaxed);
         }
     }
 
@@ -1442,6 +1451,8 @@ private:
     int _open_fd = -1;
     std::uint64_t _next_pack = 1;
     mutable cache_chunk_store_stats _stats;
+    /// `_stats._bytes_written`'s live counter; see `pwrite_all`.
+    std::atomic<std::uint64_t> _bytes_written{0};
     std::atomic<std::uint64_t> _tmp_counter{0};
 
     /// A large chunk written with `chunk_durability::deferred`, still at its

@@ -170,6 +170,15 @@ struct cache_http_stats {
     std::atomic<std::uint64_t> _too_large{0};
     std::atomic<std::uint64_t> _insufficient_storage{0};
     std::atomic<std::uint64_t> _aborted_puts{0};
+    /// Where a leader's `PUT` time goes (GitHub issue 942), summed over
+    /// requests: waiting on the client for body bytes, waiting for a
+    /// `put_chunk` proposal to apply before the next may go (one is in
+    /// flight per request), and waiting for the `commit`. A slow source
+    /// shows as body time, a slow shard as chunk and commit time.
+    std::atomic<std::uint64_t> _put_chunks{0};
+    std::atomic<std::uint64_t> _put_body_ns{0};
+    std::atomic<std::uint64_t> _put_chunk_wait_ns{0};
+    std::atomic<std::uint64_t> _put_commit_ns{0};
     std::atomic<std::uint64_t> _aborted_gets{0};
     std::atomic<std::uint64_t> _chunk_serves{0};
     std::atomic<std::uint64_t> _connections_accepted{0};
@@ -1527,22 +1536,31 @@ auto cache_http_front_end<Host, Logger>::handle_put(connection& c, Stream& strea
     std::uint64_t total = 0;
     bool failed = false;
 
+    using clock = std::chrono::steady_clock;
+    const auto add_since = [](std::atomic<std::uint64_t>& counter, clock::time_point since) {
+        counter.fetch_add(
+            static_cast<std::uint64_t>(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(clock::now() - since).count()),
+            std::memory_order_relaxed);
+    };
     auto settle = [&]() -> bool {
         if (!in_flight) {
             return true;
         }
         auto f = std::move(*in_flight);
         in_flight.reset();
+        const auto waiting = clock::now();
+        bool ok = false;
         try {
-            if (!f.wait(_config._command_timeout)) {
-                return false;
+            if (f.wait(_config._command_timeout)) {
+                (void)std::move(f).get();
+                ok = true;
             }
-            (void)std::move(f).get();
-            return true;
         } catch (const std::exception& e) {
             _logger.log(log_level::debug, "cache http: put_chunk failed", {{"error", e.what()}});
-            return false;
         }
+        add_since(_stats._put_chunk_wait_ns, waiting);
+        return ok;
     };
     auto flush = [&]() -> bool {
         if (!settle()) {
@@ -1556,6 +1574,7 @@ auto cache_http_front_end<Host, Logger>::handle_put(connection& c, Stream& strea
         filling.reserve(_config._chunk_bytes);
         try {
             in_flight.emplace(_host.submit_command(key, command, _config._command_timeout));
+            ++_stats._put_chunks;
         } catch (const std::exception& e) {
             _logger.log(log_level::debug, "cache http: put_chunk refused", {{"error", e.what()}});
             return false;
@@ -1568,8 +1587,10 @@ auto cache_http_front_end<Host, Logger>::handle_put(connection& c, Stream& strea
         req.body().data = scratch.data();
         req.body().size = scratch.size();
         cache_http_detail::lowest(stream).expires_after(_config._io_timeout);
+        const auto reading = clock::now();
         auto ec = cache_http_detail::drive(
             c._ioc, [&](auto h) { http::async_read(stream, buffer, parser, std::move(h)); });
+        add_since(_stats._put_body_ns, reading);
         if (ec == http::error::need_buffer) {
             ec = {};
         }
@@ -1614,7 +1635,9 @@ auto cache_http_front_end<Host, Logger>::handle_put(connection& c, Stream& strea
     }
 
     redis_kv_commit_command commit{key, 0, total, whole.finish(), std::move(chunk_list)};
+    const auto committing = clock::now();
     auto applied = propose(key, encode_redis_kv_command(commit), forward_to);
+    add_since(_stats._put_commit_ns, committing);
     if (!applied || applied->empty() || applied->front() != std::byte{1}) {
         // Not bound: leadership moved, or a chunk's grace ran out mid-upload
         // (design Component 2). The client retries or treats it as a miss.
@@ -1754,6 +1777,10 @@ auto cache_http_front_end<Host, Logger>::handle_metrics(connection& c, Stream& s
     line("too_large", _stats._too_large);
     line("insufficient_storage", _stats._insufficient_storage);
     line("aborted_puts", _stats._aborted_puts);
+    line("put_chunks", _stats._put_chunks);
+    line("put_body_ns", _stats._put_body_ns);
+    line("put_chunk_wait_ns", _stats._put_chunk_wait_ns);
+    line("put_commit_ns", _stats._put_commit_ns);
     line("aborted_gets", _stats._aborted_gets);
     line("chunk_serves", _stats._chunk_serves);
     line("connections_current", _stats._connections_current);
