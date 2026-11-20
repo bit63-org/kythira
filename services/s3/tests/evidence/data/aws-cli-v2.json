@@ -1,0 +1,1266 @@
+{
+ "client": "aws-cli-2.31.0",
+ "requests": [
+  {
+   "operation": "CreateBucket",
+   "method": "PUT",
+   "target": "/evidence",
+   "addressing": "path",
+   "http_version": "HTTP/1.1",
+   "expect_continue": false,
+   "content_sha256": "hex",
+   "headers": [
+    [
+     "Host",
+     "s3.kythira.test:<port>"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "User-Agent",
+     "aws-cli/2.31.0 md/awscrt#0.27.6 ua/2.1 os/linux#<kernel> md/arch#x86_64 lang/python#3.13.7 md/pyimpl#CPython m/E,N,Z,b cfg/retry-mode#standard md/installer#exe md/distrib#ubuntu.24 md/prompt#off md/command#s3.mb"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "X-Amz-Content-SHA256",
+     "<sha256-hex>"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/s3/aws4_request, SignedHeaders=host;x-amz-content-sha256;x-amz-date, Signature=<hex>"
+    ],
+    [
+     "Content-Length",
+     "0"
+    ]
+   ],
+   "body": null,
+   "response_status": 200
+  },
+  {
+   "operation": "HeadBucket",
+   "method": "HEAD",
+   "target": "/evidence",
+   "addressing": "path",
+   "http_version": "HTTP/1.1",
+   "expect_continue": false,
+   "content_sha256": "hex",
+   "headers": [
+    [
+     "Host",
+     "s3.kythira.test:<port>"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "User-Agent",
+     "aws-cli/2.31.0 md/awscrt#0.27.6 ua/2.1 os/linux#<kernel> md/arch#x86_64 lang/python#3.13.7 md/pyimpl#CPython m/E,N,Z,b cfg/retry-mode#standard md/installer#exe md/distrib#ubuntu.24 md/prompt#off md/command#s3api.head-bucket"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "X-Amz-Content-SHA256",
+     "<sha256-hex>"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/s3/aws4_request, SignedHeaders=host;x-amz-content-sha256;x-amz-date, Signature=<hex>"
+    ]
+   ],
+   "body": null,
+   "response_status": 200
+  },
+  {
+   "operation": "PutObject",
+   "method": "PUT",
+   "target": "/evidence/hello.txt",
+   "addressing": "path",
+   "http_version": "HTTP/1.1",
+   "expect_continue": true,
+   "content_sha256": "STREAMING-UNSIGNED-PAYLOAD-TRAILER",
+   "headers": [
+    [
+     "Host",
+     "s3.kythira.test:<port>"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "x-amz-sdk-checksum-algorithm",
+     "CRC64NVME"
+    ],
+    [
+     "Content-Type",
+     "text/plain"
+    ],
+    [
+     "User-Agent",
+     "aws-cli/2.31.0 md/awscrt#0.27.6 ua/2.1 os/linux#<kernel> md/arch#x86_64 lang/python#3.13.7 md/pyimpl#CPython m/E,G,N,W,Z,b cfg/retry-mode#standard md/installer#exe md/distrib#ubuntu.24 md/prompt#off md/command#s3.cp"
+    ],
+    [
+     "Expect",
+     "100-continue"
+    ],
+    [
+     "Transfer-Encoding",
+     "chunked"
+    ],
+    [
+     "Content-Encoding",
+     "aws-chunked"
+    ],
+    [
+     "X-Amz-Trailer",
+     "x-amz-checksum-crc64nvme"
+    ],
+    [
+     "X-Amz-Decoded-Content-Length",
+     "41"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "X-Amz-Content-SHA256",
+     "STREAMING-UNSIGNED-PAYLOAD-TRAILER"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/s3/aws4_request, SignedHeaders=content-encoding;content-type;host;x-amz-content-sha256;x-amz-date;x-amz-decoded-content-length;x-amz-sdk-checksum-algorithm;x-amz-trailer, Signature=<hex>"
+    ]
+   ],
+   "body": {
+    "transfer": "transfer-encoding: chunked",
+    "kind": "object",
+    "length": 41,
+    "sha256": "5731799fa50a404cb2a77e5722751784a724ca25c500908d148f5f1a274b4e05",
+    "aws_chunked": {
+     "chunk_sizes": [
+      {
+       "size": 41,
+       "count": 1
+      },
+      {
+       "size": 0,
+       "count": 1
+      }
+     ],
+     "chunks_signed": false,
+     "trailers": [
+      "x-amz-checksum-crc64nvme"
+     ],
+     "trailer_signed": false
+    },
+    "encoded_length": 91
+   },
+   "response_status": 200
+  },
+  {
+   "operation": "CreateMultipartUpload",
+   "method": "POST",
+   "target": "/evidence/large.bin?uploads",
+   "addressing": "path",
+   "http_version": "HTTP/1.1",
+   "expect_continue": false,
+   "content_sha256": "hex",
+   "headers": [
+    [
+     "Host",
+     "s3.kythira.test:<port>"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "x-amz-checksum-algorithm",
+     "CRC64NVME"
+    ],
+    [
+     "Content-Type",
+     "application/octet-stream"
+    ],
+    [
+     "User-Agent",
+     "aws-cli/2.31.0 md/awscrt#0.27.6 ua/2.1 os/linux#<kernel> md/arch#x86_64 lang/python#3.13.7 md/pyimpl#CPython m/E,G,N,Z,b cfg/retry-mode#standard md/installer#exe md/distrib#ubuntu.24 md/prompt#off md/command#s3.cp"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "X-Amz-Content-SHA256",
+     "<sha256-hex>"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/s3/aws4_request, SignedHeaders=content-type;host;x-amz-checksum-algorithm;x-amz-content-sha256;x-amz-date, Signature=<hex>"
+    ],
+    [
+     "Content-Length",
+     "0"
+    ]
+   ],
+   "body": null,
+   "response_status": 200
+  },
+  {
+   "operation": "UploadPart",
+   "method": "PUT",
+   "target": "/evidence/large.bin?uploadId=evidence-upload-0001&partNumber=1",
+   "addressing": "path",
+   "http_version": "HTTP/1.1",
+   "expect_continue": true,
+   "content_sha256": "STREAMING-UNSIGNED-PAYLOAD-TRAILER",
+   "headers": [
+    [
+     "Host",
+     "s3.kythira.test:<port>"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "x-amz-sdk-checksum-algorithm",
+     "CRC64NVME"
+    ],
+    [
+     "User-Agent",
+     "aws-cli/2.31.0 md/awscrt#0.27.6 ua/2.1 os/linux#<kernel> md/arch#x86_64 lang/python#3.13.7 md/pyimpl#CPython m/E,G,N,W,Z,b cfg/retry-mode#standard md/installer#exe md/distrib#ubuntu.24 md/prompt#off md/command#s3.cp"
+    ],
+    [
+     "Expect",
+     "100-continue"
+    ],
+    [
+     "Transfer-Encoding",
+     "chunked"
+    ],
+    [
+     "Content-Encoding",
+     "aws-chunked"
+    ],
+    [
+     "X-Amz-Trailer",
+     "x-amz-checksum-crc64nvme"
+    ],
+    [
+     "X-Amz-Decoded-Content-Length",
+     "8388608"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "X-Amz-Content-SHA256",
+     "STREAMING-UNSIGNED-PAYLOAD-TRAILER"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/s3/aws4_request, SignedHeaders=content-encoding;host;x-amz-content-sha256;x-amz-date;x-amz-decoded-content-length;x-amz-sdk-checksum-algorithm;x-amz-trailer, Signature=<hex>"
+    ]
+   ],
+   "body": {
+    "transfer": "transfer-encoding: chunked",
+    "kind": "object",
+    "length": 8388608,
+    "sha256": "7d212b9c884f5c77896de960ae17cc341cda43b14d6a971f34ca29ebd4badf7f",
+    "aws_chunked": {
+     "chunk_sizes": [
+      {
+       "size": 1048576,
+       "count": 8
+      },
+      {
+       "size": 0,
+       "count": 1
+      }
+     ],
+     "chunks_signed": false,
+     "trailers": [
+      "x-amz-checksum-crc64nvme"
+     ],
+     "trailer_signed": false
+    },
+    "encoded_length": 8388732
+   },
+   "response_status": 200
+  },
+  {
+   "operation": "UploadPart",
+   "method": "PUT",
+   "target": "/evidence/large.bin?uploadId=evidence-upload-0001&partNumber=2",
+   "addressing": "path",
+   "http_version": "HTTP/1.1",
+   "expect_continue": true,
+   "content_sha256": "STREAMING-UNSIGNED-PAYLOAD-TRAILER",
+   "headers": [
+    [
+     "Host",
+     "s3.kythira.test:<port>"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "x-amz-sdk-checksum-algorithm",
+     "CRC64NVME"
+    ],
+    [
+     "User-Agent",
+     "aws-cli/2.31.0 md/awscrt#0.27.6 ua/2.1 os/linux#<kernel> md/arch#x86_64 lang/python#3.13.7 md/pyimpl#CPython m/E,G,N,W,Z,b cfg/retry-mode#standard md/installer#exe md/distrib#ubuntu.24 md/prompt#off md/command#s3.cp"
+    ],
+    [
+     "Expect",
+     "100-continue"
+    ],
+    [
+     "Transfer-Encoding",
+     "chunked"
+    ],
+    [
+     "Content-Encoding",
+     "aws-chunked"
+    ],
+    [
+     "X-Amz-Trailer",
+     "x-amz-checksum-crc64nvme"
+    ],
+    [
+     "X-Amz-Decoded-Content-Length",
+     "8388608"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "X-Amz-Content-SHA256",
+     "STREAMING-UNSIGNED-PAYLOAD-TRAILER"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/s3/aws4_request, SignedHeaders=content-encoding;host;x-amz-content-sha256;x-amz-date;x-amz-decoded-content-length;x-amz-sdk-checksum-algorithm;x-amz-trailer, Signature=<hex>"
+    ]
+   ],
+   "body": {
+    "transfer": "transfer-encoding: chunked",
+    "kind": "object",
+    "length": 8388608,
+    "sha256": "7d212b9c884f5c77896de960ae17cc341cda43b14d6a971f34ca29ebd4badf7f",
+    "aws_chunked": {
+     "chunk_sizes": [
+      {
+       "size": 1048576,
+       "count": 8
+      },
+      {
+       "size": 0,
+       "count": 1
+      }
+     ],
+     "chunks_signed": false,
+     "trailers": [
+      "x-amz-checksum-crc64nvme"
+     ],
+     "trailer_signed": false
+    },
+    "encoded_length": 8388732
+   },
+   "response_status": 200
+  },
+  {
+   "operation": "UploadPart",
+   "method": "PUT",
+   "target": "/evidence/large.bin?uploadId=evidence-upload-0001&partNumber=3",
+   "addressing": "path",
+   "http_version": "HTTP/1.1",
+   "expect_continue": true,
+   "content_sha256": "STREAMING-UNSIGNED-PAYLOAD-TRAILER",
+   "headers": [
+    [
+     "Host",
+     "s3.kythira.test:<port>"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "x-amz-sdk-checksum-algorithm",
+     "CRC64NVME"
+    ],
+    [
+     "User-Agent",
+     "aws-cli/2.31.0 md/awscrt#0.27.6 ua/2.1 os/linux#<kernel> md/arch#x86_64 lang/python#3.13.7 md/pyimpl#CPython m/E,G,N,W,Z,b cfg/retry-mode#standard md/installer#exe md/distrib#ubuntu.24 md/prompt#off md/command#s3.cp"
+    ],
+    [
+     "Expect",
+     "100-continue"
+    ],
+    [
+     "Transfer-Encoding",
+     "chunked"
+    ],
+    [
+     "Content-Encoding",
+     "aws-chunked"
+    ],
+    [
+     "X-Amz-Trailer",
+     "x-amz-checksum-crc64nvme"
+    ],
+    [
+     "X-Amz-Decoded-Content-Length",
+     "1048576"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "X-Amz-Content-SHA256",
+     "STREAMING-UNSIGNED-PAYLOAD-TRAILER"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/s3/aws4_request, SignedHeaders=content-encoding;host;x-amz-content-sha256;x-amz-date;x-amz-decoded-content-length;x-amz-sdk-checksum-algorithm;x-amz-trailer, Signature=<hex>"
+    ]
+   ],
+   "body": {
+    "transfer": "transfer-encoding: chunked",
+    "kind": "object",
+    "length": 1048576,
+    "sha256": "fbbab289f7f94b25736c58be46a994c441fd02552cc6022352e3d86d2fab7c83",
+    "aws_chunked": {
+     "chunk_sizes": [
+      {
+       "size": 1048576,
+       "count": 1
+      },
+      {
+       "size": 0,
+       "count": 1
+      }
+     ],
+     "chunks_signed": false,
+     "trailers": [
+      "x-amz-checksum-crc64nvme"
+     ],
+     "trailer_signed": false
+    },
+    "encoded_length": 1048630
+   },
+   "response_status": 200
+  },
+  {
+   "operation": "CompleteMultipartUpload",
+   "method": "POST",
+   "target": "/evidence/large.bin?uploadId=evidence-upload-0001",
+   "addressing": "path",
+   "http_version": "HTTP/1.1",
+   "expect_continue": false,
+   "content_sha256": "hex",
+   "headers": [
+    [
+     "Host",
+     "s3.kythira.test:<port>"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "User-Agent",
+     "aws-cli/2.31.0 md/awscrt#0.27.6 ua/2.1 os/linux#<kernel> md/arch#x86_64 lang/python#3.13.7 md/pyimpl#CPython m/E,G,N,Z,b cfg/retry-mode#standard md/installer#exe md/distrib#ubuntu.24 md/prompt#off md/command#s3.cp"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "X-Amz-Content-SHA256",
+     "<sha256-hex>"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/s3/aws4_request, SignedHeaders=host;x-amz-content-sha256;x-amz-date, Signature=<hex>"
+    ],
+    [
+     "Content-Length",
+     "357"
+    ]
+   ],
+   "body": {
+    "transfer": "content-length",
+    "kind": "xml",
+    "text": "<CompleteMultipartUpload xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"><Part><ETag>\"57b019a28c426df5727b3992701bd2be\"</ETag><PartNumber>1</PartNumber></Part><Part><ETag>\"57b019a28c426df5727b3992701bd2be\"</ETag><PartNumber>2</PartNumber></Part><Part><ETag>\"c35cc7d8d91728a0cb052831bc4ef372\"</ETag><PartNumber>3</PartNumber></Part></CompleteMultipartUpload>"
+   },
+   "response_status": 200
+  },
+  {
+   "operation": "HeadObject",
+   "method": "HEAD",
+   "target": "/evidence/hello.txt",
+   "addressing": "path",
+   "http_version": "HTTP/1.1",
+   "expect_continue": false,
+   "content_sha256": "hex",
+   "headers": [
+    [
+     "Host",
+     "s3.kythira.test:<port>"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "User-Agent",
+     "aws-cli/2.31.0 md/awscrt#0.27.6 ua/2.1 os/linux#<kernel> md/arch#x86_64 lang/python#3.13.7 md/pyimpl#CPython m/E,N,Z,b cfg/retry-mode#standard md/installer#exe md/distrib#ubuntu.24 md/prompt#off md/command#s3api.head-object"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "X-Amz-Content-SHA256",
+     "<sha256-hex>"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/s3/aws4_request, SignedHeaders=host;x-amz-content-sha256;x-amz-date, Signature=<hex>"
+    ]
+   ],
+   "body": null,
+   "response_status": 200
+  },
+  {
+   "operation": "GetObject",
+   "method": "GET",
+   "target": "/evidence/hello.txt",
+   "addressing": "path",
+   "http_version": "HTTP/1.1",
+   "expect_continue": false,
+   "content_sha256": "hex",
+   "headers": [
+    [
+     "Host",
+     "s3.kythira.test:<port>"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "Range",
+     "bytes=0-4"
+    ],
+    [
+     "x-amz-checksum-mode",
+     "ENABLED"
+    ],
+    [
+     "User-Agent",
+     "aws-cli/2.31.0 md/awscrt#0.27.6 ua/2.1 os/linux#<kernel> md/arch#x86_64 lang/python#3.13.7 md/pyimpl#CPython m/E,N,Z,b cfg/retry-mode#standard md/installer#exe md/distrib#ubuntu.24 md/prompt#off md/command#s3api.get-object"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "X-Amz-Content-SHA256",
+     "<sha256-hex>"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/s3/aws4_request, SignedHeaders=host;range;x-amz-checksum-mode;x-amz-content-sha256;x-amz-date, Signature=<hex>"
+    ]
+   ],
+   "body": null,
+   "response_status": 206
+  },
+  {
+   "operation": "ListObjectsV2",
+   "method": "GET",
+   "target": "/evidence?list-type=2&prefix=&delimiter=%2F&encoding-type=url",
+   "addressing": "path",
+   "http_version": "HTTP/1.1",
+   "expect_continue": false,
+   "content_sha256": "hex",
+   "headers": [
+    [
+     "Host",
+     "s3.kythira.test:<port>"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "User-Agent",
+     "aws-cli/2.31.0 md/awscrt#0.27.6 ua/2.1 os/linux#<kernel> md/arch#x86_64 lang/python#3.13.7 md/pyimpl#CPython m/C,E,N,Z,b cfg/retry-mode#standard md/installer#exe md/distrib#ubuntu.24 md/prompt#off md/command#s3.ls"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "X-Amz-Content-SHA256",
+     "<sha256-hex>"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/s3/aws4_request, SignedHeaders=host;x-amz-content-sha256;x-amz-date, Signature=<hex>"
+    ]
+   ],
+   "body": null,
+   "response_status": 200
+  },
+  {
+   "operation": "HeadObject",
+   "method": "HEAD",
+   "target": "/evidence/hello.txt",
+   "addressing": "path",
+   "http_version": "HTTP/1.1",
+   "expect_continue": false,
+   "content_sha256": "hex",
+   "headers": [
+    [
+     "Host",
+     "s3.kythira.test:<port>"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "User-Agent",
+     "aws-cli/2.31.0 md/awscrt#0.27.6 ua/2.1 os/linux#<kernel> md/arch#x86_64 lang/python#3.13.7 md/pyimpl#CPython m/E,G,N,Z,b cfg/retry-mode#standard md/installer#exe md/distrib#ubuntu.24 md/prompt#off md/command#s3.cp"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "X-Amz-Content-SHA256",
+     "<sha256-hex>"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/s3/aws4_request, SignedHeaders=host;x-amz-content-sha256;x-amz-date, Signature=<hex>"
+    ]
+   ],
+   "body": null,
+   "response_status": 200
+  },
+  {
+   "operation": "CopyObject",
+   "method": "PUT",
+   "target": "/evidence/dir/copy.txt",
+   "addressing": "path",
+   "http_version": "HTTP/1.1",
+   "expect_continue": false,
+   "content_sha256": "hex",
+   "headers": [
+    [
+     "Host",
+     "s3.kythira.test:<port>"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "x-amz-copy-source",
+     "evidence/hello.txt"
+    ],
+    [
+     "User-Agent",
+     "aws-cli/2.31.0 md/awscrt#0.27.6 ua/2.1 os/linux#<kernel> md/arch#x86_64 lang/python#3.13.7 md/pyimpl#CPython m/E,G,N,Z,b cfg/retry-mode#standard md/installer#exe md/distrib#ubuntu.24 md/prompt#off md/command#s3.cp"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "X-Amz-Content-SHA256",
+     "<sha256-hex>"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/s3/aws4_request, SignedHeaders=host;x-amz-content-sha256;x-amz-copy-source;x-amz-date, Signature=<hex>"
+    ],
+    [
+     "Content-Length",
+     "0"
+    ]
+   ],
+   "body": null,
+   "response_status": 200
+  },
+  {
+   "operation": "HeadObject",
+   "method": "HEAD",
+   "target": "/evidence/large.bin",
+   "addressing": "path",
+   "http_version": "HTTP/1.1",
+   "expect_continue": false,
+   "content_sha256": "hex",
+   "headers": [
+    [
+     "Host",
+     "s3.kythira.test:<port>"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "User-Agent",
+     "aws-cli/2.31.0 md/awscrt#0.27.6 ua/2.1 os/linux#<kernel> md/arch#x86_64 lang/python#3.13.7 md/pyimpl#CPython m/E,G,N,Z,b cfg/retry-mode#standard md/installer#exe md/distrib#ubuntu.24 md/prompt#off md/command#s3.cp"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "X-Amz-Content-SHA256",
+     "<sha256-hex>"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/s3/aws4_request, SignedHeaders=host;x-amz-content-sha256;x-amz-date, Signature=<hex>"
+    ]
+   ],
+   "body": null,
+   "response_status": 200
+  },
+  {
+   "operation": "GetObject",
+   "method": "GET",
+   "target": "/evidence/large.bin",
+   "addressing": "path",
+   "http_version": "HTTP/1.1",
+   "expect_continue": false,
+   "content_sha256": "hex",
+   "headers": [
+    [
+     "Host",
+     "s3.kythira.test:<port>"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "Range",
+     "bytes=0-8388607"
+    ],
+    [
+     "If-Match",
+     "\"088df1b34330dadfb3e923fed96c305b-3\""
+    ],
+    [
+     "x-amz-checksum-mode",
+     "ENABLED"
+    ],
+    [
+     "User-Agent",
+     "aws-cli/2.31.0 md/awscrt#0.27.6 ua/2.1 os/linux#<kernel> md/arch#x86_64 lang/python#3.13.7 md/pyimpl#CPython m/E,G,N,Z,b cfg/retry-mode#standard md/installer#exe md/distrib#ubuntu.24 md/prompt#off md/command#s3.cp"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "X-Amz-Content-SHA256",
+     "<sha256-hex>"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/s3/aws4_request, SignedHeaders=host;if-match;range;x-amz-checksum-mode;x-amz-content-sha256;x-amz-date, Signature=<hex>"
+    ]
+   ],
+   "body": null,
+   "response_status": 206
+  },
+  {
+   "operation": "GetObject",
+   "method": "GET",
+   "target": "/evidence/large.bin",
+   "addressing": "path",
+   "http_version": "HTTP/1.1",
+   "expect_continue": false,
+   "content_sha256": "hex",
+   "headers": [
+    [
+     "Host",
+     "s3.kythira.test:<port>"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "Range",
+     "bytes=8388608-16777215"
+    ],
+    [
+     "If-Match",
+     "\"088df1b34330dadfb3e923fed96c305b-3\""
+    ],
+    [
+     "x-amz-checksum-mode",
+     "ENABLED"
+    ],
+    [
+     "User-Agent",
+     "aws-cli/2.31.0 md/awscrt#0.27.6 ua/2.1 os/linux#<kernel> md/arch#x86_64 lang/python#3.13.7 md/pyimpl#CPython m/E,G,N,Z,b cfg/retry-mode#standard md/installer#exe md/distrib#ubuntu.24 md/prompt#off md/command#s3.cp"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "X-Amz-Content-SHA256",
+     "<sha256-hex>"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/s3/aws4_request, SignedHeaders=host;if-match;range;x-amz-checksum-mode;x-amz-content-sha256;x-amz-date, Signature=<hex>"
+    ]
+   ],
+   "body": null,
+   "response_status": 206
+  },
+  {
+   "operation": "GetObject",
+   "method": "GET",
+   "target": "/evidence/large.bin",
+   "addressing": "path",
+   "http_version": "HTTP/1.1",
+   "expect_continue": false,
+   "content_sha256": "hex",
+   "headers": [
+    [
+     "Host",
+     "s3.kythira.test:<port>"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "Range",
+     "bytes=16777216-"
+    ],
+    [
+     "If-Match",
+     "\"088df1b34330dadfb3e923fed96c305b-3\""
+    ],
+    [
+     "x-amz-checksum-mode",
+     "ENABLED"
+    ],
+    [
+     "User-Agent",
+     "aws-cli/2.31.0 md/awscrt#0.27.6 ua/2.1 os/linux#<kernel> md/arch#x86_64 lang/python#3.13.7 md/pyimpl#CPython m/E,G,N,Z,b cfg/retry-mode#standard md/installer#exe md/distrib#ubuntu.24 md/prompt#off md/command#s3.cp"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "X-Amz-Content-SHA256",
+     "<sha256-hex>"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/s3/aws4_request, SignedHeaders=host;if-match;range;x-amz-checksum-mode;x-amz-content-sha256;x-amz-date, Signature=<hex>"
+    ]
+   ],
+   "body": null,
+   "response_status": 206
+  },
+  {
+   "operation": "GetObject",
+   "method": "GET",
+   "target": "/evidence/hello.txt?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=AKIDEXAMPLE%2F<yyyymmdd>%2Fus-east-1%2Fs3%2Faws4_request&X-Amz-Date=<amz-date>&X-Amz-Expires=3600&X-Amz-SignedHeaders=host&X-Amz-Signature=<hex>",
+   "addressing": "path",
+   "http_version": "HTTP/1.1",
+   "expect_continue": false,
+   "content_sha256": "absent",
+   "headers": [
+    [
+     "Host",
+     "s3.kythira.test:<port>"
+    ],
+    [
+     "User-Agent",
+     "curl/8.5.0"
+    ],
+    [
+     "Accept",
+     "*/*"
+    ]
+   ],
+   "body": null,
+   "response_status": 200
+  },
+  {
+   "operation": "CreateMultipartUpload",
+   "method": "POST",
+   "target": "/evidence/aborted.bin?uploads",
+   "addressing": "path",
+   "http_version": "HTTP/1.1",
+   "expect_continue": false,
+   "content_sha256": "hex",
+   "headers": [
+    [
+     "Host",
+     "s3.kythira.test:<port>"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "User-Agent",
+     "aws-cli/2.31.0 md/awscrt#0.27.6 ua/2.1 os/linux#<kernel> md/arch#x86_64 lang/python#3.13.7 md/pyimpl#CPython m/E,N,Z,b cfg/retry-mode#standard md/installer#exe md/distrib#ubuntu.24 md/prompt#off md/command#s3api.create-multipart-upload"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "X-Amz-Content-SHA256",
+     "<sha256-hex>"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/s3/aws4_request, SignedHeaders=host;x-amz-content-sha256;x-amz-date, Signature=<hex>"
+    ],
+    [
+     "Content-Length",
+     "0"
+    ]
+   ],
+   "body": null,
+   "response_status": 200
+  },
+  {
+   "operation": "AbortMultipartUpload",
+   "method": "DELETE",
+   "target": "/evidence/aborted.bin?uploadId=evidence-upload-0002",
+   "addressing": "path",
+   "http_version": "HTTP/1.1",
+   "expect_continue": false,
+   "content_sha256": "hex",
+   "headers": [
+    [
+     "Host",
+     "s3.kythira.test:<port>"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "User-Agent",
+     "aws-cli/2.31.0 md/awscrt#0.27.6 ua/2.1 os/linux#<kernel> md/arch#x86_64 lang/python#3.13.7 md/pyimpl#CPython m/E,N,Z,b cfg/retry-mode#standard md/installer#exe md/distrib#ubuntu.24 md/prompt#off md/command#s3api.abort-multipart-upload"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "X-Amz-Content-SHA256",
+     "<sha256-hex>"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/s3/aws4_request, SignedHeaders=host;x-amz-content-sha256;x-amz-date, Signature=<hex>"
+    ],
+    [
+     "Content-Length",
+     "0"
+    ]
+   ],
+   "body": null,
+   "response_status": 204
+  },
+  {
+   "operation": "ListObjectsV2",
+   "method": "GET",
+   "target": "/evidence?list-type=2&prefix=&encoding-type=url",
+   "addressing": "path",
+   "http_version": "HTTP/1.1",
+   "expect_continue": false,
+   "content_sha256": "hex",
+   "headers": [
+    [
+     "Host",
+     "s3.kythira.test:<port>"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "User-Agent",
+     "aws-cli/2.31.0 md/awscrt#0.27.6 ua/2.1 os/linux#<kernel> md/arch#x86_64 lang/python#3.13.7 md/pyimpl#CPython m/C,E,G,N,Z,b cfg/retry-mode#standard md/installer#exe md/distrib#ubuntu.24 md/prompt#off md/command#s3.rm"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "X-Amz-Content-SHA256",
+     "<sha256-hex>"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/s3/aws4_request, SignedHeaders=host;x-amz-content-sha256;x-amz-date, Signature=<hex>"
+    ]
+   ],
+   "body": null,
+   "response_status": 200
+  },
+  {
+   "operation": "DeleteObject",
+   "method": "DELETE",
+   "target": "/evidence/dir/copy.txt",
+   "addressing": "path",
+   "http_version": "HTTP/1.1",
+   "expect_continue": false,
+   "content_sha256": "hex",
+   "headers": [
+    [
+     "Host",
+     "s3.kythira.test:<port>"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "User-Agent",
+     "aws-cli/2.31.0 md/awscrt#0.27.6 ua/2.1 os/linux#<kernel> md/arch#x86_64 lang/python#3.13.7 md/pyimpl#CPython m/E,G,N,Z,b cfg/retry-mode#standard md/installer#exe md/distrib#ubuntu.24 md/prompt#off md/command#s3.rm"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "X-Amz-Content-SHA256",
+     "<sha256-hex>"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/s3/aws4_request, SignedHeaders=host;x-amz-content-sha256;x-amz-date, Signature=<hex>"
+    ],
+    [
+     "Content-Length",
+     "0"
+    ]
+   ],
+   "body": null,
+   "response_status": 204
+  },
+  {
+   "operation": "DeleteObject",
+   "method": "DELETE",
+   "target": "/evidence/hello.txt",
+   "addressing": "path",
+   "http_version": "HTTP/1.1",
+   "expect_continue": false,
+   "content_sha256": "hex",
+   "headers": [
+    [
+     "Host",
+     "s3.kythira.test:<port>"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "User-Agent",
+     "aws-cli/2.31.0 md/awscrt#0.27.6 ua/2.1 os/linux#<kernel> md/arch#x86_64 lang/python#3.13.7 md/pyimpl#CPython m/E,G,N,Z,b cfg/retry-mode#standard md/installer#exe md/distrib#ubuntu.24 md/prompt#off md/command#s3.rm"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "X-Amz-Content-SHA256",
+     "<sha256-hex>"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/s3/aws4_request, SignedHeaders=host;x-amz-content-sha256;x-amz-date, Signature=<hex>"
+    ],
+    [
+     "Content-Length",
+     "0"
+    ]
+   ],
+   "body": null,
+   "response_status": 204
+  },
+  {
+   "operation": "DeleteObject",
+   "method": "DELETE",
+   "target": "/evidence/large.bin",
+   "addressing": "path",
+   "http_version": "HTTP/1.1",
+   "expect_continue": false,
+   "content_sha256": "hex",
+   "headers": [
+    [
+     "Host",
+     "s3.kythira.test:<port>"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "User-Agent",
+     "aws-cli/2.31.0 md/awscrt#0.27.6 ua/2.1 os/linux#<kernel> md/arch#x86_64 lang/python#3.13.7 md/pyimpl#CPython m/E,G,N,Z,b cfg/retry-mode#standard md/installer#exe md/distrib#ubuntu.24 md/prompt#off md/command#s3.rm"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "X-Amz-Content-SHA256",
+     "<sha256-hex>"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/s3/aws4_request, SignedHeaders=host;x-amz-content-sha256;x-amz-date, Signature=<hex>"
+    ],
+    [
+     "Content-Length",
+     "0"
+    ]
+   ],
+   "body": null,
+   "response_status": 204
+  },
+  {
+   "operation": "DeleteBucket",
+   "method": "DELETE",
+   "target": "/evidence",
+   "addressing": "path",
+   "http_version": "HTTP/1.1",
+   "expect_continue": false,
+   "content_sha256": "hex",
+   "headers": [
+    [
+     "Host",
+     "s3.kythira.test:<port>"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "User-Agent",
+     "aws-cli/2.31.0 md/awscrt#0.27.6 ua/2.1 os/linux#<kernel> md/arch#x86_64 lang/python#3.13.7 md/pyimpl#CPython m/E,N,Z,b cfg/retry-mode#standard md/installer#exe md/distrib#ubuntu.24 md/prompt#off md/command#s3.rb"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "X-Amz-Content-SHA256",
+     "<sha256-hex>"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/s3/aws4_request, SignedHeaders=host;x-amz-content-sha256;x-amz-date, Signature=<hex>"
+    ],
+    [
+     "Content-Length",
+     "0"
+    ]
+   ],
+   "body": null,
+   "response_status": 204
+  }
+ ],
+ "summary": {
+  "operations": [
+   "CreateBucket",
+   "HeadBucket",
+   "PutObject",
+   "CreateMultipartUpload",
+   "UploadPart",
+   "UploadPart",
+   "UploadPart",
+   "CompleteMultipartUpload",
+   "HeadObject",
+   "GetObject",
+   "ListObjectsV2",
+   "HeadObject",
+   "CopyObject",
+   "HeadObject",
+   "GetObject",
+   "GetObject",
+   "GetObject",
+   "GetObject",
+   "CreateMultipartUpload",
+   "AbortMultipartUpload",
+   "ListObjectsV2",
+   "DeleteObject",
+   "DeleteObject",
+   "DeleteObject",
+   "DeleteBucket"
+  ],
+  "addressing": [
+   "path"
+  ],
+  "content_sha256": [
+   "STREAMING-UNSIGNED-PAYLOAD-TRAILER",
+   "absent",
+   "hex"
+  ],
+  "http_versions": [
+   "HTTP/1.1"
+  ],
+  "expect_continue": [
+   "False",
+   "True"
+  ],
+  "object_uploads": [
+   {
+    "aws_chunked": true,
+    "chunks_signed": false,
+    "trailers": [
+     "x-amz-checksum-crc64nvme"
+    ],
+    "transfer": "transfer-encoding: chunked",
+    "x-amz-content-sha256": "STREAMING-UNSIGNED-PAYLOAD-TRAILER",
+    "requests": 4
+   }
+  ]
+ }
+}

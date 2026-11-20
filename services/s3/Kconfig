@@ -1,0 +1,23 @@
+# Copyright (c) 2026 Clark Rawlins
+# SPDX-License-Identifier: Apache-2.0
+
+# The Amazon S3-compatible object storage service (services/s3/,
+# .kiro/specs/s3-compatible-storage/). Sourced from the top-level Kconfig's
+# "Service Modules" menu.
+
+config S3
+	bool "Amazon S3-compatible object storage service"
+	default n
+	depends on OPENSSL
+	help
+	  Builds the services/s3/ module: an Amazon S3-compatible object
+	  store that unmodified AWS SDKs, the AWS CLI, rclone and Mountpoint
+	  for Amazon S3 can point at, with object metadata in Kythira's Raft
+	  groups and object bytes in content-addressed chunks outside the
+	  Raft log. Service module number 8. So far the module holds the
+	  pinned botocore model, the generated operation table, the coverage
+	  check and the s3_gateway_node placeholder (task 1); the REST-XML
+	  codec, object index and data path follow. OpenSSL is needed for
+	  SigV4, chunk digests and server-side encryption. Off by default
+	  like every new module (services/README.md). See
+	  .kiro/specs/s3-compatible-storage/.

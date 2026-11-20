@@ -1,0 +1,1425 @@
+{
+ "client": "boto3-1.43.126",
+ "requests": [
+  {
+   "operation": "CreateBucket",
+   "method": "PUT",
+   "target": "/evidence",
+   "addressing": "path",
+   "http_version": "HTTP/1.1",
+   "expect_continue": false,
+   "content_sha256": "hex",
+   "headers": [
+    [
+     "Host",
+     "s3.kythira.test:<port>"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "User-Agent",
+     "Boto3/1.43.126 md/Botocore#1.43.126 ua/2.1 os/linux#<kernel> md/arch#x86_64 lang/python#3.13.18 md/pyimpl#CPython m/D,N,Z,b,g cfg/retry-mode#legacy Botocore/1.43.126"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "X-Amz-Content-SHA256",
+     "<sha256-hex>"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/s3/aws4_request, SignedHeaders=host;x-amz-content-sha256;x-amz-date, Signature=<hex>"
+    ],
+    [
+     "amz-sdk-invocation-id",
+     "<uuid>"
+    ],
+    [
+     "amz-sdk-request",
+     "attempt=1"
+    ],
+    [
+     "Content-Length",
+     "0"
+    ]
+   ],
+   "body": null,
+   "response_status": 200
+  },
+  {
+   "operation": "HeadBucket",
+   "method": "HEAD",
+   "target": "/evidence",
+   "addressing": "path",
+   "http_version": "HTTP/1.1",
+   "expect_continue": false,
+   "content_sha256": "hex",
+   "headers": [
+    [
+     "Host",
+     "s3.kythira.test:<port>"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "User-Agent",
+     "Boto3/1.43.126 md/Botocore#1.43.126 ua/2.1 os/linux#<kernel> md/arch#x86_64 lang/python#3.13.18 md/pyimpl#CPython m/D,N,Z,b,g cfg/retry-mode#legacy Botocore/1.43.126"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "X-Amz-Content-SHA256",
+     "<sha256-hex>"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/s3/aws4_request, SignedHeaders=host;x-amz-content-sha256;x-amz-date, Signature=<hex>"
+    ],
+    [
+     "amz-sdk-invocation-id",
+     "<uuid>"
+    ],
+    [
+     "amz-sdk-request",
+     "attempt=1"
+    ]
+   ],
+   "body": null,
+   "response_status": 200
+  },
+  {
+   "operation": "GetBucketLocation",
+   "method": "GET",
+   "target": "/evidence?location",
+   "addressing": "path",
+   "http_version": "HTTP/1.1",
+   "expect_continue": false,
+   "content_sha256": "hex",
+   "headers": [
+    [
+     "Host",
+     "s3.kythira.test:<port>"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "User-Agent",
+     "Boto3/1.43.126 md/Botocore#1.43.126 ua/2.1 os/linux#<kernel> md/arch#x86_64 lang/python#3.13.18 md/pyimpl#CPython m/D,N,Z,b,g cfg/retry-mode#legacy Botocore/1.43.126"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "X-Amz-Content-SHA256",
+     "<sha256-hex>"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/s3/aws4_request, SignedHeaders=host;x-amz-content-sha256;x-amz-date, Signature=<hex>"
+    ],
+    [
+     "amz-sdk-invocation-id",
+     "<uuid>"
+    ],
+    [
+     "amz-sdk-request",
+     "attempt=1"
+    ]
+   ],
+   "body": null,
+   "response_status": 200
+  },
+  {
+   "operation": "PutObject",
+   "method": "PUT",
+   "target": "/evidence/hello.txt",
+   "addressing": "path",
+   "http_version": "HTTP/1.1",
+   "expect_continue": true,
+   "content_sha256": "STREAMING-UNSIGNED-PAYLOAD-TRAILER",
+   "headers": [
+    [
+     "Host",
+     "s3.kythira.test:<port>"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "Content-Type",
+     "text/plain"
+    ],
+    [
+     "User-Agent",
+     "Boto3/1.43.126 md/Botocore#1.43.126 ua/2.1 os/linux#<kernel> md/arch#x86_64 lang/python#3.13.18 md/pyimpl#CPython m/D,N,U,Z,b,g cfg/retry-mode#legacy Botocore/1.43.126"
+    ],
+    [
+     "Expect",
+     "100-continue"
+    ],
+    [
+     "Transfer-Encoding",
+     "chunked"
+    ],
+    [
+     "Content-Encoding",
+     "aws-chunked"
+    ],
+    [
+     "X-Amz-Trailer",
+     "x-amz-checksum-crc32"
+    ],
+    [
+     "X-Amz-Decoded-Content-Length",
+     "41"
+    ],
+    [
+     "x-amz-sdk-checksum-algorithm",
+     "CRC32"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "X-Amz-Content-SHA256",
+     "STREAMING-UNSIGNED-PAYLOAD-TRAILER"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/s3/aws4_request, SignedHeaders=content-encoding;content-type;host;x-amz-content-sha256;x-amz-date;x-amz-decoded-content-length;x-amz-sdk-checksum-algorithm;x-amz-trailer, Signature=<hex>"
+    ],
+    [
+     "amz-sdk-invocation-id",
+     "<uuid>"
+    ],
+    [
+     "amz-sdk-request",
+     "attempt=1"
+    ]
+   ],
+   "body": {
+    "transfer": "transfer-encoding: chunked",
+    "kind": "object",
+    "length": 41,
+    "sha256": "5731799fa50a404cb2a77e5722751784a724ca25c500908d148f5f1a274b4e05",
+    "aws_chunked": {
+     "chunk_sizes": [
+      {
+       "size": 41,
+       "count": 1
+      },
+      {
+       "size": 0,
+       "count": 1
+      }
+     ],
+     "chunks_signed": false,
+     "trailers": [
+      "x-amz-checksum-crc32"
+     ],
+     "trailer_signed": false
+    },
+    "encoded_length": 83
+   },
+   "response_status": 200
+  },
+  {
+   "operation": "PutObject",
+   "method": "PUT",
+   "target": "/evidence/dir/sha256.txt",
+   "addressing": "path",
+   "http_version": "HTTP/1.1",
+   "expect_continue": true,
+   "content_sha256": "STREAMING-UNSIGNED-PAYLOAD-TRAILER",
+   "headers": [
+    [
+     "Host",
+     "s3.kythira.test:<port>"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "x-amz-sdk-checksum-algorithm",
+     "SHA256"
+    ],
+    [
+     "User-Agent",
+     "Boto3/1.43.126 md/Botocore#1.43.126 ua/2.1 os/linux#<kernel> md/arch#x86_64 lang/python#3.13.18 md/pyimpl#CPython m/D,N,Y,Z,b,g cfg/retry-mode#legacy Botocore/1.43.126"
+    ],
+    [
+     "Expect",
+     "100-continue"
+    ],
+    [
+     "Transfer-Encoding",
+     "chunked"
+    ],
+    [
+     "Content-Encoding",
+     "aws-chunked"
+    ],
+    [
+     "X-Amz-Trailer",
+     "x-amz-checksum-sha256"
+    ],
+    [
+     "X-Amz-Decoded-Content-Length",
+     "41"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "X-Amz-Content-SHA256",
+     "STREAMING-UNSIGNED-PAYLOAD-TRAILER"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/s3/aws4_request, SignedHeaders=content-encoding;host;x-amz-content-sha256;x-amz-date;x-amz-decoded-content-length;x-amz-sdk-checksum-algorithm;x-amz-trailer, Signature=<hex>"
+    ],
+    [
+     "amz-sdk-invocation-id",
+     "<uuid>"
+    ],
+    [
+     "amz-sdk-request",
+     "attempt=1"
+    ]
+   ],
+   "body": {
+    "transfer": "transfer-encoding: chunked",
+    "kind": "object",
+    "length": 41,
+    "sha256": "5731799fa50a404cb2a77e5722751784a724ca25c500908d148f5f1a274b4e05",
+    "aws_chunked": {
+     "chunk_sizes": [
+      {
+       "size": 41,
+       "count": 1
+      },
+      {
+       "size": 0,
+       "count": 1
+      }
+     ],
+     "chunks_signed": false,
+     "trailers": [
+      "x-amz-checksum-sha256"
+     ],
+     "trailer_signed": false
+    },
+    "encoded_length": 120
+   },
+   "response_status": 200
+  },
+  {
+   "operation": "HeadObject",
+   "method": "HEAD",
+   "target": "/evidence/hello.txt",
+   "addressing": "path",
+   "http_version": "HTTP/1.1",
+   "expect_continue": false,
+   "content_sha256": "hex",
+   "headers": [
+    [
+     "Host",
+     "s3.kythira.test:<port>"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "User-Agent",
+     "Boto3/1.43.126 md/Botocore#1.43.126 ua/2.1 os/linux#<kernel> md/arch#x86_64 lang/python#3.13.18 md/pyimpl#CPython m/D,N,Z,b,g cfg/retry-mode#legacy Botocore/1.43.126"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "X-Amz-Content-SHA256",
+     "<sha256-hex>"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/s3/aws4_request, SignedHeaders=host;x-amz-content-sha256;x-amz-date, Signature=<hex>"
+    ],
+    [
+     "amz-sdk-invocation-id",
+     "<uuid>"
+    ],
+    [
+     "amz-sdk-request",
+     "attempt=1"
+    ]
+   ],
+   "body": null,
+   "response_status": 200
+  },
+  {
+   "operation": "GetObject",
+   "method": "GET",
+   "target": "/evidence/hello.txt",
+   "addressing": "path",
+   "http_version": "HTTP/1.1",
+   "expect_continue": false,
+   "content_sha256": "hex",
+   "headers": [
+    [
+     "Host",
+     "s3.kythira.test:<port>"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "Range",
+     "bytes=0-4"
+    ],
+    [
+     "x-amz-checksum-mode",
+     "ENABLED"
+    ],
+    [
+     "User-Agent",
+     "Boto3/1.43.126 md/Botocore#1.43.126 ua/2.1 os/linux#<kernel> md/arch#x86_64 lang/python#3.13.18 md/pyimpl#CPython m/D,N,Z,b,g cfg/retry-mode#legacy Botocore/1.43.126"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "X-Amz-Content-SHA256",
+     "<sha256-hex>"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/s3/aws4_request, SignedHeaders=host;range;x-amz-checksum-mode;x-amz-content-sha256;x-amz-date, Signature=<hex>"
+    ],
+    [
+     "amz-sdk-invocation-id",
+     "<uuid>"
+    ],
+    [
+     "amz-sdk-request",
+     "attempt=1"
+    ]
+   ],
+   "body": null,
+   "response_status": 206
+  },
+  {
+   "operation": "CreateMultipartUpload",
+   "method": "POST",
+   "target": "/evidence/large.bin?uploads",
+   "addressing": "path",
+   "http_version": "HTTP/1.1",
+   "expect_continue": false,
+   "content_sha256": "hex",
+   "headers": [
+    [
+     "Host",
+     "s3.kythira.test:<port>"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "x-amz-checksum-algorithm",
+     "CRC32"
+    ],
+    [
+     "User-Agent",
+     "Boto3/1.43.126 md/Botocore#1.43.126 ua/2.1 os/linux#<kernel> md/arch#x86_64 lang/python#3.13.18 md/pyimpl#CPython m/D,G,N,Z,b,g cfg/retry-mode#legacy Botocore/1.43.126"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "X-Amz-Content-SHA256",
+     "<sha256-hex>"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/s3/aws4_request, SignedHeaders=host;x-amz-checksum-algorithm;x-amz-content-sha256;x-amz-date, Signature=<hex>"
+    ],
+    [
+     "amz-sdk-invocation-id",
+     "<uuid>"
+    ],
+    [
+     "amz-sdk-request",
+     "attempt=1"
+    ],
+    [
+     "Content-Length",
+     "0"
+    ]
+   ],
+   "body": null,
+   "response_status": 200
+  },
+  {
+   "operation": "UploadPart",
+   "method": "PUT",
+   "target": "/evidence/large.bin?uploadId=evidence-upload-0001&partNumber=1",
+   "addressing": "path",
+   "http_version": "HTTP/1.1",
+   "expect_continue": true,
+   "content_sha256": "STREAMING-UNSIGNED-PAYLOAD-TRAILER",
+   "headers": [
+    [
+     "Host",
+     "s3.kythira.test:<port>"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "x-amz-sdk-checksum-algorithm",
+     "CRC32"
+    ],
+    [
+     "User-Agent",
+     "Boto3/1.43.126 md/Botocore#1.43.126 ua/2.1 os/linux#<kernel> md/arch#x86_64 lang/python#3.13.18 md/pyimpl#CPython m/D,G,N,U,Z,b,g cfg/retry-mode#legacy Botocore/1.43.126"
+    ],
+    [
+     "Expect",
+     "100-continue"
+    ],
+    [
+     "Transfer-Encoding",
+     "chunked"
+    ],
+    [
+     "Content-Encoding",
+     "aws-chunked"
+    ],
+    [
+     "X-Amz-Trailer",
+     "x-amz-checksum-crc32"
+    ],
+    [
+     "X-Amz-Decoded-Content-Length",
+     "8388608"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "X-Amz-Content-SHA256",
+     "STREAMING-UNSIGNED-PAYLOAD-TRAILER"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/s3/aws4_request, SignedHeaders=content-encoding;host;x-amz-content-sha256;x-amz-date;x-amz-decoded-content-length;x-amz-sdk-checksum-algorithm;x-amz-trailer, Signature=<hex>"
+    ],
+    [
+     "amz-sdk-invocation-id",
+     "<uuid>"
+    ],
+    [
+     "amz-sdk-request",
+     "attempt=1"
+    ]
+   ],
+   "body": {
+    "transfer": "transfer-encoding: chunked",
+    "kind": "object",
+    "length": 8388608,
+    "sha256": "7d212b9c884f5c77896de960ae17cc341cda43b14d6a971f34ca29ebd4badf7f",
+    "aws_chunked": {
+     "chunk_sizes": [
+      {
+       "size": 1048576,
+       "count": 8
+      },
+      {
+       "size": 0,
+       "count": 1
+      }
+     ],
+     "chunks_signed": false,
+     "trailers": [
+      "x-amz-checksum-crc32"
+     ],
+     "trailer_signed": false
+    },
+    "encoded_length": 8388724
+   },
+   "response_status": 200
+  },
+  {
+   "operation": "UploadPart",
+   "method": "PUT",
+   "target": "/evidence/large.bin?uploadId=evidence-upload-0001&partNumber=2",
+   "addressing": "path",
+   "http_version": "HTTP/1.1",
+   "expect_continue": true,
+   "content_sha256": "STREAMING-UNSIGNED-PAYLOAD-TRAILER",
+   "headers": [
+    [
+     "Host",
+     "s3.kythira.test:<port>"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "x-amz-sdk-checksum-algorithm",
+     "CRC32"
+    ],
+    [
+     "User-Agent",
+     "Boto3/1.43.126 md/Botocore#1.43.126 ua/2.1 os/linux#<kernel> md/arch#x86_64 lang/python#3.13.18 md/pyimpl#CPython m/D,G,N,U,Z,b,g cfg/retry-mode#legacy Botocore/1.43.126"
+    ],
+    [
+     "Expect",
+     "100-continue"
+    ],
+    [
+     "Transfer-Encoding",
+     "chunked"
+    ],
+    [
+     "Content-Encoding",
+     "aws-chunked"
+    ],
+    [
+     "X-Amz-Trailer",
+     "x-amz-checksum-crc32"
+    ],
+    [
+     "X-Amz-Decoded-Content-Length",
+     "8388608"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "X-Amz-Content-SHA256",
+     "STREAMING-UNSIGNED-PAYLOAD-TRAILER"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/s3/aws4_request, SignedHeaders=content-encoding;host;x-amz-content-sha256;x-amz-date;x-amz-decoded-content-length;x-amz-sdk-checksum-algorithm;x-amz-trailer, Signature=<hex>"
+    ],
+    [
+     "amz-sdk-invocation-id",
+     "<uuid>"
+    ],
+    [
+     "amz-sdk-request",
+     "attempt=1"
+    ]
+   ],
+   "body": {
+    "transfer": "transfer-encoding: chunked",
+    "kind": "object",
+    "length": 8388608,
+    "sha256": "7d212b9c884f5c77896de960ae17cc341cda43b14d6a971f34ca29ebd4badf7f",
+    "aws_chunked": {
+     "chunk_sizes": [
+      {
+       "size": 1048576,
+       "count": 8
+      },
+      {
+       "size": 0,
+       "count": 1
+      }
+     ],
+     "chunks_signed": false,
+     "trailers": [
+      "x-amz-checksum-crc32"
+     ],
+     "trailer_signed": false
+    },
+    "encoded_length": 8388724
+   },
+   "response_status": 200
+  },
+  {
+   "operation": "UploadPart",
+   "method": "PUT",
+   "target": "/evidence/large.bin?uploadId=evidence-upload-0001&partNumber=3",
+   "addressing": "path",
+   "http_version": "HTTP/1.1",
+   "expect_continue": true,
+   "content_sha256": "STREAMING-UNSIGNED-PAYLOAD-TRAILER",
+   "headers": [
+    [
+     "Host",
+     "s3.kythira.test:<port>"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "x-amz-sdk-checksum-algorithm",
+     "CRC32"
+    ],
+    [
+     "User-Agent",
+     "Boto3/1.43.126 md/Botocore#1.43.126 ua/2.1 os/linux#<kernel> md/arch#x86_64 lang/python#3.13.18 md/pyimpl#CPython m/D,G,N,U,Z,b,g cfg/retry-mode#legacy Botocore/1.43.126"
+    ],
+    [
+     "Expect",
+     "100-continue"
+    ],
+    [
+     "Transfer-Encoding",
+     "chunked"
+    ],
+    [
+     "Content-Encoding",
+     "aws-chunked"
+    ],
+    [
+     "X-Amz-Trailer",
+     "x-amz-checksum-crc32"
+    ],
+    [
+     "X-Amz-Decoded-Content-Length",
+     "1048576"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "X-Amz-Content-SHA256",
+     "STREAMING-UNSIGNED-PAYLOAD-TRAILER"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/s3/aws4_request, SignedHeaders=content-encoding;host;x-amz-content-sha256;x-amz-date;x-amz-decoded-content-length;x-amz-sdk-checksum-algorithm;x-amz-trailer, Signature=<hex>"
+    ],
+    [
+     "amz-sdk-invocation-id",
+     "<uuid>"
+    ],
+    [
+     "amz-sdk-request",
+     "attempt=1"
+    ]
+   ],
+   "body": {
+    "transfer": "transfer-encoding: chunked",
+    "kind": "object",
+    "length": 1048576,
+    "sha256": "fbbab289f7f94b25736c58be46a994c441fd02552cc6022352e3d86d2fab7c83",
+    "aws_chunked": {
+     "chunk_sizes": [
+      {
+       "size": 1048576,
+       "count": 1
+      },
+      {
+       "size": 0,
+       "count": 1
+      }
+     ],
+     "chunks_signed": false,
+     "trailers": [
+      "x-amz-checksum-crc32"
+     ],
+     "trailer_signed": false
+    },
+    "encoded_length": 1048622
+   },
+   "response_status": 200
+  },
+  {
+   "operation": "CompleteMultipartUpload",
+   "method": "POST",
+   "target": "/evidence/large.bin?uploadId=evidence-upload-0001",
+   "addressing": "path",
+   "http_version": "HTTP/1.1",
+   "expect_continue": false,
+   "content_sha256": "hex",
+   "headers": [
+    [
+     "Host",
+     "s3.kythira.test:<port>"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "User-Agent",
+     "Boto3/1.43.126 md/Botocore#1.43.126 ua/2.1 os/linux#<kernel> md/arch#x86_64 lang/python#3.13.18 md/pyimpl#CPython m/D,G,N,Z,b,g cfg/retry-mode#legacy Botocore/1.43.126"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "X-Amz-Content-SHA256",
+     "<sha256-hex>"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/s3/aws4_request, SignedHeaders=host;x-amz-content-sha256;x-amz-date, Signature=<hex>"
+    ],
+    [
+     "amz-sdk-invocation-id",
+     "<uuid>"
+    ],
+    [
+     "amz-sdk-request",
+     "attempt=1"
+    ],
+    [
+     "Content-Length",
+     "357"
+    ]
+   ],
+   "body": {
+    "transfer": "content-length",
+    "kind": "xml",
+    "text": "<CompleteMultipartUpload xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"><Part><ETag>\"57b019a28c426df5727b3992701bd2be\"</ETag><PartNumber>1</PartNumber></Part><Part><ETag>\"57b019a28c426df5727b3992701bd2be\"</ETag><PartNumber>2</PartNumber></Part><Part><ETag>\"c35cc7d8d91728a0cb052831bc4ef372\"</ETag><PartNumber>3</PartNumber></Part></CompleteMultipartUpload>"
+   },
+   "response_status": 200
+  },
+  {
+   "operation": "ListObjectsV2",
+   "method": "GET",
+   "target": "/evidence?list-type=2&prefix=&delimiter=%2F&encoding-type=url",
+   "addressing": "path",
+   "http_version": "HTTP/1.1",
+   "expect_continue": false,
+   "content_sha256": "hex",
+   "headers": [
+    [
+     "Host",
+     "s3.kythira.test:<port>"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "User-Agent",
+     "Boto3/1.43.126 md/Botocore#1.43.126 ua/2.1 os/linux#<kernel> md/arch#x86_64 lang/python#3.13.18 md/pyimpl#CPython m/D,N,Z,b,g cfg/retry-mode#legacy Botocore/1.43.126"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "X-Amz-Content-SHA256",
+     "<sha256-hex>"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/s3/aws4_request, SignedHeaders=host;x-amz-content-sha256;x-amz-date, Signature=<hex>"
+    ],
+    [
+     "amz-sdk-invocation-id",
+     "<uuid>"
+    ],
+    [
+     "amz-sdk-request",
+     "attempt=1"
+    ]
+   ],
+   "body": null,
+   "response_status": 200
+  },
+  {
+   "operation": "ListObjects",
+   "method": "GET",
+   "target": "/evidence?encoding-type=url",
+   "addressing": "path",
+   "http_version": "HTTP/1.1",
+   "expect_continue": false,
+   "content_sha256": "hex",
+   "headers": [
+    [
+     "Host",
+     "s3.kythira.test:<port>"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "User-Agent",
+     "Boto3/1.43.126 md/Botocore#1.43.126 ua/2.1 os/linux#<kernel> md/arch#x86_64 lang/python#3.13.18 md/pyimpl#CPython m/D,N,Z,b,g cfg/retry-mode#legacy Botocore/1.43.126"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "X-Amz-Content-SHA256",
+     "<sha256-hex>"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/s3/aws4_request, SignedHeaders=host;x-amz-content-sha256;x-amz-date, Signature=<hex>"
+    ],
+    [
+     "amz-sdk-invocation-id",
+     "<uuid>"
+    ],
+    [
+     "amz-sdk-request",
+     "attempt=1"
+    ]
+   ],
+   "body": null,
+   "response_status": 200
+  },
+  {
+   "operation": "CopyObject",
+   "method": "PUT",
+   "target": "/evidence/copy.txt",
+   "addressing": "path",
+   "http_version": "HTTP/1.1",
+   "expect_continue": false,
+   "content_sha256": "hex",
+   "headers": [
+    [
+     "Host",
+     "s3.kythira.test:<port>"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "x-amz-copy-source",
+     "evidence/hello.txt"
+    ],
+    [
+     "User-Agent",
+     "Boto3/1.43.126 md/Botocore#1.43.126 ua/2.1 os/linux#<kernel> md/arch#x86_64 lang/python#3.13.18 md/pyimpl#CPython m/D,N,Z,b,g cfg/retry-mode#legacy Botocore/1.43.126"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "X-Amz-Content-SHA256",
+     "<sha256-hex>"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/s3/aws4_request, SignedHeaders=host;x-amz-content-sha256;x-amz-copy-source;x-amz-date, Signature=<hex>"
+    ],
+    [
+     "amz-sdk-invocation-id",
+     "<uuid>"
+    ],
+    [
+     "amz-sdk-request",
+     "attempt=1"
+    ],
+    [
+     "Content-Length",
+     "0"
+    ]
+   ],
+   "body": null,
+   "response_status": 200
+  },
+  {
+   "operation": "GetObject",
+   "method": "GET",
+   "target": "/evidence/copy.txt?AWSAccessKeyId=AKIDEXAMPLE&Signature=<base64>&Expires=<epoch>",
+   "addressing": "path",
+   "http_version": "HTTP/1.1",
+   "expect_continue": false,
+   "content_sha256": "absent",
+   "headers": [
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "Host",
+     "s3.kythira.test:<port>"
+    ],
+    [
+     "User-Agent",
+     "Python-urllib/3.13"
+    ],
+    [
+     "Connection",
+     "close"
+    ]
+   ],
+   "body": null,
+   "response_status": 200
+  },
+  {
+   "operation": "GetObject",
+   "method": "GET",
+   "target": "/evidence/copy.txt?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=AKIDEXAMPLE%2F<yyyymmdd>%2Fus-east-1%2Fs3%2Faws4_request&X-Amz-Date=<amz-date>&X-Amz-Expires=3600&X-Amz-SignedHeaders=host&X-Amz-Signature=<hex>",
+   "addressing": "path",
+   "http_version": "HTTP/1.1",
+   "expect_continue": false,
+   "content_sha256": "absent",
+   "headers": [
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "Host",
+     "s3.kythira.test:<port>"
+    ],
+    [
+     "User-Agent",
+     "Python-urllib/3.13"
+    ],
+    [
+     "Connection",
+     "close"
+    ]
+   ],
+   "body": null,
+   "response_status": 200
+  },
+  {
+   "operation": "CreateMultipartUpload",
+   "method": "POST",
+   "target": "/evidence/aborted.bin?uploads",
+   "addressing": "path",
+   "http_version": "HTTP/1.1",
+   "expect_continue": false,
+   "content_sha256": "hex",
+   "headers": [
+    [
+     "Host",
+     "s3.kythira.test:<port>"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "User-Agent",
+     "Boto3/1.43.126 md/Botocore#1.43.126 ua/2.1 os/linux#<kernel> md/arch#x86_64 lang/python#3.13.18 md/pyimpl#CPython m/D,N,Z,b,g cfg/retry-mode#legacy Botocore/1.43.126"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "X-Amz-Content-SHA256",
+     "<sha256-hex>"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/s3/aws4_request, SignedHeaders=host;x-amz-content-sha256;x-amz-date, Signature=<hex>"
+    ],
+    [
+     "amz-sdk-invocation-id",
+     "<uuid>"
+    ],
+    [
+     "amz-sdk-request",
+     "attempt=1"
+    ],
+    [
+     "Content-Length",
+     "0"
+    ]
+   ],
+   "body": null,
+   "response_status": 200
+  },
+  {
+   "operation": "ListMultipartUploads",
+   "method": "GET",
+   "target": "/evidence?uploads",
+   "addressing": "path",
+   "http_version": "HTTP/1.1",
+   "expect_continue": false,
+   "content_sha256": "hex",
+   "headers": [
+    [
+     "Host",
+     "s3.kythira.test:<port>"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "User-Agent",
+     "Boto3/1.43.126 md/Botocore#1.43.126 ua/2.1 os/linux#<kernel> md/arch#x86_64 lang/python#3.13.18 md/pyimpl#CPython m/D,N,Z,b,g cfg/retry-mode#legacy Botocore/1.43.126"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "X-Amz-Content-SHA256",
+     "<sha256-hex>"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/s3/aws4_request, SignedHeaders=host;x-amz-content-sha256;x-amz-date, Signature=<hex>"
+    ],
+    [
+     "amz-sdk-invocation-id",
+     "<uuid>"
+    ],
+    [
+     "amz-sdk-request",
+     "attempt=1"
+    ]
+   ],
+   "body": null,
+   "response_status": 200
+  },
+  {
+   "operation": "AbortMultipartUpload",
+   "method": "DELETE",
+   "target": "/evidence/aborted.bin?uploadId=evidence-upload-0002",
+   "addressing": "path",
+   "http_version": "HTTP/1.1",
+   "expect_continue": false,
+   "content_sha256": "hex",
+   "headers": [
+    [
+     "Host",
+     "s3.kythira.test:<port>"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "User-Agent",
+     "Boto3/1.43.126 md/Botocore#1.43.126 ua/2.1 os/linux#<kernel> md/arch#x86_64 lang/python#3.13.18 md/pyimpl#CPython m/D,N,Z,b,g cfg/retry-mode#legacy Botocore/1.43.126"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "X-Amz-Content-SHA256",
+     "<sha256-hex>"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/s3/aws4_request, SignedHeaders=host;x-amz-content-sha256;x-amz-date, Signature=<hex>"
+    ],
+    [
+     "amz-sdk-invocation-id",
+     "<uuid>"
+    ],
+    [
+     "amz-sdk-request",
+     "attempt=1"
+    ],
+    [
+     "Content-Length",
+     "0"
+    ]
+   ],
+   "body": null,
+   "response_status": 204
+  },
+  {
+   "operation": "DeleteObjects",
+   "method": "POST",
+   "target": "/evidence?delete",
+   "addressing": "path",
+   "http_version": "HTTP/1.1",
+   "expect_continue": false,
+   "content_sha256": "hex",
+   "headers": [
+    [
+     "Host",
+     "s3.kythira.test:<port>"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "User-Agent",
+     "Boto3/1.43.126 md/Botocore#1.43.126 ua/2.1 os/linux#<kernel> md/arch#x86_64 lang/python#3.13.18 md/pyimpl#CPython m/D,N,U,Z,b,g cfg/retry-mode#legacy Botocore/1.43.126"
+    ],
+    [
+     "x-amz-checksum-crc32",
+     "w7YEgg=="
+    ],
+    [
+     "x-amz-sdk-checksum-algorithm",
+     "CRC32"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "X-Amz-Content-SHA256",
+     "<sha256-hex>"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/s3/aws4_request, SignedHeaders=host;x-amz-checksum-crc32;x-amz-content-sha256;x-amz-date;x-amz-sdk-checksum-algorithm, Signature=<hex>"
+    ],
+    [
+     "amz-sdk-invocation-id",
+     "<uuid>"
+    ],
+    [
+     "amz-sdk-request",
+     "attempt=1"
+    ],
+    [
+     "Content-Length",
+     "180"
+    ]
+   ],
+   "body": {
+    "transfer": "content-length",
+    "kind": "xml",
+    "text": "<Delete xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"><Object><Key>copy.txt</Key></Object><Object><Key>dir/sha256.txt</Key></Object><Object><Key>large.bin</Key></Object></Delete>"
+   },
+   "response_status": 200
+  },
+  {
+   "operation": "DeleteObject",
+   "method": "DELETE",
+   "target": "/evidence/hello.txt",
+   "addressing": "path",
+   "http_version": "HTTP/1.1",
+   "expect_continue": false,
+   "content_sha256": "hex",
+   "headers": [
+    [
+     "Host",
+     "s3.kythira.test:<port>"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "User-Agent",
+     "Boto3/1.43.126 md/Botocore#1.43.126 ua/2.1 os/linux#<kernel> md/arch#x86_64 lang/python#3.13.18 md/pyimpl#CPython m/D,N,Z,b,g cfg/retry-mode#legacy Botocore/1.43.126"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "X-Amz-Content-SHA256",
+     "<sha256-hex>"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/s3/aws4_request, SignedHeaders=host;x-amz-content-sha256;x-amz-date, Signature=<hex>"
+    ],
+    [
+     "amz-sdk-invocation-id",
+     "<uuid>"
+    ],
+    [
+     "amz-sdk-request",
+     "attempt=1"
+    ],
+    [
+     "Content-Length",
+     "0"
+    ]
+   ],
+   "body": null,
+   "response_status": 204
+  },
+  {
+   "operation": "DeleteBucket",
+   "method": "DELETE",
+   "target": "/evidence",
+   "addressing": "path",
+   "http_version": "HTTP/1.1",
+   "expect_continue": false,
+   "content_sha256": "hex",
+   "headers": [
+    [
+     "Host",
+     "s3.kythira.test:<port>"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "User-Agent",
+     "Boto3/1.43.126 md/Botocore#1.43.126 ua/2.1 os/linux#<kernel> md/arch#x86_64 lang/python#3.13.18 md/pyimpl#CPython m/D,N,Z,b,g cfg/retry-mode#legacy Botocore/1.43.126"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "X-Amz-Content-SHA256",
+     "<sha256-hex>"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/s3/aws4_request, SignedHeaders=host;x-amz-content-sha256;x-amz-date, Signature=<hex>"
+    ],
+    [
+     "amz-sdk-invocation-id",
+     "<uuid>"
+    ],
+    [
+     "amz-sdk-request",
+     "attempt=1"
+    ],
+    [
+     "Content-Length",
+     "0"
+    ]
+   ],
+   "body": null,
+   "response_status": 204
+  },
+  {
+   "operation": "ListBuckets",
+   "method": "GET",
+   "target": "/",
+   "addressing": "service",
+   "http_version": "HTTP/1.1",
+   "expect_continue": false,
+   "content_sha256": "hex",
+   "headers": [
+    [
+     "Host",
+     "s3.kythira.test:<port>"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "User-Agent",
+     "Boto3/1.43.126 md/Botocore#1.43.126 ua/2.1 os/linux#<kernel> md/arch#x86_64 lang/python#3.13.18 md/pyimpl#CPython m/D,N,Z,b,g cfg/retry-mode#legacy Botocore/1.43.126"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "X-Amz-Content-SHA256",
+     "<sha256-hex>"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/s3/aws4_request, SignedHeaders=host;x-amz-content-sha256;x-amz-date, Signature=<hex>"
+    ],
+    [
+     "amz-sdk-invocation-id",
+     "<uuid>"
+    ],
+    [
+     "amz-sdk-request",
+     "attempt=1"
+    ]
+   ],
+   "body": null,
+   "response_status": 200
+  }
+ ],
+ "summary": {
+  "operations": [
+   "CreateBucket",
+   "HeadBucket",
+   "GetBucketLocation",
+   "PutObject",
+   "PutObject",
+   "HeadObject",
+   "GetObject",
+   "CreateMultipartUpload",
+   "UploadPart",
+   "UploadPart",
+   "UploadPart",
+   "CompleteMultipartUpload",
+   "ListObjectsV2",
+   "ListObjects",
+   "CopyObject",
+   "GetObject",
+   "GetObject",
+   "CreateMultipartUpload",
+   "ListMultipartUploads",
+   "AbortMultipartUpload",
+   "DeleteObjects",
+   "DeleteObject",
+   "DeleteBucket",
+   "ListBuckets"
+  ],
+  "addressing": [
+   "path"
+  ],
+  "content_sha256": [
+   "STREAMING-UNSIGNED-PAYLOAD-TRAILER",
+   "absent",
+   "hex"
+  ],
+  "http_versions": [
+   "HTTP/1.1"
+  ],
+  "expect_continue": [
+   "False",
+   "True"
+  ],
+  "object_uploads": [
+   {
+    "aws_chunked": true,
+    "chunks_signed": false,
+    "trailers": [
+     "x-amz-checksum-crc32"
+    ],
+    "transfer": "transfer-encoding: chunked",
+    "x-amz-content-sha256": "STREAMING-UNSIGNED-PAYLOAD-TRAILER",
+    "requests": 4
+   },
+   {
+    "aws_chunked": true,
+    "chunks_signed": false,
+    "trailers": [
+     "x-amz-checksum-sha256"
+    ],
+    "transfer": "transfer-encoding: chunked",
+    "x-amz-content-sha256": "STREAMING-UNSIGNED-PAYLOAD-TRAILER",
+    "requests": 1
+   }
+  ]
+ }
+}
