@@ -859,7 +859,10 @@ private:
                 << "cache_put_body_ms:" << fe._put_body_ns.load() / ns_per_ms << "\r\n"
                 << "cache_put_chunk_wait_ms:" << fe._put_chunk_wait_ns.load() / ns_per_ms << "\r\n"
                 << "cache_put_commit_ms:" << fe._put_commit_ns.load() / ns_per_ms << "\r\n"
-                << "cache_forwards:" << fe._forwards.load() << "\r\n";
+                << "cache_forwards:" << fe._forwards.load() << "\r\n"
+                << "cache_relay_apply_waits:" << fe._relay_apply_waits.load() << "\r\n"
+                << "cache_relay_apply_wait_ms:" << fe._relay_apply_wait_ns.load() / ns_per_ms
+                << "\r\n";
         }
         for (const auto& g : h->group_ids()) {
             if (auto* node = h->group_node(g)) {
