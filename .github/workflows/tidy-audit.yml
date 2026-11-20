@@ -37,7 +37,7 @@ concurrency:
 jobs:
   shard:
     name: uncached clang-tidy (shard ${{ matrix.shard }} of 6)
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.event.pull_request.head.repo.fork && 'ubuntu-24.04') || vars.KYTHIRA_X64_RUNNER || 'bit63' }}
     # An uncached shard took up to 56 minutes on an EPYC 7763 runner
     # (November 7, 2026), plus setup.
     timeout-minutes: 120
@@ -154,7 +154,7 @@ jobs:
     name: audit report
     needs: shard
     if: always()
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.event.pull_request.head.repo.fork && 'ubuntu-24.04') || vars.KYTHIRA_X64_RUNNER || 'bit63' }}
     timeout-minutes: 15
     permissions:
       contents: read

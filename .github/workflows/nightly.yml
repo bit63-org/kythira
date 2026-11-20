@@ -65,7 +65,7 @@ jobs:
   # Decides whether tonight builds at all, and names the snapshot. Cheap: two
   # API calls, no checkout.
   gate:
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.event.pull_request.head.repo.fork && 'ubuntu-24.04') || vars.KYTHIRA_X64_RUNNER || 'bit63' }}
     timeout-minutes: 5
     outputs:
       build: ${{ steps.decide.outputs.build }}
@@ -126,7 +126,7 @@ jobs:
     needs: gate
     if: needs.gate.outputs.build == 'true'
     name: Build snapshot (${{ matrix.arch }})
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.os == 'ubuntu-24.04' && ((github.event.pull_request.head.repo.fork && 'ubuntu-24.04') || vars.KYTHIRA_X64_RUNNER || 'bit63') || matrix.os }}
     # arm64's first night compiles the whole ion+rocksdb dependency tree cold.
     timeout-minutes: 360
     strategy:
@@ -353,7 +353,7 @@ jobs:
   publish:
     needs: [gate, build]
     if: needs.gate.outputs.publish == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.event.pull_request.head.repo.fork && 'ubuntu-24.04') || vars.KYTHIRA_X64_RUNNER || 'bit63' }}
     timeout-minutes: 15
     permissions:
       contents: write   # create the prerelease and its tag; prune old ones

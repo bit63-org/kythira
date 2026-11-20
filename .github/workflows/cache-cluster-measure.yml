@@ -46,7 +46,7 @@ concurrency:
 jobs:
   measure:
     name: Measure (${{ matrix.compiler }}, x64)
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.event.pull_request.head.repo.fork && 'ubuntu-24.04') || vars.KYTHIRA_X64_RUNNER || 'bit63' }}
     # A cold full-tree build on a hosted runner is 70-175 minutes; then three
     # warm builds and the image.
     timeout-minutes: 360

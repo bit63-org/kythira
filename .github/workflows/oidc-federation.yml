@@ -65,7 +65,7 @@ concurrency:
 jobs:
   federate:
     name: OIDC federation
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.event.pull_request.head.repo.fork && 'ubuntu-24.04') || vars.KYTHIRA_X64_RUNNER || 'bit63' }}
     timeout-minutes: 360
     environment: real-cloud-tests
     permissions:

@@ -182,7 +182,7 @@ jobs:
   # in step when a gate changes.
   run-plan:
     name: Real Cloud Tests run plan
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.event.pull_request.head.repo.fork && 'ubuntu-24.04') || vars.KYTHIRA_X64_RUNNER || 'bit63' }}
     timeout-minutes: 5
     env:
       MASTER: ${{ github.event.inputs.run_real_cloud_tests == 'true' || (github.event.inputs.run_real_cloud_tests == null && vars.REAL_CLOUD_TESTS_ENABLED == 'true') }}
@@ -267,7 +267,7 @@ jobs:
   # x86_64-only runner. See .kiro/specs/arm64-ci-verification/ Requirement 7.
   aws:
     name: Real Cloud Tests (AWS, ${{ matrix.arch_label }})
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.os == 'ubuntu-24.04' && ((github.event.pull_request.head.repo.fork && 'ubuntu-24.04') || vars.KYTHIRA_X64_RUNNER || 'bit63') || matrix.os }}
     # All three bundle ctest steps below can run sequentially in this one
     # job when every bundle is enabled. Sum of their own worst-case CTest
     # TIMEOUT properties (tests/CMakeLists.txt): 10800s (ec2-quorum-manager)
@@ -1195,7 +1195,7 @@ jobs:
       group: real-cloud-aws-asg-${{ github.repository }}
       # A run already holding real groups must reach its own teardown.
       cancel-in-progress: false
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.os == 'ubuntu-24.04' && ((github.event.pull_request.head.repo.fork && 'ubuntu-24.04') || vars.KYTHIRA_X64_RUNNER || 'bit63') || matrix.os }}
     timeout-minutes: 360
     environment: real-cloud-tests
     permissions:
@@ -1479,7 +1479,7 @@ jobs:
       group: real-cloud-aws-ec2-launch-options-${{ github.repository }}
       # A run already holding real instances must reach its own teardown.
       cancel-in-progress: false
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.os == 'ubuntu-24.04' && ((github.event.pull_request.head.repo.fork && 'ubuntu-24.04') || vars.KYTHIRA_X64_RUNNER || 'bit63') || matrix.os }}
     # 155 minutes of worst-case CTest TIMEOUT (tests/CMakeLists.txt), the
     # build, and the audit and sweep.
     timeout-minutes: 300
@@ -1761,7 +1761,7 @@ jobs:
             runner: ubuntu-24.04
           - arch: arm64
             runner: ubuntu-24.04-arm
-    runs-on: ${{ matrix.runner }}
+    runs-on: ${{ matrix.runner == 'ubuntu-24.04' && ((github.event.pull_request.head.repo.fork && 'ubuntu-24.04') || vars.KYTHIRA_X64_RUNNER || 'bit63') || matrix.runner }}
     # 60 minutes only fit a warm vcpkg cache. Run 37125140982 missed the
     # binary cache for folly, protobuf, aws-sdk-cpp and grpc (34 of 131
     # ports on arm64, 27 on x64): x64 was cancelled at 60 minutes while
@@ -1985,7 +1985,7 @@ jobs:
       group: real-cloud-azure-${{ github.repository }}
       cancel-in-progress: false
     name: Real Cloud Tests (Azure)
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.event.pull_request.head.repo.fork && 'ubuntu-24.04') || vars.KYTHIRA_X64_RUNNER || 'bit63' }}
     # 60 minutes was not enough: a real run of this job (PR #125) was killed
     # by the job timeout while still mid-compile, having never reached the
     # actual test-running step at all. Unlike the AWS job above, whose own
@@ -2761,7 +2761,7 @@ jobs:
 
   gcp:
     name: Real Cloud Tests (GCP)
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.event.pull_request.head.repo.fork && 'ubuntu-24.04') || vars.KYTHIRA_X64_RUNNER || 'bit63' }}
     # Same protected environment as the aws/ami-build jobs: the real-cloud
     # repository variables (GCP_CI_WORKLOAD_IDENTITY_PROVIDER,
     # GCP_CI_SERVICE_ACCOUNT, GCP_REAL_CLOUD_TESTS_PROJECT, and the enable
@@ -3212,7 +3212,7 @@ jobs:
   # Configuration, not the runner's architecture.
   oci:
     name: Real Cloud Tests (OCI)
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.event.pull_request.head.repo.fork && 'ubuntu-24.04') || vars.KYTHIRA_X64_RUNNER || 'bit63' }}
     # Worst case: the quorum suite's provision/assess/decommission case waits
     # up to 900s for an instance, plus the ladder walk and the certificates
     # suite's issuance polls. 120 minutes is generous against a measured ~5
@@ -3765,7 +3765,7 @@ jobs:
   # the same contract the oci job follows.
   alibaba:
     name: Real Cloud Tests (Alibaba Cloud)
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.event.pull_request.head.repo.fork && 'ubuntu-24.04') || vars.KYTHIRA_X64_RUNNER || 'bit63' }}
     # 120 minutes covers a normal run with room to spare: the OSS suite
     # takes about 11 minutes. The opt-in segment-size sweep needs much
     # longer. Run 40388183572 spent 10, 60 and 26 minutes on the put,
@@ -4174,7 +4174,7 @@ jobs:
 
   aws-monitoring:
     name: Monitoring config (AWS CloudWatch)
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.event.pull_request.head.repo.fork && 'ubuntu-24.04') || vars.KYTHIRA_X64_RUNNER || 'bit63' }}
     timeout-minutes: 30
     environment: real-cloud-tests
     permissions:
@@ -4212,7 +4212,7 @@ jobs:
 
   azure-monitoring:
     name: Monitoring config (Azure Monitor)
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.event.pull_request.head.repo.fork && 'ubuntu-24.04') || vars.KYTHIRA_X64_RUNNER || 'bit63' }}
     timeout-minutes: 30
     environment: real-cloud-tests
     permissions:
@@ -4250,7 +4250,7 @@ jobs:
 
   gcp-monitoring:
     name: Monitoring config (GCP Cloud Monitoring)
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.event.pull_request.head.repo.fork && 'ubuntu-24.04') || vars.KYTHIRA_X64_RUNNER || 'bit63' }}
     timeout-minutes: 30
     environment: real-cloud-tests
     permissions:
@@ -4291,7 +4291,7 @@ jobs:
 
   oci-monitoring:
     name: Monitoring config (OCI Monitoring)
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.event.pull_request.head.repo.fork && 'ubuntu-24.04') || vars.KYTHIRA_X64_RUNNER || 'bit63' }}
     # The Management Agent's install + registration + first Prometheus
     # scrape cycle dominates; the script's own assertion deadline is 900s.
     timeout-minutes: 45
@@ -4386,7 +4386,7 @@ jobs:
 
   alibaba-monitoring:
     name: Monitoring config (Alibaba CloudMonitor)
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.event.pull_request.head.repo.fork && 'ubuntu-24.04') || vars.KYTHIRA_X64_RUNNER || 'bit63' }}
     timeout-minutes: 30
     environment: real-cloud-tests
     if: |
