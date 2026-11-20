@@ -1,6 +1,6 @@
 # Implementation Plan — Multi-Raft load buckets
 
-## Status: In progress (tasks 1-5 done; Clark's go 2026-11-20)
+## Status: In progress (tasks 1-7 done; Clark's go 2026-11-20)
 
 Follow-up to `.kiro/specs/multi-raft/` Phase 9 and open question 4.
 
@@ -50,14 +50,31 @@ Follow-up to `.kiro/specs/multi-raft/` Phase 9 and open question 4.
     rules in `load_buckets_unit_test`.
   - _Requirements: 4.2, 4.3_
 
-- [ ] 6. Exposure
+- [x] 6. Exposure
   - `shard_report::_hot_buckets` (top k); the `shard_hottest_bucket_share`
     gauge.
+  - The gauge is `kythira.multiraft.shard.hottest_bucket_share` (dimension
+    `group`), emitted on the policy phase once a slot has closed.
+    `best_bucket_cut`, `hottest_bucket_share` and `top_buckets` sit beside
+    `bucket_stats` in `shard_types.hpp` so the policy can use them without
+    the bucket set's header.
   - _Requirements: 5.2, 5.3_
 
-- [ ] 7. Load split from buckets
+- [x] 7. Load split from buckets
   - The bucket branch in the default policy; `load_split_sampler::restrict_to`;
     back-off gating; integration test against the sampler alone.
+  - Deviations: `shard_stats` also gains `_buckets_window` (how long the
+    rates cover; the policy waits for `_load_split_duration` of it) and
+    `_load_split_backoff` (the sampler's back-off, Requirement 6.4), since a
+    policy sees nothing but its stats. The sampler is narrowed by the host,
+    not the policy: the policy stays a pure function, and the host applies
+    the same one-sided rule to the same buckets on the policy phase, so the
+    two cannot disagree.
+  - The integration case shows the gap the spec names first ("a shard that
+    cools and heats again pays that window every time"): a skewed load in
+    60 ms bursts with idle gaps that span whole policy ticks. The sampler
+    alone abandons every window and never splits in 3 s; with buckets the
+    window spans the gaps and the split lands inside the hot quarter.
   - _Requirements: 6.1-6.4, 7.3_
 
 - [ ] 8. Measure
