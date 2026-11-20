@@ -494,6 +494,13 @@ void read_kinesis_side(const reader& r, node_options& o) {
         fail("KINESIS_CHANNEL_STS_ENDPOINT must be an http:// or https:// URL");
     }
     o._channel_ca_file = r.opt("KINESIS_CHANNEL_CA_FILE", "");
+    o._channel_iceberg_uri = r.opt("KINESIS_CHANNEL_ICEBERG_URI", "");
+    if (!o._channel_iceberg_uri.empty() && !kinesis::parse_aws_endpoint(o._channel_iceberg_uri)) {
+        fail("KINESIS_CHANNEL_ICEBERG_URI must be an http:// or https:// URL");
+    }
+    o._channel_iceberg_warehouse = r.opt("KINESIS_CHANNEL_ICEBERG_WAREHOUSE", "");
+    o._channel_iceberg_sigv4 = r.flag("KINESIS_CHANNEL_ICEBERG_SIGV4", "true");
+    o._channel_iceberg_token = r.opt("KINESIS_CHANNEL_ICEBERG_TOKEN", "");
 }
 
 }  // namespace
@@ -719,7 +726,11 @@ auto describe(const node_options& o) -> std::string {
                            ? " role=assume" + (o._channel_sts_endpoint.empty()
                                                    ? std::string()
                                                    : " sts=" + o._channel_sts_endpoint)
-                           : std::string(" role=node"))
+                           : std::string(" role=node")) +
+                      (o._channel_iceberg_uri.empty()
+                           ? std::string()
+                           : " iceberg=" + o._channel_iceberg_uri +
+                                 (o._channel_iceberg_sigv4 ? " (sigv4)" : ""))
                 : std::string("off"))
         << '\n';
     for (const auto& [k, v] : o._compat) {
