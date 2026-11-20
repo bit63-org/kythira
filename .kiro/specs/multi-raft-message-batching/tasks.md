@@ -66,8 +66,15 @@ defaults to false and no binary turns it on.
     cluster on each transport the build has.
   - _Requirements: 5.2, 5.4_
 
-- [ ] 8. Metrics
+- [x] 8. Metrics
   - Members per batch, batches, fallbacks, marked destinations.
+  - Done: `batching_metrics_emitter` publishes the batcher's counters to the
+    host's metrics at the end of each tick, as the change since the last
+    tick: `kythira.multiraft.batching.batches`, `.fallbacks`,
+    `.members_per_batch` (one count per bucket, `max_members` dimension) and
+    the `.marked_destinations` gauge (emitted when it moves).
+    `multi_raft::batching_statistics()` gives the same totals to a caller
+    without a sink.
   - _Requirements: 6.2_
 
 - [ ] 9. Measure, then decide

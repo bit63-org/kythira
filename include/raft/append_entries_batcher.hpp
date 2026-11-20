@@ -64,6 +64,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <tuple>
 #include <type_traits>
 #include <unordered_map>
 #include <utility>
@@ -100,6 +101,11 @@ struct batching_config {
 /// one every batching transport returns (the HTTP clients build their own
 /// futures the same way), so that is the one mapping provided. A client
 /// returning anything else simply does not batch.
+/// Upper bounds of a batcher's members-per-batch histogram buckets; one more
+/// bucket counts everything above the last bound.
+inline constexpr std::array<std::size_t, 9> batch_histogram_bounds{1,  2,  4,   8,  16,
+                                                                   32, 64, 128, 256};
+
 template<typename Future> struct batch_promise_for {
     using type = void;
 };
@@ -144,8 +150,7 @@ public:
 
     /// Upper bounds of the members-per-batch histogram's buckets; the last
     /// bucket counts everything above the last bound.
-    static constexpr std::array<std::size_t, 9> k_histogram_bounds{1,  2,  4,   8,  16,
-                                                                   32, 64, 128, 256};
+    static constexpr auto k_histogram_bounds = batch_histogram_bounds;
 
     append_entries_batcher(Client& inner, batching_config cfg) : _inner(&inner), _cfg(cfg) {
         _cfg._max_messages = std::max<std::size_t>(_cfg._max_messages, 1);
@@ -608,6 +613,76 @@ private:
     std::mutex _flight_mutex;
     std::condition_variable _flight_cv;
     std::size_t _in_flight{0};
+};
+
+/// @brief Publishes a batcher's counters to a metrics sink
+///        (.kiro/specs/multi-raft-message-batching/ Requirement 6.2).
+///
+/// Holds what it last published, so each `publish` emits only the change:
+/// a sink that sums counts sees the batcher's totals, however the batches
+/// were flushed (tick, timer or full queue) between two calls. The metrics
+/// concept has no histogram primitive, so members per batch goes out as one
+/// count per bucket with a `max_members` dimension naming the bucket's upper
+/// bound ("more" for the overflow bucket). Buckets do not overlap, unlike a
+/// Prometheus `le`, so a sink sums them. Marked destinations is a gauge,
+/// emitted only when it moves; a call with no change emits nothing.
+///
+/// Not thread-safe: one caller (the host's `tick()`) publishes, holding
+/// whatever lock guards the sink.
+class batching_metrics_emitter {
+public:
+    static constexpr const char* k_batches = "kythira.multiraft.batching.batches";
+    static constexpr const char* k_fallbacks = "kythira.multiraft.batching.fallbacks";
+    static constexpr const char* k_members_per_batch =
+        "kythira.multiraft.batching.members_per_batch";
+    static constexpr const char* k_marked_destinations =
+        "kythira.multiraft.batching.marked_destinations";
+
+    template<typename Batcher, typename Metrics>
+    auto publish(const Batcher& batcher, Metrics& metrics) -> void {
+        const auto histogram = batcher.members_per_batch_histogram();
+        static_assert(std::tuple_size_v<decltype(histogram)> ==
+                      std::tuple_size_v<decltype(_histogram)>);
+        count(metrics, k_batches, batcher.batches_sent(), _batches);
+        count(metrics, k_fallbacks, batcher.fallbacks(), _fallbacks);
+        for (std::size_t i = 0; i < histogram.size(); ++i) {
+            if (histogram[i] > _histogram[i]) {
+                metrics.set_metric_name(k_members_per_batch);
+                metrics.add_dimension("max_members", i < k_bounds.size()
+                                                         ? std::to_string(k_bounds[i])
+                                                         : std::string{"more"});
+                metrics.add_count(static_cast<std::int64_t>(histogram[i] - _histogram[i]));
+                metrics.emit();
+            }
+            _histogram[i] = histogram[i];
+        }
+        const auto marked = batcher.marked_destinations();
+        if (marked != _marked) {
+            metrics.set_metric_name(k_marked_destinations);
+            metrics.add_value(static_cast<double>(marked));
+            metrics.emit();
+            _marked = marked;
+        }
+    }
+
+private:
+    static constexpr auto k_bounds = batch_histogram_bounds;
+
+    template<typename Metrics>
+    static auto count(Metrics& metrics, const char* name, std::uint64_t now, std::uint64_t& was)
+        -> void {
+        if (now > was) {
+            metrics.set_metric_name(name);
+            metrics.add_count(static_cast<std::int64_t>(now - was));
+            metrics.emit();
+        }
+        was = now;
+    }
+
+    std::uint64_t _batches{0};
+    std::uint64_t _fallbacks{0};
+    std::size_t _marked{0};
+    std::array<std::uint64_t, k_bounds.size() + 1> _histogram{};
 };
 
 }  // namespace kythira
