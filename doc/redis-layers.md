@@ -19,6 +19,21 @@ page gains the runbook with task 19.
 
 ## How the code is layered
 
+The layers are separate classes in `services/redis/include/kythira/redis/`:
+
+- `redis_front_end` (definitions in `redis_front_end_impl.hpp`) does
+  everything past authentication: the transaction surface, the per-command
+  handlers, authorization, planning, the transaction coordinator and the
+  forward link.
+- `redis_gateway` (`redis_gateway_impl.hpp`) extends it with the listeners,
+  TLS, connection state and the connection commands (`AUTH`, `HELLO`,
+  `CLIENT`, `QUIT`, `RESET`). Its `execute()` does the credential checks
+  and then calls `execute_command()`. On a co-located node that call stays
+  in-process, with no hop or copy. A gateway without `front_end` will send
+  the command to a remote front end instead (task 17).
+
+New command handlers are `redis_front_end` members.
+
 The command path reaches data only through a data access object
 (`services/redis/include/kythira/redis/redis_data_access.hpp`):
 route a key, propose an entry, run a transaction participant message, read a
