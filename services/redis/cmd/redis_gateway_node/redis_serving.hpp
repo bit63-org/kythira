@@ -54,6 +54,7 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <iomanip>
 #include <iostream>
 #include <map>
 #include <memory>
@@ -648,7 +649,7 @@ private:
                 guard->record(std::string(payload.substr(0, semi)), *r);
             }
         };
-        hooks._info = [d = _disk.get(), h = _host.get()] {
+        hooks._info = [this, d = _disk.get(), h = _host.get()] {
             const auto stats = d->_store.stats();
             const auto local = d->_guard.local().value_or(kythira::cache_node_report{});
             std::uint64_t keys = 0;
@@ -685,6 +686,7 @@ private:
                 << "cache_fs_free_inodes:" << local._free_inodes << "\r\n"
                 << "cache_space_refusals:" << d->_guard.refusals() << "\r\n"
                 << "cache_peer_reports:" << d->_guard.fresh_peers() << "\r\n";
+            write_path_info(out, stats, h, _front_end.get());
             return out.str();
         };
         _gateway->set_cache_hooks(std::move(hooks));
@@ -745,7 +747,11 @@ private:
                 << "kythira_cache_fetch_pending_chunks " << d->_fetcher->pending() << '\n'
                 << "kythira_cache_fs_free_bytes " << local._free_bytes << '\n'
                 << "kythira_cache_fs_free_inodes " << local._free_inodes << '\n'
-                << "kythira_cache_space_refusals " << d->_guard.refusals() << '\n';
+                << "kythira_cache_space_refusals " << d->_guard.refusals() << '\n'
+                << "kythira_cache_disk_write_bytes " << process_write_bytes() << '\n'
+                << "kythira_cache_store_written_bytes " << d->_store.stats()._bytes_written << '\n'
+                << "kythira_cache_log_append_bytes "
+                << kythira::binary_file_persistence_stats()._append_bytes.load() << '\n';
             return out.str();
         });
     }
@@ -804,6 +810,84 @@ private:
             return out.str();
         };
         _gateway->set_cache_hooks(std::move(hooks));
+    }
+
+    /// The `# Cache` lines that say where a write's time and bytes go
+    /// (GitHub issue 942), so a slow cache can be diagnosed from a live
+    /// node instead of from host-wide disk and CPU figures:
+    ///
+    /// * `cache_disk_write_bytes`, this process's bytes written to storage
+    ///   (`/proc/self/io` `write_bytes`), and `cache_store_written_bytes`,
+    ///   what the chunk store wrote. Their ratio,
+    ///   `cache_write_amplification`, is the bytes written per byte stored:
+    ///   about 2 in steady state, because a chunk is written to the Raft log
+    ///   and then to the store (design Component 4, "Double write,
+    ///   accepted"). Unlike a container's block-I/O counters it counts a
+    ///   write once, not once per RAID member.
+    /// * `cache_log_*`, every shard replica's Raft log on this node: bytes
+    ///   appended, time framing and writing them, and fsync rounds and time.
+    /// * `cache_put_*`, the leader's HTTP `PUT` time split into waiting on
+    ///   the client, waiting on `put_chunk` proposals, and waiting on the
+    ///   `commit`.
+    /// * `cache_shard_<group>`, per shard replica: role, the log's last,
+    ///   commit and applied indices, proposals waiting for their result
+    ///   (`pending`), and on a leader its slowest follower's lag. A stuck
+    ///   shard shows as a queue that keeps growing.
+    template<typename Stats, typename HostPtr, typename FrontEnd>
+    static void write_path_info(std::ostringstream& out, const Stats& store, HostPtr h,
+                                const FrontEnd* front_end) {
+        const auto disk_written = process_write_bytes();
+        out << "cache_disk_write_bytes:" << disk_written << "\r\n"
+            << "cache_store_written_bytes:" << store._bytes_written << "\r\n";
+        if (store._bytes_written > 0) {
+            out << "cache_write_amplification:" << std::fixed << std::setprecision(2)
+                << static_cast<double>(disk_written) / static_cast<double>(store._bytes_written)
+                << std::defaultfloat << "\r\n";
+        }
+        const auto& log = kythira::binary_file_persistence_stats();
+        constexpr std::uint64_t ns_per_ms = 1000000;
+        out << "cache_log_appends:" << log._appends.load() << "\r\n"
+            << "cache_log_append_bytes:" << log._append_bytes.load() << "\r\n"
+            << "cache_log_append_ms:" << log._append_ns.load() / ns_per_ms << "\r\n"
+            << "cache_log_fsyncs:" << log._barriers.load() << "\r\n"
+            << "cache_log_fsync_ms:" << log._barrier_ns.load() / ns_per_ms << "\r\n";
+        if (front_end != nullptr) {
+            const auto& fe = front_end->stats();
+            out << "cache_puts:" << fe._puts.load() << "\r\n"
+                << "cache_put_bytes:" << fe._put_bytes.load() << "\r\n"
+                << "cache_put_chunks:" << fe._put_chunks.load() << "\r\n"
+                << "cache_put_body_ms:" << fe._put_body_ns.load() / ns_per_ms << "\r\n"
+                << "cache_put_chunk_wait_ms:" << fe._put_chunk_wait_ns.load() / ns_per_ms << "\r\n"
+                << "cache_put_commit_ms:" << fe._put_commit_ns.load() / ns_per_ms << "\r\n"
+                << "cache_forwards:" << fe._forwards.load() << "\r\n";
+        }
+        for (const auto& g : h->group_ids()) {
+            if (auto* node = h->group_node(g)) {
+                const auto p = node->progress();
+                out << "cache_shard_" << g << ":role=" << (p._leader ? "leader" : "follower")
+                    << ",last_log=" << p._last_log << ",commit=" << p._commit
+                    << ",applied=" << p._applied << ",pending=" << p._pending_commands;
+                if (p._leader) {
+                    out << ",slowest_follower_lag=" << (p._last_log - p._slowest_match);
+                }
+                out << "\r\n";
+            }
+        }
+    }
+
+    /// `write_bytes` from `/proc/self/io`: bytes this process caused to be
+    /// sent to storage. 0 where the file is missing (not Linux, or a
+    /// kernel without task I/O accounting).
+    static auto process_write_bytes() -> std::uint64_t {
+        std::ifstream io("/proc/self/io");
+        std::string name;
+        std::uint64_t value = 0;
+        while (io >> name >> value) {
+            if (name == "write_bytes:") {
+                return value;
+            }
+        }
+        return 0;
     }
 
     void start_threads() {

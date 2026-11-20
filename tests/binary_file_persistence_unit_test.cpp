@@ -631,6 +631,38 @@ BOOST_AUTO_TEST_CASE(test_dead_segments_left_by_a_crash_are_deleted,
     BOOST_TEST(eng.get_last_log_index() == 20U);
 }
 
+// GitHub issue 942: the process-wide write-path totals that a node's INFO
+// reports. Other engines in this process may append concurrently in other
+// cases, but cases run one at a time, so the deltas here are this engine's.
+BOOST_AUTO_TEST_CASE(test_write_path_totals_count_appends_and_barriers,
+                     *boost::unit_test::timeout(30)) {
+    temp_dir d;
+    engine_t eng(d.path);
+    auto& totals = kythira::binary_file_persistence_stats();
+    const auto appends = totals._appends.load();
+    const auto bytes = totals._append_bytes.load();
+    const auto barriers = totals._barriers.load();
+    std::uint64_t command_bytes = 0;
+    kythira::write_sequence last = 0;
+    for (std::uint64_t i = 1; i <= 5; ++i) {
+        const auto e = make_entry(1, i);
+        command_bytes += e.command().size();
+        last = eng.append_log_entry_sequenced(e);
+    }
+    BOOST_TEST(totals._appends.load() - appends == 5U);
+    // Framed bytes: each record adds its header and CRC to the command.
+    BOOST_TEST(totals._append_bytes.load() - bytes > command_bytes);
+    eng.barrier_through(last);
+    BOOST_TEST(totals._barriers.load() - barriers == 1U);
+    // An append already covered issues no new barrier, so counts none.
+    eng.barrier_through(last);
+    BOOST_TEST(totals._barriers.load() - barriers == 1U);
+    // Re-appending the same index and term is the log-matching no-op: no
+    // write, so nothing counted.
+    eng.append_log_entry(make_entry(1, 5));
+    BOOST_TEST(totals._appends.load() - appends == 5U);
+}
+
 BOOST_AUTO_TEST_CASE(test_barrier_publishes_and_coalesces, *boost::unit_test::timeout(30)) {
     temp_dir d;
     engine_t eng(d.path);
