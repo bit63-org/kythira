@@ -415,3 +415,79 @@ BOOST_AUTO_TEST_CASE(inherited_boundaries_start_a_fresh_set_at_the_given_version
     BOOST_TEST((snap.front()._start == std::optional<key_type>{key_of(100)}));
     BOOST_TEST((snap.back()._end == std::optional<key_type>{key_of(500)}));
 }
+
+// ── reset, split and merge helpers (task 5) ──────────────────────────────────
+
+BOOST_AUTO_TEST_CASE(reset_starts_over_on_a_new_range_at_version_one) {
+    const auto t0 = clock::now();
+    set_type set{enabled_config(), unbounded(), t0, {key_of(300), key_of(600)}};
+    set.count(key_of(1), 0, false);
+    set.roll(t0 + 10s);
+    BOOST_TEST(set.refresh({key_of(400)}, t0 + 11s));
+    BOOST_TEST(set.version() == 2U);
+
+    // A leader that lost the shard and won it back, or a split child: the new
+    // range, the boundaries inside it, version 1, nothing counted, nothing in
+    // the reservoir.
+    set.reset(range_of(100, 500), {key_of(50), key_of(200), key_of(700)}, t0 + 12s);
+    BOOST_TEST(set.version() == 1U);
+    BOOST_TEST(set.boundaries() == (std::vector<key_type>{key_of(200)}));
+    BOOST_TEST((set.range() == range_of(100, 500)));
+    BOOST_TEST(set.window_covered() == clock::duration::zero());
+    BOOST_TEST(total(set.window_counts()).requests() == 0U);
+    BOOST_TEST(set.reservoir_boundaries().empty());
+    BOOST_TEST(!set.roll(t0 + 21s));  // the slot restarted at the reset
+    BOOST_TEST(set.roll(t0 + 22s));
+}
+
+BOOST_AUTO_TEST_CASE(trimming_drops_the_boundary_between_the_coldest_pair) {
+    // Loads 5 | 1 | 1 | 9 | 2: the pair (1, 1) around boundary 1 is coldest.
+    const std::vector<key_type> b{key_of(10), key_of(20), key_of(30), key_of(40)};
+    auto kept = set_type::trim_by_load(b, {5, 1, 1, 9, 2}, 3);
+    BOOST_TEST(kept == (std::vector<key_type>{key_of(10), key_of(30), key_of(40)}));
+    // Then 5 | 2 | 9 | 2: (5, 2) = 7 beats (2, 9) = 11 and (9, 2) = 11.
+    kept = set_type::trim_by_load(b, {5, 1, 1, 9, 2}, 2);
+    BOOST_TEST(kept == (std::vector<key_type>{key_of(30), key_of(40)}));
+    // Equal loads drop leftmost first, deterministically.
+    kept = set_type::trim_by_load(b, {0, 0, 0, 0, 0}, 1);
+    BOOST_TEST(kept == (std::vector<key_type>{key_of(40)}));
+    BOOST_TEST(set_type::trim_by_load(b, {}, 10) == b);
+}
+
+BOOST_AUTO_TEST_CASE(a_merge_survivor_takes_both_lists_and_the_shared_bound) {
+    // Survivor [100, 500) with one boundary at 300, absorbing [500, 900) with
+    // one at 700: the union plus 500 is three boundaries, which fits.
+    const auto merged = range_of(100, 900);
+    const auto b = set_type::merge_boundaries(merged, range_of(100, 500), {key_of(300)},
+                                              {bucket_counts{._writes = 4}, bucket_counts{}},
+                                              {key_of(700)}, 3);
+    BOOST_TEST(b == (std::vector<key_type>{key_of(300), key_of(500), key_of(700)}));
+
+    // Absorbing from the LEFT: the shared bound is the survivor's old start.
+    const auto left =
+        set_type::merge_boundaries(merged, range_of(500, 900), {key_of(700)}, {}, {key_of(300)}, 3);
+    BOOST_TEST(left == (std::vector<key_type>{key_of(300), key_of(500), key_of(700)}));
+}
+
+BOOST_AUTO_TEST_CASE(a_merge_over_target_coarsens_the_unmeasured_side_first) {
+    // Survivor [100, 500) cut at 200 / 300 / 400 with real load in every
+    // bucket; the absorbed side's buckets were never measured here, so they
+    // count as zero and their boundaries go first (Requirement 4.3).
+    const std::vector<bucket_counts> own{bucket_counts{._writes = 10}, bucket_counts{._reads = 10},
+                                         bucket_counts{._writes = 10},
+                                         bucket_counts{._writes = 10}};
+    const auto b = set_type::merge_boundaries(range_of(100, 900), range_of(100, 500),
+                                              {key_of(200), key_of(300), key_of(400)}, own,
+                                              {key_of(600), key_of(700), key_of(800)}, 4);
+    // Seven candidates trimmed to four: the absorbed 600 / 700 / 800 go, then
+    // nothing more is needed once the shared bound 500 separates the measured
+    // buckets from the single unmeasured one.
+    BOOST_TEST(b == (std::vector<key_type>{key_of(200), key_of(300), key_of(400), key_of(500)}));
+}
+
+BOOST_AUTO_TEST_CASE(a_merge_with_no_measured_side_still_keeps_the_shared_bound) {
+    // A replica that led neither shard's set has nothing but the bound.
+    const auto b =
+        set_type::merge_boundaries(range_of(100, 900), range_of(100, 500), {}, {}, {}, 3);
+    BOOST_TEST(b == (std::vector<key_type>{key_of(500)}));
+}
