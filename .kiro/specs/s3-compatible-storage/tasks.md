@@ -398,10 +398,79 @@ builds it to that design). Each task is one PR unless noted.
 
 ### Phase 3: independent layers
 
-- [ ] 16. Roles and metadata access
+- [x] 16. Roles and metadata access
   - `KYTHIRA_S3_ROLES`; local, remote and hybrid metadata access; workers
     on metadata nodes only
   - _Requirements: 14.1, 14.2, 14.6, 14.7_
+  - Done: `s3_roles.hpp` parses `KYTHIRA_S3_ROLES` (`gateway`,
+    `front_end`, `metadata`, `blobs`; all four by default) onto the shared
+    layer roles, so certificates carry `data` for metadata and `segments`
+    for blobs, and refuses at start, naming what is missing, a role set
+    that cannot serve yet: a front end without metadata endpoints, the
+    gateway without the front end (task 17), and metadata or blobs alone
+    (a blob pool, task 18). `internal_route_rules()` opens the metadata
+    routes to front ends and metadata nodes and the chunk routes to those
+    and blob nodes; the gateway calls neither. `s3_remote_metadata.hpp`:
+    every `metadata_access` call (and the workers' calls) as
+    `POST /_kythira/s3/metadata/v1/<call>` in the index's own record
+    encoding, `metadata_server` over the local group (503 when it may not
+    answer), `remote_metadata`, an `endpoint_transport` that fails over on
+    no answer or 503, and `hybrid_metadata`, which asks a `metadata_choice`
+    about each call. A remote layer that does not answer throws
+    `metadata_unavailable`, which the pipeline answers `503
+    ServiceUnavailable`. `s3_workers.hpp`'s `worker_runner` runs the
+    workers on a schedule only on nodes with the metadata role and only
+    while `is_leader`, counting and logging failures without stopping
+    other jobs. Daemon wiring (the leftovers of tasks 11-15):
+    `s3_gateway_node` reads `KYTHIRA_S3_*` (`s3_node_config.hpp`, `--help`)
+    and runs the API listener, the website listener (plain HTTP, as S3's,
+    for `KYTHIRA_S3_WEBSITE_DOMAINS`), the internal listener (mutual TLS,
+    route guard on layer identities), the chunk store, the lifecycle, tier,
+    notification and replication workers and the chunk sweeper, and SigV4
+    transports to KMS (forwarding the caller to a Kythira KMS), SQS, SNS,
+    Kinesis and S3 (`s3_outbound.hpp`). The core HTTPS server now keeps a
+    HEAD answer's Content-Length. Not built: the index on Raft (task
+    16a). A metadata node holds its group in process and in memory, so a
+    split layout has one metadata node, several metadata endpoints or a metadata node given
+    endpoints (hybrid in the daemon) are refused, and nothing in the index
+    survives a restart (as `dynamodb_gateway_node` without peers); the
+    leadership gate is always open until then. Also not here: IAM
+    authentication in the daemon (static keys; anonymous access through
+    AllUsers grants only), cloud tiers in the daemon (the tier worker runs
+    with none), streaming bodies (whole bodies up to
+    `KYTHIRA_S3_MAX_REQUEST_BYTES` until task 17), and the container job,
+    which joins with task 20's docker-chaos scenario. Tests:
+    `s3_layers_test`, `s3_gateway_node_test` (co-located with a website;
+    split over mutual TLS with layer identity certificates, a wrong-role
+    caller refused, 503 once the metadata node is gone).
+
+- [ ] 16a. Object index on Raft
+  - `raft_metadata`: the index state machine as `multi_raft` groups on the
+    node's persistent `kv_engine` (RocksDB), a `metadata_access` that
+    proposes on the owning group's leader and hops to the leader a
+    not-leader answer names (as DynamoDB's `raft_backend`), reads on the
+    leader, and the change log in the group's record segment store, so the
+    index and the workers' cursors survive a restart
+  - Metadata nodes find each other from `KYTHIRA_S3_METADATA_PEERS` and
+    bootstrap one group over the whole `s3/` range (splits stay with task
+    18); a node joining or leaving changes membership through Raft
+  - `worker_runner`'s `is_leader` and `metadata_server`'s `ready` follow
+    the group's leadership, so workers run on the leader only and a
+    follower's internal route answers 503 and the front end fails over
+  - `s3_gateway_node` lifts the task 16 limits: several metadata
+    endpoints, a hybrid node (local when it leads, remote otherwise), and
+    the index kept across a restart; the in-memory group stays for
+    `--self-test` and unit tests
+  - S3 registers with `module_registry` so `kythira_node` can host it
+    beside the other modules, as the stand-alone daemon does
+  - Tests: three metadata nodes in process (`network_simulator`) with a
+    leader killed during PUTs, multipart and listings, no acknowledged
+    write lost (Requirement 10.1) and every reference count equal to a
+    recount; workers moving with leadership without double delivery past
+    at least once; a restart keeping objects, versions, uploads and change
+    log positions; and the node test's split layout with three metadata
+    nodes, one stopped mid-run
+  - _Requirements: 10.1-10.3, 14.2, 14.6, 14.7_
 
 - [ ] 17. Gateway and front end apart
   - Authenticated call with body streaming; prefix-affinity routing; role

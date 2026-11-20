@@ -745,9 +745,15 @@ private:
             if (failed || !req.keep_alive()) {
                 res.keep_alive(false);
             }
-            res.prepare_payload();
+            // A HEAD answer keeps the Content-Length its handler set: the
+            // length of the body a GET would send (RFC 9110 section 9.3.2),
+            // not of its own empty body. S3's HeadObject depends on it.
+            const bool head_answer = req.method() == boost::beast::http::verb::head;
+            if (!head_answer || !res.has_content_length()) {
+                res.prepare_payload();
+            }
             const bool keep = res.keep_alive();
-            if (!write(c, stream, std::move(res)) || !keep) {
+            if (!write(c, stream, std::move(res), head_answer) || !keep) {
                 break;
             }
         }
@@ -898,10 +904,15 @@ private:
         }
     }
 
-    template<typename Stream> auto write(connection& c, Stream& stream, response res) -> bool {
+    /// `head_answer`: `res` answers a HEAD request, so a Content-Length the
+    /// handler set is kept (see the request loop).
+    template<typename Stream>
+    auto write(connection& c, Stream& stream, response res, bool head_answer = false) -> bool {
         namespace http = boost::beast::http;
         detail::lowest(stream).expires_after(_config.io_timeout);
-        res.prepare_payload();
+        if (!head_answer || !res.has_content_length()) {
+            res.prepare_payload();
+        }
         auto ec =
             detail::drive(c.ioc, [&](auto h) { http::async_write(stream, res, std::move(h)); });
         return !ec;
