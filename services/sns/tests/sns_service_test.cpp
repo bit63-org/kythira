@@ -657,6 +657,58 @@ BOOST_FIXTURE_TEST_CASE(set_attributes_and_unsubscribe, subscription_fixture) {
                "InvalidParameter");
 }
 
+BOOST_FIXTURE_TEST_CASE(filter_policies_are_checked_in_their_scope, subscription_fixture) {
+    const auto nested = std::string(R"({"order":{"status":["shipped"]}})");
+    // Nested keys need payload scope, on Subscribe and on a later change.
+    BOOST_TEST(message(subscribe("sqs", std::string(k_queue),
+                                 {{"Attributes.entry.1.key", "FilterPolicy"},
+                                  {"Attributes.entry.1.value", nested}})) ==
+               "Invalid parameter: Filter policy scope MessageAttributes does not support "
+               "nested filter policy");
+    const auto r = subscribe("sqs", std::string(k_queue),
+                             {{"Attributes.entry.1.key", "FilterPolicy"},
+                              {"Attributes.entry.1.value", nested},
+                              {"Attributes.entry.2.key", "FilterPolicyScope"},
+                              {"Attributes.entry.2.value", "MessageBody"}});
+    BOOST_TEST_REQUIRE(r._status == 200U, r._body);
+    const auto sub = element(r._body, "SubscriptionArn");
+    const auto set = [&](std::string name, std::string value) {
+        return call("SetSubscriptionAttributes", {{"SubscriptionArn", sub},
+                                                  {"AttributeName", std::move(name)},
+                                                  {"AttributeValue", std::move(value)}});
+    };
+    BOOST_TEST(code(set("FilterPolicyScope", "MessageAttributes")) == "InvalidParameter");
+    BOOST_TEST(unescape(message(set("FilterPolicy", R"({"a":[{"numeric":["<","x"]}]})"))) ==
+               "Invalid parameter: FilterPolicy: Value of < must be numeric");
+    BOOST_TEST(message(set("FilterPolicy", "[1]")) ==
+               "Invalid parameter: FilterPolicy: Filter policy must be a JSON object");
+    // Removing the policy frees the scope to change.
+    BOOST_TEST(set("FilterPolicy", "")._status == 200U);
+    BOOST_TEST(set("FilterPolicyScope", "MessageAttributes")._status == 200U);
+    BOOST_TEST(set("FilterPolicy", R"({"store":[{"prefix":"ex"}]})")._status == 200U);
+}
+
+BOOST_FIXTURE_TEST_CASE(a_topic_holds_at_most_200_filter_policies, subscription_fixture) {
+    const std::vector<std::pair<std::string, std::string>> filtered = {
+        {"Attributes.entry.1.key", "FilterPolicy"}, {"Attributes.entry.1.value", R"({"a":["b"]})"}};
+    for (std::size_t i = 0; i < sns::k_max_filter_policies_per_topic; ++i) {
+        BOOST_TEST_REQUIRE(
+            subscribe("sqs", std::string(k_queue) + std::to_string(i), filtered)._status == 200U);
+    }
+    const auto over = subscribe("sqs", std::string(k_queue) + "-over", filtered);
+    BOOST_TEST(code(over) == "FilterPolicyLimitExceeded");
+    BOOST_TEST(over._status == 403U);
+    // Without a policy the subscription is fine, and changing one that
+    // already has a policy does not count it twice.
+    BOOST_TEST(subscribe("sqs", std::string(k_queue) + "-plain")._status == 200U);
+    const auto first =
+        element(call("ListSubscriptionsByTopic", {{"TopicArn", arn}})._body, "SubscriptionArn");
+    BOOST_TEST(call("SetSubscriptionAttributes", {{"SubscriptionArn", first},
+                                                  {"AttributeName", "FilterPolicy"},
+                                                  {"AttributeValue", R"({"a":["c"]})"}})
+                   ._status == 200U);
+}
+
 BOOST_FIXTURE_TEST_CASE(a_subscription_arn_names_its_own_topic, subscription_fixture) {
     const auto sub = element(subscribe("sqs", std::string(k_queue))._body, "SubscriptionArn");
     const auto other = create("other");
