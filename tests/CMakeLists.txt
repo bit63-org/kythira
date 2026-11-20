@@ -4770,41 +4770,18 @@ endif()
 # byte-identical build. The Folly conditions inside are a separate requirement,
 # kept only on the tests whose source needs Folly.
 if(KYTHIRA_BUILD_COAP_TRANSPORT)
-    add_executable(coap_cipher_suite_property_test coap_cipher_suite_property_test.cpp)
-    target_link_libraries(coap_cipher_suite_property_test PRIVATE
-        network_simulator
-        Boost::unit_test_framework
-        boost_json
-    )
-    if(TARGET Folly::folly)
-        target_link_libraries(coap_cipher_suite_property_test PRIVATE Folly::folly)
-    endif()
-    target_compile_features(coap_cipher_suite_property_test PRIVATE cxx_std_23)
-    add_test(NAME coap_cipher_suite_property_test COMMAND coap_cipher_suite_property_test)
+    # Properties 35 and 36: real DTLS handshakes against a live coap_server,
+    # with certificates the tests generate (coap_dtls_test_pki.hpp). They run
+    # on every future backend; without libcoap only the configuration checks
+    # run.
+    add_network_test(coap_cipher_suite_property_test coap_cipher_suite_property_test.cpp)
     set_tests_properties(coap_cipher_suite_property_test PROPERTIES
-        TIMEOUT 120
+        TIMEOUT 300
         LABELS "property;coap;dtls;cipher_suite"
     )
-
-    add_executable(coap_dtls_handshake_property_test coap_dtls_handshake_property_test.cpp)
-    target_link_libraries(coap_dtls_handshake_property_test PRIVATE
-        network_simulator
-        Boost::unit_test_framework
-        boost_json
-    )
-    if(TARGET Folly::folly)
-        target_link_libraries(coap_dtls_handshake_property_test PRIVATE Folly::folly)
-    endif()
-    if(TARGET certificate_authority)
-        target_link_libraries(coap_dtls_handshake_property_test PRIVATE certificate_authority)
-    endif()
-    if(TARGET httplib::httplib)
-        target_link_libraries(coap_dtls_handshake_property_test PRIVATE httplib::httplib)
-    endif()
-    target_compile_features(coap_dtls_handshake_property_test PRIVATE cxx_std_23)
-    add_test(NAME coap_dtls_handshake_property_test COMMAND coap_dtls_handshake_property_test)
+    add_network_test(coap_dtls_handshake_property_test coap_dtls_handshake_property_test.cpp)
     set_tests_properties(coap_dtls_handshake_property_test PROPERTIES
-        TIMEOUT 120
+        TIMEOUT 300
         LABELS "property;coap;dtls;handshake"
     )
 
