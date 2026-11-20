@@ -33,6 +33,8 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
+#include <random>
 #include <string>
 #include <thread>
 #include <tuple>
@@ -298,6 +300,84 @@ auto drive_until(bucket_host& h, const std::function<void()>& work,
     return predicate();
 }
 
+/// The load-split gates of multi_raft_arbiter_unit_test, with buckets on or
+/// off: thresholds low enough that in-process traffic is hot, size triggers
+/// out of reach, and a sampling window longer than the bursts below.
+auto load_split_config(bool buckets) -> std::function<void(config_type&)> {
+    return [buckets](config_type& cfg) {
+        cfg.load_split._enabled = true;
+        cfg.load_split._qps_threshold = 1.0;
+        cfg.load_split._bytes_threshold = 1e12;
+        cfg.load_split._duration = std::chrono::milliseconds{100};
+        cfg.load_split._one_sided_fraction = 0.99;
+        cfg.load_split._seed = 20261120;
+
+        kythira::threshold_split_merge_policy_config policy_cfg;
+        policy_cfg._load_split_enabled = true;
+        policy_cfg._load_split_qps_threshold = 1.0;
+        policy_cfg._load_split_duration = std::chrono::milliseconds{100};
+        policy_cfg._load_split_one_sided_fraction = 0.99;
+        policy_cfg._shard_split_size_bytes = 1ULL << 40;
+        policy_cfg._shard_max_size_bytes = 1ULL << 41;
+        policy_cfg._shard_split_keys = 1'000'000'000;
+        policy_cfg._shard_max_keys = 2'000'000'000;
+        policy_cfg._shard_merge_max_size_bytes = 1;
+        policy_cfg._shard_merge_max_keys = 1;
+        auto policy = std::make_shared<policy_type>(policy_cfg);
+        cfg.evaluate_split = [policy](const stats_type& s) { return policy->evaluate_split(s); };
+        cfg.policy_interval = std::chrono::milliseconds{20};
+        cfg.split_merge_interval = std::chrono::milliseconds{0};
+
+        if (buckets) {
+            cfg.buckets._enabled = true;
+            cfg.buckets._target_buckets = 16;
+            cfg.buckets._window_slots = 6;
+            cfg.buckets._slot_duration = std::chrono::milliseconds{50};
+            cfg.buckets._refresh_interval = std::chrono::hours{1};
+            cfg.buckets._seed = 20261120;
+        }
+    };
+}
+
+/// Requirement 7.3's skew: a quarter of the key space ([k000, k025)) takes
+/// 90% of the writes. Sustained in bursts: 60 ms of writes, then 60 ms with
+/// none, round after round. The load never stops for long, but every idle
+/// gap spans whole policy ticks with no writes, which is exactly a "spike
+/// that ended" to the sampler, so its 100 ms window never completes. The
+/// buckets' window spans the gaps, and is what this measures.
+///
+/// @return The first split's cut key, or nothing within `budget`.
+auto run_bursty_skew(bucket_host& h, std::chrono::milliseconds budget) -> std::optional<key_type> {
+    for (int i = 0; i < 100; ++i) {
+        BOOST_REQUIRE(h.put(key_of(i), "v"));
+    }
+    std::mt19937 rng{20261120};
+    std::uniform_int_distribution<int> pct{0, 99};
+    std::uniform_int_distribution<int> hot{0, 24};
+    std::uniform_int_distribution<int> cold{25, 99};
+    const auto deadline = std::chrono::steady_clock::now() + budget;
+    const auto burst = std::chrono::milliseconds{60};
+    while (std::chrono::steady_clock::now() < deadline) {
+        const auto busy_until = std::chrono::steady_clock::now() + burst;
+        while (std::chrono::steady_clock::now() < busy_until) {
+            std::ignore = h.put(key_of(pct(rng) < 90 ? hot(rng) : cold(rng)), "w");
+            h.host().tick();
+            if (h.host().applied_split_count() > 0) {
+                return h.host().stats_for(k_group)->descriptor()._range._end;
+            }
+        }
+        const auto idle_until = std::chrono::steady_clock::now() + burst;
+        while (std::chrono::steady_clock::now() < idle_until) {
+            h.host().tick();
+            if (h.host().applied_split_count() > 0) {
+                return h.host().stats_for(k_group)->descriptor()._range._end;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds{2});
+        }
+    }
+    return std::nullopt;
+}
+
 }  // namespace
 
 BOOST_AUTO_TEST_SUITE(multi_raft_load_buckets)
@@ -422,6 +502,74 @@ BOOST_AUTO_TEST_CASE(split_children_inherit_the_boundaries_inside_their_ranges,
         return s.has_value() && boundaries_of(*s) == cut;
     }));
     BOOST_TEST(h.host().stats_for(k_group)->_buckets_version == 1U);
+}
+
+BOOST_AUTO_TEST_CASE(the_report_carries_the_busiest_buckets_and_no_more,
+                     *boost::unit_test::timeout(120)) {
+    // Requirement 5.2: four buckets, two reported, busiest first.
+    bucket_host h{[](config_type& cfg) {
+        enable_buckets(cfg);
+        cfg.buckets._report_top_buckets = 2;
+    }};
+    BOOST_REQUIRE(h.await_leader());
+    const auto cut = seed_and_cut(h);
+    int next = 0;
+    const auto reported = [&] {
+        const auto reports = h.host().build_shard_reports();
+        return reports.size() == 1 && reports[0]._hot_buckets.size() == 2 &&
+               reports[0]._hot_buckets[0].qps() > 0.0;
+    };
+    // All writes below the first boundary: that bucket leads the report.
+    BOOST_REQUIRE(drive_until(h, [&] { std::ignore = h.put(key_of(next++ % 3), "w"); }, reported));
+    const auto r = h.host().build_shard_reports().front();
+    BOOST_TEST(!r._hot_buckets[0]._start.has_value());
+    BOOST_TEST((r._hot_buckets[0]._end == std::optional<key_type>{cut[0]}));
+    BOOST_TEST(r._hot_buckets[0].qps() >= r._hot_buckets[1].qps());
+}
+
+BOOST_AUTO_TEST_CASE(buckets_split_a_skewed_load_the_sampler_alone_keeps_abandoning,
+                     *boost::unit_test::timeout(180)) {
+    // Requirement 7.3, first half. The sampler alone: every burst gap reads
+    // as a spike that ended, so its window restarts and no split comes.
+    {
+        bucket_host h{load_split_config(false)};
+        BOOST_REQUIRE(h.await_leader());
+        BOOST_TEST(!run_bursty_skew(h, std::chrono::milliseconds{3000}).has_value());
+        const auto counters = h.host().load_sampler_counters(k_group).value();
+        BOOST_TEST(counters[1] >= 1U);  // abandoned spikes: the reason, recorded
+    }
+    // With buckets, the window spans the gaps: a split comes inside the same
+    // budget, and it cuts inside the hot quarter.
+    bucket_host h{load_split_config(true)};
+    BOOST_REQUIRE(h.await_leader());
+    const auto at = run_bursty_skew(h, std::chrono::milliseconds{3000});
+    BOOST_REQUIRE_MESSAGE(at.has_value(), "buckets should split the skewed load within budget");
+    BOOST_TEST(*at > key_of(0));
+    BOOST_TEST(*at < key_of(25));
+    BOOST_TEST(!h.host().shard_map_snapshot().check_tiling().has_value());
+}
+
+BOOST_AUTO_TEST_CASE(a_single_hot_key_is_never_split_with_buckets_on,
+                     *boost::unit_test::timeout(180)) {
+    // Requirement 7.3, second half: every boundary is one-sided, so the policy
+    // declines; the host narrows the sampler to the hot bucket, which finds
+    // the one key and backs the shard off, and the back-off holds the bucket
+    // branch too (Requirement 6.4).
+    bucket_host h{load_split_config(true)};
+    BOOST_REQUIRE(h.await_leader());
+    for (int i = 0; i < 100; ++i) {
+        BOOST_REQUIRE(h.put(key_of(i), "v"));
+    }
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{3};
+    while (std::chrono::steady_clock::now() < deadline) {
+        std::ignore = h.put(key_of(50), "w");
+        h.host().tick();
+    }
+    BOOST_TEST(h.host().applied_split_count() == 0U);
+    const auto counters = h.host().load_sampler_counters(k_group).value();
+    BOOST_TEST(counters[2] >= 1U);  // single-hot-key verdicts
+    BOOST_TEST(counters[3] == 0U);  // proposals
+    BOOST_TEST(h.host().stats_for(k_group)->_load_split_backoff);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

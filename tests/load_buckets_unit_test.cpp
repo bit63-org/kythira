@@ -491,3 +491,56 @@ BOOST_AUTO_TEST_CASE(a_merge_with_no_measured_side_still_keeps_the_shared_bound)
         set_type::merge_boundaries(range_of(100, 900), range_of(100, 500), {}, {}, {}, 3);
     BOOST_TEST(b == (std::vector<key_type>{key_of(500)}));
 }
+
+// ── exposure helpers (task 6) ────────────────────────────────────────────────
+
+namespace {
+
+auto stats_with(std::vector<double> qps) -> std::vector<kythira::bucket_stats<key_type>> {
+    std::vector<kythira::bucket_stats<key_type>> out;
+    for (std::size_t i = 0; i < qps.size(); ++i) {
+        kythira::bucket_stats<key_type> b;
+        if (i > 0) {
+            b._start = key_of(static_cast<int>(i) * 100);
+        }
+        if (i + 1 < qps.size()) {
+            b._end = key_of(static_cast<int>(i + 1) * 100);
+        }
+        b._read_qps = qps[i] / 2;
+        b._write_qps = qps[i] / 2;
+        out.push_back(b);
+    }
+    return out;
+}
+
+}  // namespace
+
+BOOST_AUTO_TEST_CASE(the_hottest_share_is_the_busiest_buckets_fraction) {
+    BOOST_TEST(kythira::hottest_bucket_share(stats_with({10, 30, 60})) == 0.6);
+    BOOST_TEST(kythira::hottest_bucket_share(stats_with({0, 0})) == 0.0);
+    BOOST_TEST(kythira::hottest_bucket_share(std::vector<kythira::bucket_stats<key_type>>{}) ==
+               0.0);
+    BOOST_TEST(kythira::hottest_bucket_share(stats_with({5})) == 1.0);
+}
+
+BOOST_AUTO_TEST_CASE(the_report_carries_at_most_k_buckets_busiest_first) {
+    // Requirement 5.2.
+    const auto top = kythira::top_buckets(stats_with({10, 40, 30, 40, 5}), 3);
+    BOOST_REQUIRE(top.size() == 3U);
+    BOOST_TEST(top[0].qps() == 40.0);
+    BOOST_TEST((top[0]._start == std::optional<key_type>{key_of(100)}));  // ties in key order
+    BOOST_TEST(top[1].qps() == 40.0);
+    BOOST_TEST(top[2].qps() == 30.0);
+    BOOST_TEST(kythira::top_buckets(stats_with({1, 2}), 4).size() == 2U);
+}
+
+BOOST_AUTO_TEST_CASE(the_best_cut_balances_and_reports_how_evenly) {
+    const auto cut = kythira::best_bucket_cut(stats_with({10, 200, 150, 40}));
+    BOOST_REQUIRE(cut.has_value());
+    BOOST_TEST(cut->_boundary == 1U);
+    BOOST_TEST(cut->_left == 210.0);
+    BOOST_TEST(cut->_right == 190.0);
+    BOOST_TEST(cut->one_sided_fraction() == 210.0 / 400.0);
+    BOOST_TEST(!kythira::best_bucket_cut(stats_with({100})).has_value());
+    BOOST_TEST(kythira::best_bucket_cut(stats_with({0, 0}))->one_sided_fraction() == 1.0);
+}

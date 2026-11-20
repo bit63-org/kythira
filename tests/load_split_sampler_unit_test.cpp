@@ -20,6 +20,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -307,6 +308,47 @@ BOOST_AUTO_TEST_CASE(a_window_with_no_key_addressed_traffic_proposes_nothing) {
     BOOST_CHECK(out.empty());
     BOOST_CHECK_EQUAL(s.single_hot_key_count(), 0U);
     BOOST_CHECK(s.state() == load_sampler_state::idle);
+}
+
+// ── restriction to a bucket (multi-raft-load-buckets Requirement 6.2) ────────
+
+BOOST_AUTO_TEST_CASE(a_restricted_sampler_proposes_only_inside_its_range) {
+    // Traffic over all of [00, 99], candidates only from [20, 40): the cut it
+    // proposes is inside the range, and its balance still counts every key.
+    sampler_type s{enabled_config()};
+    s.restrict_to(kythira::shard_range<key_type>{._start = key_of(20), ._end = key_of(40)});
+    const auto t0 = clock::now();
+    BOOST_REQUIRE(s.evaluate(0.0, 500.0, 0.0, 0.0, t0).empty());
+    BOOST_REQUIRE(s.state() == load_sampler_state::sampling);
+    drive_balanced(s, 5000);
+    BOOST_CHECK_EQUAL(s.observation_count(), 5000U);
+
+    const auto out = s.evaluate(0.0, 500.0, 0.0, 0.0, t0 + std::chrono::seconds{10});
+    BOOST_REQUIRE_EQUAL(out.size(), 1U);
+    BOOST_CHECK(out[0].key() >= key_of(20));
+    BOOST_CHECK(out[0].key() < key_of(40));
+    // Keys below 20 are a fifth of the traffic and are never admitted, yet
+    // they are on the left of every candidate: a balance counted over the
+    // range alone would put far less there.
+    BOOST_CHECK_GT(static_cast<double>(out[0].left_accesses()),
+                   0.2 * static_cast<double>(out[0].total_accesses()));
+}
+
+BOOST_AUTO_TEST_CASE(a_restricted_sampler_still_backs_off_on_one_hot_key) {
+    sampler_type s{enabled_config()};
+    s.restrict_to(kythira::shard_range<key_type>{._start = key_of(20), ._end = key_of(40)});
+    const auto t0 = clock::now();
+    BOOST_REQUIRE(s.evaluate(0.0, 500.0, 0.0, 0.0, t0).empty());
+    for (int i = 0; i < 5000; ++i) {
+        s.observe(key_of(30));
+    }
+    BOOST_CHECK(s.evaluate(0.0, 500.0, 0.0, 0.0, t0 + std::chrono::seconds{10}).empty());
+    BOOST_CHECK(s.state() == load_sampler_state::backoff);
+    BOOST_CHECK_EQUAL(s.single_hot_key_count(), 1U);
+
+    // Lifting the restriction admits every key again.
+    s.restrict_to(std::nullopt);
+    BOOST_CHECK(!s.restriction().has_value());
 }
 
 BOOST_AUTO_TEST_SUITE_END()
