@@ -12,6 +12,7 @@
 #include <boost/test/unit_test.hpp>
 
 #include <kythira/dynamodb/expr_request.hpp>
+#include <kythira/dynamodb/group_state_machine.hpp>
 #include <kythira/dynamodb/item_state_machine.hpp>
 #include <kythira/dynamodb/key_layout.hpp>
 
@@ -272,6 +273,25 @@ BOOST_AUTO_TEST_CASE(durable_applied_index_follows_the_engine) {
     f.engine.release_durability();
     f.engine.sync(f.engine.latest_sequence());
     BOOST_TEST(f.sm.durable_applied_index() == 2U);
+}
+
+// The Raft node calls sync_durable() before compacting the log; without it
+// an engine that syncs only when asked (RocksDB) never lets the log compact,
+// and the log grows in memory until the node restarts
+// (doc/memory_profiling.md). The group state machine the node holds must
+// pass it through, for the item and the catalog state machines alike.
+static_assert(requires(ddb::dynamo_group_state_machine<>& sm) { sm.sync_durable(); });
+
+BOOST_AUTO_TEST_CASE(sync_durable_makes_every_applied_entry_durable) {
+    fixture f;
+    (void)f.put(R"({"pk":{"S":"a"},"sk":{"N":"1"}})");
+    f.engine.hold_durability();
+    (void)f.put(R"({"pk":{"S":"a"},"sk":{"N":"2"}})");
+    (void)f.put(R"({"pk":{"S":"a"},"sk":{"N":"3"}})");
+    BOOST_TEST(f.sm.durable_applied_index() == 1U);
+    f.sm.sync_durable();
+    BOOST_TEST(f.sm.durable_applied_index() == 3U);
+    BOOST_TEST(f.sm.durable_applied_index() == f.sm.applied_index());
 }
 
 BOOST_AUTO_TEST_CASE(checkpoint_and_ingest_move_items_and_versions) {
