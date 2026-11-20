@@ -83,6 +83,34 @@ defaults to false and no binary turns it on.
     latency. Record here. Turn batching on in `cmd/multi_raft_node` only if
     CPU per committed entry drops at 1000 groups.
   - _Requirements: 7.4_
+  - Tooling: `multi_raft_node --batching 0|1 --count-rpcs 0|1`, the control
+    port's `/stats` (process CPU, sent and wire RPCs, batch counters), and
+    `scripts/run-tier-c-row.sh --batching 0|1 --host-stats`, which reads
+    `/stats` around the driver and prints host CPU per committed write and
+    wire requests per second.
+  - 2026-11-20, Tier C in a 4-core cloud sandbox (Xeon 2.1 GHz, 3 host
+    processes plus the driver on one machine, Beast + JSON, memory
+    persistence, tick 2 ms, heartbeat 50 ms, 16 in flight, 5 x 2000 writes
+    of 128 B plus 50 warm-up each). Host figures cover the whole driver run,
+    readiness wait included.
+
+    | groups | batching | result | ops/sec (median) | p99 | host CPU per write | wire req/s | RPCs/s |
+    |---|---|---|---|---|---|---|---|
+    | 100 | off | run 1: unstable (45.5% spread) | 331.4 | 158.8 ms | 19.2 ms | 2826 | 2826 |
+    | 100 | off | runs 2, 3: not every group led within 60 s, no load offered | n/a | n/a | n/a | 2583, 2970 | same |
+    | 100 | on | stable (4.9% spread) | 524.3 | 100.3 ms | 6.4 ms | 978 | 6272 |
+    | 1000 | off | not every group led within 60 s | n/a | n/a | n/a | 55 | 55 |
+    | 1000 | on | not every group led within 60 s | n/a | n/a | n/a | 48 | 119 |
+
+  - Reading: at 100 groups batching cuts host CPU per committed write about
+    3x and p99 by a third, carries about 6 RPCs per wire request, and is
+    the only arm that reliably reaches a led cluster
+    on this machine (the hosts sit at about 3.3 of 4 cores either way). At
+    1000 groups neither arm gets every group led on 4 cores: with 55 RPCs a
+    second the hosts are still CPU-bound, which points at per-group work in
+    the hosts rather than the wire (not profiled), and this machine cannot answer the
+    1000-group question. Batching stays off in `cmd/multi_raft_node` until
+    a 1000-group run on larger hardware shows the drop this task requires.
 
 - [ ] 10. Other transports and serializers (optional)
   - gRPC with protobuf, the CoAP backends, TCP RPC, Ion: each on its own,
