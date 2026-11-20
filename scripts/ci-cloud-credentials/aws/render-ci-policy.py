@@ -24,6 +24,14 @@ and the role's inline policy has 10,240 characters to share between every
 bundle, so the copies must collapse to one. Two different statements under
 one Sid is an error: one of them would be silently lost.
 
+Merging also drops, from an unconditioned `Resource: "*"` Allow statement,
+every action an earlier such statement already grants (most bundles list
+ec2:DescribeInstances and friends). The union of Allow statements is what
+IAM evaluates, so this changes no permission; it only stops the same action
+string being paid for once per bundle out of the shared 10,240 characters.
+A statement keeps its first action if all of them were duplicates, so its
+Sid survives for --detect-bundles.
+
 The lint enforces the rule the README's "Instance actions are tag-scoped"
 section explains: no statement may let CI stop, start, terminate, reboot or
 retag an EC2 instance without a condition. An unconditioned ec2:CreateTags
@@ -103,9 +111,36 @@ def merge(bundles, account_id, bucket):
             if sid:
                 by_sid[sid] = (name, stmt)
             statements.append(stmt)
+    statements = drop_granted_actions(statements)
     statements.append({"Sid": "StsGetCallerIdentity", "Effect": "Allow",
                        "Action": "sts:GetCallerIdentity", "Resource": "*"})
     return {"Version": "2012-10-17", "Statement": statements}
+
+
+def is_blanket_allow(stmt):
+    """An Allow on every resource with no condition: its actions hold everywhere."""
+    return (stmt.get("Effect") == "Allow" and as_list(stmt.get("Resource")) == ["*"]
+            and "Action" in stmt and not ({"Condition", "NotResource", "NotAction"} & stmt.keys()))
+
+
+def drop_granted_actions(statements):
+    granted = []
+    out = []
+    for stmt in statements:
+        if not is_blanket_allow(stmt):
+            out.append(stmt)
+            continue
+        actions = as_list(stmt["Action"])
+        # IAM action names are case-insensitive and may carry wildcards.
+        fresh = [a for a in actions
+                 if not any(fnmatch.fnmatchcase(a.lower(), g) for g in granted)]
+        granted.extend(a.lower() for a in actions)
+        if fresh == actions:
+            out.append(stmt)
+            continue
+        kept = fresh or actions[:1]
+        out.append({**stmt, "Action": kept if isinstance(stmt["Action"], list) else kept[0]})
+    return out
 
 
 def compact_len(doc):

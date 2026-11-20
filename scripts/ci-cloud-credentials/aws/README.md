@@ -265,10 +265,12 @@ plus four certificates at $0.058, roughly $0.25 a run per matrix leg; see
 against the per-region CA quota (200 by default) for their seven-day restore
 window but are not billed.
 
-The role's inline policy has 10,240 characters for every bundle together,
-and with this bundle all nine render to 10,224 (`render-ci-policy.py
---check` prints the figure). The next bundle will not fit; it needs a
-managed policy of its own or a second inline policy.
+The role's inline policy has 10,240 characters for every bundle together
+(`render-ci-policy.py --check` prints the figure). With this bundle all nine
+rendered to 10,224 until the renderer started dropping actions an earlier
+unconditioned `Resource: "*"` statement already grants (every EC2 bundle
+lists `ec2:DescribeInstances` and friends); that changes no permission and
+brought the nine down to about 8,050, leaving room for more bundles.
 
 Applying this bundle to the live CI role, and the first real runs, need
 Clark's go-ahead (spec task 7).
