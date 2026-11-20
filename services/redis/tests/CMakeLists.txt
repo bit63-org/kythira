@@ -57,6 +57,9 @@ target_compile_definitions(redis_golden_bytes_test PRIVATE
 set_tests_properties(redis_golden_bytes_test PROPERTIES LABELS "unit;redis;cache" TIMEOUT 120)
 target_link_libraries(redis_acl_unit_test PRIVATE OpenSSL::Crypto)
 kythira_redis_test(redis_auth_limiter_unit_test redis_auth_limiter_unit_test.cpp)
+# redis-general-data-types task 16: the data-layer API's bytes and the
+# remote data access, against scripted data nodes.
+kythira_redis_test(redis_data_wire_unit_test redis_data_wire_unit_test.cpp)
 # redis_gateway_node's own environment parsing (the plaintext-Raft opt-in).
 kythira_redis_test(redis_gateway_node_config_unit_test
                    redis_gateway_node_config_unit_test.cpp)

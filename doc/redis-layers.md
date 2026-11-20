@@ -12,8 +12,8 @@ and 24, design Component 9):
 
 A node picks its layers with `KYTHIRA_REDIS_ROLES` (see
 [redis-gateway.md](redis-gateway.md)). This build serves only the co-located
-set, all three, which is the node as it has always been. The later tasks
-(16 to 20) add the data-layer API, front ends without data, gateways apart
+set, all three, which is the node as it has always been. The data-layer
+API is in place (below). The later tasks add front ends without data, gateways apart
 from front ends, layer membership, and the split and merge procedures. This
 page gains the runbook with task 19.
 
@@ -43,6 +43,39 @@ implementation, which makes the same host calls as before the split. The data
 layer's own jobs (sweeps, evictions, advisories, per-node `INFO` and
 `DBSIZE` counts) use the same object's `local_*` members, which only a node
 with `data` has.
+
+## The data-layer API
+
+A node with `data` serves the data-layer API to other nodes as internal RESP
+commands on the forward link, beside `KYTHIRA.TXN`. Only a connection that
+authenticated as the internal identity may send them. A client that sends
+one gets `NOPERM`, whatever its role.
+
+| Command | Answers with |
+|---|---|
+| `KYTHIRA.DATA ROUTE <key>` | the route of the group that owns the key |
+| `KYTHIRA.DATA ROUTES <range>` | every route overlapping the range, in key order |
+| `KYTHIRA.DATA PROPOSE <group> <version> <conf_version> <entry>` | the state machine's result, or why not |
+
+Every answer is one bulk string in the encoding of `redis_data_wire.hpp`.
+A routes answer carries the `host:port` where each node it names takes these
+calls. A route's leader hint is the leader the answering node's own replica
+knows, which is fresher than its routing map.
+
+A data node never forwards a refused proposal. It answers with what the
+caller needs to try again: not the leader (with the leader it knows), a stale
+route (with the current routes), an unknown group, a locked key, an unrouted
+key, a timeout (the entry may still commit) or a failure. A split or merge in
+flight answers "not the leader" naming the node itself, so the caller asks
+again after a pause.
+
+`redis_remote_data_access` (`redis_remote_data_access.hpp`) is the caller's
+side. It keeps the shared route cache (`include/raft/route_cache.hpp`),
+fetches routes from any data node it knows or from its seeds, sends a write
+to the leader hint first and then the other voters, and corrects the cache
+from every refusal. A proposal raises the same exceptions as the host's
+`submit_command`, so a caller handles a local and a remote proposal the same
+way. Front ends without data use it from task 16b.
 
 ## Co-located baseline
 

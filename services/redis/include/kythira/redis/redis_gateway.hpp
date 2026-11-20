@@ -28,6 +28,7 @@
 #include <kythira/redis/redis_forward_link.hpp>
 #include <kythira/redis/redis_kv_commands.hpp>
 #include <kythira/redis/redis_data_access.hpp>
+#include <kythira/redis/redis_data_wire.hpp>
 #include <kythira/redis/redis_gateway_value_access.hpp>
 #include <kythira/redis/redis_kv_state_machine.hpp>
 #include <kythira/redis/redis_server_identity.hpp>
@@ -402,6 +403,14 @@ public:
     [[nodiscard]] auto stats() const noexcept -> const redis_gateway_stats& { return _stats; }
     [[nodiscard]] auto config() const noexcept -> const redis_gateway_config& { return _config; }
 
+    /// Sends `argv` to the gateway listening at `endpoint` (`host:port`)
+    /// over the forward link, authenticated as the internal identity, and
+    /// returns its whole RESP reply; `nullopt` when forwarding is not set up
+    /// or the peer could not be reached in time. The `call_fn` of a
+    /// `redis_remote_data_access` (task 16).
+    auto data_call(const std::string& endpoint, const std::vector<std::string>& argv)
+        -> std::optional<std::string>;
+
 protected:
     ~redis_front_end() = default;
 
@@ -517,6 +526,14 @@ protected:
     auto handle_isolation(session& s, const resp_command& cmd) -> std::string;
     auto handle_watch(session& s, const resp_command& cmd) -> std::string;
     auto handle_internal_txn(session& s, const resp_command& cmd) -> std::string;
+    /// `KYTHIRA.DATA ROUTE|ROUTES|PROPOSE`: the data-layer API a front end
+    /// without a replica of a key's group calls (redis_data_wire.hpp).
+    auto handle_data(session& s, const resp_command& cmd) -> std::string;
+    /// `KYTHIRA.DATA PROPOSE`'s answer bytes.
+    auto data_propose(const resp_command& cmd) -> std::string;
+    /// `routes` with the addresses of every node they name.
+    auto data_routes_payload(std::vector<typename Host::descriptor_type> routes)
+        -> redis_data_wire::routes_payload<group_id_type, node_id_type>;
     /// Queue one command inside `MULTI`, or refuse it (and doom the `EXEC`).
     auto queue_in_multi(session& s, std::string_view upper, const resp_command& cmd) -> std::string;
     [[nodiscard]] auto isolation_of(const session& s) const -> txn_isolation;
@@ -576,6 +593,9 @@ protected:
     auto forward_argv(const std::vector<std::string>& argv, const node_id_type& to,
                       std::string_view what) -> std::optional<std::string>;
     auto forward_endpoint(const node_id_type& to) -> std::optional<std::string>;
+    /// `forward_argv` to a resolved `host:port`.
+    auto forward_to_endpoint(const std::vector<std::string>& argv, const std::string& endpoint,
+                             std::string_view what) -> std::optional<std::string>;
     auto locate(const std::string& key, std::string& error_reply,
                 std::optional<node_id_type>& forward_to) -> group_node_type*;
     [[nodiscard]] static auto data_error(redis_data_status status) -> std::string;
