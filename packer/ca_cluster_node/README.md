@@ -127,11 +127,65 @@ shellcheck packer/ca_cluster_node/scripts/*.sh
 would otherwise try to resolve the template's `amazon-parameterstore` data
 source via a real AWS SSM API call.)
 
-## Cleanup
+## Cleanup and retention
 
 Packer's own temporary build instance/security-group/key-pair are cleaned up
 automatically on both success and failure. The AMI and its snapshot are
-**not** — deleting them is a deliberate operator action:
+not; old ones are removed by the retention script,
+`scripts/ami-retention/prune-amis.sh`
+(`.kiro/specs/ca-cluster-node-ami-retention/`).
+
+```
+scripts/ami-retention/prune-amis.sh [--arch amd64|arm64] [--keep N] [--min-age-days D] [--apply]
+```
+
+It only ever considers AMIs owned by the account and tagged both
+`kythira:component=ca-cluster-node` and `kythira:built-by=packer`, grouped
+into classes by (`kythira:arch`, `kythira:chaos-node`); an image with no
+`kythira:chaos-node` tag counts as `false`. Within a class an image is
+**kept** if any of these hold, and removed otherwise:
+
+| Rule | Default |
+|---|---|
+| one of the newest `N` of its class (`--keep`, at least 1, so the real-EC2 bundles' "Resolve ca_cluster_node AMI ID" steps always find one) | 2 |
+| younger than `D` days (`--min-age-days`), so a parallel build's fresh image is never removed | 7 |
+| tagged `kythira:retain=true` (the operator's pin) | |
+| an instance in any state but `terminated` was launched from it, or the `$Latest` or `$Default` version of a launch template in the region names it | |
+
+Removing an image deregisters it and then deletes those of its snapshots
+that are themselves tagged `kythira:component=ca-cluster-node`; any other
+snapshot in its mappings is listed and left alone. Without `--apply` it
+prints the plan and changes nothing. A failed or unreadable query aborts
+before anything is changed; a failed deregister or delete fails the run
+after the rest have been attempted.
+
+To keep an image indefinitely, pin it:
+
+```
+aws ec2 create-tags --resources ami-XXXXXXXXXXXXXXXXX --tags Key=kythira:retain,Value=true
+```
+
+**Launch-template caveat.** Only a template's `$Latest` and `$Default`
+versions are read, because an ASG or fleet launches from one of those unless
+pinned to a numbered version, and reading every version of every template is
+unbounded. A template pinned to an older numbered version, or one whose
+`ImageId` is a `resolve:ssm:` parameter, is not seen: pin its image with
+`kythira:retain=true`.
+
+**In CI.** The `ami-build` bundle runs the script as its last step, per
+architecture, after a successful build. It is a dry run, with the plan in
+the job summary, until the repository variable
+`REAL_CLOUD_TESTS_AWS_AMI_PRUNE_ENABLED` is `true`. `REAL_CLOUD_TESTS_AWS_AMI_KEEP`
+and `REAL_CLOUD_TESTS_AWS_AMI_MIN_AGE_DAYS` override `N` and `D`. The CI
+role may only deregister and delete resources tagged
+`kythira:component=ca-cluster-node` (`scripts/ci-cloud-credentials/aws/README.md`,
+"AMI retention grants").
+
+The script's keep and failure rules are checked against a fake `aws` by
+`scripts/ami-retention/test-prune-amis.sh`, which CI runs on every pull
+request.
+
+### Manual fallback
 
 ```
 aws ec2 deregister-image --image-id ami-XXXXXXXXXXXXXXXXX
@@ -151,6 +205,6 @@ aws ec2 describe-images --owners self \
 - Wiring a freshly built AMI's ID automatically into `KYTHIRA_EC2_TEST_AMI`
   for the real-EC2 test bundles — set it manually from the manifest/CI
   artifact today.
-- AMI/snapshot retention or lifecycle cleanup automation.
 
-Both are candidate follow-up work, not part of this pipeline.
+This is candidate follow-up work, not part of this pipeline. (Retention, the
+other follow-up once listed here, is the section above.)

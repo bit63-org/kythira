@@ -456,8 +456,9 @@ unverified completion claim.
     composite mode, every manager's default since October 16, 2026;
     it remains in numeric mode (`<std::uint64_t>`).
   - **Named follow-up specs never written** (optional): a remote ccache
-    backend (`ccache-adoption` tasks.md ~349) and AMI retention automation
-    (`ca-cluster-node-ami` tasks.md ~261).
+    backend (`ccache-adoption` tasks.md ~349). (AMI retention automation,
+    the other one, is `.kiro/specs/ca-cluster-node-ami-retention/`; tasks
+    1-6 are built, its first live run needs Clark's go.)
   - **Checkbox bookkeeping owed in the specs themselves**, so the next audit
     does not rediscover it: `stdexec-future-backend`'s
     header, which still says "not yet merged into `main`"; and

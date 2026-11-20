@@ -3,6 +3,23 @@
 Chronological log of notable changes to Kythira, newest first. For the
 current list of outstanding work, see [TODO.md](TODO.md).
 
+### What Changed (November 20, 2026)
+
+- **Old `ca_cluster_node` AMIs can now be pruned automatically.** Every
+  `ami-build` run registered two AMIs and two snapshots and nothing removed
+  them. `scripts/ami-retention/prune-amis.sh` keeps the newest two images
+  of each (arch, chaos-node) class, anything younger than seven days,
+  anything tagged `kythira:retain=true`, and anything an instance or a
+  launch template still uses; it removes the rest and their own snapshots.
+  It runs as the `ami-build` job's last step, as a dry run that prints the
+  plan into the job summary until `REAL_CLOUD_TESTS_AWS_AMI_PRUNE_ENABLED`
+  is set. Any failed or unreadable AWS query stops it before it changes
+  anything. The CI role may now only deregister and delete resources tagged
+  `kythira:component=ca-cluster-node`; the policy renderer drops actions
+  another statement already grants, which freed about 2,000 of the 10,240
+  characters the role's policy is allowed
+  (`.kiro/specs/ca-cluster-node-ami-retention/`, tasks 1-6).
+
 ### What Changed (November 18, 2026)
 
 - **DynamoDB takes `OnDemandThroughput`.** `CreateTable`, `UpdateTable`
