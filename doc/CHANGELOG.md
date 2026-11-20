@@ -3,6 +3,49 @@
 Chronological log of notable changes to Kythira, newest first. For the
 current list of outstanding work, see [TODO.md](TODO.md).
 
+### What Changed (November 20, 2026)
+
+- **Cache uploads through a follower no longer stall for a second**
+  (GitHub issue 942). When a node that was not the shard's leader relayed a
+  `PUT` to the leader, it removed the client's `Expect: 100-continue` and
+  never answered it. curl sends that header for any body over 1 MiB, then
+  holds the body for a second waiting for `100 Continue`. With round-robin
+  over three nodes, two in three uploads paid that second: a 2 MB `PUT`
+  took 1.07 s through a follower and 0.05 s at the leader. The relaying
+  node now answers `100 Continue` itself once it has connected to the
+  leader.
+- **A node reads back an upload it relayed at once** (GitHub issue 942).
+  rclone's WebDAV backend sends a `PROPFIND` for each file right after
+  its `PUT`. When the `PUT` had gone through a follower, that follower
+  had often not yet applied the commit and answered 404. rclone counted
+  the upload as failed and sent it again, so 5 or 6 of 24 files went
+  twice. The leader now returns its applied index on a relayed `PUT` or
+  `DELETE` (`X-Kythira-Applied-Index`), and the relaying node waits until
+  it has applied that index before it answers. The wait is usually a few
+  milliseconds; `cache_relay_apply_waits` and `cache_relay_apply_wait_ms`
+  in `INFO` count it.
+- **The disk-backed build cache shows where its write time goes, and
+  spends less CPU per byte** (GitHub issue 942). `INFO`'s `# Cache`
+  section now splits a leader's `PUT` time into waiting on the client,
+  waiting on `put_chunk` proposals and waiting on the `commit`. It also
+  reports Raft log append and fsync time, per-shard log, commit, apply
+  and pending-proposal figures, and `cache_write_amplification`: the
+  process's own bytes written per byte the chunk store wrote. That ratio
+  is about 2 in steady state, since every chunk is written to the log and
+  then to the store. A container's block-I/O counters can count a write
+  once per RAID member and report 6x instead. A profile of a three-node
+  write run turned up three wastes, now fixed. CRC-32 ran one table
+  lookup per byte; it now folds eight bytes at a time (339 MB/s to
+  1.8 GB/s, with identical results, so nothing on disk changes). The
+  Beast and cpp-httplib Raft transports copied every request and response
+  body with a `push_back` per byte, which was 7% of a node's CPU. And each
+  AppendEntries copied its 4 MiB entries into the retry lambda, its
+  continuation and the reply handler for every follower. The cache-cluster
+  test gains a `matrix` client mode and a `write_throughput_matrix`
+  scenario. It measures aggregate `PUT` throughput for 1, 4, 16 and 32
+  writers of 64 KiB and 2 MiB objects, and 1 and 4 writers of 256 MiB
+  objects, and checks each node's write amplification.
+
 ### What Changed (November 18, 2026)
 
 - **DynamoDB takes `OnDemandThroughput`.** `CreateTable`, `UpdateTable`
