@@ -245,14 +245,15 @@ if(_RUNTIME_EXE)
     # docker-chaos-image: stage the host-built chaos_node binary, then
     # package it into a runtime-only image (.kiro/specs/chaos-node-host-build/).
     # Guarded exactly like cmd/chaos_node's own inclusion at the top level
-    # (NOT ENABLE_COVERAGE AND folly_FOUND AND Boost_FOUND AND httplib_FOUND)
+    # (NOT ENABLE_COVERAGE AND KYTHIRA_FUTURE_BACKEND_AVAILABLE AND Boost_FOUND
+    # AND httplib_FOUND)
     # — this guard predates cmd/chaos_node moving ahead of tests/ at the top
     # level, and keeps matching its inclusion rather than testing
     # `if(TARGET chaos_node)`. It must match the top-level
     # CMakeLists.txt guard exactly, including NOT ENABLE_COVERAGE, or a
     # coverage build (which skips add_subdirectory(cmd/chaos_node) entirely)
-    # hits this branch with folly/Boost/httplib all found but no chaos_node
-    # target actually defined, failing CMake generate on
+    # hits this branch with a future backend, Boost and httplib all found but
+    # no chaos_node target actually defined, failing CMake generate on
     # `$<TARGET_FILE:chaos_node>` with "No target chaos_node".
     # A seeded-bug build (KYTHIRA_CHAOS_SEEDED_BUG) gets its own tag, so it
     # can never overwrite :dev, which every scenario and the cairn fence run.
@@ -260,7 +261,7 @@ if(_RUNTIME_EXE)
     if(KYTHIRA_CHAOS_SEEDED_BUG STREQUAL "vote_term")
         set(_CHAOS_IMAGE_TAG kythira-chaos-node:seeded-vote-term)
     endif()
-    if(NOT ENABLE_COVERAGE AND folly_FOUND AND Boost_FOUND AND httplib_FOUND)
+    if(NOT ENABLE_COVERAGE AND KYTHIRA_FUTURE_BACKEND_AVAILABLE AND Boost_FOUND AND httplib_FOUND)
         add_custom_target(docker-chaos-image
             DEPENDS chaos_node chaos_workload chaos_s3_mock
             COMMAND ${CMAKE_COMMAND} -E make_directory
@@ -286,7 +287,7 @@ if(_RUNTIME_EXE)
     else()
         add_custom_target(docker-chaos-image
             COMMAND ${CMAKE_COMMAND} -E echo
-                    "'docker-chaos-image' requires chaos_node to be buildable (folly + Boost + httplib)"
+                    "'docker-chaos-image' requires chaos_node to be buildable (a future backend + Boost + httplib)"
             COMMAND ${CMAKE_COMMAND} -E false
         )
     endif()
@@ -298,7 +299,7 @@ if(_RUNTIME_EXE)
     # `if(TARGET ...)`-isn't-usable-here reason docker-chaos-image's own
     # comment above documents (cmd/poco_discovery_node is also added after
     # tests/ at the top level).
-    if(POCO_DNSSD_FOUND AND folly_FOUND AND Boost_FOUND AND httplib_FOUND)
+    if(POCO_DNSSD_FOUND AND KYTHIRA_FUTURE_BACKEND_AVAILABLE AND Boost_FOUND AND httplib_FOUND)
         add_custom_target(docker-poco-discovery-image
             DEPENDS poco_discovery_node
             COMMAND ${CMAKE_COMMAND} -E make_directory
@@ -316,7 +317,7 @@ if(_RUNTIME_EXE)
     else()
         add_custom_target(docker-poco-discovery-image
             COMMAND ${CMAKE_COMMAND} -E echo
-                    "'docker-poco-discovery-image' requires poco_discovery_node to be buildable (Poco DNSSD + folly + Boost + httplib)"
+                    "'docker-poco-discovery-image' requires poco_discovery_node to be buildable (Poco DNSSD + a future backend + Boost + httplib)"
             COMMAND ${CMAKE_COMMAND} -E false
         )
     endif()
@@ -366,7 +367,7 @@ if(_RUNTIME_EXE)
     # generation there.
     set(_chaos_ctl_scenario_command "")
     set(_chaos_ctl_target "")
-    if(NOT ENABLE_COVERAGE AND folly_FOUND AND Boost_FOUND AND httplib_FOUND)
+    if(NOT ENABLE_COVERAGE AND KYTHIRA_FUTURE_BACKEND_AVAILABLE AND Boost_FOUND AND httplib_FOUND)
         set(_chaos_ctl_target chaos_ctl)
         set(_chaos_ctl_scenario_command
             COMMAND ${CMAKE_COMMAND} -E env
@@ -519,7 +520,7 @@ if(_RUNTIME_EXE)
     # (.kiro/specs/discovery-nodes-host-build/) — same shape and rationale as
     # docker-poco-discovery-image above, guarded on cmd/dns_discovery_node's
     # and cmd/dns_sd_discovery_node's own condition.
-    if(LIBLDNS_FOUND AND folly_FOUND AND httplib_FOUND)
+    if(LIBLDNS_FOUND AND KYTHIRA_FUTURE_BACKEND_AVAILABLE AND httplib_FOUND)
         add_custom_target(docker-dns-discovery-image
             DEPENDS dns_discovery_node
             COMMAND ${CMAKE_COMMAND} -E make_directory
@@ -552,7 +553,7 @@ if(_RUNTIME_EXE)
         foreach(_t docker-dns-discovery-image docker-dns-sd-discovery-image)
             add_custom_target(${_t}
                 COMMAND ${CMAKE_COMMAND} -E echo
-                        "'${_t}' requires the relevant node to be buildable (libldns + folly + httplib)"
+                        "'${_t}' requires the relevant node to be buildable (libldns + a future backend + httplib)"
                 COMMAND ${CMAKE_COMMAND} -E false
             )
         endforeach()
@@ -588,7 +589,7 @@ if(_RUNTIME_EXE)
     # (cmd/chaos_node/CMakeLists.txt); ca_service needs the former too. It
     # reuses docker-chaos-image's own condition rather than
     # if(TARGET chaos_node).
-    if(NOT ENABLE_COVERAGE AND folly_FOUND AND Boost_FOUND AND httplib_FOUND
+    if(NOT ENABLE_COVERAGE AND KYTHIRA_FUTURE_BACKEND_AVAILABLE AND Boost_FOUND AND httplib_FOUND
        AND TARGET ca_service AND TARGET certificate_authority AND KYTHIRA_HTTP_TLS)
         add_custom_target(docker-mtls-chaos-image
             DEPENDS docker-chaos-image ca_service

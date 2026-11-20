@@ -29,7 +29,7 @@
 #include "multi_raft_row_report.hpp"
 #include "multi_raft_transport_harness.hpp"
 
-#include <folly/init/Init.h>
+#include <raft/process_init.hpp>
 
 #include <charconv>
 #include <chrono>
@@ -299,10 +299,7 @@ auto main(int argc, char** argv) -> int {
         return 2;
     }
 
-    int folly_argc = 1;
-    char* folly_argv_storage[] = {argv[0], nullptr};
-    char** folly_argv = folly_argv_storage;
-    folly::Init init(&folly_argc, &folly_argv);
+    const kythira::process_init process_init(argv[0]);
 
     data_path_target target{opt._target};
     if (!target.await_ready(opt._ready_timeout)) {

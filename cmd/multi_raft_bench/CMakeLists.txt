@@ -11,8 +11,10 @@
 #
 # Not in any install target, for the same reason as the host.
 
-if(NOT folly_FOUND OR NOT Boost_FOUND OR NOT httplib_FOUND)
-    message(STATUS "multi_raft_bench: skipped (needs folly, Boost and cpp-httplib)")
+# No folly_FOUND: main() initialises Folly through raft/process_init.hpp only
+# where it is linked; the parent CMakeLists.txt requires a future backend.
+if(NOT Boost_FOUND OR NOT httplib_FOUND)
+    message(STATUS "multi_raft_bench: skipped (needs Boost and cpp-httplib)")
     return()
 endif()
 

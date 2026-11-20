@@ -24,10 +24,8 @@
 #include <raft/node_core.hpp>
 #include <raft/node_endpoint.hpp>
 
-#if !defined(KYTHIRA_FUTURE_BACKEND_STDEXEC) && !defined(KYTHIRA_FUTURE_BACKEND_BOOST)
 // Before the first future: Folly's timekeeper is a Folly singleton.
-#include <folly/init/Init.h>
-#endif
+#include <raft/process_init.hpp>
 
 #include <cstdlib>
 #include <exception>
@@ -227,9 +225,7 @@ auto main(int argc, char** argv) -> int {
     }
 #if defined(KYTHIRA_KMS_NODE_DAEMON)
     if (argc == 1) {
-#if !defined(KYTHIRA_FUTURE_BACKEND_STDEXEC) && !defined(KYTHIRA_FUTURE_BACKEND_BOOST)
-        const folly::Init folly_init(&argc, &argv);
-#endif
+        const kythira::process_init process_init(argv[0]);
         try {
             return run();
         } catch (const std::exception& e) {

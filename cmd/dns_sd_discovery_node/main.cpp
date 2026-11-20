@@ -32,7 +32,7 @@
 
 #include <raft/rfc2136_dns_sd_discovery.hpp>
 
-#include <folly/init/Init.h>
+#include <raft/process_init.hpp>
 
 #include <atomic>
 #include <chrono>
@@ -122,7 +122,7 @@ std::string resolve_with_retry(const std::string& host,
 }  // namespace
 
 int main(int argc, char** argv) {
-    folly::Init folly_init(&argc, &argv);
+    const kythira::process_init process_init(argv[0]);
 
     const std::string node_id = env_or("NODE_ID", "node1");
     const int http_port = std::stoi(env_or("HTTP_PORT", "9031"));
