@@ -1607,6 +1607,21 @@ public:
     ///        false. For metrics and tests.
     [[nodiscard]] auto batcher() const -> const batcher_type* { return _batcher.get(); }
 
+    /// @brief Batching counters for a caller without a metrics sink; all zero
+    ///        when `batching_active()` is false. The same figures go to the
+    ///        host's metrics on every tick (see `batching_metrics_emitter`).
+    struct batching_stats {
+        std::uint64_t _batches_sent{0};
+        std::uint64_t _members_sent{0};
+        /// Batches refused (not implemented, or too large) whose members
+        /// were resent alone.
+        std::uint64_t _fallbacks{0};
+        /// Destinations currently sent lone AppendEntries until their next
+        /// probe.
+        std::size_t _marked_destinations{0};
+    };
+    [[nodiscard]] auto batching_statistics() const -> batching_stats;
+
     [[nodiscard]] auto executor_stripe_count() const -> std::size_t;
 
     /// @brief Which stripe a group runs on. `npos` if the group is unknown.
@@ -2095,6 +2110,9 @@ private:
     /// Declared after `_client` so it is destroyed first: its destructor
     /// waits out batches still in flight on the client.
     std::unique_ptr<batcher_type> _batcher;
+    /// Publishes `_batcher`'s counters on each tick (Requirement 6.2 of
+    /// .kiro/specs/multi-raft-message-batching/). Touched only by `tick()`.
+    batching_metrics_emitter _batching_metrics;
 
     /// Stripe count is fixed for the host's lifetime so a group's stripe index
     /// stays valid across a stop/start cycle.

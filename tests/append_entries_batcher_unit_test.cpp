@@ -20,6 +20,7 @@
 #include <raft/exceptions.hpp>
 #include <raft/future_default.hpp>
 #include <raft/group_transport.hpp>
+#include <raft/metrics.hpp>
 #include <raft/network.hpp>
 
 #if !defined(KYTHIRA_FUTURE_BACKEND_STDEXEC) && !defined(KYTHIRA_FUTURE_BACKEND_BOOST)
@@ -29,11 +30,13 @@
 #include <chrono>
 #include <cstdint>
 #include <functional>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -594,6 +597,122 @@ BOOST_AUTO_TEST_CASE(the_histogram_counts_members_per_batch) {
     const auto h = batcher.members_per_batch_histogram();
     BOOST_TEST(h[0] == 1U);  // a batch of 1
     BOOST_TEST(h[3] == 1U);  // a batch of 5: in (4, 8]
+}
+
+/// A metrics sink that keeps each emission's name, dimensions and amount.
+class counting_metrics {
+public:
+    struct emission {
+        std::string _name;
+        std::map<std::string, std::string> _dims;
+        std::int64_t _count{0};
+        double _value{0};
+    };
+
+    auto set_metric_name(std::string_view name) -> void { _pending._name = name; }
+    auto add_dimension(std::string_view k, std::string_view v) -> void {
+        _pending._dims.emplace(std::string(k), std::string(v));
+    }
+    auto add_one() -> void { ++_pending._count; }
+    auto add_count(std::int64_t n) -> void { _pending._count += n; }
+    auto add_duration(std::chrono::nanoseconds) -> void {}
+    auto add_value(double v) -> void { _pending._value = v; }
+    auto emit() -> void {
+        _emitted.push_back(std::move(_pending));
+        _pending = {};
+    }
+
+    [[nodiscard]] auto emitted() const -> const std::vector<emission>& { return _emitted; }
+    auto clear() -> void { _emitted.clear(); }
+    [[nodiscard]] auto total(std::string_view name) const -> std::int64_t {
+        std::int64_t sum = 0;
+        for (const auto& e : _emitted) {
+            if (e._name == name) {
+                sum += e._count;
+            }
+        }
+        return sum;
+    }
+
+private:
+    emission _pending;
+    std::vector<emission> _emitted;
+};
+static_assert(kythira::metrics<counting_metrics>);
+
+// Requirement 6.2: batches, fallbacks, members per batch and marked
+// destinations reach the host's metrics, each as the change since the last
+// publish.
+BOOST_AUTO_TEST_CASE(metrics_publish_the_change_since_last_time) {
+    using emitter = kythira::batching_metrics_emitter;
+    fake_client client;
+    client.answer_batches_with(answer_all_ok);
+    client.answer_lones_with(answer_lone_ok);
+    batcher_type batcher(client, config());
+    emitter publisher;
+    counting_metrics sink;
+
+    // Nothing sent: nothing emitted.
+    publisher.publish(batcher, sink);
+    BOOST_TEST(sink.emitted().empty());
+
+    std::vector<kythira::future_default<ae_response>> futures;
+    futures.push_back(batcher.send(2, append_for(10, 1), 100ms));
+    batcher.flush_all();
+    for (std::uint64_t g = 0; g < 5; ++g) {
+        futures.push_back(batcher.send(2, append_for(20 + g, 1), 100ms));
+    }
+    batcher.flush_all();
+    for (auto& f : futures) {
+        std::move(f).get();
+    }
+    futures.clear();
+
+    publisher.publish(batcher, sink);
+    BOOST_TEST(sink.total(emitter::k_batches) == 2);
+    BOOST_TEST(sink.total(emitter::k_fallbacks) == 0);
+    std::map<std::string, std::int64_t> buckets;
+    for (const auto& e : sink.emitted()) {
+        if (e._name == emitter::k_members_per_batch) {
+            buckets[e._dims.at("max_members")] += e._count;
+        }
+    }
+    BOOST_TEST(buckets.size() == 2U);
+    BOOST_TEST(buckets["1"] == 1);
+    BOOST_TEST(buckets["8"] == 1);
+
+    // Unchanged since: a second publish emits nothing.
+    sink.clear();
+    publisher.publish(batcher, sink);
+    BOOST_TEST(sink.emitted().empty());
+
+    // An older peer: one fallback, one marked destination, and the gauge
+    // goes back to zero once the probe interval passes.
+    client.answer_batches_with([](fake_client::batch_call& call) {
+        call._done->setException(std::make_exception_ptr(
+            kythira::rpc_not_implemented_exception("append_entries_batch", call._target)));
+    });
+    futures.push_back(batcher.send(3, append_for(30, 1), 100ms));
+    batcher.flush_all();
+    std::move(futures.back()).get();
+    publisher.publish(batcher, sink);
+    BOOST_TEST(sink.total(emitter::k_batches) == 1);
+    BOOST_TEST(sink.total(emitter::k_fallbacks) == 1);
+    const auto gauge = [&] {
+        std::optional<double> last;
+        for (const auto& e : sink.emitted()) {
+            if (e._name == emitter::k_marked_destinations) {
+                last = e._value;
+            }
+        }
+        return last;
+    };
+    BOOST_TEST((gauge() == std::optional<double>{1.0}));
+
+    sink.clear();
+    std::this_thread::sleep_for(80ms);
+    publisher.publish(batcher, sink);
+    BOOST_TEST((gauge() == std::optional<double>{0.0}));
 }
 
 BOOST_AUTO_TEST_SUITE_END()
