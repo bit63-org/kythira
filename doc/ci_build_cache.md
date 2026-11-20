@@ -292,6 +292,89 @@ environment exists to prevent.
 A missing **variable** fails the job at the action, with an `::error::` naming
 it. Missing **secrets** are the fork case and disable the caches instead.
 
+## Self-hosted runners and the kythira cache
+
+x86-64 jobs run on `bit63`, the bit63-org actions-runner-controller scale set on
+Clark's rack server, and their caches live in the **kythira cache** on
+new-reliant: a `redis_gateway_node` cluster with the HTTP front end on (see
+[doc/redis-gateway.md](redis-gateway.md), "The disk-backed cache"). The OCI bucket
+stays in service for every job that is not on that runner.
+
+| Job | Runner | Cache |
+|---|---|---|
+| x86-64, push / schedule / dispatch / same-repo PR | `bit63` | kythira cache |
+| x86-64, pull request from a fork | `ubuntu-24.04` | OCI, no secrets (off) |
+| arm64 | `ubuntu-24.04-arm` | OCI bucket |
+| any job, after the kill switch below | `ubuntu-24.04` | OCI bucket |
+
+**Forks never reach the rack.** The repository is public, and a self-hosted
+runner executes whatever a pull request's workflow says. Every x86-64
+`runs-on:` is the same expression,
+
+```yaml
+runs-on: ${{ (github.event.pull_request.head.repo.fork && 'ubuntu-24.04') || vars.KYTHIRA_X64_RUNNER || 'bit63' }}
+```
+
+so a fork's pull request always lands on a GitHub-hosted runner.
+
+**Kill switch.** Set the repository variable `KYTHIRA_X64_RUNNER` to
+`ubuntu-24.04` and every x86-64 job goes back to GitHub-hosted runners on
+its next run, with the OCI bucket as its cache; delete the variable to
+return to `bit63`. No commit is needed either way.
+
+**Backend choice.** `.github/actions/oci-build-cache` tries the kythira
+cache first, and only when the job is on a self-hosted runner and
+`KYTHIRA_BUILD_CACHE_URL` is set. It probes each listed node in turn with one
+authenticated `GET` of `sccache/.sccache_check` and uses the first that
+answers 200 or 404. If none does (all unreachable, or 401/403 from a wrong
+secret) it warns and falls back to the bucket, so the cache is
+still never a build dependency. With the kythira cache selected:
+
+- sccache uses its WebDAV backend (`SCCACHE_WEBDAV_*`), at `<url>/sccache`,
+  and behind it the bucket's `sccache/` with the read-only key, through
+  sccache's multi-level chain (`SCCACHE_MULTILEVEL_CHAIN=webdav,s3`). The
+  bucket level is never written. Pull requests only read the kythira
+  cache, so until main has filled it they would otherwise compile
+  everything from scratch: #943's g++-13 leg got 0 hits in 466 compiles
+  and timed out. On main, a hit in the bucket is copied back into the
+  kythira cache;
+- vcpkg uses its `http` source at `<url>/vcpkg/<triplet>/{sha}.zip`, the
+  same key the bucket's x-aws backend writes, with the Basic header masked
+  in the log, and then the bucket's `vcpkg/<triplet>/` with the read-only
+  key, read only. Only main writes the kythira cache; because its keys
+  match the bucket's (`vcpkg/<triplet>/<sha>.zip`, `sccache/...`), it can
+  be seeded by copying bucket objects as they are. A package whose ABI hash matches
+  one GitHub-hosted jobs stored (same compiler and toolchain inputs) is
+  restored from the bucket instead of rebuilt. The bucket is never
+  written from a self-hosted job;
+- the clang-tidy result cache uses `<url>/clang-tidy/<key>` with Basic auth
+  (`scripts/tidy-cache.py`'s `HttpBackend`), and on a miss the bucket's
+  `clang-tidy/` with the read-only key (`ChainBackend`). The keys replace
+  the checkout path with `@SRC@`, so results stored by GitHub-hosted runs
+  hit here. Without the fallback #943's shards found the PR cache cold
+  (0 hits in 116 TUs) and ran into their 90-minute limit. On main, a
+  bucket hit is copied into the kythira cache. Each shard's summary is
+  followed by a `bucket fallback:` line with the hits, copies and errors.
+
+The writer policy is the bucket's: main gets the read-write user, a
+same-repository pull request the pr user, everything else the read-only user.
+The gateway's ACL role enforces it. Unlike OCI, the gateway has no
+create-only role, so give the pr user `read_only` unless pull requests
+should be trusted to overwrite main's entries.
+
+Configuration:
+
+| Kind | Name | Meaning |
+|---|---|---|
+| variable | `KYTHIRA_X64_RUNNER` | optional; overrides `bit63` (the kill switch) |
+| variable | `KYTHIRA_BUILD_CACHE_URL` | base URL of each node's HTTP front end, space-separated, tried in order (every node serves every key) |
+| variable | `KYTHIRA_BUILD_CACHE_RW_USER` / `_PR_USER` / `_RO_USER` | ACL user names |
+| environment secret (`build-cache-write`) | `KYTHIRA_BUILD_CACHE_RW_PASSWORD` | read-write user's secret, main only |
+| repository secret | `KYTHIRA_BUILD_CACHE_PR_PASSWORD` | pr user's secret |
+| repository secret | `KYTHIRA_BUILD_CACHE_RO_PASSWORD` | read-only user's secret |
+
+Each user's ACL line needs the `sccache/ vcpkg/ clang-tidy/` prefixes.
+
 ## clang-tidy result cache
 
 A third cache shares the bucket, under `clang-tidy/`. It stores one small

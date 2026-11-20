@@ -13,6 +13,7 @@ Run: python3 scripts/tests/test_tidy_cache.py
 
 from __future__ import annotations
 
+import base64
 import datetime as dt
 import http.server
 import importlib.util
@@ -24,6 +25,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest import mock
 from pathlib import Path
 
 SCRIPT = Path(__file__).resolve().parents[1] / "tidy-cache.py"
@@ -45,6 +47,9 @@ class StubS3(http.server.ThreadingHTTPServer):
         self.head_status: int | None = None
         self.create_only = False
         self.delay = 0.0
+        # When set, the stub plays the kythira cache's HTTP front end: it
+        # wants this exact Basic header instead of a SigV4 signature.
+        self.basic: str | None = None
         self.lock = threading.Lock()
         threading.Thread(target=self.serve_forever, daemon=True).start()
 
@@ -76,7 +81,13 @@ class StubHandler(http.server.BaseHTTPRequestHandler):
             s.requests.append((method, self.path))
         if s.delay:
             time.sleep(s.delay)
-        if "AWS4-HMAC-SHA256 Credential=" not in self.headers.get("authorization", ""):
+        auth = self.headers.get("authorization", "")
+        if s.basic is not None:
+            if auth != s.basic:
+                self._reply(401, b"unauthorized", head=method == "HEAD")
+                return False
+            return True
+        if "AWS4-HMAC-SHA256 Credential=" not in auth:
             self._reply(403, b"unsigned", head=method == "HEAD")
             return False
         return True
@@ -253,6 +264,98 @@ class DriverS3Test(unittest.TestCase):
         self.assertEqual(d.stats["backend_errors"], 0)
 
 
+class HttpBackendTest(unittest.TestCase):
+    """The self-hosted kythira cache: same keys, Basic auth, no bucket."""
+
+    def setUp(self):
+        self.stub = StubS3()
+        self.stub.basic = "Basic " + base64.b64encode(b"ci-main:fixture-pw").decode()
+
+    def tearDown(self):
+        self.stub.shutdown()
+        self.stub.server_close()
+
+    def http(self, password="fixture-pw", writable=True):
+        return tc.HttpBackend(self.stub.endpoint + "/", "ci-main", password, writable,
+                              timeout=2, backoff=(0, 0))
+
+    def test_miss_then_store_then_hit_without_a_bucket_segment(self):
+        d = make_driver(self.http())
+        self.assertEqual(d.run(["a.cpp"]), 0)
+        self.assertEqual(list(self.stub.objects), ["/clang-tidy/k-a.cpp"])
+        d2 = make_driver(self.http())
+        self.assertEqual(d2.run(["a.cpp"]), 0)
+        self.assertEqual(d2.stats["hits"], 1)
+
+    def test_wrong_password_is_a_lookup_error_not_a_failure(self):
+        d = make_driver(self.http(password="wrong"), requested=False)
+        self.assertEqual(d.run(["a.cpp"]), 0)
+        self.assertEqual(d.analysed, ["a.cpp"])
+        # The lookup and the store are both refused, and neither is fatal.
+        self.assertEqual((d.stats["backend_errors"], d.stats["stores"]), (2, 0))
+        self.assertEqual(self.stub.objects, {})
+
+    def test_from_env_and_cli_pick_http_when_url_is_set(self):
+        env = {"KYTHIRA_CACHE_HTTP_URL": self.stub.endpoint,
+               "KYTHIRA_CACHE_HTTP_USER": "ci-main",
+               "KYTHIRA_CACHE_HTTP_PASSWORD": "fixture-pw"}
+        with mock.patch.dict(os.environ, env):
+            b = tc.HttpBackend.from_env(writable=False)
+        self.assertFalse(b.lookup("nope"))
+        b.close()
+        with mock.patch.dict(os.environ, {"KYTHIRA_CACHE_HTTP_URL": "http://x"}, clear=True):
+            with self.assertRaises(ValueError):
+                tc.HttpBackend.from_env(writable=False)
+
+
+class ChainBackendTest(unittest.TestCase):
+    """A cold kythira cache backed by the bucket, read-only."""
+
+    def setUp(self):
+        self.kythira = StubS3()
+        self.kythira.basic = "Basic " + base64.b64encode(b"ci-main:fixture-pw").decode()
+        self.bucket = StubS3()
+
+    def tearDown(self):
+        for stub in (self.kythira, self.bucket):
+            stub.shutdown()
+            stub.server_close()
+
+    def chain(self, writable):
+        primary = tc.HttpBackend(self.kythira.endpoint, "ci-main", "fixture-pw", writable,
+                                 timeout=2, backoff=(0, 0))
+        return tc.ChainBackend(primary, s3(self.bucket, writable=False))
+
+    def test_bucket_hit_serves_a_cold_cache_and_fills_it_when_writable(self):
+        self.bucket.objects["/bucket/clang-tidy/k-a.cpp"] = b"{}"
+        b = self.chain(writable=True)
+        d = make_driver(b)
+        self.assertEqual(d.run(["a.cpp", "b.cpp"]), 0)
+        self.assertEqual(d.analysed, ["b.cpp"])
+        self.assertEqual((b.fallback_hits, b.backfilled), (1, 1))
+        # The hit was copied in and the miss stored, both in the kythira
+        # cache; the bucket was never written.
+        self.assertEqual(sorted(self.kythira.objects),
+                         ["/clang-tidy/k-a.cpp", "/clang-tidy/k-b.cpp"])
+        self.assertEqual(self.bucket.count("PUT"), 0)
+
+    def test_read_only_chain_copies_nothing(self):
+        self.bucket.objects["/bucket/clang-tidy/k-a.cpp"] = b"{}"
+        b = self.chain(writable=False)
+        d = make_driver(b)
+        self.assertEqual(d.run(["a.cpp"]), 0)
+        self.assertEqual((d.stats["hits"], b.backfilled), (1, 0))
+        self.assertEqual(self.kythira.objects, {})
+
+    def test_bucket_error_is_a_miss(self):
+        self.bucket.head_status = 403
+        b = self.chain(writable=False)
+        d = make_driver(b)
+        self.assertEqual(d.run(["a.cpp"]), 0)
+        self.assertEqual(d.analysed, ["a.cpp"])
+        self.assertEqual((b.fallback_errors, d.stats["backend_errors"]), (1, 0))
+
+
 class DriverLocalTest(unittest.TestCase):
     def test_local_backend_round_trip(self):
         with tempfile.TemporaryDirectory() as t:
@@ -346,7 +449,10 @@ class CliEndToEndTest(unittest.TestCase):
         self.assertNotIn("cached:", r.stdout)
 
     def test_requested_cache_without_bucket_is_silent_no_op(self):
-        env_keys = ("AWS_ENDPOINT_URL", "SCCACHE_BUCKET")
+        # A self-hosted runner exports the kythira cache's HTTP endpoint,
+        # which selects the HTTP backend instead; drop it too so this test
+        # sees "no cache configured" on every runner.
+        env_keys = ("AWS_ENDPOINT_URL", "SCCACHE_BUCKET", "KYTHIRA_CACHE_HTTP_URL")
         saved = {k: os.environ.pop(k, None) for k in env_keys}
         try:
             r = self.run_cli("a.cpp", mode="read")
