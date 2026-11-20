@@ -49,6 +49,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstring>
+#include <functional>
 #include <memory>
 #include <string>
 #include <thread>
@@ -267,7 +268,16 @@ auto expected_shard_for(const key_type& k) -> group_id_type {
 /// is the property the whole design rests on.
 class cluster {
 public:
-    cluster() {
+    /// Each host's batching setting: from the environment, unless a test
+    /// names its own (the rolling-upgrade case mixes hosts).
+    using batching_for_node = std::function<kythira::batching_config(node_id_t)>;
+
+    explicit cluster(batching_for_node batching = {},
+                     std::function<void(message_fabric&)> setup = {})
+        : _batching(std::move(batching)) {
+        if (setup) {
+            setup(_fabric);
+        }
         for (node_id_t id = 1; id <= k_node_count; ++id) {
             _hosts.push_back(std::make_unique<host_type>(make_config(id)));
             for (const auto& shard : static_shards()) {
@@ -310,6 +320,18 @@ public:
             }
         }
         return nullptr;
+    }
+
+    /// @brief Wait until `pred` holds, polling.
+    template<typename Pred> auto await(Pred pred, std::chrono::milliseconds budget) -> bool {
+        const auto deadline = std::chrono::steady_clock::now() + budget;
+        while (std::chrono::steady_clock::now() < deadline) {
+            if (pred()) {
+                return true;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds{20});
+        }
+        return pred();
     }
 
     /// @brief Wait until every shard has a leader somewhere.
@@ -441,6 +463,7 @@ private:
         // bug and vice versa.
         cfg.hibernation = hibernation_mode::off;
         cfg.executor_stripes = 2;
+        cfg.batching = _batching ? _batching(id) : kythira::testing::fabric_batching_config();
         cfg.partitioner = kythira::make_partitioner<key_type>(kv_partitioner{});
         return cfg;
     }
@@ -467,6 +490,7 @@ private:
         }
     }
 
+    batching_for_node _batching;
     message_fabric _fabric{8};
     std::vector<std::unique_ptr<host_type>> _hosts;
     std::vector<std::thread> _drivers;
@@ -635,6 +659,109 @@ BOOST_AUTO_TEST_CASE(a_mixed_read_write_workload_commits_on_every_shard,
         }
     }
     BOOST_CHECK_EQUAL(shards_with_traffic, k_shard_count);
+}
+
+// .kiro/specs/multi-raft-message-batching/ Requirement 4.3: a rolling
+// upgrade. Hosts 1 and 2 batch; host 3 runs a build from before batching, so
+// it neither sends batches nor takes them. Every shard keeps committing, and
+// host 3's replicas keep up, through the batch refusals, through its upgrade,
+// and after the others' probe finds it upgraded and batches to it again.
+BOOST_AUTO_TEST_CASE(a_rolling_upgrade_keeps_every_shard_replicating,
+                     *boost::unit_test::timeout(180)) {
+    constexpr node_id_t k_old = 3;
+    const auto batching = [](node_id_t id) {
+        kythira::batching_config cfg;
+        cfg._enabled = id != k_old;
+        cfg._probe_interval = std::chrono::milliseconds{400};
+        return cfg;
+    };
+    cluster c(batching,
+              [](message_fabric& f) { f.set_not_implemented(k_old, "append_entries_batch"); });
+    BOOST_REQUIRE(c.await_all_leaders(std::chrono::seconds{20}));
+    BOOST_REQUIRE(c.host(1).batching_active());
+    BOOST_REQUIRE(!c.host(k_old).batching_active());
+
+    // Only a leader sends AppendEntries, so a new host that happened to lead
+    // nothing would send no batch and take no fallback, and the checks below
+    // would fail on the election's luck rather than on batching. Host 1 leads
+    // shard 1 and host 2 leads shard 2, moved there if the election chose
+    // otherwise.
+    for (node_id_t id : {node_id_t{1}, node_id_t{2}}) {
+        const auto group = static_cast<group_id_type>(id);
+        const auto leads = [&] { return c.leader_of(group) == &c.host(id); };
+        for (int attempt = 0; attempt < 5 && !leads(); ++attempt) {
+            if (auto* leader = c.leader_of(group); leader != nullptr) {
+                try {
+                    std::ignore =
+                        leader->transfer_leadership(group, id, std::chrono::seconds{5}).get();
+                } catch (const std::exception&) {
+                    // Retried below; a transfer can lose to an election.
+                }
+            }
+            c.await(leads, std::chrono::seconds{5});
+        }
+        BOOST_REQUIRE_MESSAGE(leads(),
+                              "host " << id << " could not be made shard " << group << "'s leader");
+    }
+
+    // Every replica of every shard on host 3 reaches what its leader applied.
+    const auto old_host_caught_up = [&] {
+        return c.await(
+            [&] {
+                for (group_id_type g = 1; g <= k_shard_count; ++g) {
+                    auto* leader = c.leader_of(g);
+                    if (leader == nullptr) {
+                        return false;
+                    }
+                    const auto applied = leader->group_node(g)->last_applied_index();
+                    if (c.host(k_old).group_node(g)->last_applied_index() < applied) {
+                        return false;
+                    }
+                }
+                return true;
+            },
+            std::chrono::seconds{10});
+    };
+
+    const auto write_round = [&](const std::string& value) {
+        for (const auto& key : workload_keys()) {
+            BOOST_REQUIRE_MESSAGE(c.put(key, value), "key " << key << " stopped committing");
+        }
+    };
+
+    // Mixed versions: the new hosts batch to each other and fall back to
+    // message-by-message for host 3.
+    write_round("mixed");
+    BOOST_CHECK(old_host_caught_up());
+    for (node_id_t id : {node_id_t{1}, node_id_t{2}}) {
+        const auto* b = c.host(id).batcher();
+        BOOST_REQUIRE(b != nullptr);
+        BOOST_CHECK_GT(b->batches_sent(), 0U);
+        BOOST_CHECK_GT(b->fallbacks(), 0U);
+    }
+
+    // Host 3 is upgraded: it takes batches now. Writes go on throughout.
+    c.fabric().clear_not_implemented(k_old, "append_entries_batch");
+    write_round("upgrading");
+    BOOST_CHECK(old_host_caught_up());
+
+    // Once the probe interval has passed, nobody is sending to host 3 message
+    // by message any more, and replication to it still works.
+    BOOST_CHECK(c.await(
+        [&] {
+            return c.host(1).batcher()->marked_destinations() == 0 &&
+                   c.host(2).batcher()->marked_destinations() == 0;
+        },
+        std::chrono::seconds{10}));
+    const auto fallbacks_after_upgrade =
+        c.host(1).batcher()->fallbacks() + c.host(2).batcher()->fallbacks();
+    write_round("upgraded");
+    BOOST_CHECK(old_host_caught_up());
+    BOOST_CHECK_EQUAL(c.host(1).batcher()->fallbacks() + c.host(2).batcher()->fallbacks(),
+                      fallbacks_after_upgrade);
+    if (auto problem = c.tiling_problem()) {
+        BOOST_FAIL("tiling broken across the upgrade: " << *problem);
+    }
 }
 
 BOOST_AUTO_TEST_SUITE_END()
