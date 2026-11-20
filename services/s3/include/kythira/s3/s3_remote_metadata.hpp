@@ -50,9 +50,10 @@
 /// version.
 ///
 /// Reads are answered by the node the transport reaches, at or after every
-/// write it acknowledged; until the index groups run on Raft (one group per
-/// metadata node today) that node is the only copy, so a read sees every
-/// write before it (Requirement 7.2).
+/// write it acknowledged: a node holding the group in process is its only
+/// copy, and a member of a Raft group (`s3_raft_metadata.hpp`) takes a read
+/// barrier at the leader first, so a read sees every write before it
+/// (Requirement 7.2). A member that cannot reach a leader answers 503.
 
 #include <kythira/s3/s3_change_log.hpp>
 #include <kythira/s3/s3_index_records.hpp>
@@ -201,6 +202,10 @@ public:
             return {200, std::move(*out)};
         } catch (const index_format_error& e) {
             return {400, e.what()};
+        } catch (const metadata_unavailable& e) {
+            // The group behind this node has no leader it can reach (Raft,
+            // s3_raft_metadata.hpp): the caller tries another node.
+            return {503, e.what()};
         } catch (const std::exception& e) {
             return {500, e.what()};
         }

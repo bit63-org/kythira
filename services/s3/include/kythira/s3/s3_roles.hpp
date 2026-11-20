@@ -183,10 +183,17 @@ struct layout {
 /// Path prefix of the metadata-layer routes (`s3_remote_metadata.hpp`).
 inline constexpr std::string_view metadata_route_prefix = "/_kythira/s3/metadata/v1/";
 
+/// Path prefix of the routes between the members of an index group
+/// (`s3_raft_metadata.hpp`): a proposal or a read-index round sent to the
+/// leader, and a change log segment fetched from a peer.
+inline constexpr std::string_view group_route_prefix = "/_kythira/s3/group/v1/";
+
 /// Who may call S3's internal routes (Requirement 14.5):
 ///
 ///  - the metadata routes: front ends, and metadata nodes (a metadata node
 ///    with a front end on it forwards to the group it does not hold);
+///  - the group routes: metadata nodes only (the members of the index
+///    groups forward to their leader and fetch segments from each other);
 ///  - the chunk routes (`raft/chunk_service.hpp`): front ends (object
 ///    bytes), metadata nodes (the sweeper, placement repair and the tier
 ///    worker read, write, list and delete chunks) and blob nodes (moves
@@ -196,6 +203,7 @@ inline constexpr std::string_view metadata_route_prefix = "/_kythira/s3/metadata
 [[nodiscard]] inline auto internal_route_rules() -> std::vector<layers::route_rule> {
     return {
         {std::string(metadata_route_prefix), role_set{role::front_end, role::data}},
+        {std::string(group_route_prefix), role_set{role::data}},
         {std::string(chunk_service_prefix), role_set{role::front_end, role::data, role::segments}},
     };
 }
