@@ -79,6 +79,9 @@
 // to deliver channels to the same mock, five seconds after a batch's first
 // record, and writes through a channel while every node is killed in turn:
 // every record reaches the bucket, in order under each key within a shard.
+// A second channel on the stream is encrypted (Requirement 18.4) with the
+// nodes on the local key provider: every one of its objects is sealed, and
+// opened with the passphrase they hold the same records in the same order.
 //
 // The tables case (task 19, Requirement 18.3) starts the Apache Iceberg REST
 // catalog fixture (the `tables` profile) over the same mock, recreates the
@@ -1158,12 +1161,17 @@ BOOST_AUTO_TEST_CASE(tiered_segments_survive_leader_kills_and_s3_faults) {
 
 // Task 19: channel delivery through node kills. Runs after the tiering
 // case, whose S3 mock it reuses, and recreates the nodes again to deliver
-// channels there.
+// channels there. A second channel on the same stream is encrypted
+// (Requirement 18.4): the nodes seal its objects under data keys from the
+// local key provider, and the check opens every one with the passphrase.
 BOOST_AUTO_TEST_CASE(channel_delivers_every_record_through_node_kills) {
     const logs_on_failure logs;
+    static constexpr const char* k_kms_passphrase = "kinesis-scenario-kms-passphrase";
     os::checked_exec(os::real_exec, compose_cmd({"--profile", "s3", "up", "-d", "s3mock"}));
     ::setenv("KINESIS_SCENARIO_CHANNEL_ENDPOINT", "http://s3mock:9000", 1);
     ::setenv("KINESIS_SCENARIO_CHANNEL_MAX_DELAY_MS", "5000", 1);
+    ::setenv("KINESIS_SCENARIO_KMS", "local", 1);
+    ::setenv("KINESIS_SCENARIO_KMS_PASSPHRASE", k_kms_passphrase, 1);
     os::checked_exec(os::real_exec, compose_cmd({"up", "-d", "--force-recreate", "--no-deps",
                                                  "kin-1", "kin-2", "kin-3"}));
     for (int n : {1, 2, 3}) {
@@ -1179,6 +1187,10 @@ BOOST_AUTO_TEST_CASE(channel_delivers_every_record_through_node_kills) {
                    "to-s3", "--bucket", "channel-out"},
                   k_admin_id, k_admin_secret);
         BOOST_REQUIRE_MESSAGE(r.code == 0, "boto3 channel-create failed:\n" << r.out);
+        r = boto3({"channel-create", "--endpoint", endpoint(1), "--stream", "chan", "--channel",
+                   "to-s3-kms", "--bucket", "channel-kms", "--kms-key", "alias/channel-key"},
+                  k_admin_id, k_admin_secret);
+        BOOST_REQUIRE_MESSAGE(r.code == 0, "boto3 channel-create (encrypted) failed:\n" << r.out);
     }
 
     const std::string all = endpoint(1) + "," + endpoint(2) + "," + endpoint(3);
@@ -1207,6 +1219,14 @@ BOOST_AUTO_TEST_CASE(channel_delivers_every_record_through_node_kills) {
                     "--timeout", "240"});
     BOOST_TEST(c.code == 0, "channel-check failed:\n" << c.out);
     BOOST_TEST(c.out.find("\"delivered\": " + count) != std::string::npos, c.out);
+
+    // Every object of the encrypted channel is sealed and opens, and it too
+    // holds every record in order.
+    auto k = boto3({"channel-check", "--s3", "http://s3mock:9000", "--bucket", "channel-kms",
+                    "--channel", "to-s3-kms", "--count", count, "--keys", "8", "--tag", "ch",
+                    "--timeout", "240", "--kms-passphrase", k_kms_passphrase});
+    BOOST_TEST(k.code == 0, "channel-check (encrypted) failed:\n" << k.out);
+    BOOST_TEST(k.out.find("\"delivered\": " + count) != std::string::npos, k.out);
 }
 
 // Task 19: S3 Tables delivery through node kills, into a real Iceberg REST

@@ -16,10 +16,11 @@ kinesis_node_scenario_test, against the gateways by compose service name:
     kinesis_e2e.py batch-produce --endpoints URL,URL --stream S --count N --keys K --tag T
     kinesis_e2e.py fan-out-consume --endpoints URL,URL --stream S --count N --keys K --tag T
     kinesis_e2e.py s3-control --url URL [--put-delay MS] [--fail-puts N --prefix P]
-    kinesis_e2e.py channel-create --endpoint URL --stream S --channel C --bucket B
+    kinesis_e2e.py channel-create --endpoint URL --stream S --channel C --bucket B [--kms-key K]
     kinesis_e2e.py channel-create --endpoint URL --stream S --channel C \
         --table-bucket ARN --namespace NS --table T --bucket DLQ
-    kinesis_e2e.py channel-check --s3 URL --bucket B --channel C --count N --keys K --tag T
+    kinesis_e2e.py channel-check --s3 URL --bucket B --channel C --count N --keys K --tag T \
+        [--kms-passphrase P]
     kinesis_e2e.py tables-create --catalog URL --s3 URL --namespace NS --table T
     kinesis_e2e.py tables-check --catalog URL --s3 URL --namespace NS --table T --count N --tag T
 
@@ -67,7 +68,10 @@ bucket (task 19). `channel-check` reads that bucket through S3 (the
 scenario's mock), until every record `T-0` .. `T-<N-1>` written by
 `batch-produce` has been delivered or the deadline passes, and fails
 unless, within each shard, a key's records were delivered in the order
-they were written.
+they were written. With `--kms-key` the channel is encrypted under that key
+(Requirement 18.4); `channel-check --kms-passphrase` then requires every
+object to be envelope-sealed and opens it the way Kythira's `local` key
+provider wrapped its data key, with that passphrase.
 
 The S3 Tables case (task 19) runs `batch-produce --json`, whose records are
 JSON objects `{"id": i, "key": i mod K, "tag": T, "event_time": <ms>}`.
@@ -84,7 +88,9 @@ retried across a node kill was committed once.
 """
 
 import argparse
+import base64
 import gzip
+import hashlib
 import json
 import re
 import sys
@@ -450,6 +456,9 @@ def channel_create(args):
         "StreamARN"
     ]
     account = arn.split(":")[4]
+    encryption = {}
+    if args.kms_key:
+        encryption["EncryptionConfiguration"] = {"EncryptionType": "KMS", "KeyId": args.kms_key}
     if args.table_bucket:
         out = c.create_channel(
             ChannelName=args.channel,
@@ -495,11 +504,67 @@ def channel_create(args):
                 "CompressionType": "GZIP",
             }
         },
+        **encryption,
     )
     print(json.dumps({"channel": args.channel, "arn": out["ChannelDescription"]["ChannelARN"]}))
 
 
 CHANNEL_OBJECT = re.compile(r"-(shardId-\d+)-(\d+)-(\d+)(\.gz)?$")
+
+# Kythira's local key provider (include/raft/kms_key_provider.hpp,
+# local_kms_provider): a wrapped data key is version byte 1, a 16-byte salt,
+# a 12-byte nonce, then the key sealed with AES-256-GCM under
+# PBKDF2-HMAC-SHA256(passphrase, salt, 200000), the additional data being
+# this label then the key id and each context entry (in byte order),
+# each length-prefixed with a big-endian u32.
+LOCAL_KMS_LABEL = b"kythira-kinesis-local-kms-v1"
+LOCAL_KMS_ITERATIONS = 200_000
+
+
+def local_unwrap(passphrase, key_id, wrapped, context, cache):
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+    if wrapped in cache:
+        return cache[wrapped]
+    if len(wrapped) != 1 + 16 + 12 + 32 + 16 or wrapped[0] != 1:
+        fail(f"a wrapped data key of {len(wrapped)} bytes is not the local provider's")
+    salt, nonce, sealed = wrapped[1:17], wrapped[17:29], wrapped[29:]
+    master = hashlib.pbkdf2_hmac("sha256", passphrase.encode(), salt, LOCAL_KMS_ITERATIONS, 32)
+
+    def prefixed(b):
+        return len(b).to_bytes(4, "big") + b
+
+    aad = LOCAL_KMS_LABEL + prefixed(key_id.encode())
+    for k, v in sorted(((k.encode(), v.encode()) for k, v in context.items())):
+        aad += prefixed(k) + prefixed(v)
+    key = AESGCM(master).decrypt(nonce, sealed, aad)
+    cache[wrapped] = key
+    return key
+
+
+def open_sealed(key, meta, body, passphrase, cache):
+    """The plaintext of an envelope-sealed channel object (the S3 Encryption
+    Client's v2 layout: AES/GCM/NoPadding under a kms+context data key)."""
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+    if meta.get("x-amz-cek-alg") != "AES/GCM/NoPadding" or meta.get("x-amz-wrap-alg") != (
+        "kms+context"
+    ):
+        fail(f"{key} is not envelope-sealed: metadata {sorted(meta)}")
+    context = json.loads(meta["x-amz-matdesc"])
+    if context.get("aws:x-amz-cek-alg") != "AES/GCM/NoPadding":
+        fail(f"{key}: the encryption context does not name the content algorithm")
+    data_key = local_unwrap(
+        passphrase,
+        meta["kythira-kms-key-id"],
+        base64.b64decode(meta["x-amz-key-v2"]),
+        context,
+        cache,
+    )
+    plain = AESGCM(data_key).decrypt(base64.b64decode(meta["x-amz-iv"]), body, None)
+    if len(plain) != int(meta["x-amz-unencrypted-content-length"]):
+        fail(f"{key}: plaintext length differs from x-amz-unencrypted-content-length")
+    return plain
 
 
 def channel_pass(s3, args):
@@ -516,8 +581,14 @@ def channel_pass(s3, args):
     by_shard_key = {}
     seen = set()
     total = 0
+    keys = {}
     for shard, _first, _last, key in objects:
-        body = s3.get_object(Bucket=args.bucket, Key=key)["Body"].read()
+        got = s3.get_object(Bucket=args.bucket, Key=key)
+        body = got["Body"].read()
+        if args.kms_passphrase:
+            body = open_sealed(key, got.get("Metadata", {}), body, args.kms_passphrase, keys)
+        elif "x-amz-key-v2" in got.get("Metadata", {}):
+            fail(f"{key} is sealed but the channel was not encrypted")
         if key.endswith(".gz"):
             body = gzip.decompress(body)
         for line in body.decode().splitlines():
@@ -728,6 +799,7 @@ def main():
     cc.add_argument("--table-bucket")
     cc.add_argument("--namespace")
     cc.add_argument("--table")
+    cc.add_argument("--kms-key")
     ck = sub.add_parser("channel-check")
     ck.add_argument("--s3", required=True)
     ck.add_argument("--bucket", required=True)
@@ -736,6 +808,7 @@ def main():
     ck.add_argument("--keys", type=int, required=True)
     ck.add_argument("--tag", required=True)
     ck.add_argument("--timeout", type=int, default=300)
+    ck.add_argument("--kms-passphrase")
     for name in ("tables-create", "tables-check"):
         t = sub.add_parser(name)
         t.add_argument("--catalog", required=True)

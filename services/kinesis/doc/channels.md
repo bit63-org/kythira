@@ -12,7 +12,9 @@ updated, tagged and deleted, and it keeps its source streams from being
 deleted. An S3 channel's records reach its bucket as described under
 [Delivery to S3](#delivery-to-s3); an S3 Tables channel's records are
 appended to its Iceberg table as described under
-[Delivery to S3 Tables](#delivery-to-s3-tables).
+[Delivery to S3 Tables](#delivery-to-s3-tables). A channel with an
+`EncryptionConfiguration` has its objects encrypted as described under
+[Encryption](#encryption).
 
 ## What the API checks
 
@@ -233,6 +235,71 @@ reach. With `KINESIS_CHANNEL_ROLE=assume` a node does the same:
 so only a caller allowed to hand the role over can create a channel that
 writes as it.
 
+## Encryption
+
+A channel's `EncryptionConfiguration` (`EncryptionType` `KMS` and a
+customer managed `KeyId`) encrypts what it delivers (Requirement 18.4).
+How depends on the destination and on the node's
+`KINESIS_CHANNEL_ENCRYPTION`:
+
+| Destination | `envelope` (the default) | `sse-kms` |
+|---|---|---|
+| General purpose S3 | sealed by the node under a data key from `KINESIS_KMS` | plaintext sent, SSE-KMS asked of S3 under `KeyId` |
+| S3 Tables | SSE-KMS asked of S3 under `KeyId` | the same |
+
+**Envelope encryption** works on any S3-compatible store, MinIO included,
+and with any of the node's key providers (`kythira`, `aws`, `local` or
+`pkcs11`), the same one streams are encrypted at rest with:
+
+- The node asks the provider for an AES-256 data key under `KeyId`, as the
+  channel's execution role (the session
+  `arn:<partition>:sts::<account>:assumed-role/<role>/kinesis-channel-<id>`),
+  so with `KINESIS_KMS=kythira` the key policy and grants decide, through
+  `kms:ViaService` `kinesis.<region>.amazonaws.com`, whether the channel
+  can deliver. One data key seals a channel's objects for five minutes, as
+  AWS reuses a stream's data keys, then the provider is asked again.
+- Each object, and each dead-letter object, is compressed first, then
+  sealed with AES-256-GCM under a fresh 12-byte nonce, laid out as the
+  Amazon S3 Encryption Client's version 2 format lays out
+  `AES/GCM/NoPadding` with a `kms+context` key: the body is the ciphertext
+  then the 16-byte tag, and the user metadata holds `x-amz-key-v2` (the
+  wrapped data key), `x-amz-iv`, `x-amz-cek-alg`, `x-amz-wrap-alg`,
+  `x-amz-tag-len`, `x-amz-matdesc` (the encryption context:
+  `aws:x-amz-cek-alg` and the channel's id as `kinesis:channel-id`) and
+  `x-amz-unencrypted-content-length`, plus `kythira-kms-key-id`, the
+  provider's id for the wrapping key. Object keys keep their `.gz` or
+  `.zst` extension.
+- To read an object, unwrap `x-amz-key-v2` with the matdesc as encryption
+  context (KMS `Decrypt` for `aws` and `kythira`; the same passphrase or
+  token for `local` and `pkcs11`) and open the body with the nonce.
+  `channel_detail::open_object` in `kinesis_channel_delivery.hpp` does it
+  through any provider. With `KINESIS_KMS=aws` the wrapped key is a real
+  KMS ciphertext blob, so AWS's own tools can unwrap it too.
+- A refused data key (the role may not use the key, the key is disabled)
+  leaves the batch undelivered: the pass's log line carries the KMS's
+  answer (`last_failure=`), the next pass retries, and the channel stays
+  ACTIVE. A node with no key provider (`KINESIS_KMS=off`) never writes an
+  encrypted channel's records in plaintext: the catalog leader sets the
+  channel to FAILED, saying `KINESIS_KMS` is missing.
+
+**SSE-KMS** (`KINESIS_CHANNEL_ENCRYPTION=sse-kms`) is what AWS's own
+delivery does: every write carries `x-amz-server-side-encryption: aws:kms`
+and the channel's `KeyId`, readers need nothing beyond `GetObject`, and the
+store's KMS must know the key and let the writer (the node, or the
+execution role with `KINESIS_CHANNEL_ROLE=assume`) use it. The node's own
+key provider is not involved.
+
+**S3 Tables** channels always ask for SSE-KMS on every data file,
+manifest, manifest list and dead letter: an Iceberg reader opens data files
+straight from the table bucket, so only the store can decrypt them.
+
+The container scenario's channel case runs the nodes with
+`KINESIS_KMS=local` and a second, encrypted channel on the same stream:
+every object it delivers through the node kills is sealed, and the boto3
+client opens each with the passphrase and finds every record, in order.
+`kinesis_channel_encryption_test` covers the local, AWS and Kythira
+providers.
+
 ## Limits and differences
 
 - A channel is ACTIVE as soon as `CreateChannel` answers, and an update
@@ -242,8 +309,10 @@ writes as it.
   the model documents; an S3 Tables channel names exactly one table, the
   only case the model says AWS supports today.
 - `aws:ResourceTag` conditions are not evaluated for channel ARNs.
-- Delivered objects are not yet encrypted with the channel's
-  `EncryptionConfiguration`.
+- Envelope encryption (the default) seals objects on the node, so a
+  reader must unwrap the data key itself, as with the S3 Encryption Client;
+  AWS's delivery uses SSE-KMS, which `KINESIS_CHANNEL_ENCRYPTION=sse-kms`
+  gives where the store has a KMS (see [Encryption](#encryption)).
 - An S3 Tables channel validates records against the table's schema; the
   `GSRSchemaARN` is checked to be present but its schema is not fetched
   from Glue. Parquet files carry no column statistics yet, so engines
@@ -263,3 +332,6 @@ AWS recording of it exists yet.
 S3 Tables delivery has been checked against pyiceberg and the Apache
 Iceberg REST catalog fixture, not against S3 Tables itself: the SigV4 signing name and
 the warehouse prefix follow AWS's documentation.
+Neither has SSE-KMS on channel writes been tried against real S3 or S3
+Tables, nor an envelope-sealed object opened with AWS's S3 Encryption
+Client; the layout follows that client's documented v2 format.

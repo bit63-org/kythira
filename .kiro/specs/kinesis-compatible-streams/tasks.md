@@ -603,3 +603,18 @@ asked.
     `errors/`). The scenario's differential case runs it. Left: KMS for
     delivered objects, AWS recordings of channels and a run against real
     S3 Tables (both need Clark's go).
+  - Progress (November 20, 2026): KMS for delivered objects. An S3
+    channel with an `EncryptionConfiguration` has each object and dead
+    letter compressed, then sealed with AES-256-GCM under a data key from
+    the node's `KINESIS_KMS` provider (kythira, aws, local or pkcs11),
+    asked for as the channel's execution role and reused for five minutes,
+    in the S3 Encryption Client's v2 layout (wrapped key, nonce and
+    context in user metadata); `KINESIS_CHANNEL_ENCRYPTION=sse-kms` asks S3
+    for SSE-KMS under the channel's key instead, and S3 Tables channels
+    always do. A refused key holds the batch for the next pass; a node with
+    no provider sets the channel to FAILED rather than write plaintext.
+    `kinesis_channel_encryption_test` runs the local, AWS and Kythira
+    providers, and the scenario's channel case delivers an encrypted
+    channel through the node kills and opens every object with the local
+    provider's passphrase. Left: AWS recordings of channels and a run
+    against real S3 or S3 Tables (both need Clark's go).
