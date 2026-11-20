@@ -40,6 +40,7 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -111,6 +112,8 @@ struct fixture {
     std::map<std::string, bucket> buckets;
     /// The put options of each object, by `<bucket>/<key>`.
     std::map<std::string, kin::channel_put_options> options;
+    /// Who each write was for, in order.
+    std::vector<kin::channel_access> accesses;
     delivery_t delivery{cluster, service, delivery_config()};
 
     fixture() { service.register_with(fe); }
@@ -123,7 +126,10 @@ struct fixture {
 
     auto delivery_config() -> kin::channel_delivery_config {
         kin::channel_delivery_config cfg;
-        cfg._destination = [this](const std::string& name) -> std::optional<kin::channel_bucket> {
+        cfg._destination = [this](
+                               const std::string& name,
+                               const kin::channel_access& a) -> std::optional<kin::channel_bucket> {
+            accesses.push_back(a);
             kin::channel_bucket t;
             t._put = [this, name](const std::string& k, std::string_view b,
                                   const kin::channel_put_options& o) {
@@ -343,6 +349,39 @@ BOOST_AUTO_TEST_CASE(delivers_once_fresh_and_never_again) {
     stats = f.delivery.run_once();
     BOOST_TEST(stats._objects == 1U);
     BOOST_TEST(all_lines(b) == (std::vector<std::string>{"one", "two", "three"}));
+
+    // Each write was asked for on the channel's behalf: its role, so a node
+    // assuming execution roles writes as it, and its id for the session.
+    BOOST_REQUIRE(!f.accesses.empty());
+    const auto& a = f.accesses.back();
+    BOOST_TEST(a._role_arn == k_role);
+    BOOST_TEST(a._account == k_account);
+    BOOST_TEST(a._channel == "c");
+    BOOST_TEST(f.arns.at("c").ends_with("channel/" + a._channel_id));
+}
+
+BOOST_AUTO_TEST_CASE(a_failed_write_reports_why) {
+    fixture f;
+    kin::channel_delivery_config cfg;
+    cfg._destination = [](const std::string&,
+                          const kin::channel_access&) -> std::optional<kin::channel_bucket> {
+        kin::channel_bucket t;
+        t._put = [](const std::string&, std::string_view, const kin::channel_put_options&) {
+            throw std::runtime_error("sts:AssumeRole was refused: AccessDenied");
+        };
+        return t;
+    };
+    delivery_t refused{f.cluster, f.service, cfg};
+    f.on_demand("s");
+    f.channel("c", "s", "STRING", "NONE");
+    f.advance_s(1);
+    (void)f.put("s", "one");
+    f.advance_s(300);
+    const auto stats = refused.run_once();
+    BOOST_TEST(stats._objects == 0U);
+    BOOST_TEST(stats._checkpoints == 0U);
+    BOOST_TEST(stats._failures == 1U);
+    BOOST_TEST(stats._last_failure == "sts:AssumeRole was refused: AccessDenied");
 }
 
 BOOST_AUTO_TEST_CASE(size_limit_writes_before_freshness) {
@@ -566,7 +605,8 @@ BOOST_AUTO_TEST_CASE(child_waits_for_its_parent) {
 
     // The parent cannot be delivered: the destination is unreachable.
     kin::channel_delivery_config cfg;
-    cfg._destination = [](const std::string&) -> std::optional<kin::channel_bucket> {
+    cfg._destination = [](const std::string&,
+                          const kin::channel_access&) -> std::optional<kin::channel_bucket> {
         return std::nullopt;
     };
     delivery_t blocked{f.cluster, f.service, cfg};

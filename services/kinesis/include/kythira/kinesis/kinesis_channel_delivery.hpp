@@ -94,11 +94,25 @@ struct channel_bucket {
     [[nodiscard]] auto configured() const -> bool { return static_cast<bool>(_put); }
 };
 
+/// Who a write is for: the destination writes as the channel's service
+/// execution role when the node is set to assume it
+/// (`kinesis_channel_role.hpp`), and names the channel in the session.
+struct channel_access {
+    std::string _account;
+    std::string _channel;
+    /// `ChannelId`.
+    std::string _channel_id;
+    /// `ServiceExecutionRoleARN`.
+    std::string _role_arn;
+};
+
 struct channel_delivery_config {
-    /// The writer for a destination bucket (the name from the bucket ARN),
-    /// or nullopt when this node cannot reach it; unset turns delivery off
-    /// on this node.
-    std::function<std::optional<channel_bucket>(const std::string& bucket)> _destination;
+    /// The writer for a destination bucket (the name from the bucket ARN)
+    /// on behalf of a channel, or nullopt when this node cannot reach it;
+    /// unset turns delivery off on this node.
+    std::function<std::optional<channel_bucket>(const std::string& bucket,
+                                                const channel_access& access)>
+        _destination;
     /// Write an object once a batch holds this many bytes, however fresh.
     std::size_t _max_object_bytes = std::size_t{64} * 1024 * 1024;
     /// Bytes read from a shard per page.
@@ -122,6 +136,9 @@ struct channel_delivery_stats {
     std::uint64_t _failures = 0;
     /// Channels set to FAILED this pass.
     std::uint64_t _failed_channels = 0;
+    /// What the last failed write said (an S3 error, a refused role), for
+    /// the node's log; empty when nothing failed with a message.
+    std::string _last_failure;
 };
 
 namespace channel_detail {
@@ -363,8 +380,9 @@ public:
         for (const auto& job : jobs()) {
             try {
                 channel(job, stats);
-            } catch (const std::exception&) {
+            } catch (const std::exception& e) {
                 ++stats._failures;
+                stats._last_failure = e.what();
             }
         }
         return stats;
@@ -411,6 +429,13 @@ private:
             }
         });
         return out;
+    }
+
+    [[nodiscard]] static auto access_of(const channel_record& c) -> channel_access {
+        return channel_access{._account = c._account,
+                              ._channel = c._name,
+                              ._channel_id = channel_id_text(c._id),
+                              ._role_arn = c._role_arn};
     }
 
     auto checkpoint(const channel_record& c, const std::string& shard) -> std::uint64_t {
@@ -625,7 +650,7 @@ private:
         }
         try {
             if (has_body) {
-                const auto store = _config._destination(bucket);
+                const auto store = _config._destination(bucket, access_of(c));
                 if (!store || !store->configured()) {
                     ++stats._failures;
                     return false;
@@ -652,7 +677,7 @@ private:
                         prefix = std::string(p->as_string());
                     }
                 }
-                const auto store = _config._destination(dlq_bucket);
+                const auto store = _config._destination(dlq_bucket, access_of(c));
                 if (!store || !store->configured()) {
                     ++stats._failures;
                     return false;
@@ -663,8 +688,9 @@ private:
                             dead, dlq_options);
                 stats._dead_letters += dead_count;
             }
-        } catch (const std::exception&) {
+        } catch (const std::exception& e) {
             ++stats._failures;
+            stats._last_failure = e.what();
             return false;
         }
         stats._records += batch.size() - dead_count;
