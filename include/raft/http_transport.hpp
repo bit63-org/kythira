@@ -147,6 +147,11 @@ struct cpp_httplib_server_config {
     /// `413 Payload Too Large` with a `text/plain` body and never reaches a
     /// handler.
     std::size_t max_request_body_size{10 * 1024 * 1024};  // 10 MB
+    /// Most members a batched AppendEntries may carry; a larger batch is
+    /// answered `413` before any member is dispatched, and the sender resends
+    /// its members one by one (.kiro/specs/multi-raft-message-batching/
+    /// Requirement 5.4). Matches `batching_config::_max_messages`' default.
+    std::size_t max_append_entries_batch_members{256};
     std::chrono::seconds request_timeout{30};
     bool enable_ssl{false};
     std::string ssl_cert_path{};
@@ -236,6 +241,31 @@ public:
     auto send_timeout_now(const NodeId& target, const kythira::timeout_now_request<NodeId>& request,
                           std::chrono::milliseconds timeout) ->
         typename Types::template future_template<kythira::timeout_now_response<>>;
+
+    // Batched AppendEntries (.kiro/specs/multi-raft-message-batching/), on
+    // `/v1/raft/append_entries_batch`. Offered only when every serializer in
+    // the registry can encode a batch (JSON and CBOR can), so a peer can never
+    // negotiate a media type the batch has no encoding in. A peer without the
+    // route answers 404, one without a handler 501, and both fail the future
+    // with `rpc_not_implemented_exception`; a 413 (too many members, or a body
+    // above the peer's limit) fails it with `rpc_payload_too_large_exception`.
+    using append_entries_batch_request_type =
+        kythira::append_entries_batch_request<kythira::append_entries_request<NodeId>>;
+    using append_entries_batch_response_type =
+        kythira::append_entries_batch_response<kythira::append_entries_response<>>;
+    static constexpr bool k_batches_append_entries =
+        serializer_registry_type::template handles<append_entries_batch_request_type> &&
+        serializer_registry_type::template handles<append_entries_batch_response_type>;
+
+    auto send_append_entries_batch(const NodeId& target,
+                                   const append_entries_batch_request_type& request,
+                                   std::chrono::milliseconds timeout) ->
+        typename Types::template future_template<append_entries_batch_response_type>
+    requires k_batches_append_entries
+    {
+        return send_rpc<append_entries_batch_request_type, append_entries_batch_response_type>(
+            target, "/v1/raft/append_entries_batch", request, timeout);
+    }
 
     /// Validates `client_cert_path`/`client_key_path`/`ca_cert_path`, then
     /// closes every idle pooled connection so subsequent RPCs build fresh ones
@@ -414,6 +444,26 @@ public:
         std::function<kythira::timeout_now_response<>(const kythira::timeout_now_request<NodeId>&)>
             handler) -> void;
 
+    // Batched AppendEntries; see the client's note. The route is installed
+    // whenever the registry can carry a batch, so an unregistered handler
+    // answers 501 like the other extensions.
+    using append_entries_batch_request_type =
+        kythira::append_entries_batch_request<kythira::append_entries_request<NodeId>>;
+    using append_entries_batch_response_type =
+        kythira::append_entries_batch_response<kythira::append_entries_response<>>;
+    static constexpr bool k_batches_append_entries =
+        serializer_registry_type::template handles<append_entries_batch_request_type> &&
+        serializer_registry_type::template handles<append_entries_batch_response_type>;
+
+    auto register_append_entries_batch_handler(
+        std::function<append_entries_batch_response_type(const append_entries_batch_request_type&)>
+            handler) -> void
+    requires k_batches_append_entries
+    {
+        std::lock_guard<std::mutex> lock(_mutex);
+        _append_entries_batch_handler = std::move(handler);
+    }
+
     auto start() -> void;
     auto stop() -> void;
     auto is_running() const -> bool;
@@ -475,6 +525,8 @@ private:
         _request_pre_vote_handler;
     std::function<kythira::timeout_now_response<>(const kythira::timeout_now_request<NodeId>&)>
         _timeout_now_handler;
+    std::function<append_entries_batch_response_type(const append_entries_batch_request_type&)>
+        _append_entries_batch_handler;
     std::string _bind_address;
     std::uint16_t _bind_port;
     // Resolved by start(); atomic because bound_port() is callable without the

@@ -15,6 +15,7 @@
 #include <string_view>
 #include <type_traits>
 #include <utility>
+#include <variant>
 #include <vector>
 
 namespace kythira {
@@ -341,20 +342,8 @@ public:
     [[nodiscard]] auto deserialize_append_entries_request(const Data& data) const
         -> append_entries_request<NodeId, TermId, LogIndex, LogEntry, GroupId> {
         return guarded("append_entries_request", [&] {
-            const auto obj = parse_object(data, "append_entries_request");
-
-            append_entries_request<NodeId, TermId, LogIndex, LogEntry, GroupId> req;
-            req._group_id = decode_group_id<GroupId>(obj);
-            req._term = read_int<TermId>(obj, "term");
-            req._prev_log_index = read_int<LogIndex>(obj, "prev_log_index");
-            req._prev_log_term = read_int<TermId>(obj, "prev_log_term");
-            req._leader_commit = read_int<LogIndex>(obj, "leader_commit");
-
-            req._leader_id = read_id<NodeId>(obj, "leader_id");
-
-            req._entries = read_entries<LogEntry, TermId, LogIndex>(obj);
-
-            return req;
+            return decode_append_entries_request<NodeId, TermId, LogIndex, LogEntry, GroupId>(
+                parse_object(data, "append_entries_request"));
         });
     }
 
@@ -364,22 +353,130 @@ public:
     [[nodiscard]] auto deserialize_append_entries_response(const Data& data) const
         -> append_entries_response<TermId, LogIndex, GroupId> {
         return guarded("append_entries_response", [&] {
-            const auto obj = parse_object(data, "append_entries_response");
+            return decode_append_entries_response<TermId, LogIndex, GroupId>(
+                parse_object(data, "append_entries_response"));
+        });
+    }
 
-            append_entries_response<TermId, LogIndex, GroupId> resp;
-            resp._group_id = decode_group_id<GroupId>(obj);
-            resp._term = read_int<TermId>(obj, "term");
-            resp._success = read_bool(obj, "success");
+    // ── batched AppendEntries (.kiro/specs/multi-raft-message-batching/) ────
+    //
+    // {"type":"append_entries_batch_request","members":[<AE request>, ...]}
+    // {"type":"append_entries_batch_response","members":[{"ok":<AE response>}
+    //                                                   | {"err":{...}}, ...]}
+    //
+    // Members are spliced in as their standalone encodings, byte for byte
+    // (Requirement 5.1): one encoder per message type, and a member inside a
+    // batch is exactly the bytes it would have been alone.
 
-            if (obj.contains("conflict_index")) {
-                resp._conflict_index = read_int<LogIndex>(obj, "conflict_index");
+    template<typename NodeId = std::uint64_t, typename TermId = std::uint64_t,
+             typename LogIndex = std::uint64_t, typename LogEntry = log_entry<TermId, LogIndex>,
+             typename GroupId = std::uint64_t>
+    [[nodiscard]] auto serialize(
+        const append_entries_batch_request<
+            append_entries_request<NodeId, TermId, LogIndex, LogEntry, GroupId>>& batch) const
+        -> Data {
+        std::string text = R"({"type":"append_entries_batch_request","members":[)";
+        bool first = true;
+        for (const auto& member : batch.members()) {
+            if (!first) {
+                text.push_back(',');
             }
+            first = false;
+            append_bytes(text, serialize(member));
+        }
+        text += "]}";
+        return json_to_bytes(text);
+    }
 
-            if (obj.contains("conflict_term")) {
-                resp._conflict_term = read_int<TermId>(obj, "conflict_term");
+    template<typename TermId = std::uint64_t, typename LogIndex = std::uint64_t,
+             typename GroupId = std::uint64_t>
+    [[nodiscard]] auto serialize(
+        const append_entries_batch_response<append_entries_response<TermId, LogIndex, GroupId>>&
+            batch) const -> Data {
+        std::string text = R"({"type":"append_entries_batch_response","members":[)";
+        bool first = true;
+        for (const auto& member : batch.members()) {
+            if (!first) {
+                text.push_back(',');
             }
+            first = false;
+            if (const auto* ok = std::get_if<0>(&member)) {
+                text += R"({"ok":)";
+                append_bytes(text, serialize(*ok));
+                text.push_back('}');
+            } else {
+                const auto& err = std::get<1>(member);
+                boost::json::object e;
+                e["kind"] = batch_member_error_kind_name(err.kind());
+                e["message"] = err.message();
+                boost::json::object wrapper;
+                wrapper["err"] = std::move(e);
+                text += boost::json::serialize(wrapper);
+            }
+        }
+        text += "]}";
+        return json_to_bytes(text);
+    }
 
-            return resp;
+    template<typename NodeId = std::uint64_t, typename TermId = std::uint64_t,
+             typename LogIndex = std::uint64_t, typename LogEntry = log_entry<TermId, LogIndex>,
+             typename GroupId = std::uint64_t>
+    [[nodiscard]] auto deserialize_append_entries_batch_request(const Data& data) const
+        -> append_entries_batch_request<
+            append_entries_request<NodeId, TermId, LogIndex, LogEntry, GroupId>> {
+        return guarded("append_entries_batch_request", [&] {
+            const auto obj = parse_object(data, "append_entries_batch_request");
+            append_entries_batch_request<
+                append_entries_request<NodeId, TermId, LogIndex, LogEntry, GroupId>>
+                batch;
+            const auto& members = read_array(obj, "members");
+            batch._members.reserve(members.size());
+            for (const auto& m : members) {
+                batch._members.push_back(
+                    decode_append_entries_request<NodeId, TermId, LogIndex, LogEntry, GroupId>(
+                        member_object(m, "append_entries_request")));
+            }
+            return batch;
+        });
+    }
+
+    template<typename TermId = std::uint64_t, typename LogIndex = std::uint64_t,
+             typename GroupId = std::uint64_t>
+    [[nodiscard]] auto deserialize_append_entries_batch_response(const Data& data) const
+        -> append_entries_batch_response<append_entries_response<TermId, LogIndex, GroupId>> {
+        return guarded("append_entries_batch_response", [&] {
+            const auto obj = parse_object(data, "append_entries_batch_response");
+            append_entries_batch_response<append_entries_response<TermId, LogIndex, GroupId>> batch;
+            const auto& members = read_array(obj, "members");
+            batch._members.reserve(members.size());
+            for (const auto& m : members) {
+                if (!m.is_object()) {
+                    fail("members", "item is not an object");
+                }
+                const auto& slot = m.get_object();
+                if (slot.size() != 1) {
+                    fail("members", "item must hold exactly one of 'ok' or 'err'");
+                }
+                if (const auto* ok = slot.if_contains("ok")) {
+                    batch._members.emplace_back(
+                        std::in_place_index<0>,
+                        decode_append_entries_response<TermId, LogIndex, GroupId>(
+                            member_object(*ok, "append_entries_response")));
+                } else if (const auto* err = slot.if_contains("err")) {
+                    if (!err->is_object()) {
+                        fail("err", "not an object");
+                    }
+                    const auto& e = err->get_object();
+                    batch._members.emplace_back(
+                        std::in_place_index<1>,
+                        batch_member_error{
+                            ._kind = batch_member_error_kind_from(read_string(e, "kind")),
+                            ._message = read_string(e, "message")});
+                } else {
+                    fail("members", "item must hold exactly one of 'ok' or 'err'");
+                }
+            }
+            return batch;
         });
     }
 
@@ -661,6 +758,12 @@ public:
             return deserialize_fetch_log_entries_request<N>(data);
         } else if constexpr (std::same_as<T, fetch_log_entries_response<N>>) {
             return deserialize_fetch_log_entries_response<N>(data);
+        } else if constexpr (std::same_as<
+                                 T, append_entries_batch_request<append_entries_request<N>>>) {
+            return deserialize_append_entries_batch_request<N>(data);
+        } else if constexpr (std::same_as<
+                                 T, append_entries_batch_response<append_entries_response<>>>) {
+            return deserialize_append_entries_batch_response(data);
         } else {
             static_assert(std::is_same_v<T, void>, "Unsupported type for deserialization");
         }
@@ -683,6 +786,84 @@ private:
                            [](char c) { return static_cast<std::byte>(c); });
         }
         return result;
+    }
+
+    static auto append_bytes(std::string& text, const Data& bytes) -> void {
+        text.reserve(text.size() + std::ranges::size(bytes));
+        for (auto b : bytes) {
+            text.push_back(static_cast<char>(b));
+        }
+    }
+
+    // The body of an AppendEntries request, from its already-parsed object;
+    // shared by the lone message and the batch, which is what keeps their
+    // decodings from drifting apart.
+    template<typename NodeId, typename TermId, typename LogIndex, typename LogEntry,
+             typename GroupId>
+    [[nodiscard]] static auto decode_append_entries_request(const boost::json::object& obj)
+        -> append_entries_request<NodeId, TermId, LogIndex, LogEntry, GroupId> {
+        append_entries_request<NodeId, TermId, LogIndex, LogEntry, GroupId> req;
+        req._group_id = decode_group_id<GroupId>(obj);
+        req._term = read_int<TermId>(obj, "term");
+        req._prev_log_index = read_int<LogIndex>(obj, "prev_log_index");
+        req._prev_log_term = read_int<TermId>(obj, "prev_log_term");
+        req._leader_commit = read_int<LogIndex>(obj, "leader_commit");
+
+        req._leader_id = read_id<NodeId>(obj, "leader_id");
+
+        req._entries = read_entries<LogEntry, TermId, LogIndex>(obj);
+
+        return req;
+    }
+
+    template<typename TermId, typename LogIndex, typename GroupId>
+    [[nodiscard]] static auto decode_append_entries_response(const boost::json::object& obj)
+        -> append_entries_response<TermId, LogIndex, GroupId> {
+        append_entries_response<TermId, LogIndex, GroupId> resp;
+        resp._group_id = decode_group_id<GroupId>(obj);
+        resp._term = read_int<TermId>(obj, "term");
+        resp._success = read_bool(obj, "success");
+
+        if (obj.contains("conflict_index")) {
+            resp._conflict_index = read_int<LogIndex>(obj, "conflict_index");
+        }
+
+        if (obj.contains("conflict_term")) {
+            resp._conflict_term = read_int<TermId>(obj, "conflict_term");
+        }
+
+        return resp;
+    }
+
+    // A batch member: an object carrying the member type's own discriminant.
+    [[nodiscard]] static auto member_object(const boost::json::value& v,
+                                            std::string_view expected_type)
+        -> const boost::json::object& {
+        if (!v.is_object()) {
+            fail("members", "item is not an object");
+        }
+        const auto& obj = v.get_object();
+        if (read_string(obj, "type") != expected_type) {
+            fail("members", "item is not an " + std::string(expected_type));
+        }
+        return obj;
+    }
+
+    [[nodiscard]] static auto batch_member_error_kind_name(batch_member_error::kind_type kind)
+        -> const char* {
+        return kind == batch_member_error::kind_type::unknown_group ? "unknown_group"
+                                                                    : "handler_failed";
+    }
+
+    [[nodiscard]] static auto batch_member_error_kind_from(std::string_view name)
+        -> batch_member_error::kind_type {
+        if (name == "unknown_group") {
+            return batch_member_error::kind_type::unknown_group;
+        }
+        if (name == "handler_failed") {
+            return batch_member_error::kind_type::handler_failed;
+        }
+        fail("kind", "unknown batch member error kind '" + std::string(name) + "'");
     }
 
     // ── checked decoding (.kiro/specs/json-serializer-input-validation) ─────

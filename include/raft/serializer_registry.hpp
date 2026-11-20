@@ -98,6 +98,20 @@ template<node_id N> struct message_node_id<fetch_log_entries_response<N>> {
     using type = N;
 };
 
+template<node_id N>
+struct message_node_id<append_entries_batch_request<append_entries_request<N>>> {
+    using type = N;
+};
+
+/// @brief Whether serializer @p S has an encoding for message @p T.
+///
+/// The batched AppendEntries RPC (.kiro/specs/multi-raft-message-batching/
+/// Requirement 5.3) is encoded by JSON and CBOR only. A transport offers it
+/// only when every serializer in its registry can carry it, so a peer can
+/// never pick a media type the batch has no encoding in.
+template<typename S, typename T>
+concept serializer_encodes = requires(const S& s, const T& t) { s.serialize(t); };
+
 }  // namespace serializer_registry_detail
 
 /// @brief Decodes @p data as @p T with @p s, for any node id type @p T is
@@ -127,6 +141,8 @@ template<typename T, typename S, typename Data>
         return s.template deserialize_install_snapshot_request<N>(data);
     } else if constexpr (std::same_as<T, fetch_log_entries_request<N>>) {
         return s.template deserialize_fetch_log_entries_request<N>(data);
+    } else if constexpr (std::same_as<T, append_entries_batch_request<append_entries_request<N>>>) {
+        return s.template deserialize_append_entries_batch_request<N>(data);
     } else {
         static_assert(std::same_as<T, fetch_log_entries_response<N>>);
         return s.template deserialize_fetch_log_entries_response<N>(data);
@@ -143,6 +159,10 @@ public:
 
     single_serializer_registry() = default;
     explicit single_serializer_registry(S s) : _s(std::move(s)) {}
+
+    /// @brief Whether every serializer here can carry message @p T.
+    template<typename T>
+    static constexpr bool handles = serializer_registry_detail::serializer_encodes<S, T>;
 
     [[nodiscard]] auto default_media_type() const -> std::string { return _s.media_type(); }
 
@@ -225,6 +245,11 @@ public:
     using data_type = std::vector<std::byte>;
 
     multi_serializer_registry() = default;
+
+    /// @brief Whether every serializer here can carry message @p T.
+    template<typename T>
+    static constexpr bool handles =
+        (serializer_registry_detail::serializer_encodes<Serializers, T> && ...);
     explicit multi_serializer_registry(Serializers... serializers)
         : _serializers(std::move(serializers)...) {}
 

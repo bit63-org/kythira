@@ -43,14 +43,27 @@ defaults to false and no binary turns it on.
     is the fabric's existing `set_not_implemented`, plus
     `clear_not_implemented` for the upgrade.
 
-- [ ] 6. JSON and CBOR encodings
+- [x] 6. JSON and CBOR encodings
   - Batch request and response; round-trip tests with member byte equality.
+  - Done: each member is encoded by the existing standalone encoder and
+    spliced in, so a member's bytes inside a batch are its lone bytes
+    (`tests/append_entries_batch_serializer_test.cpp`). Registries gained
+    `handles<T>`; a transport offers batches only when every serializer in
+    its registry encodes them, so protobuf and Ion builds fall back.
   - _Requirements: 5.1, 7.3_
 
-- [ ] 7. HTTP transports
+- [x] 7. HTTP transports
   - `POST /v1/raft/append_entries_batch` on cpp-httplib, Beast and Proxygen,
     client and server; 404 to `rpc_not_implemented_exception`; member-count
     and body limits; conformance tests.
+  - Done: `max_append_entries_batch_members` (256) on each server config;
+    over it, or over the body limit, the server answers 413 and the client
+    raises `rpc_payload_too_large_exception`, which makes the batcher resend
+    the members alone without marking the peer. Beast also refuses (400) a
+    batch whose members name different leaders, because its certificate
+    binding checks one sender. `tests/http_append_entries_batch_test.cpp`
+    covers the wire behaviour on cpp-httplib and a 3-host multi_raft
+    cluster on each transport the build has.
   - _Requirements: 5.2, 5.4_
 
 - [ ] 8. Metrics
