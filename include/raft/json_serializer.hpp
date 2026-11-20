@@ -774,7 +774,15 @@ public:
 
     /// @brief IANA media type used for HTTP `Content-Type`/`Accept` negotiation
     ///        and CoAP Content-Format mapping (`rpc_serializer`).
-    [[nodiscard]] auto media_type() const -> std::string { return "application/json"; }
+    ///
+    /// A reference to one constant rather than a fresh `std::string`: the
+    /// transports call this on every request (`supports()`), and at 16
+    /// characters the name is one past the small-string buffer, so a value
+    /// return cost a heap allocation per RPC (doc/memory_profiling.md).
+    [[nodiscard]] auto media_type() const -> const std::string& {
+        static const std::string k_media_type{"application/json"};
+        return k_media_type;
+    }
 
 private:
     // Helper to convert JSON string to bytes

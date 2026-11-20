@@ -620,7 +620,12 @@ public:
     /// is what gRPC-Gateway, Prometheus and the wider ecosystem actually emit,
     /// and interoperating with existing peers matters more here than preferring
     /// the later formal registration.
-    [[nodiscard]] auto media_type() const -> std::string { return "application/x-protobuf"; }
+    /// Returns a reference to one constant, so the per-request `supports()`
+    /// check allocates nothing (doc/memory_profiling.md).
+    [[nodiscard]] auto media_type() const -> const std::string& {
+        static const std::string k_media_type{"application/x-protobuf"};
+        return k_media_type;
+    }
 
 private:
     /// @brief One-byte discriminator prepended to every payload, checked before

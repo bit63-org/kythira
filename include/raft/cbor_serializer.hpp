@@ -1151,7 +1151,12 @@ public:
     ///
     /// `application/cbor` is the registration from RFC 8949 §9.1, and is the
     /// name CoAP Content-Format 60 corresponds to.
-    [[nodiscard]] auto media_type() const -> std::string { return "application/cbor"; }
+    /// Returns a reference to one constant, so the per-request `supports()`
+    /// check allocates nothing (doc/memory_profiling.md).
+    [[nodiscard]] auto media_type() const -> const std::string& {
+        static const std::string k_media_type{"application/cbor"};
+        return k_media_type;
+    }
 
 private:
     // ── CBOR major types (RFC 8949 §3), the accepted subset ─────────────────
