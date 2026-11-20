@@ -1,0 +1,1321 @@
+# Copyright (c) 2026 Clark Rawlins
+# SPDX-License-Identifier: Apache-2.0
+
+# The Redis command registry (.kiro/specs/redis-general-data-types/ task 1,
+# design Component 2). services/redis/tools/gen_redis_commands.py turns it
+# into include/kythira/redis/redis_command_ids.hpp; the test
+# redis_command_ids_header_fresh fails when the two disagree, so edit this
+# file and regenerate:
+#
+#   python3 services/redis/tools/gen_redis_commands.py \
+#       services/redis/tools/redis_commands.yaml \
+#       services/redis/include/kythira/redis/redis_command_ids.hpp
+#
+# Rules:
+# - `id` is what a format-0x03 `exec` log record carries for the command.
+#   Once merged, an id is never changed or given to another command, and a
+#   command is never deleted: a removed one moves to `retired` below, so its
+#   id stays taken. redis_command_registry_test pins every id ever issued
+#   (golden/redis/command_ids.txt) and allows additions only.
+# - New commands take the next unused id, whatever their position.
+# - `status: planned` registers a command a later task ships, so its id is
+#   fixed now; the gateway still answers `-ERR unknown command` for it.
+# - `flags`, `acl` and `keys` (first, last, step) are Redis's COMMAND INFO
+#   values; `path` is the design's column (R W M F A, L local); `task` is the
+#   spec task that ships the command (0: an earlier spec).
+#
+# The format is a strict subset of YAML that the generator parses itself
+# (no PyYAML dependency): `commands:` and `retired:` lists of flat maps,
+# scalar values, and `[a, b]` flow lists.
+
+commands:
+  - name: GET
+    id: 1
+    group: string
+    since: 1.0.0
+    arity: 2
+    flags: [readonly, fast]
+    acl: [read, string, fast]
+    keys: [1, 1, 1]
+    path: R
+    status: shipped
+    task: 0
+  - name: SET
+    id: 2
+    group: string
+    since: 1.0.0
+    arity: -3
+    flags: [write, denyoom]
+    acl: [write, string, slow]
+    keys: [1, 1, 1]
+    path: W
+    status: shipped
+    task: 0
+  - name: SETEX
+    id: 3
+    group: string
+    since: 2.0.0
+    arity: 4
+    flags: [write, denyoom]
+    acl: [write, string, slow]
+    keys: [1, 1, 1]
+    path: W
+    status: shipped
+    task: 0
+  - name: DEL
+    id: 4
+    group: generic
+    since: 1.0.0
+    arity: -2
+    flags: [write]
+    acl: [keyspace, write, slow]
+    keys: [1, -1, 1]
+    path: M
+    status: shipped
+    task: 0
+  - name: EXISTS
+    id: 5
+    group: generic
+    since: 1.0.0
+    arity: -2
+    flags: [readonly, fast]
+    acl: [keyspace, read, fast]
+    keys: [1, -1, 1]
+    path: R
+    status: shipped
+    task: 0
+  - name: STRLEN
+    id: 6
+    group: string
+    since: 2.2.0
+    arity: 2
+    flags: [readonly, fast]
+    acl: [read, string, fast]
+    keys: [1, 1, 1]
+    path: R
+    status: shipped
+    task: 0
+  - name: GETRANGE
+    id: 7
+    group: string
+    since: 2.4.0
+    arity: 4
+    flags: [readonly]
+    acl: [read, string, slow]
+    keys: [1, 1, 1]
+    path: R
+    status: shipped
+    task: 0
+  - name: TTL
+    id: 8
+    group: generic
+    since: 1.0.0
+    arity: 2
+    flags: [readonly, fast]
+    acl: [keyspace, read, fast]
+    keys: [1, 1, 1]
+    path: R
+    status: shipped
+    task: 0
+  - name: PING
+    id: 9
+    group: connection
+    since: 1.0.0
+    arity: -1
+    flags: [fast]
+    acl: [fast, connection]
+    keys: [0, 0, 0]
+    path: L
+    status: shipped
+    task: 0
+  - name: ECHO
+    id: 10
+    group: connection
+    since: 1.0.0
+    arity: 2
+    flags: [fast]
+    acl: [fast, connection]
+    keys: [0, 0, 0]
+    path: L
+    status: shipped
+    task: 0
+  - name: AUTH
+    id: 11
+    group: connection
+    since: 1.0.0
+    arity: -2
+    flags: [noscript, loading, stale, fast, no_auth, allow_busy]
+    acl: [fast, connection]
+    keys: [0, 0, 0]
+    path: L
+    status: shipped
+    task: 0
+  - name: HELLO
+    id: 12
+    group: connection
+    since: 6.0.0
+    arity: -1
+    flags: [noscript, loading, stale, fast, no_auth, allow_busy]
+    acl: [fast, connection]
+    keys: [0, 0, 0]
+    path: L
+    status: shipped
+    task: 0
+  - name: SELECT
+    id: 13
+    group: connection
+    since: 2.0.0
+    arity: 2
+    flags: [loading, stale, fast]
+    acl: [fast, connection]
+    keys: [0, 0, 0]
+    path: L
+    status: shipped
+    task: 0
+  - name: CLIENT
+    id: 14
+    group: connection
+    since: 2.4.0
+    arity: -2
+    flags: []
+    acl: [slow, connection]
+    keys: [0, 0, 0]
+    path: L
+    status: shipped
+    task: 0
+  - name: QUIT
+    id: 15
+    group: connection
+    since: 1.0.0
+    arity: -1
+    flags: [noscript, loading, stale, fast, no_auth, allow_busy]
+    acl: [fast, connection]
+    keys: [0, 0, 0]
+    path: L
+    status: shipped
+    task: 0
+  - name: RESET
+    id: 16
+    group: connection
+    since: 6.2.0
+    arity: 1
+    flags: [noscript, loading, stale, fast, no_auth, allow_busy]
+    acl: [fast, connection]
+    keys: [0, 0, 0]
+    path: L
+    status: shipped
+    task: 0
+  - name: COMMAND
+    id: 17
+    group: server
+    since: 2.8.13
+    arity: -1
+    flags: [loading, stale]
+    acl: [slow, connection]
+    keys: [0, 0, 0]
+    path: L
+    status: shipped
+    task: 0
+  - name: INFO
+    id: 18
+    group: server
+    since: 1.0.0
+    arity: -1
+    flags: [loading, stale]
+    acl: [slow, dangerous]
+    keys: [0, 0, 0]
+    path: L
+    status: shipped
+    task: 0
+  - name: DBSIZE
+    id: 19
+    group: server
+    since: 1.0.0
+    arity: 1
+    flags: [readonly, fast]
+    acl: [keyspace, read, fast]
+    keys: [0, 0, 0]
+    path: F
+    status: shipped
+    task: 0
+  - name: MGET
+    id: 20
+    group: string
+    since: 1.0.0
+    arity: -2
+    flags: [readonly, fast]
+    acl: [read, string, fast]
+    keys: [1, -1, 1]
+    path: M
+    status: shipped
+    task: 0
+  - name: MSET
+    id: 21
+    group: string
+    since: 1.0.1
+    arity: -3
+    flags: [write, denyoom]
+    acl: [write, string, slow]
+    keys: [1, -1, 2]
+    path: M
+    status: shipped
+    task: 0
+  - name: MULTI
+    id: 22
+    group: transactions
+    since: 1.2.0
+    arity: 1
+    flags: [noscript, loading, stale, fast, allow_busy]
+    acl: [fast, transaction]
+    keys: [0, 0, 0]
+    path: L
+    status: shipped
+    task: 0
+  - name: EXEC
+    id: 23
+    group: transactions
+    since: 1.2.0
+    arity: 1
+    flags: [noscript, loading, stale, skip_slowlog]
+    acl: [slow, transaction]
+    keys: [0, 0, 0]
+    path: L
+    status: shipped
+    task: 0
+  - name: DISCARD
+    id: 24
+    group: transactions
+    since: 2.0.0
+    arity: 1
+    flags: [noscript, loading, stale, fast, allow_busy]
+    acl: [fast, transaction]
+    keys: [0, 0, 0]
+    path: L
+    status: shipped
+    task: 0
+  - name: WATCH
+    id: 25
+    group: transactions
+    since: 2.2.0
+    arity: -2
+    flags: [noscript, loading, stale, fast, allow_busy]
+    acl: [fast, transaction]
+    keys: [1, -1, 1]
+    path: L
+    status: shipped
+    task: 0
+  - name: UNWATCH
+    id: 26
+    group: transactions
+    since: 2.2.0
+    arity: 1
+    flags: [noscript, loading, stale, fast, allow_busy]
+    acl: [fast, transaction]
+    keys: [0, 0, 0]
+    path: L
+    status: shipped
+    task: 0
+  - name: KYTHIRA.ADVISE
+    id: 27
+    group: kythira
+    since: 7.0.0
+    arity: -2
+    flags: [admin, noscript, loading, stale]
+    acl: [admin, slow, dangerous]
+    keys: [0, 0, 0]
+    path: L
+    status: shipped
+    task: 0
+  - name: KYTHIRA.ISOLATION
+    id: 28
+    group: kythira
+    since: 7.0.0
+    arity: -1
+    flags: [noscript, loading, stale, fast]
+    acl: [fast, connection]
+    keys: [0, 0, 0]
+    path: L
+    status: shipped
+    task: 0
+  - name: KYTHIRA.TXN
+    id: 29
+    group: kythira
+    since: 7.0.0
+    arity: -2
+    flags: [admin, noscript, loading, stale]
+    acl: [admin, slow, dangerous]
+    keys: [0, 0, 0]
+    path: L
+    status: shipped
+    task: 0
+  - name: KYTHIRA.FORMAT
+    id: 30
+    group: kythira
+    since: 7.0.0
+    arity: -2
+    flags: [admin, noscript, loading, stale]
+    acl: [admin, slow, dangerous]
+    keys: [0, 0, 0]
+    path: A
+    status: planned
+    task: 2
+  - name: INCR
+    id: 31
+    group: string
+    since: 1.0.0
+    arity: 2
+    flags: [write, denyoom, fast]
+    acl: [write, string, fast]
+    keys: [1, 1, 1]
+    path: W
+    status: planned
+    task: 3
+  - name: DECR
+    id: 32
+    group: string
+    since: 1.0.0
+    arity: 2
+    flags: [write, denyoom, fast]
+    acl: [write, string, fast]
+    keys: [1, 1, 1]
+    path: W
+    status: planned
+    task: 3
+  - name: INCRBY
+    id: 33
+    group: string
+    since: 1.0.0
+    arity: 3
+    flags: [write, denyoom, fast]
+    acl: [write, string, fast]
+    keys: [1, 1, 1]
+    path: W
+    status: planned
+    task: 3
+  - name: DECRBY
+    id: 34
+    group: string
+    since: 1.0.0
+    arity: 3
+    flags: [write, denyoom, fast]
+    acl: [write, string, fast]
+    keys: [1, 1, 1]
+    path: W
+    status: planned
+    task: 3
+  - name: INCRBYFLOAT
+    id: 35
+    group: string
+    since: 2.6.0
+    arity: 3
+    flags: [write, denyoom, fast]
+    acl: [write, string, fast]
+    keys: [1, 1, 1]
+    path: W
+    status: planned
+    task: 3
+  - name: SETNX
+    id: 36
+    group: string
+    since: 1.0.0
+    arity: 3
+    flags: [write, denyoom, fast]
+    acl: [write, string, fast]
+    keys: [1, 1, 1]
+    path: W
+    status: planned
+    task: 3
+  - name: PSETEX
+    id: 37
+    group: string
+    since: 2.6.0
+    arity: 4
+    flags: [write, denyoom]
+    acl: [write, string, slow]
+    keys: [1, 1, 1]
+    path: W
+    status: planned
+    task: 3
+  - name: GETSET
+    id: 38
+    group: string
+    since: 1.0.0
+    arity: 3
+    flags: [write, denyoom, fast]
+    acl: [write, string, fast]
+    keys: [1, 1, 1]
+    path: W
+    status: planned
+    task: 3
+  - name: GETDEL
+    id: 39
+    group: string
+    since: 6.2.0
+    arity: 2
+    flags: [write, fast]
+    acl: [write, string, fast]
+    keys: [1, 1, 1]
+    path: W
+    status: planned
+    task: 3
+  - name: GETEX
+    id: 40
+    group: string
+    since: 6.2.0
+    arity: -2
+    flags: [write, fast]
+    acl: [write, string, fast]
+    keys: [1, 1, 1]
+    path: W
+    status: planned
+    task: 3
+  - name: APPEND
+    id: 41
+    group: string
+    since: 2.0.0
+    arity: 3
+    flags: [write, denyoom, fast]
+    acl: [write, string, fast]
+    keys: [1, 1, 1]
+    path: W
+    status: planned
+    task: 3
+  - name: SETRANGE
+    id: 42
+    group: string
+    since: 2.2.0
+    arity: 4
+    flags: [write, denyoom]
+    acl: [write, string, slow]
+    keys: [1, 1, 1]
+    path: W
+    status: planned
+    task: 3
+  - name: TYPE
+    id: 43
+    group: generic
+    since: 1.0.0
+    arity: 2
+    flags: [readonly, fast]
+    acl: [keyspace, read, fast]
+    keys: [1, 1, 1]
+    path: R
+    status: planned
+    task: 3
+  - name: UNLINK
+    id: 44
+    group: generic
+    since: 4.0.0
+    arity: -2
+    flags: [write, fast]
+    acl: [keyspace, write, fast]
+    keys: [1, -1, 1]
+    path: M
+    status: planned
+    task: 3
+  - name: TOUCH
+    id: 45
+    group: generic
+    since: 3.2.1
+    arity: -2
+    flags: [readonly, fast]
+    acl: [keyspace, read, fast]
+    keys: [1, -1, 1]
+    path: R
+    status: planned
+    task: 3
+  - name: OBJECT
+    id: 46
+    group: generic
+    since: 2.2.3
+    arity: -2
+    flags: []
+    acl: [slow]
+    keys: [0, 0, 0]
+    path: R
+    status: planned
+    task: 3
+  - name: EXPIRE
+    id: 47
+    group: generic
+    since: 1.0.0
+    arity: -3
+    flags: [write, fast]
+    acl: [keyspace, write, fast]
+    keys: [1, 1, 1]
+    path: W
+    status: planned
+    task: 4
+  - name: PEXPIRE
+    id: 48
+    group: generic
+    since: 2.6.0
+    arity: -3
+    flags: [write, fast]
+    acl: [keyspace, write, fast]
+    keys: [1, 1, 1]
+    path: W
+    status: planned
+    task: 4
+  - name: EXPIREAT
+    id: 49
+    group: generic
+    since: 1.2.0
+    arity: -3
+    flags: [write, fast]
+    acl: [keyspace, write, fast]
+    keys: [1, 1, 1]
+    path: W
+    status: planned
+    task: 4
+  - name: PEXPIREAT
+    id: 50
+    group: generic
+    since: 2.6.0
+    arity: -3
+    flags: [write, fast]
+    acl: [keyspace, write, fast]
+    keys: [1, 1, 1]
+    path: W
+    status: planned
+    task: 4
+  - name: PERSIST
+    id: 51
+    group: generic
+    since: 2.2.0
+    arity: 2
+    flags: [write, fast]
+    acl: [keyspace, write, fast]
+    keys: [1, 1, 1]
+    path: W
+    status: planned
+    task: 4
+  - name: PTTL
+    id: 52
+    group: generic
+    since: 2.6.0
+    arity: 2
+    flags: [readonly, fast]
+    acl: [keyspace, read, fast]
+    keys: [1, 1, 1]
+    path: R
+    status: planned
+    task: 4
+  - name: EXPIRETIME
+    id: 53
+    group: generic
+    since: 7.0.0
+    arity: 2
+    flags: [readonly, fast]
+    acl: [keyspace, read, fast]
+    keys: [1, 1, 1]
+    path: R
+    status: planned
+    task: 4
+  - name: PEXPIRETIME
+    id: 54
+    group: generic
+    since: 7.0.0
+    arity: 2
+    flags: [readonly, fast]
+    acl: [keyspace, read, fast]
+    keys: [1, 1, 1]
+    path: R
+    status: planned
+    task: 4
+  - name: RENAME
+    id: 55
+    group: generic
+    since: 1.0.0
+    arity: 3
+    flags: [write]
+    acl: [keyspace, write, slow]
+    keys: [1, 2, 1]
+    path: M
+    status: planned
+    task: 6
+  - name: RENAMENX
+    id: 56
+    group: generic
+    since: 1.0.0
+    arity: 3
+    flags: [write, fast]
+    acl: [keyspace, write, fast]
+    keys: [1, 2, 1]
+    path: M
+    status: planned
+    task: 6
+  - name: COPY
+    id: 57
+    group: generic
+    since: 6.2.0
+    arity: -3
+    flags: [write, denyoom]
+    acl: [keyspace, write, slow]
+    keys: [1, 2, 1]
+    path: M
+    status: planned
+    task: 6
+  - name: MSETNX
+    id: 58
+    group: string
+    since: 1.0.1
+    arity: -3
+    flags: [write, denyoom]
+    acl: [write, string, slow]
+    keys: [1, -1, 2]
+    path: M
+    status: planned
+    task: 6
+  - name: HSET
+    id: 59
+    group: hash
+    since: 2.0.0
+    arity: -4
+    flags: [write, denyoom, fast]
+    acl: [write, hash, fast]
+    keys: [1, 1, 1]
+    path: W
+    status: planned
+    task: 7
+  - name: HSETNX
+    id: 60
+    group: hash
+    since: 2.0.0
+    arity: 4
+    flags: [write, denyoom, fast]
+    acl: [write, hash, fast]
+    keys: [1, 1, 1]
+    path: W
+    status: planned
+    task: 7
+  - name: HMSET
+    id: 61
+    group: hash
+    since: 2.0.0
+    arity: -4
+    flags: [write, denyoom, fast]
+    acl: [write, hash, fast]
+    keys: [1, 1, 1]
+    path: W
+    status: planned
+    task: 7
+  - name: HGET
+    id: 62
+    group: hash
+    since: 2.0.0
+    arity: 3
+    flags: [readonly, fast]
+    acl: [read, hash, fast]
+    keys: [1, 1, 1]
+    path: R
+    status: planned
+    task: 7
+  - name: HMGET
+    id: 63
+    group: hash
+    since: 2.0.0
+    arity: -3
+    flags: [readonly, fast]
+    acl: [read, hash, fast]
+    keys: [1, 1, 1]
+    path: R
+    status: planned
+    task: 7
+  - name: HDEL
+    id: 64
+    group: hash
+    since: 2.0.0
+    arity: -3
+    flags: [write, fast]
+    acl: [write, hash, fast]
+    keys: [1, 1, 1]
+    path: W
+    status: planned
+    task: 7
+  - name: HEXISTS
+    id: 65
+    group: hash
+    since: 2.0.0
+    arity: 3
+    flags: [readonly, fast]
+    acl: [read, hash, fast]
+    keys: [1, 1, 1]
+    path: R
+    status: planned
+    task: 7
+  - name: HLEN
+    id: 66
+    group: hash
+    since: 2.0.0
+    arity: 2
+    flags: [readonly, fast]
+    acl: [read, hash, fast]
+    keys: [1, 1, 1]
+    path: R
+    status: planned
+    task: 7
+  - name: HSTRLEN
+    id: 67
+    group: hash
+    since: 3.2.0
+    arity: 3
+    flags: [readonly, fast]
+    acl: [read, hash, fast]
+    keys: [1, 1, 1]
+    path: R
+    status: planned
+    task: 7
+  - name: HKEYS
+    id: 68
+    group: hash
+    since: 2.0.0
+    arity: 2
+    flags: [readonly]
+    acl: [read, hash, slow]
+    keys: [1, 1, 1]
+    path: R
+    status: planned
+    task: 7
+  - name: HVALS
+    id: 69
+    group: hash
+    since: 2.0.0
+    arity: 2
+    flags: [readonly]
+    acl: [read, hash, slow]
+    keys: [1, 1, 1]
+    path: R
+    status: planned
+    task: 7
+  - name: HGETALL
+    id: 70
+    group: hash
+    since: 2.0.0
+    arity: 2
+    flags: [readonly]
+    acl: [read, hash, slow]
+    keys: [1, 1, 1]
+    path: R
+    status: planned
+    task: 7
+  - name: HINCRBY
+    id: 71
+    group: hash
+    since: 2.0.0
+    arity: 4
+    flags: [write, denyoom, fast]
+    acl: [write, hash, fast]
+    keys: [1, 1, 1]
+    path: W
+    status: planned
+    task: 7
+  - name: HINCRBYFLOAT
+    id: 72
+    group: hash
+    since: 2.6.0
+    arity: 4
+    flags: [write, denyoom, fast]
+    acl: [write, hash, fast]
+    keys: [1, 1, 1]
+    path: W
+    status: planned
+    task: 7
+  - name: HRANDFIELD
+    id: 73
+    group: hash
+    since: 6.2.0
+    arity: -2
+    flags: [readonly]
+    acl: [read, hash, slow]
+    keys: [1, 1, 1]
+    path: R
+    status: planned
+    task: 7
+  - name: SADD
+    id: 74
+    group: set
+    since: 1.0.0
+    arity: -3
+    flags: [write, denyoom, fast]
+    acl: [write, set, fast]
+    keys: [1, 1, 1]
+    path: W
+    status: planned
+    task: 8
+  - name: SREM
+    id: 75
+    group: set
+    since: 1.0.0
+    arity: -3
+    flags: [write, fast]
+    acl: [write, set, fast]
+    keys: [1, 1, 1]
+    path: W
+    status: planned
+    task: 8
+  - name: SISMEMBER
+    id: 76
+    group: set
+    since: 1.0.0
+    arity: 3
+    flags: [readonly, fast]
+    acl: [read, set, fast]
+    keys: [1, 1, 1]
+    path: R
+    status: planned
+    task: 8
+  - name: SMISMEMBER
+    id: 77
+    group: set
+    since: 6.2.0
+    arity: -3
+    flags: [readonly, fast]
+    acl: [read, set, fast]
+    keys: [1, 1, 1]
+    path: R
+    status: planned
+    task: 8
+  - name: SMEMBERS
+    id: 78
+    group: set
+    since: 1.0.0
+    arity: 2
+    flags: [readonly]
+    acl: [read, set, slow]
+    keys: [1, 1, 1]
+    path: R
+    status: planned
+    task: 8
+  - name: SCARD
+    id: 79
+    group: set
+    since: 1.0.0
+    arity: 2
+    flags: [readonly, fast]
+    acl: [read, set, fast]
+    keys: [1, 1, 1]
+    path: R
+    status: planned
+    task: 8
+  - name: SPOP
+    id: 80
+    group: set
+    since: 1.0.0
+    arity: -2
+    flags: [write, fast]
+    acl: [write, set, fast]
+    keys: [1, 1, 1]
+    path: W
+    status: planned
+    task: 8
+  - name: SRANDMEMBER
+    id: 81
+    group: set
+    since: 1.0.0
+    arity: -2
+    flags: [readonly]
+    acl: [read, set, slow]
+    keys: [1, 1, 1]
+    path: R
+    status: planned
+    task: 8
+  - name: SMOVE
+    id: 82
+    group: set
+    since: 1.0.0
+    arity: 4
+    flags: [write, fast]
+    acl: [write, set, fast]
+    keys: [1, 2, 1]
+    path: M
+    status: planned
+    task: 8
+  - name: SINTER
+    id: 83
+    group: set
+    since: 1.0.0
+    arity: -2
+    flags: [readonly]
+    acl: [read, set, slow]
+    keys: [1, -1, 1]
+    path: M
+    status: planned
+    task: 8
+  - name: SUNION
+    id: 84
+    group: set
+    since: 1.0.0
+    arity: -2
+    flags: [readonly]
+    acl: [read, set, slow]
+    keys: [1, -1, 1]
+    path: M
+    status: planned
+    task: 8
+  - name: SDIFF
+    id: 85
+    group: set
+    since: 1.0.0
+    arity: -2
+    flags: [readonly]
+    acl: [read, set, slow]
+    keys: [1, -1, 1]
+    path: M
+    status: planned
+    task: 8
+  - name: SINTERCARD
+    id: 86
+    group: set
+    since: 7.0.0
+    arity: -3
+    flags: [readonly, movablekeys]
+    acl: [read, set, slow]
+    keys: [0, 0, 0]
+    path: M
+    status: planned
+    task: 8
+  - name: SINTERSTORE
+    id: 87
+    group: set
+    since: 1.0.0
+    arity: -3
+    flags: [write, denyoom]
+    acl: [write, set, slow]
+    keys: [1, -1, 1]
+    path: M
+    status: planned
+    task: 8
+  - name: SUNIONSTORE
+    id: 88
+    group: set
+    since: 1.0.0
+    arity: -3
+    flags: [write, denyoom]
+    acl: [write, set, slow]
+    keys: [1, -1, 1]
+    path: M
+    status: planned
+    task: 8
+  - name: SDIFFSTORE
+    id: 89
+    group: set
+    since: 1.0.0
+    arity: -3
+    flags: [write, denyoom]
+    acl: [write, set, slow]
+    keys: [1, -1, 1]
+    path: M
+    status: planned
+    task: 8
+  - name: LPUSH
+    id: 90
+    group: list
+    since: 1.0.0
+    arity: -3
+    flags: [write, denyoom, fast]
+    acl: [write, list, fast]
+    keys: [1, 1, 1]
+    path: W
+    status: planned
+    task: 9
+  - name: RPUSH
+    id: 91
+    group: list
+    since: 1.0.0
+    arity: -3
+    flags: [write, denyoom, fast]
+    acl: [write, list, fast]
+    keys: [1, 1, 1]
+    path: W
+    status: planned
+    task: 9
+  - name: LPUSHX
+    id: 92
+    group: list
+    since: 2.2.0
+    arity: -3
+    flags: [write, denyoom, fast]
+    acl: [write, list, fast]
+    keys: [1, 1, 1]
+    path: W
+    status: planned
+    task: 9
+  - name: RPUSHX
+    id: 93
+    group: list
+    since: 2.2.0
+    arity: -3
+    flags: [write, denyoom, fast]
+    acl: [write, list, fast]
+    keys: [1, 1, 1]
+    path: W
+    status: planned
+    task: 9
+  - name: LPOP
+    id: 94
+    group: list
+    since: 1.0.0
+    arity: -2
+    flags: [write, fast]
+    acl: [write, list, fast]
+    keys: [1, 1, 1]
+    path: W
+    status: planned
+    task: 9
+  - name: RPOP
+    id: 95
+    group: list
+    since: 1.0.0
+    arity: -2
+    flags: [write, fast]
+    acl: [write, list, fast]
+    keys: [1, 1, 1]
+    path: W
+    status: planned
+    task: 9
+  - name: LLEN
+    id: 96
+    group: list
+    since: 1.0.0
+    arity: 2
+    flags: [readonly, fast]
+    acl: [read, list, fast]
+    keys: [1, 1, 1]
+    path: R
+    status: planned
+    task: 9
+  - name: LINDEX
+    id: 97
+    group: list
+    since: 1.0.0
+    arity: 3
+    flags: [readonly]
+    acl: [read, list, slow]
+    keys: [1, 1, 1]
+    path: R
+    status: planned
+    task: 9
+  - name: LRANGE
+    id: 98
+    group: list
+    since: 1.0.0
+    arity: 4
+    flags: [readonly]
+    acl: [read, list, slow]
+    keys: [1, 1, 1]
+    path: R
+    status: planned
+    task: 9
+  - name: LSET
+    id: 99
+    group: list
+    since: 1.0.0
+    arity: 4
+    flags: [write, denyoom]
+    acl: [write, list, slow]
+    keys: [1, 1, 1]
+    path: W
+    status: planned
+    task: 9
+  - name: LINSERT
+    id: 100
+    group: list
+    since: 2.2.0
+    arity: 5
+    flags: [write, denyoom]
+    acl: [write, list, slow]
+    keys: [1, 1, 1]
+    path: W
+    status: planned
+    task: 9
+  - name: LREM
+    id: 101
+    group: list
+    since: 1.0.0
+    arity: 4
+    flags: [write]
+    acl: [write, list, slow]
+    keys: [1, 1, 1]
+    path: W
+    status: planned
+    task: 9
+  - name: LTRIM
+    id: 102
+    group: list
+    since: 1.0.0
+    arity: 4
+    flags: [write]
+    acl: [write, list, slow]
+    keys: [1, 1, 1]
+    path: W
+    status: planned
+    task: 9
+  - name: LPOS
+    id: 103
+    group: list
+    since: 6.0.6
+    arity: -3
+    flags: [readonly]
+    acl: [read, list, slow]
+    keys: [1, 1, 1]
+    path: R
+    status: planned
+    task: 9
+  - name: LMOVE
+    id: 104
+    group: list
+    since: 6.2.0
+    arity: 5
+    flags: [write, denyoom]
+    acl: [write, list, slow]
+    keys: [1, 2, 1]
+    path: M
+    status: planned
+    task: 9
+  - name: RPOPLPUSH
+    id: 105
+    group: list
+    since: 1.2.0
+    arity: 3
+    flags: [write, denyoom]
+    acl: [write, list, slow]
+    keys: [1, 2, 1]
+    path: M
+    status: planned
+    task: 9
+  - name: LMPOP
+    id: 106
+    group: list
+    since: 7.0.0
+    arity: -4
+    flags: [write, movablekeys]
+    acl: [write, list, slow]
+    keys: [0, 0, 0]
+    path: M
+    status: planned
+    task: 9
+  - name: SCAN
+    id: 107
+    group: generic
+    since: 2.8.0
+    arity: -2
+    flags: [readonly]
+    acl: [keyspace, read, slow]
+    keys: [0, 0, 0]
+    path: F
+    status: planned
+    task: 12
+  - name: HSCAN
+    id: 108
+    group: hash
+    since: 2.8.0
+    arity: -3
+    flags: [readonly]
+    acl: [read, hash, slow]
+    keys: [1, 1, 1]
+    path: R
+    status: planned
+    task: 12
+  - name: SSCAN
+    id: 109
+    group: set
+    since: 2.8.0
+    arity: -3
+    flags: [readonly]
+    acl: [read, set, slow]
+    keys: [1, 1, 1]
+    path: R
+    status: planned
+    task: 12
+  - name: KEYS
+    id: 110
+    group: generic
+    since: 1.0.0
+    arity: 2
+    flags: [readonly]
+    acl: [keyspace, read, slow, dangerous]
+    keys: [0, 0, 0]
+    path: F
+    status: planned
+    task: 12
+  - name: RANDOMKEY
+    id: 111
+    group: generic
+    since: 1.0.0
+    arity: 1
+    flags: [readonly]
+    acl: [keyspace, read, slow]
+    keys: [0, 0, 0]
+    path: F
+    status: planned
+    task: 12
+  - name: KYTHIRA.DELPREFIX
+    id: 112
+    group: kythira
+    since: 7.0.0
+    arity: -2
+    flags: [write, admin]
+    acl: [keyspace, write, admin, slow, dangerous]
+    keys: [0, 0, 0]
+    path: A
+    status: planned
+    task: 13
+  - name: KYTHIRA.USAGE
+    id: 113
+    group: kythira
+    since: 7.0.0
+    arity: -1
+    flags: [readonly, admin]
+    acl: [keyspace, read, admin, slow]
+    keys: [0, 0, 0]
+    path: F
+    status: planned
+    task: 13
+  - name: FLUSHDB
+    id: 114
+    group: server
+    since: 1.0.0
+    arity: -1
+    flags: [write]
+    acl: [keyspace, write, slow, dangerous]
+    keys: [0, 0, 0]
+    path: A
+    status: planned
+    task: 13
+  - name: FLUSHALL
+    id: 115
+    group: server
+    since: 1.0.0
+    arity: -1
+    flags: [write]
+    acl: [keyspace, write, slow, dangerous]
+    keys: [0, 0, 0]
+    path: A
+    status: planned
+    task: 13
+  - name: MEMORY
+    id: 116
+    group: server
+    since: 4.0.0
+    arity: -2
+    flags: []
+    acl: [slow]
+    keys: [0, 0, 0]
+    path: R
+    status: planned
+    task: 13
+  - name: SLOWLOG
+    id: 117
+    group: server
+    since: 2.2.12
+    arity: -2
+    flags: []
+    acl: [slow]
+    keys: [0, 0, 0]
+    path: L
+    status: planned
+    task: 13
+
+# Commands removed after their id was issued: `- name: X` and `id: N` only.
+retired: []
