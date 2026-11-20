@@ -224,6 +224,25 @@ elseif(TARGET Boost::json)
     target_link_libraries(s3_layers_test PRIVATE Boost::json)
 endif()
 
+# Task 16a: the object index on Raft. Three metadata nodes on the
+# in-process message fabric (tests/multi_raft_test_fabric.hpp) vote in one
+# index group: followers forward entries and read barriers to the leader,
+# a leader lost during PUTs loses no acknowledged write, workers follow
+# leadership, change log cursors survive a new leader, restarted members
+# keep their replicas, and a member restored from a snapshot fetches the
+# change log segment it names. multi_raft needs a future backend.
+if(KYTHIRA_FUTURE_BACKEND_AVAILABLE)
+    add_raft_completion_test(s3_raft_metadata_test s3_raft_metadata_test.cpp)
+    target_link_libraries(s3_raft_metadata_test PRIVATE kythira_s3 kythira_test_support)
+    if(TARGET boost_json)
+        target_link_libraries(s3_raft_metadata_test PRIVATE boost_json)
+    elseif(TARGET Boost::json)
+        target_link_libraries(s3_raft_metadata_test PRIVATE Boost::json)
+    endif()
+    set_tests_properties(s3_raft_metadata_test PROPERTIES
+        LABELS "integration;s3;s3-module" TIMEOUT 300)
+endif()
+
 set_tests_properties(
     s3_model_coverage
     s3_model_coverage_checker

@@ -4,7 +4,9 @@
 # Core *_impl.hpp headers the S3 module may include, one per line, with the
 # reason (services/README.md, "Boundary rules"). Only the composition root
 # (cmd/s3_gateway_node) and tests that stand up an in-process cluster may be
-# listed. None yet: the multi-raft host arrives with the object index
-# (task 4).
+# listed.
 #
 # file                                         allowed core *_impl.hpp       why
+tests/s3_raft_metadata_test.cpp                multi_raft_impl.hpp           in-process index group for the Raft metadata tests
+cmd/s3_gateway_node/run_raft.cpp  beast_http_transport_impl.hpp  composition root: the Raft daemon's own Beast transport (task 16a)
+cmd/s3_gateway_node/s3_module.hpp  multi_raft_impl.hpp  composition root: the S3 module's index group on the node's Raft host (task 16a)
