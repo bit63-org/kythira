@@ -1447,6 +1447,20 @@ public:
                 beast::get_lowest_layer(self->_stream).socket().close(ec);
             });
         });
+        // The first read (or handshake) starts on the session's strand, not
+        // on the accept handler's thread. Once register_session() has
+        // published the closer above, stop() may run it at any moment, and
+        // its close() runs on the strand. Starting the read from the accept
+        // thread raced that close(): async_receive read the descriptor state
+        // close() had just released, a TSan SEGV in
+        // epoll_reactor::start_op. On the strand the two are serialized: a
+        // close that wins makes the read fail cleanly with
+        // bad_descriptor, which routes to finish() like any other error.
+        net::dispatch(_stream.get_executor(), [self] { self->start(); });
+    }
+
+private:
+    auto start() -> void {
         if constexpr (std::is_same_v<Stream, beast::ssl_stream<beast::tcp_stream>>) {
             auto self = this->shared_from_this();
             // The tcp_stream's expiry bounds every read and write the SSL
@@ -1471,7 +1485,6 @@ public:
         }
     }
 
-private:
     auto read_loop() -> void {
         auto self = this->shared_from_this();
         _buffer.clear();
@@ -1943,11 +1956,17 @@ auto boost_beast_server<Types, NodeId>::start() -> void {
     metric.add_one();
     metric.emit();
 
+    // A fresh guard per run: handlers left over from an earlier run keep
+    // the old one, whose `running` stays cleared.
+    auto guard = std::make_shared<accept_guard>();
+    const std::lock_guard accept_lock(guard->mutex);
+    guard->running = true;
+    _accept_guard = guard;
     _accept_backoff_timers.clear();
     for (const auto& acceptor : _acceptors) {
         auto timer = std::make_shared<net::steady_timer>(_ioc);
         _accept_backoff_timers.push_back(timer);
-        do_accept(acceptor, std::move(timer), beast_detail::accept_backoff_min);
+        do_accept(guard, acceptor, std::move(timer), beast_detail::accept_backoff_min);
     }
 }
 
@@ -1974,9 +1993,10 @@ auto boost_beast_server<Types, NodeId>::stop() -> void {
     // write). Never touch _ioc itself (Requirement 8.3); that stays the
     // caller's own, separate responsibility.
     {
-        // Under _accept_mutex: an accept handler on an io thread may be
+        // Under the accept guard: an accept handler on an io thread may be
         // re-arming one of these acceptors right now (see the member).
-        const std::lock_guard accept_lock(_accept_mutex);
+        const std::lock_guard accept_lock(_accept_guard->mutex);
+        _accept_guard->running = false;
         boost::system::error_code ec;
         for (const auto& acceptor : _acceptors) {
             (void)acceptor->close(ec);
@@ -2048,11 +2068,19 @@ auto boost_beast_server<Types, NodeId>::register_session(std::function<void()> c
 template<typename Types, typename NodeId>
 requires kythira::future_default_transport_types<Types>
 auto boost_beast_server<Types, NodeId>::session_finished(std::size_t session_id) -> void {
+    // Erase and notify both under _drain_mutex. stop() waits on _drain_cv
+    // and returns as soon as it sees the map empty, after which the server
+    // may be destroyed. Erasing first and only then taking _drain_mutex let
+    // stop() see the map empty, return, and destroy the server while this
+    // thread was still about to lock _drain_mutex and notify _drain_cv:
+    // TSan reported the notify racing the condition variable's destructor.
+    // With the erase under the same lock, stop() cannot observe it until
+    // this function has released the lock, its last touch of the server.
+    std::lock_guard<std::mutex> lock(_drain_mutex);
     {
-        std::lock_guard<std::mutex> lock(_sessions_mutex);
+        std::lock_guard<std::mutex> sessions_lock(_sessions_mutex);
         _session_closers.erase(session_id);
     }
-    std::lock_guard<std::mutex> lock(_drain_mutex);
     _drain_cv.notify_all();
 }
 
@@ -2245,21 +2273,24 @@ auto boost_beast_server<Types, NodeId>::dispatch(
 
 template<typename Types, typename NodeId>
 requires kythira::future_default_transport_types<Types>
-auto boost_beast_server<Types, NodeId>::do_accept(std::shared_ptr<net::ip::tcp::acceptor> acceptor,
+auto boost_beast_server<Types, NodeId>::do_accept(std::shared_ptr<accept_guard> guard,
+                                                  std::shared_ptr<net::ip::tcp::acceptor> acceptor,
                                                   std::shared_ptr<net::steady_timer> backoff_timer,
                                                   std::chrono::milliseconds backoff) -> void {
-    // Re-armed from accept handlers on any io thread while stop() may be
-    // closing the acceptor on another: see _accept_mutex.
-    const std::lock_guard accept_lock(_accept_mutex);
-    if (!_running.load()) {
-        return;
-    }
+    // The caller holds guard->mutex and saw guard->running set, so stop()
+    // has not closed this acceptor yet and cannot until the caller lets go.
     auto& a = *acceptor;
     a.async_accept(
         net::make_strand(_ioc),
-        [this, acceptor = std::move(acceptor), backoff_timer = std::move(backoff_timer), backoff](
-            const boost::system::error_code& ec, net::ip::tcp::socket socket) mutable {
-            if (ec == net::error::operation_aborted || !_running.load()) {
+        [this, guard = std::move(guard), acceptor = std::move(acceptor),
+         backoff_timer = std::move(backoff_timer),
+         backoff](const boost::system::error_code& ec, net::ip::tcp::socket socket) mutable {
+            // Nothing of the server is read before this check. The handler
+            // of an accept that completed just before stop() closed the
+            // acceptor can run after stop() has returned and the server is
+            // gone; `guard` is the handler's own, so it is still valid.
+            const std::lock_guard accept_lock(guard->mutex);
+            if (ec == net::error::operation_aborted || !guard->running) {
                 return;  // stop() closed the acceptors -- do not recurse.
             }
             if (ec) {
@@ -2282,24 +2313,28 @@ auto boost_beast_server<Types, NodeId>::do_accept(std::shared_ptr<net::ip::tcp::
                     // loop that pins a core. Wait for finished sessions to give
                     // descriptors back instead.
                     auto next = std::min(backoff * 2, beast_detail::accept_backoff_max);
-                    const std::lock_guard accept_lock(_accept_mutex);
-                    if (!_running.load()) {
-                        return;  // stop() ran since the check above.
-                    }
                     backoff_timer->expires_after(backoff);
                     auto& timer = *backoff_timer;
-                    timer.async_wait([this, acceptor = std::move(acceptor),
+                    timer.async_wait([this, guard, acceptor = std::move(acceptor),
                                       backoff_timer = std::move(backoff_timer),
                                       next](const boost::system::error_code& wait_ec) mutable {
-                        if (wait_ec == net::error::operation_aborted || !_running.load()) {
+                        const std::lock_guard wait_lock(guard->mutex);
+                        if (wait_ec == net::error::operation_aborted || !guard->running) {
                             return;  // stop() cancelled the timer.
                         }
-                        do_accept(std::move(acceptor), std::move(backoff_timer), next);
+                        // A copy, not a move: wait_lock still refers to its mutex.
+                        do_accept(guard, std::move(acceptor), std::move(backoff_timer), next);
                     });
                     return;
                 }
             } else {
                 backoff = beast_detail::accept_backoff_min;
+                // Still under guard->mutex, so a session is either registered
+                // before stop() clears `running` (and stop() closes it and
+                // waits for it) or never created. Without that a session could
+                // register after stop() had run every closer and stopped
+                // waiting, and outlive the server it points at.
+                //
                 // Ask for a slot before anything is read or a handshake starts:
                 // a refused connection should cost one accept() and nothing more.
                 auto slot = _gate->try_acquire();
@@ -2330,7 +2365,8 @@ auto boost_beast_server<Types, NodeId>::do_accept(std::shared_ptr<net::ip::tcp::
                     session->run();
                 }
             }
-            do_accept(std::move(acceptor), std::move(backoff_timer), backoff);
+            // A copy, not a move: accept_lock still refers to its mutex.
+            do_accept(guard, std::move(acceptor), std::move(backoff_timer), backoff);
         });
 }
 

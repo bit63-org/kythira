@@ -1322,14 +1322,27 @@ private:
     /// an accept fails for want of descriptors or memory. `stop()` cancels
     /// them along with closing the acceptors.
     std::vector<std::shared_ptr<net::steady_timer>> _accept_backoff_timers;
-    /// Serializes every call on the acceptors and backoff timers. Their
-    /// handlers run on any of the io_context's threads while `stop()`
-    /// closes them from the caller's, and an Asio object is not safe for
-    /// concurrent use: an async_accept racing close() reads the
-    /// descriptor state close() just released (a TSan SEGV in
-    /// epoll_reactor::start_op). `_running` is cleared under it, so a
+    /// What accept and backoff handlers check before they touch the
+    /// server. Its mutex serializes every call on the acceptors and backoff
+    /// timers: their handlers run on any of the io_context's threads while
+    /// `stop()` closes them from the caller's, and an Asio object is not
+    /// safe for concurrent use (an async_accept racing close() reads the
+    /// descriptor state close() just released, a TSan SEGV in
+    /// epoll_reactor::start_op). `stop()` clears `running` under it, so a
     /// handler that sees it set may re-arm before the close, never after.
-    std::mutex _accept_mutex;
+    ///
+    /// Shared with the handlers, and a new one per `start()`, because a
+    /// handler can still be queued after `stop()` returns and the server
+    /// is destroyed: closing an acceptor does not wait for the handler of
+    /// an accept that had already completed. Such a handler finds
+    /// `running` cleared in its own copy and returns without reading a
+    /// member of the server, and one left over from an earlier run never
+    /// sees a later `start()`'s flag.
+    struct accept_guard {
+        std::mutex mutex;
+        bool running{false};
+    };
+    std::shared_ptr<accept_guard> _accept_guard{std::make_shared<accept_guard>()};
     std::atomic<bool> _running{false};
     std::mutex _sessions_mutex;
     std::unordered_map<std::size_t, std::function<void()>> _session_closers;
@@ -1347,7 +1360,9 @@ private:
     /// wait on `backoff_timer` if this accept fails with EMFILE, ENFILE,
     /// ENOBUFS or ENOMEM; it doubles on each such failure up to 1 s and
     /// resets on success, the same schedule as `tcp_detail::run_accept_loop`.
-    auto do_accept(std::shared_ptr<net::ip::tcp::acceptor> acceptor,
+    /// The caller holds `guard->mutex` and has seen `guard->running` set.
+    auto do_accept(std::shared_ptr<accept_guard> guard,
+                   std::shared_ptr<net::ip::tcp::acceptor> acceptor,
                    std::shared_ptr<net::steady_timer> backoff_timer,
                    std::chrono::milliseconds backoff) -> void;
 };

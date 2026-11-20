@@ -771,6 +771,14 @@ BOOST_AUTO_TEST_CASE(server_reports_where_a_sender_connected_from) {
 // A client keeps connecting so accept handlers are completing and re-arming
 // at the moment of each stop(); TSan reports the race, if it comes back, as
 // a data race on the acceptor even in runs where it does not crash.
+//
+// The same loop covers two more races around stop(). A session accepted at
+// the moment of a stop() started its first read from the accept thread
+// while stop()'s close ran on the session's strand (the same SEGV, in a
+// Beast receive). And an accept handler queued before the close, or a
+// finishing session's notify, could still touch the server after stop()
+// returned; TSan reports that as a race with the server's destructor or
+// with the next round's server built in the same memory.
 BOOST_AUTO_TEST_CASE(server_stop_races_accept_handlers_safely) {
     boost::asio::io_context ioc;
     kythira::testing::io_thread_pool io_threads(ioc, 4);
