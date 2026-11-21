@@ -408,6 +408,42 @@ unverified completion claim.
 
 ## Known Follow-ups
 
+- **The `aws` KMS provider takes credentials only from three environment
+  variables, read once at start; it should use the AWS SDK's credential
+  chain.** Found November 20, 2026, in the real-S3 run of Kinesis channel
+  encryption (PR #926). A node started with `AWS_PROFILE=personal` delivered
+  plain and SSE-KMS channels to S3 fine, but every envelope-encrypted
+  delivery failed with `KMS refused a data key under
+  alias/kythira-channel-rc: No AWS credentials for KMS.` Exporting the
+  profile's keys as `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` and
+  restarting fixed it, with no other change.
+  - **Cause.** `aws_kms_provider` (`include/raft/kms_key_provider_aws.hpp`)
+    signs with whatever its `_credentials` callback returns. Every caller
+    fills that callback from `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` and
+    `AWS_SESSION_TOKEN`, captured once when the provider is built:
+    `include/raft/raft_log_kms.hpp` (Raft log encryption),
+    `services/dynamodb/include/kythira/dynamodb/table_key_providers.hpp`,
+    `services/hsm/cmd/hsm_node/hsm_module.hpp` (the `aws-kms` share sealer)
+    and `services/kinesis/cmd/kinesis_gateway_node/kinesis_module.hpp`.
+    The S3 paths in the same daemons (Kinesis tiering and channel delivery,
+    `tier_s3.cpp`) use the SDK's default chain, so one configuration can
+    reach S3 and still fail at KMS.
+  - **What breaks.** Shared config and credentials files (`AWS_PROFILE`,
+    SSO, `credential_process`), web identity (EKS IRSA, GitHub OIDC), ECS
+    task roles and EC2 instance roles through IMDS: no node on AWS can use
+    its own role for KMS. Even env credentials go stale: a session token is
+    captured at start and never refreshed, so KMS calls fail once a
+    temporary credential expires, while S3 calls, refreshed by the SDK,
+    keep working.
+  - **Fix.** Build the callback from
+    `Aws::Auth::DefaultAWSCredentialsProviderChain` (or the provider the
+    daemon already uses for S3), called on each request, wherever the AWS
+    SDK is linked; the chain caches and refreshes itself. Keep the
+    environment as the fallback for builds without the SDK, and say in
+    `--help` which one the build uses. Add a test that a
+    profile-only environment reaches KMS, and one that a rotated credential
+    is picked up without a restart.
+
 - **Deferred work that lived only in completed specs — collected October 4–6,
   2026.** Recorded as deferred inside specs whose boxes are all ticked, with
   no entry in this file until now. Each was checked against `main`; none is
