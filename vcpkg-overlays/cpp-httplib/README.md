@@ -41,10 +41,13 @@ use. Two glibc defects, both in 2.39 and still in glibc master:
    "wait until it is no longer in progress" loop after a cancel never ends.
    The silent drop was reported on libc-alpha in 2017
    (["gai_cancel()"](https://patchwork.ozlabs.org/project/glibc/patch/1498487169.6717.64.camel@pbcl.net/)),
-   also never fixed; no Bugzilla entry tracks it.
+   also never fixed. Now tracked as glibc
+   [BZ #35026](https://sourceware.org/bugzilla/show_bug.cgi?id=35026)
+   (filed 2026-11-21).
 
 Both reproduce on glibc master (2.44.9000, 2026-11-17). A glibc patch
-fixing both was tested locally against master; nothing is merged upstream.
+fixing both was tested locally against master and attached to both bugs
+on 2026-11-21; nothing is merged upstream yet.
 
 The patch stops calling `getaddrinfo_a()`, `gai_suspend()`, `gai_error()`
 and `gai_cancel()` at all. In their place it adds `async_resolver`, our
@@ -100,7 +103,8 @@ runs. Upstream master (0.65.0) still uses `getaddrinfo_a()` and
 ## Removing the overlay
 
 Drop this directory and its `overlay-ports` entry once a registry version
-of cpp-httplib no longer uses `getaddrinfo_a()` on glibc (or glibc fixes
-both defects), after checking that version's
+of cpp-httplib no longer uses `getaddrinfo_a()` on glibc (or every glibc
+we build against fixes both BZ #20874 and BZ #35026), after checking that
+version's
 `getaddrinfo_with_timeout()` by hand. When moving to a newer cpp-httplib
 before then, re-copy that version's registry port here and rebase the patch.

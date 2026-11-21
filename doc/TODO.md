@@ -1877,7 +1877,8 @@ unverified completion claim.
         through it. And `gai_cancel()` on a still-queued request never sets
         its status, so cpp-httplib's wait after a cancel never ends. Both
         are known upstream and unfixed since 2017: glibc BZ #20874 and the
-        libc-alpha "gai_cancel()" thread (links in the overlay README). A local
+        libc-alpha "gai_cancel()" thread, now BZ #35026; tested patches for
+        both were attached to the bugs on November 21. A local
         16-thread stress of the pattern crashed or hung in 6 of 9 runs. The
         cpp-httplib overlay (port-version 2) now drops glibc's async API
         for its own fixed one (`async_resolver`: a pool of at most 64
