@@ -41,6 +41,7 @@
 /// unchanged.
 
 #include <kythira/kinesis/kinesis_cluster.hpp>
+#include <kythira/kinesis/kinesis_data_access.hpp>
 #include <kythira/kinesis/kinesis_front_end.hpp>
 #include <kythira/kinesis/kinesis_leases.hpp>
 #include <kythira/kinesis/kinesis_stream_state_machine.hpp>
@@ -194,10 +195,13 @@ namespace lease_detail {
 
 }  // namespace lease_detail
 
-template<stream_cluster Cluster, aws_auth::aws_request_authorizer Authorizer> class lease_api {
+/// `Cluster` is any `data_layer`: every lease read and write is a
+/// proposal, so a front end without a replica serves the API through the
+/// data-layer API with the same consistency.
+template<data_layer Cluster, aws_auth::aws_request_authorizer Authorizer> class lease_api {
 public:
     lease_api(Cluster& cluster, Authorizer& authorizer, front_end_config config)
-        : _cluster(cluster), _authorizer(authorizer), _config(std::move(config)) {}
+        : _access(cluster), _authorizer(authorizer), _config(std::move(config)) {}
 
     [[nodiscard]] static auto handles(std::string_view path) -> bool {
         return path.starts_with(k_lease_path_prefix);
@@ -212,7 +216,7 @@ public:
     }
 
 private:
-    Cluster& _cluster;
+    data_access_of<Cluster> _access;
     Authorizer& _authorizer;
     front_end_config _config;
 
@@ -323,7 +327,7 @@ private:
     }
 
     auto propose(const stream_command& c) -> std::optional<apply_result> {
-        return _cluster.propose(command_key(c), encode_command(c), admission::none);
+        return _access.get().propose(command_key(c), encode_command(c), admission::none);
     }
 
     [[nodiscard]] static auto unavailable() -> aws_json::http_response {

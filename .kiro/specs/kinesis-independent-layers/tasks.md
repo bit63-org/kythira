@@ -16,7 +16,7 @@ every role (7, 8, 10).
     barrier cost unchanged
   - _Requirements: 9.1, 12.1_
 
-- [ ] 2. Named data-layer queries and `data_access`
+- [x] 2. Named data-layer queries and `data_access`
   - `kinesis_data_access.hpp`: the concept (propose, transact, group_of,
     leads, now_ms, shard_state, read_records, find_stream, list_streams,
     leases, catalog id) and `local_data_access<Host>` over
@@ -25,6 +25,28 @@ every role (7, 8, 10).
     callbacks onto the queries; maintenance and on-demand keep callbacks
   - Measure the local path against main before merging (Requirement 1.2)
   - _Requirements: 1.2, 3.1, 3.3_
+  - Status: `data_access` is an abstract class (the hybrid access picks
+    local or remote per call at run time, which a concept cannot):
+    `find_stream`, `list_streams`, `streams(filter)`, `find_channel`,
+    `find_channel_by_id`, `list_channels`, `shard`, `read_records` (as
+    stored, opened on the front end), `local_bytes`, plus `propose`,
+    `transact`, `can_transact`, `group_of`, `leads`, `now_ms`. Leases need
+    no query: every lease read is already a proposal. The catalog id is
+    the catalog group's routing key, not a query.
+    `local_data_access<Cluster>` takes any `stream_cluster`, and the
+    service and the Lease API take any `data_layer` (a `stream_cluster`,
+    wrapped, or a `data_access`). Local path against main, median of five
+    runs, g++-13 -O2, `local_stream_cluster` with a segment store:
+
+    | Call | main | task 2 |
+    |---|---|---|
+    | PutRecords (10 records) | 32.8 us | 32.9 us |
+    | GetRecords (100 records) | 145.3 us | 146.9 us |
+    | DescribeStreamSummary | 5.44 us | 5.70 us |
+    | ListShards | 10.49 us | 10.55 us |
+
+    Within run-to-run noise except DescribeStreamSummary, which now
+    copies the account's channels to count them (+0.26 us).
 
 - [ ] 3. Layer identity
   - `include/raft/layer_identity.hpp`: role set in the SAN URI, issued by

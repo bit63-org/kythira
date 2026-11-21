@@ -4,7 +4,7 @@
 #pragma once
 
 /// @file kinesis_service.hpp
-/// @brief The Kinesis operation handlers over any `stream_cluster`
+/// @brief The Kinesis operation handlers over any `data_layer`
 ///        (`.kiro/specs/kinesis-compatible-streams/`): stream lifecycle and
 ///        writes (task 6, Requirements 6.1, 7.1-7.5, 8.2: CreateStream,
 ///        DeleteStream, DescribeStream, DescribeStreamSummary, ListStreams,
@@ -60,6 +60,7 @@
 
 #include <kythira/kinesis/kinesis_catalog.hpp>
 #include <kythira/kinesis/kinesis_cluster.hpp>
+#include <kythira/kinesis/kinesis_data_access.hpp>
 #include <kythira/kinesis/kinesis_compat_profile.hpp>
 #include <kythira/kinesis/kinesis_errors.hpp>
 #include <kythira/kinesis/kinesis_front_end.hpp>
@@ -320,10 +321,14 @@ struct pending_record {
 
 }  // namespace service_detail
 
-template<stream_cluster Cluster> class kinesis_service {
+/// `Cluster` is a `stream_cluster` this node holds replicas of, or any
+/// `data_access` (`.kiro/specs/kinesis-independent-layers/` task 2): the
+/// handlers only ask it named queries.
+template<data_layer Cluster> class kinesis_service {
 public:
     kinesis_service(Cluster& cluster, kinesis_service_config config = {})
-        : _cluster(cluster),
+        : _access(cluster),
+          _data(_access.get()),
           _config(std::move(config)),
           _reads(_config._throughput, _config._monotonic),
           _control(_config._control_plane, _config._monotonic) {
@@ -388,7 +393,7 @@ public:
         on("DescribeChannel", &kinesis_service::describe_channel);
         on("ListChannels", &kinesis_service::list_channels);
         on("DeleteChannel", &kinesis_service::delete_channel);
-        if constexpr (transacts<Cluster>) {
+        if (_data.can_transact()) {
             on("SplitShard", &kinesis_service::split_shard);
             on("MergeShards", &kinesis_service::merge_shards);
             on("UpdateShardCount", &kinesis_service::update_shard_count);
@@ -483,13 +488,13 @@ public:
         if (profile._aws_count_limits) {
             std::size_t open = 0;
             std::size_t on_demand = 0;
-            if (!read_catalog([&](const auto& sm) {
-                    for (const auto* s : sm.list_streams(account)) {
-                        open += s->open_shard_count();
-                        on_demand += s->_mode == stream_mode::on_demand ? 1 : 0;
-                    }
-                })) {
+            const auto mine = _data.list_streams(account, {}, 0);
+            if (!mine) {
                 return internal_failure();
+            }
+            for (const auto& s : *mine) {
+                open += s.open_shard_count();
+                on_demand += s._mode == stream_mode::on_demand ? 1 : 0;
             }
             if (open + count > _config._limits._shard_limit) {
                 return service_detail::limit_exceeded(
@@ -517,7 +522,7 @@ public:
         c._name = name;
         c._shard_count = count;
         c._mode = mode;
-        c._created_ms = _cluster.now_ms();
+        c._created_ms = _data.now_ms();
         c._tags = std::move(tags);
         const auto created = propose(c);
         if (!created) {
@@ -552,18 +557,8 @@ public:
     /// forever, and every write to it is answered not found. Returns how
     /// many streams it finished.
     auto repair_creates(std::int64_t now_ms, std::int64_t stale_ms) -> std::size_t {
-        std::vector<stream_record> streams;
-        (void)read_catalog([&](const auto& sm) {
-            const auto prefix = streams_prefix();
-            const auto& entries = sm.entries();
-            for (auto it = entries.lower_bound(prefix);
-                 it != entries.end() && it->first.starts_with(prefix); ++it) {
-                if (const auto* r = std::get_if<stream_record>(&it->second);
-                    r != nullptr && r->_status == stream_status::creating) {
-                    streams.push_back(*r);
-                }
-            }
-        });
+        const auto streams =
+            _data.streams({stream_status::creating}).value_or(std::vector<stream_record>{});
         std::size_t repaired = 0;
         const std::scoped_lock lock(_creating_mutex);
         std::map<std::uint64_t, std::int64_t> still;
@@ -597,11 +592,10 @@ public:
         }
         // AWS: a stream cannot be deleted while it has channels (task 19).
         bool has_channels = false;
-        (void)read_catalog([&](const auto& sm) {
-            for (const auto* c : sm.list_channels(rec._account)) {
-                has_channels = has_channels || c->delivers_from(rec._id);
-            }
-        });
+        for (const auto& c :
+             _data.list_channels(rec._account, {}, 0).value_or(std::vector<channel_record>{})) {
+            has_channels = has_channels || c.delivers_from(rec._id);
+        }
         if (has_channels) {
             return service_detail::in_use("Stream " + rec._name + " under account " + rec._account +
                                           " has channels. Delete them first.");
@@ -1015,7 +1009,7 @@ public:
         if (rec._status != stream_status::active) {
             return not_active(rec);
         }
-        const auto now = _cluster.now_ms();
+        const auto now = _data.now_ms();
         const consumer_record c{._name = name, ._created_ms = now, ._tags = tags, ._policy = {}};
         if (const auto* old = rec.find_consumer(name)) {
             return consumer_exists(ctx, rec, *old);
@@ -1237,7 +1231,7 @@ public:
         rec._account = ctx._principal.account;
         rec._name = name;
         rec._status = channel_status::active;
-        rec._created_ms = _cluster.now_ms();
+        rec._created_ms = _data.now_ms();
         rec._role_arn = role;
         rec._destination = destination;
         rec._destination_config = boost::json::serialize(dest);
@@ -1245,34 +1239,35 @@ public:
         rec._logging_config = std::move(logging);
         rec._tags = std::move(tags);
         std::optional<aws_json::error> refused;
-        if (!read_catalog([&](const auto& sm) {
-                if (sm.find_channel(rec._account, name) != nullptr) {
-                    refused = service_detail::in_use("Channel " + name + " under account " +
-                                                     rec._account + " already exists.");
-                    return;
-                }
-                for (const auto& src : sources) {
-                    const auto* s = sm.find_stream(rec._account, src._name);
-                    if (s == nullptr) {
-                        refused = service_detail::not_found(src._name, rec._account);
-                        return;
-                    }
-                    if (s->_status != stream_status::active &&
-                        s->_status != stream_status::updating) {
-                        refused = not_active(*s);
-                        return;
-                    }
-                    if (s->_mode != stream_mode::on_demand) {
-                        refused = on_demand_only(*s);
-                        return;
-                    }
-                    rec._streams.push_back({._stream = s->_name,
-                                            ._stream_id = s->_id,
-                                            ._stream_created_ms = s->_created_ms,
-                                            ._record_config = src._record_config});
-                }
-            })) {
+        const auto existing = _data.find_channel(rec._account, name);
+        if (!existing) {
             return internal_failure();
+        }
+        if (*existing) {
+            refused = service_detail::in_use("Channel " + name + " under account " + rec._account +
+                                             " already exists.");
+        }
+        for (const auto& src : sources) {
+            if (refused) {
+                break;
+            }
+            const auto s = _data.find_stream(rec._account, src._name);
+            if (!s) {
+                return internal_failure();
+            }
+            if (!*s) {
+                refused = service_detail::not_found(src._name, rec._account);
+            } else if ((*s)->_status != stream_status::active &&
+                       (*s)->_status != stream_status::updating) {
+                refused = not_active(**s);
+            } else if ((*s)->_mode != stream_mode::on_demand) {
+                refused = on_demand_only(**s);
+            } else {
+                rec._streams.push_back({._stream = (*s)->_name,
+                                        ._stream_id = (*s)->_id,
+                                        ._stream_created_ms = (*s)->_created_ms,
+                                        ._record_config = src._record_config});
+            }
         }
         if (refused) {
             return *refused;
@@ -1434,19 +1429,19 @@ public:
         };
         std::vector<channel_record> page;
         bool more = false;
-        if (!read_catalog([&](const auto& sm) {
-                for (const auto* c : sm.list_channels(account, after)) {
-                    if (!keep(*c)) {
-                        continue;
-                    }
-                    if (page.size() == limit) {
-                        more = true;
-                        return;
-                    }
-                    page.push_back(*c);
-                }
-            })) {
+        const auto all = _data.list_channels(account, after, 0);
+        if (!all) {
             return internal_failure();
+        }
+        for (const auto& c : *all) {
+            if (!keep(c)) {
+                continue;
+            }
+            if (page.size() == limit) {
+                more = true;
+                break;
+            }
+            page.push_back(c);
         }
         boost::json::array list;
         for (const auto& c : page) {
@@ -1598,13 +1593,10 @@ public:
             return std::nullopt;
         }
         std::optional<resource_facts> out;
-        (void)read_catalog([&](const auto& sm) {
-            if (const auto* rec =
-                    sm.find_stream(std::string(parts->_account), std::string(*name))) {
-                out = resource_facts{._tags = {rec->_tags.begin(), rec->_tags.end()},
-                                     ._policy = rec->_policy};
-            }
-        });
+        if (const auto rec = _data.find_stream(parts->_account, *name); rec && *rec) {
+            out = resource_facts{._tags = {(*rec)->_tags.begin(), (*rec)->_tags.end()},
+                                 ._policy = (*rec)->_policy};
+        }
         return out;
     }
 
@@ -1647,7 +1639,7 @@ public:
         if (rec._mode == *mode) {
             return boost::json::object{};
         }
-        const auto now = _cluster.now_ms();
+        const auto now = _data.now_ms();
         constexpr std::int64_t k_day_ms = std::int64_t{24} * 3600 * 1000;
         if (rec._mode_changes_ms.size() >= 2 && now - rec._mode_changes_ms.front() < k_day_ms) {
             return service_detail::limit_exceeded(
@@ -1656,12 +1648,12 @@ public:
         }
         if (*mode == stream_mode::on_demand && profile_of(rec)._aws_count_limits) {
             std::size_t on_demand = 0;
-            if (!read_catalog([&](const auto& sm) {
-                    for (const auto* other : sm.list_streams(rec._account)) {
-                        on_demand += other->_mode == stream_mode::on_demand ? 1 : 0;
-                    }
-                })) {
+            const auto others = _data.list_streams(rec._account, {}, 0);
+            if (!others) {
                 return internal_failure();
+            }
+            for (const auto& other : *others) {
+                on_demand += other._mode == stream_mode::on_demand ? 1 : 0;
             }
             if (on_demand + 1 > _config._limits._on_demand_stream_limit) {
                 return service_detail::limit_exceeded(
@@ -1692,16 +1684,10 @@ public:
     /// shard still open. False when it did not happen (another reshard, the
     /// shard limit, or a failure); the controller tries again later.
     auto split_for_capacity(const std::string& account, const std::string& name, std::uint64_t id,
-                            std::uint32_t ordinal) -> bool
-    requires transacts<Cluster>
-    {
+                            std::uint32_t ordinal) -> bool {
         std::optional<stream_record> rec;
-        if (!read_catalog([&](const auto& sm) {
-                if (const auto* found = sm.find_stream(account, name)) {
-                    rec = *found;
-                }
-            }) ||
-            !rec || rec->_id != id || rec->_status != stream_status::active) {
+        if (!load_stream(account, name, rec) || !rec || rec->_id != id ||
+            rec->_status != stream_status::active) {
             return false;
         }
         const auto done =
@@ -1917,11 +1903,10 @@ public:
         // AWS does not return.
         d["MaxRecordSizeInKiB"] = 1024;
         std::size_t channels = 0;
-        (void)read_catalog([&](const auto& sm) {
-            for (const auto* c : sm.list_channels(rec._account)) {
-                channels += c->delivers_from(rec._id) ? 1 : 0;
-            }
-        });
+        for (const auto& c :
+             _data.list_channels(rec._account, {}, 0).value_or(std::vector<channel_record>{})) {
+            channels += c.delivers_from(rec._id) ? 1 : 0;
+        }
         d["ChannelCount"] = channels;
         if (const auto relaxed = profile.relaxed(); !relaxed.empty()) {
             // Kythira's extension (Requirement 3.3): which AWS behaviours
@@ -1989,11 +1974,9 @@ public:
         }
         std::vector<stream_record> page;
         bool more = false;
-        if (!read_catalog([&](const auto& sm) {
-                for (const auto* s : sm.list_streams(account, start, limit + 1)) {
-                    page.push_back(*s);
-                }
-            })) {
+        if (auto got = _data.list_streams(account, start, limit + 1)) {
+            page = std::move(*got);
+        } else {
             return internal_failure();
         }
         if (page.size() > limit) {
@@ -2064,11 +2047,7 @@ public:
         }
 
         std::optional<stream_record> found;
-        if (!read_catalog([&](const auto& sm) {
-                if (const auto* s = sm.find_stream(account, name)) {
-                    found = *s;
-                }
-            })) {
+        if (!load_stream(account, name, found)) {
             return internal_failure();
         }
         if (!found || (created && *created != found->_created_ms)) {
@@ -2129,13 +2108,13 @@ public:
     auto describe_limits(call_context& ctx, boost::json::object& /*in*/) -> result {
         std::size_t open = 0;
         std::size_t on_demand = 0;
-        if (!read_catalog([&](const auto& sm) {
-                for (const auto* s : sm.list_streams(ctx._principal.account)) {
-                    open += s->open_shard_count();
-                    on_demand += s->_mode == stream_mode::on_demand ? 1 : 0;
-                }
-            })) {
+        const auto mine = _data.list_streams(ctx._principal.account, {}, 0);
+        if (!mine) {
             return internal_failure();
+        }
+        for (const auto& s : *mine) {
+            open += s.open_shard_count();
+            on_demand += s._mode == stream_mode::on_demand ? 1 : 0;
         }
         boost::json::object out;
         out["ShardLimit"] = _config._limits._shard_limit;
@@ -2306,7 +2285,7 @@ public:
         }
         it._counter = start->first;
         it._min_timestamp_ms = start->second;
-        it._issued_ms = _cluster.now_ms();
+        it._issued_ms = _data.now_ms();
         boost::json::object out;
         out["ShardIterator"] = encode_iterator(it, _config._iterator_keys);
         return out;
@@ -2314,7 +2293,7 @@ public:
 
     auto get_records(call_context& ctx, boost::json::object& in) -> result {
         const auto started = std::chrono::steady_clock::now();
-        const auto now = _cluster.now_ms();
+        const auto now = _data.now_ms();
         const std::string token(*detail::string_member(in, "ShardIterator"));
         const auto decoded = decode_iterator(token, _config._iterator_keys);
         if (!decoded) {
@@ -2336,11 +2315,7 @@ public:
         }
 
         std::optional<stream_record> found;
-        if (!read_catalog([&](const auto& sm) {
-                if (const auto* s = sm.find_stream(it._account, it._stream)) {
-                    found = *s;
-                }
-            })) {
+        if (!load_stream(it._account, it._stream, found)) {
             return internal_failure();
         }
         if (!found || found->_id != it._stream_id ||
@@ -2418,19 +2393,8 @@ public:
     /// the counters, with every ACTIVE or UPDATING stream's shard table,
     /// enhanced-monitoring switches and segment bytes from this replica.
     auto metrics_text() -> std::string {
-        std::vector<stream_record> recs;
-        (void)read_catalog([&](const auto& sm) {
-            const auto prefix = streams_prefix();
-            const auto& entries = sm.entries();
-            for (auto it = entries.lower_bound(prefix);
-                 it != entries.end() && it->first.starts_with(prefix); ++it) {
-                if (const auto* r = std::get_if<stream_record>(&it->second);
-                    r != nullptr && (r->_status == stream_status::active ||
-                                     r->_status == stream_status::updating)) {
-                    recs.push_back(*r);
-                }
-            }
-        });
+        const auto recs = _data.streams({stream_status::active, stream_status::updating})
+                              .value_or(std::vector<stream_record>{});
         std::vector<stream_metric_view> views;
         for (const auto& r : recs) {
             const auto profile = profile_of(r);
@@ -2450,11 +2414,7 @@ public:
                             row._tiered_bytes += d._bytes;
                         }
                     }
-                    if (st->_store != nullptr) {
-                        for (const auto& d : st->_store->local_segments(key)) {
-                            row._local_bytes += d._bytes;
-                        }
-                    }
+                    row._local_bytes = _data.local_bytes(key);
                 }
                 v._shards.push_back(std::move(row));
             }
@@ -2500,26 +2460,14 @@ public:
         const auto profile = profile_of(rec);
         const auto key = routing_key(rec._id, entry._ordinal);
         const segment_read_limits limits{._max_records = max_records, ._max_bytes = max_bytes};
-        std::optional<shard_read> got;
-        for (int attempt = 0; attempt < 2 && (!got || got->_missing); ++attempt) {
-            const auto state = read_shard_state(key);
-            if (!state || !state->_found || state->_store == nullptr) {
-                return std::nullopt;
-            }
-            try {
-                got = read_shard(*state->_store, state->_fetch, key, state->_state, counter,
-                                 min_timestamp_ms, limits, [&](std::span<const std::byte> bytes) {
-                                     const auto g = sealed_generation(bytes);
-                                     if (!g) {
-                                         throw record_open_error("kinesis: truncated record");
-                                     }
-                                     return open_record(data_key_of(rec, *g, who), key, bytes);
-                                 });
-            } catch (const std::exception&) {
-                return std::nullopt;
-            }
+        auto raw = _data.read_records(key, counter, min_timestamp_ms, limits);
+        if (!raw || !raw->_found || raw->_read._missing) {
+            return std::nullopt;
         }
-        if (!got || got->_missing) {
+        std::optional<shard_read> got;
+        try {
+            got = open_shard_read(std::move(raw->_read), opener_for(rec, key, who));
+        } catch (const std::exception&) {
             return std::nullopt;
         }
         delivery_page out;
@@ -2540,7 +2488,8 @@ public:
     }
 
 private:
-    Cluster& _cluster;
+    data_access_of<Cluster> _access;
+    data_access& _data;
     kinesis_service_config _config;
     read_throttle _reads;
     control_throttle _control;
@@ -2704,14 +2653,12 @@ private:
             return *k;
         }
         std::optional<data_key_record> wrapped;
-        (void)read_catalog([&](const auto& sm) {
-            if (const auto* s = sm.find_stream(rec._account, rec._name);
-                s != nullptr && s->_id == rec._id) {
-                if (const auto* k = s->find_data_key(generation)) {
-                    wrapped = *k;
-                }
+        if (const auto s = _data.find_stream(rec._account, rec._name);
+            s && *s && (*s)->_id == rec._id) {
+            if (const auto* k = (*s)->find_data_key(generation)) {
+                wrapped = *k;
             }
-        });
+        }
         if (!wrapped) {
             throw record_open_error("kinesis: a sealed record names an unknown data key");
         }
@@ -2890,7 +2837,7 @@ private:
             }
             const auto at_ms = static_cast<std::int64_t>(std::llround(*timestamp * 1000.0));
             // AWS refuses a timestamp in the future (task 17 recordings).
-            if (const auto now = _cluster.now_ms(); at_ms > now) {
+            if (const auto now = _data.now_ms(); at_ms > now) {
                 return invalid_argument(
                     "The timestampInMillis parameter cannot be greater than the "
                     "currentTimestampInMillis. timestampInMillis: " +
@@ -2916,39 +2863,40 @@ private:
         boost::json::array _children;
     };
 
+    /// Opens stream `rec`'s sealed records under shard `key` with the data
+    /// keys `who` may use.
+    auto opener_for(const stream_record& rec, const std::string& key, const kms_caller& who)
+        -> record_opener {
+        return [this, &rec, &key, &who](std::span<const std::byte> bytes) {
+            const auto g = sealed_generation(bytes);
+            if (!g) {
+                throw record_open_error("kinesis: truncated record");
+            }
+            return open_record(data_key_of(rec, *g, who), key, bytes);
+        };
+    }
+
     auto read_page(const stream_record& rec, const shard_entry& entry, std::uint64_t counter,
                    std::int64_t min_timestamp_ms, const segment_read_limits& limits,
                    std::int64_t now, const kms_caller& who) -> aws_json::result<page> {
         const auto profile = profile_of(rec);
         const auto key = routing_key(rec._id, entry._ordinal);
-        std::optional<shard_read> got;
-        std::int64_t tip_arrival = 0;
-        for (int attempt = 0; attempt < 2 && (!got || got->_missing); ++attempt) {
-            // A segment can go missing between the copy and the read (a trim
-            // or tiering in between): read again with a fresh copy once.
-            const auto state = read_shard_state(key);
-            if (!state || !state->_found || state->_store == nullptr) {
-                // Not found here although the catalog lists it: this
-                // replica is behind (see GetShardIterator). Retryable.
-                return internal_failure();
-            }
-            try {
-                got = read_shard(*state->_store, state->_fetch, key, state->_state, counter,
-                                 min_timestamp_ms, limits, [&](std::span<const std::byte> bytes) {
-                                     const auto g = sealed_generation(bytes);
-                                     if (!g) {
-                                         throw record_open_error("kinesis: truncated record");
-                                     }
-                                     return open_record(data_key_of(rec, *g, who), key, bytes);
-                                 });
-            } catch (const kms_error& e) {
-                return kms_error_answer(e);
-            } catch (const record_open_error&) {
-                return internal_failure();
-            }
-            tip_arrival = state->_state._last_arrival_ms;
+        // The data layer answers the records as stored; this node opens
+        // them, so keys and plaintext stay on the front end.
+        auto raw = _data.read_records(key, counter, min_timestamp_ms, limits);
+        if (!raw || !raw->_found || raw->_read._missing) {
+            // Not found although the catalog lists it (the replica is behind,
+            // see GetShardIterator), no replica answered, or a segment is
+            // neither there nor fetchable. Retryable.
+            return internal_failure();
         }
-        if (!got || got->_missing) {
+        const std::int64_t tip_arrival = raw->_last_arrival_ms;
+        std::optional<shard_read> got;
+        try {
+            got = open_shard_read(std::move(raw->_read), opener_for(rec, key, who));
+        } catch (const kms_error& e) {
+            return kms_error_answer(e);
+        } catch (const record_open_error&) {
             return internal_failure();
         }
         page out;
@@ -3000,26 +2948,23 @@ private:
         return out;
     }
 
-    /// A shard's state as this replica has it, copied out of the read so
-    /// the store is read without holding the state machine.
+    /// A shard's state as its replica has it.
     struct shard_snapshot {
         bool _found = false;
         shard_state _state;
-        segment_store* _store = nullptr;
-        segment_fetcher _fetch;
     };
 
+    /// nullopt when no replica answered; `_found` false while the replica
+    /// has not applied the shard's open.
     auto read_shard_state(const std::string& key) -> std::optional<shard_snapshot> {
-        shard_snapshot snap;
-        if (!_cluster.read(key, stream_reader([&](const auto& sm) {
-                               if (const auto* st = sm.find_shard(key)) {
-                                   snap._found = true;
-                                   snap._state = *st;
-                               }
-                               snap._store = sm.store();
-                               snap._fetch = sm.fetcher();
-                           }))) {
+        auto r = _data.shard(key);
+        if (!r) {
             return std::nullopt;
+        }
+        shard_snapshot snap;
+        if (*r) {
+            snap._found = true;
+            snap._state = std::move(**r);
         }
         return snap;
     }
@@ -3095,11 +3040,19 @@ private:
     auto propose(const Command& c, admission mode = admission::none)
         -> std::optional<apply_result> {
         const stream_command cmd = c;
-        return _cluster.propose(command_key(cmd), encode_command(cmd), mode);
+        return _data.propose(command_key(cmd), encode_command(cmd), mode);
     }
 
-    template<typename F> auto read_catalog(F&& f) -> bool {
-        return _cluster.read(next_id_key(), stream_reader([&f](const auto& sm) { f(sm); }));
+    /// Copies stream `account`/`name` into `out` (nullopt when there is no
+    /// such stream); false when no replica of the catalog answered.
+    auto load_stream(std::string_view account, std::string_view name,
+                     std::optional<stream_record>& out) -> bool {
+        auto r = _data.find_stream(account, name);
+        if (!r) {
+            return false;
+        }
+        out = std::move(*r);
+        return true;
     }
 
     [[nodiscard]] auto profile_of(const stream_record& rec) const -> kinesis_compat_profile {
@@ -3212,9 +3165,9 @@ private:
                         ._max_records = 10'000,
                         ._max_bytes = std::min<std::uint64_t>(static_cast<std::uint64_t>(_tokens),
                                                               std::uint64_t{1} << 20U)};
-                    auto page = _svc.read_page(_rec, *entry, _counter, _min_timestamp_ms, limits,
-                                               _svc._cluster.now_ms(),
-                                               kms_caller{._principal = &_subscriber});
+                    auto page =
+                        _svc.read_page(_rec, *entry, _counter, _min_timestamp_ms, limits,
+                                       _svc._data.now_ms(), kms_caller{._principal = &_subscriber});
                     if (!page) {
                         _done = true;
                         const auto& e = page.error();
@@ -3286,13 +3239,12 @@ private:
         // on); the exception to end with when it or the consumer is gone.
         auto refresh() -> std::optional<std::string> {
             std::optional<stream_record> fresh;
-            if (!_svc.read_catalog([&](const auto& sm) {
-                    if (const auto* s = sm.find_stream(_rec._account, _rec._name);
-                        s != nullptr && s->_id == _rec._id) {
-                        fresh = *s;
-                    }
-                })) {
+            const auto got = _svc._data.find_stream(_rec._account, _rec._name);
+            if (!got) {
                 return std::nullopt;  // try again on the next check
+            }
+            if (*got && (*got)->_id == _rec._id) {
+                fresh = **got;
             }
             const auto* c = fresh ? fresh->find_consumer(_consumer._name) : nullptr;
             if (c == nullptr || c->_created_ms != _consumer._created_ms ||
@@ -3521,12 +3473,12 @@ private:
         }
         const auto id = parse_channel_id(parts->_resource.substr(8));
         std::optional<channel_record> found;
-        if (id && !read_catalog([&](const auto& sm) {
-                if (const auto* c = sm.find_channel_by_id(parts->_account, *id)) {
-                    found = *c;
-                }
-            })) {
-            return internal_failure();
+        if (id) {
+            auto got = _data.find_channel_by_id(parts->_account, *id);
+            if (!got) {
+                return internal_failure();
+            }
+            found = std::move(*got);
         }
         if (!found) {
             return resource_not_found("Channel " + arn + " not found.");
@@ -3710,15 +3662,15 @@ private:
                                     " is not a consumer ARN in " + ctx._region + ".");
         }
         std::optional<consumer_ref> out;
-        if (!read_catalog([&](const auto& sm) {
-                if (const auto* s = sm.find_stream(parts->_account, parts->_stream)) {
-                    if (const auto* c = s->find_consumer(parts->_consumer);
-                        c != nullptr && c->created_seconds() == parts->_created_seconds) {
-                        out = consumer_ref{*s, *c};
-                    }
-                }
-            })) {
+        const auto s = _data.find_stream(parts->_account, parts->_stream);
+        if (!s) {
             return internal_failure();
+        }
+        if (*s) {
+            if (const auto* c = (*s)->find_consumer(parts->_consumer);
+                c != nullptr && c->created_seconds() == parts->_created_seconds) {
+                out = consumer_ref{**s, *c};
+            }
         }
         if (!out) {
             return consumer_not_found(arn, parts->_account);
@@ -3881,12 +3833,7 @@ private:
             return resource_not_found("Resource " + arn + " not found.");
         }
         std::optional<stream_record> found;
-        if (!read_catalog([&](const auto& sm) {
-                if (const auto* rec =
-                        sm.find_stream(std::string(parts->_account), std::string(*name))) {
-                    found = *rec;
-                }
-            })) {
+        if (!load_stream(std::string(parts->_account), std::string(*name), found)) {
             return internal_failure();
         }
         if (!found) {
@@ -4118,9 +4065,7 @@ private:
     // reshard abandoned after the transaction is finished by the
     // maintenance pass (`complete_reshard`).
     template<typename Planner>
-    auto run_reshard(const stream_record& rec, Planner&& plan_of) -> aws_json::result<bool>
-    requires transacts<Cluster>
-    {
+    auto run_reshard(const stream_record& rec, Planner&& plan_of) -> aws_json::result<bool> {
         // The compare-and-set decides, not `rec`: this replica can still
         // show the UPDATING of a reshard that has just finished.
         const auto began = propose(
@@ -4166,7 +4111,7 @@ private:
         for (const auto& c : plan->_children) {
             add(open_shard_command{routing_key(rec._id, c._ordinal), 0});
         }
-        switch (_cluster.transact(std::move(writes))) {
+        switch (_data.transact(std::move(writes))) {
             case transact_outcome::committed:
                 break;
             case transact_outcome::aborted:
@@ -4199,12 +4144,7 @@ public:
     auto complete_reshard(const std::string& account, const std::string& name, std::uint64_t id)
         -> bool {
         std::optional<stream_record> rec;
-        if (!read_catalog([&](const auto& sm) {
-                if (const auto* s = sm.find_stream(account, name)) {
-                    rec = *s;
-                }
-            }) ||
-            !rec || rec->_id != id) {
+        if (!load_stream(account, name, rec) || !rec || rec->_id != id) {
             return false;
         }
         set_ending_counters_command endings{account, name, id, {}};
@@ -4241,20 +4181,8 @@ public:
     /// fate is settled by now, so complete it. Shards still closing on an
     /// ACTIVE stream get their ending counters too. Returns how many streams
     /// it completed.
-    auto repair_reshards(std::int64_t now_ms, std::int64_t stale_ms) -> std::size_t
-    requires transacts<Cluster>
-    {
-        std::vector<stream_record> streams;
-        (void)read_catalog([&](const auto& sm) {
-            const auto prefix = streams_prefix();
-            const auto& entries = sm.entries();
-            for (auto it = entries.lower_bound(prefix);
-                 it != entries.end() && it->first.starts_with(prefix); ++it) {
-                if (const auto* r = std::get_if<stream_record>(&it->second)) {
-                    streams.push_back(*r);
-                }
-            }
-        });
+    auto repair_reshards(std::int64_t now_ms, std::int64_t stale_ms) -> std::size_t {
+        const auto streams = _data.streams({}).value_or(std::vector<stream_record>{});
         std::size_t repaired = 0;
         const std::scoped_lock lock(_updating_mutex);
         std::map<std::uint64_t, std::int64_t> still;
@@ -4302,11 +4230,7 @@ private:
                      Done&& done) -> std::optional<stream_record> {
         for (int attempt = 0; attempt < 50; ++attempt) {
             std::optional<stream_record> found;
-            if (!read_catalog([&](const auto& sm) {
-                    if (const auto* s = sm.find_stream(account, name)) {
-                        found = *s;
-                    }
-                })) {
+            if (!load_stream(account, name, found)) {
                 return std::nullopt;
             }
             if (found && found->_id == id && done(*found)) {
@@ -4334,11 +4258,7 @@ private:
     auto finish_create(const std::string& account, const std::string& name,
                        std::optional<std::uint64_t> id) -> bool {
         std::optional<stream_record> rec;
-        if (!read_catalog([&](const auto& sm) {
-                if (const auto* s = sm.find_stream(account, name)) {
-                    rec = *s;
-                }
-            })) {
+        if (!load_stream(account, name, rec)) {
             return false;
         }
         if (id && (!rec || rec->_id != *id)) {
@@ -4377,11 +4297,7 @@ private:
             return invalid_argument("Either StreamName or StreamARN should be provided.");
         }
         std::optional<stream_record> found;
-        if (!read_catalog([&](const auto& sm) {
-                if (const auto* s = sm.find_stream(ctx._stream->_account, ctx._stream->_name)) {
-                    found = *s;
-                }
-            })) {
+        if (!load_stream(ctx._stream->_account, ctx._stream->_name, found)) {
             return internal_failure();
         }
         if (!found) {
@@ -4457,24 +4373,18 @@ private:
             }
         };
         std::vector<std::vector<shard_append*>> batches;
-        if constexpr (groups_keys<Cluster>) {
-            std::map<std::uint64_t, std::size_t> slot;
-            for (auto& a : appends) {
-                const auto g = _cluster.group_of(a._command._key);
-                if (!g) {
-                    batches.push_back({&a});
-                    continue;
-                }
-                const auto [it, fresh] = slot.try_emplace(*g, batches.size());
-                if (fresh) {
-                    batches.emplace_back();
-                }
-                batches[it->second].push_back(&a);
-            }
-        } else {
-            for (auto& a : appends) {
+        std::map<std::uint64_t, std::size_t> slot;
+        for (auto& a : appends) {
+            const auto g = _data.group_of(a._command._key);
+            if (!g) {
                 batches.push_back({&a});
+                continue;
             }
+            const auto [it, fresh] = slot.try_emplace(*g, batches.size());
+            if (fresh) {
+                batches.emplace_back();
+            }
+            batches[it->second].push_back(&a);
         }
         for (auto& batch : batches) {
             if (batch.size() == 1) {
@@ -4545,7 +4455,7 @@ private:
             for (auto& [ordinal, records] : by_shard) {
                 shard_append a{._ordinal = ordinal, ._records = std::move(records), ._command = {}};
                 a._command._key = routing_key(rec._id, ordinal);
-                a._command._arrival_ms = _cluster.now_ms();
+                a._command._arrival_ms = _data.now_ms();
                 for (const auto* r : a._records) {
                     if (key) {
                         a._command._records.push_back(
@@ -4615,12 +4525,7 @@ private:
                                             (1 << std::min(attempt - 1, 6)));
             }
             std::optional<stream_record> fresh;
-            if (!read_catalog([&](const auto& sm) {
-                    if (const auto* s = sm.find_stream(rec._account, rec._name)) {
-                        fresh = *s;
-                    }
-                }) ||
-                !fresh || fresh->_id != rec._id) {
+            if (!load_stream(rec._account, rec._name, fresh) || !fresh || fresh->_id != rec._id) {
                 return service_detail::not_found(rec._name, rec._account);
             }
             rec = std::move(*fresh);

@@ -153,6 +153,10 @@ kythira_kinesis_test(kinesis_service_test kinesis_service_test.cpp)
 # Task 7: shard iterators, the shard reader, GetShardIterator and
 # GetRecords.
 kythira_kinesis_test(kinesis_reads_test kinesis_reads_test.cpp)
+# Independent layers task 2: the named data-layer queries
+# (local_data_access), unreachable groups, records as stored, and the
+# service over a data_access it is handed.
+kythira_kinesis_test(kinesis_data_access_test kinesis_data_access_test.cpp)
 # Task 6: forwarding proposals to the group leader (wire, HMAC) and the
 # multi-raft cluster adapter.
 kythira_kinesis_test(kinesis_forward_test kinesis_forward_test.cpp)
