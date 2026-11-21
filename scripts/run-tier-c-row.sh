@@ -46,7 +46,7 @@ Usage: run-tier-c-row.sh [options]
                          default of max(8, cores-1).
   --base-port P          First port; each host takes three (default 19000).
   --batching 0|1         Batch AppendEntries per destination on every host
-                         (default 0). .kiro/specs/multi-raft-message-batching/
+                         (default 1). .kiro/specs/multi-raft-message-batching/
   --host-stats           Start the hosts with --count-rpcs 1, read each
                          host's /stats before and after the driver, and print
                          host CPU per committed write, wire requests per
@@ -86,7 +86,7 @@ DATA_THREADS=0
 BASE_PORT=19000
 OUT_DIR="test_results"
 KEEP=0
-BATCHING=0
+BATCHING=1
 HOST_STATS=0
 
 while [[ $# -gt 0 ]]; do
