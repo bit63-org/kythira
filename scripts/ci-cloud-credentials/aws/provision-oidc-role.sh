@@ -33,6 +33,7 @@ ROLE_NAME="kythira-ci-real-cloud-tests"
 SESSION_DURATION="3600"
 ENVIRONMENT="real-cloud-tests"
 DRY_RUN=0
+SUBJECT_PREFIX=""
 
 OIDC_PROVIDER_URL="token.actions.githubusercontent.com"
 OIDC_AUDIENCE="sts.amazonaws.com"
@@ -48,7 +49,7 @@ again with a different --bundles value replaces the role's policy content
 (disabling a bundle and re-running revokes that bundle's permissions).
 
 Required:
-  --github-org ORG        e.g. crawlins
+  --github-org ORG        e.g. bit63-org
   --github-repo REPO      e.g. kythira
   --bundles LIST          Comma-separated, one per policies/*.json:
                            ec2-quorum-manager,asg-quorum-manager,
@@ -79,6 +80,11 @@ Optional:
                                   so only a job that declares this
                                   environment (and so passes its
                                   protection rules) can assume the role.
+  --subject-prefix PREFIX        OIDC sub prefix to trust, e.g.
+                                  repo:bit63-org@359328292/kythira@1148357760.
+                                  default: read from the repository's OIDC
+                                  settings (immutable subjects carry the
+                                  repository and owner ids)
   --dry-run                      Print the AWS CLI calls that would run
                                   without executing them
   -h, --help                     Show this help
@@ -94,6 +100,7 @@ while [[ $# -gt 0 ]]; do
         --role-name) ROLE_NAME="$2"; shift 2 ;;
         --session-duration-seconds) SESSION_DURATION="$2"; shift 2 ;;
         --environment) ENVIRONMENT="$2"; shift 2 ;;
+        --subject-prefix) SUBJECT_PREFIX="$2"; shift 2 ;;
         --ref-restriction)
             echo "ERROR: --ref-restriction was removed; the role now trusts one" \
                  "GitHub Environment (--environment, default real-cloud-tests)." >&2
@@ -153,7 +160,10 @@ echo "[step] Build trust policy"
 # role without declaring the environment, so the environment's reviewers
 # and branch rules never ran. GitHub issues this subject to every job that
 # declares `environment: NAME`, and only to such jobs.
-SUBJECT="repo:${GITHUB_ORG}/${GITHUB_REPO}:environment:${ENVIRONMENT}"
+# shellcheck source=../oidc-subject.sh
+source "$(dirname "${BASH_SOURCE[0]}")/../oidc-subject.sh"
+SUBJECT_PREFIX=$(oidc_sub_prefix "${GITHUB_ORG}" "${GITHUB_REPO}" "${SUBJECT_PREFIX}")
+SUBJECT="${SUBJECT_PREFIX}:environment:${ENVIRONMENT}"
 echo "  trusted subject: ${SUBJECT}"
 TRUST_POLICY=$(cat <<EOF
 {

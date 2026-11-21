@@ -31,6 +31,7 @@ set -euo pipefail
 
 GITHUB_ORG=""
 GITHUB_REPO=""
+SUBJECT_PREFIX=""
 REVIEWERS=()
 CI_ROLE_NAME="kythira-ci-real-cloud-tests"
 UPDATER_ROLE_NAME="kythira-ci-role-updater"
@@ -51,13 +52,17 @@ Sets up the approval-gated workflow that re-applies the AWS CI role's
 bundle policy. Run once, locally, with IAM admin credentials. Safe to re-run.
 
 Required:
-  --github-org ORG        e.g. crawlins
+  --github-org ORG        e.g. bit63-org
   --github-repo REPO      e.g. kythira
   --reviewer LOGIN        GitHub user who must approve each run (repeatable)
 
 Optional:
   --ci-role-name NAME     default: kythira-ci-real-cloud-tests
   --environment NAME      default: ci-role-admin
+  --subject-prefix PREFIX OIDC sub prefix to trust, e.g.
+                          repo:bit63-org@359328292/kythira@1148357760.
+                          default: read from the repository's OIDC settings
+                          (immutable subjects carry the numeric ids)
   --dry-run               Print the calls that would change anything
   -h, --help              Show this help
 EOF
@@ -67,6 +72,7 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --github-org) GITHUB_ORG="$2"; shift 2 ;;
         --github-repo) GITHUB_REPO="$2"; shift 2 ;;
+        --subject-prefix) SUBJECT_PREFIX="$2"; shift 2 ;;
         --reviewer) REVIEWERS+=("$2"); shift 2 ;;
         --ci-role-name) CI_ROLE_NAME="$2"; shift 2 ;;
         --environment) ENVIRONMENT="$2"; shift 2 ;;
@@ -158,7 +164,10 @@ run aws iam put-role-permissions-boundary --role-name "${CI_ROLE_NAME}" \
     --permissions-boundary "${BOUNDARY_ARN}"
 
 echo "[step] Updater role: ${UPDATER_ROLE_NAME}"
-SUBJECT="repo:${GITHUB_ORG}/${GITHUB_REPO}:environment:${ENVIRONMENT}"
+# shellcheck source=../oidc-subject.sh
+source "$(dirname "${BASH_SOURCE[0]}")/../oidc-subject.sh"
+SUBJECT_PREFIX=$(oidc_sub_prefix "${GITHUB_ORG}" "${GITHUB_REPO}" "${SUBJECT_PREFIX}")
+SUBJECT="${SUBJECT_PREFIX}:environment:${ENVIRONMENT}"
 echo "  trusted subject: ${SUBJECT}"
 TRUST=$(cat <<EOF
 {
