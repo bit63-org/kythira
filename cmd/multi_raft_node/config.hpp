@@ -206,9 +206,10 @@ struct node_options {
     std::size_t _executor_stripes{4};
 
     /// `--batching 0|1`: batch AppendEntries per destination
-    /// (.kiro/specs/multi-raft-message-batching/). Off by default until the
-    /// task 9 measurement says it pays; the transport must also speak it.
-    bool _batching{false};
+    /// (.kiro/specs/multi-raft-message-batching/). On by default: at 1000
+    /// groups it is the only setting that keeps every heartbeat flowing
+    /// (task 9). Has no effect unless the transport speaks the batch RPC.
+    bool _batching{true};
     /// `--count-rpcs 0|1`: count the RPCs this host sends, for `/stats`.
     /// Off by default because `.kiro/specs/multi-raft-performance/`
     /// Requirement 8.2 keeps measurement counters out of the measured

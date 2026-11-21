@@ -431,7 +431,7 @@ Shape (all swept axes; none requires a rebuild)
                              "S3 persistence" below.
   --data-dir PATH            Where a file-backed log lives. Refused under s3.
   --executor-stripes N       Host executor stripes (default 4).
-  --batching 0|1             Batch AppendEntries per destination (default 0).
+  --batching 0|1             Batch AppendEntries per destination (default 1).
   --count-rpcs 0|1           Count sent RPCs for the control port's /stats
                              (default 0: no counters in the measured process).
   --data-threads N           Threads serving the data path. A handler blocks
