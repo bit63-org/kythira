@@ -49,6 +49,7 @@
 #include <kythira/kinesis/kinesis_static_keys.hpp>
 #include <kythira/kinesis/kinesis_stream_state_machine.hpp>
 #include <kythira/kinesis/kinesis_tiering.hpp>
+#include <kythira/kinesis/kinesis_volume_keeper.hpp>
 
 #include <raft/raft_log_kms.hpp>
 #include <raft/beast_https_server.hpp>
@@ -81,6 +82,8 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <iterator>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -425,6 +428,22 @@ public:
 
         // Retention and tiering: each node runs the pass; only a shard's
         // leader seals, trims and tiers it.
+        // Segment volume assignments (task 10): the catalog leader seeds
+        // and replaces them; every node watches its own.
+        if (!_opt._segment_nodes.empty()) {
+            _keeper = std::make_unique<kinesis::volume_keeper<cluster_type>>(
+                *_cluster, kinesis::volume_keeper_config{
+                               ._service = "kinesis",
+                               ._self = kythira::host_node_id_text(_opt._node_id),
+                               ._replicas = volume_replicas(),
+                               ._nodes = _opt._segment_nodes,
+                               ._replace_after_ms = k_volume_replace_after_ms,
+                               ._probe = [this](const kythira::segment_node_info& n) {
+                                   return kythira::remote_segment_store::probe_space(
+                                       kinesis::make_volume_transport(*_peers, _opt._forward_secret,
+                                                                      n._endpoint));
+                               }});
+        }
         _maintenance = std::make_unique<kinesis::stream_maintenance<cluster_type>>(
             *_cluster, *_store, _tier, _fetched,
             kinesis::maintenance_config{._tier_after_ms = _opt._tier_after_ms,
@@ -493,6 +512,7 @@ public:
         _channel_destinations.reset();
         _on_demand.reset();
         _maintenance.reset();
+        _keeper.reset();
         _server.reset();
         _volumes.reset();
         _leases.reset();
@@ -512,6 +532,13 @@ public:
         if (_remote != nullptr && !_volume_reachable.load(std::memory_order_acquire)) {
             return {false, "segment volume " + _remote->volume() +
                                " is unreachable on segment node " + _volume_node};
+        }
+        // Placement moved this node's volume: it restarts into the new one.
+        {
+            const std::scoped_lock lock(_moved_mu);
+            if (!_volume_moved.empty()) {
+                return {false, _volume_moved};
+            }
         }
         return {true, {}};
     }
@@ -558,7 +585,13 @@ private:
             return;
         }
         const auto self = kythira::host_node_id_text(_opt._node_id);
-        const auto assignment = kythira::assignment_of(volume_assignments(_opt), self);
+        // The catalog's word, as this node last saw it, wins over the
+        // settings' first placement: after a replacement the volume is
+        // somewhere the settings do not say.
+        auto assignment = saved_assignment(self);
+        if (!assignment) {
+            assignment = kythira::assignment_of(volume_assignments(_opt), self);
+        }
         const auto node =
             assignment ? kythira::segment_node_of(_opt._segment_nodes, assignment->_segment_node)
                        : std::nullopt;
@@ -576,6 +609,10 @@ private:
         const auto deadline = std::chrono::steady_clock::now() + k_volume_wait;
         for (;;) {
             try {
+                // A segment node that never held this volume (a replacement
+                // moved it there) creates it at the catalog's epoch.
+                kythira::remote_segment_store::assign(transport, assignment->_volume,
+                                                      assignment->_epoch);
                 auto remote = std::make_unique<kythira::remote_segment_store>(
                     transport, assignment->_volume, assignment->_epoch);
                 _remote = remote.get();
@@ -590,6 +627,7 @@ private:
                 std::this_thread::sleep_for(std::chrono::milliseconds(500));
             }
         }
+        _opened = *assignment;
         log_info("kinesis: record segments on volume " + assignment->_volume + " epoch " +
                  std::to_string(assignment->_epoch) + " at segment node " + node->_id + " (" +
                  node->_endpoint + ")");
@@ -608,8 +646,15 @@ private:
         // co-located replica would write (Requirement 9.7).
         _volumes = std::make_unique<kythira::segment_volume_service>(
             kythira::segment_volume_service_options{.data_dir = _opt._data_dir, .store = {}});
+        // A volume already here at a newer epoch was moved here by a
+        // replacement (or moved away and back): the catalog's epoch stands.
+        std::map<std::string, std::uint64_t> held;
+        for (const auto& [id, epoch] : _volumes->volumes()) {
+            held[id] = epoch;
+        }
         for (const auto& a : volume_assignments(_opt)) {
-            if (a._segment_node == self) {
+            const auto it = held.find(a._volume);
+            if (a._segment_node == self && (it == held.end() || it->second < a._epoch)) {
                 _volumes->assign(a._volume, a._epoch);
             }
         }
@@ -892,6 +937,86 @@ private:
         _producer = std::make_shared<producer_type>(*_front_end);
     }
 
+    /// Every voter, as volume records name replicas.
+    [[nodiscard]] auto volume_replicas() const -> std::vector<std::string> {
+        std::vector<std::string> out;
+        for (const auto& id : _voters) {
+            out.push_back(kythira::host_node_id_text(id));
+        }
+        return out;
+    }
+
+    [[nodiscard]] auto saved_assignment_path() const -> std::filesystem::path {
+        return _opt._data_dir / "volume-assignment.json";
+    }
+
+    /// The assignment this node last read from the catalog, if it saved
+    /// one for itself.
+    [[nodiscard]] auto saved_assignment(const std::string& self) const
+        -> std::optional<kythira::volume_assignment> {
+        std::ifstream in(saved_assignment_path());
+        if (!in) {
+            return std::nullopt;
+        }
+        const std::string text((std::istreambuf_iterator<char>(in)), {});
+        auto a = kythira::decode_volume_assignment(text);
+        if (!a || a->_replica != self) {
+            return std::nullopt;
+        }
+        return a;
+    }
+
+    /// Writes `a` through a temporary file and a rename, so a crash leaves
+    /// the old assignment or the new one.
+    void save_assignment(const kythira::volume_assignment& a) const {
+        const auto path = saved_assignment_path();
+        auto tmp = path;
+        tmp += ".tmp";
+        {
+            std::ofstream out(tmp, std::ios::trunc);
+            out << kythira::encode_volume_assignment(a) << "\n";
+            out.flush();
+            if (!out) {
+                throw std::runtime_error("kinesis: cannot write " + tmp.string());
+            }
+        }
+        std::filesystem::rename(tmp, path);
+    }
+
+    /// One volume keeper pass (task 10). When the catalog says this node's
+    /// volume is somewhere other than where it opened it, the node saves
+    /// the new assignment and reports itself unhealthy: a restart opens
+    /// the new volume and restores into it from its snapshot and peers.
+    void keep_volumes() {
+        if (!_keeper) {
+            return;
+        }
+        try {
+            const auto p = _keeper->pass(_cluster->now_ms());
+            if (p._seeded + p._replaced + p._unplaceable > 0) {
+                log_info("kinesis volumes: seeded=" + std::to_string(p._seeded) +
+                         " replaced=" + std::to_string(p._replaced) +
+                         " unplaceable=" + std::to_string(p._unplaceable) +
+                         " failures=" + std::to_string(p._failures));
+            }
+            if (_remote == nullptr || !_opened || !p._self || *p._self == *_opened) {
+                return;
+            }
+            const std::scoped_lock lock(_moved_mu);
+            if (!_volume_moved.empty()) {
+                return;
+            }
+            save_assignment(*p._self);
+            _volume_moved = "segment volume " + p._self->_volume + " moved to segment node " +
+                            p._self->_segment_node + " at epoch " +
+                            std::to_string(p._self->_epoch) +
+                            "; restart this node to restore into it";
+            log_info("kinesis: " + _volume_moved);
+        } catch (const std::exception& e) {
+            log_info(std::string("kinesis volumes: pass failed: ") + e.what());
+        }
+    }
+
     void maintain() {
         auto next = std::chrono::steady_clock::now() + _opt._maintenance_interval;
         while (_maintaining.load(std::memory_order_acquire)) {
@@ -900,6 +1025,7 @@ private:
                 continue;
             }
             next = std::chrono::steady_clock::now() + _opt._maintenance_interval;
+            keep_volumes();
             const auto st = _maintenance->run_once();
             const auto od = _on_demand->run_once(_cluster->now_ms());
             const auto ch = _channels->run_once();
@@ -963,12 +1089,21 @@ private:
 
     /// How long a data node waits for its segment node at start.
     static constexpr auto k_volume_wait = std::chrono::seconds{60};
+    /// How long a segment node may stay silent before the catalog leader
+    /// moves its volumes elsewhere.
+    static constexpr std::int64_t k_volume_replace_after_ms = 60'000;
 
     std::unique_ptr<kythira::segment_store> _store;
     /// `_store` when it is a volume on a segment node.
     kythira::remote_segment_store* _remote = nullptr;
     std::string _volume_node;
     std::atomic<bool> _volume_reachable{true};
+    /// The assignment `_store` was opened from (a volume only).
+    std::optional<kythira::volume_assignment> _opened;
+    std::unique_ptr<kinesis::volume_keeper<cluster_type>> _keeper;
+    mutable std::mutex _moved_mu;
+    /// Set once the catalog moved this node's volume.
+    std::string _volume_moved;
     std::mutex _space_mu;
     std::optional<std::pair<std::uint64_t, std::uint64_t>> _space;
     std::chrono::steady_clock::time_point _space_at{};

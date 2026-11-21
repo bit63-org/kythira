@@ -132,10 +132,17 @@ every role (7, 8, 10).
     replica's apply (the store throws) and fails `/healthz`; the
     lose-one-segment-node case is `kinesis_stream_state_machine_test`'s
     `segment_layer` suite. First placement comes from the settings, the
-    same on every node. Left for the rest of this task: the assignment
-    replicated in the catalog (`\0meta/kinesis/volumes/<node id>`) so a
-    replacement's new epoch reaches every node through Raft, and the
-    replacement triggered by placement when a replica stops
+    same on every node. The catalog holds each replica's assignment
+    (`\0meta/kinesis/volumes/<node id>`, `volume_assignment_command`, an
+    epoch compare-and-set); `kinesis_volume_keeper.hpp` on the catalog
+    leader seeds it from the settings' placement and, when a segment node
+    has not answered `space` for a minute, moves each volume on it to a
+    segment node that answers at the next epoch. The volume API's `assign`
+    op lets a data node create its volume at the catalog's epoch on a
+    segment node that never held it. A data node whose record moved saves
+    it to `volume-assignment.json`, reports unhealthy and opens the new
+    volume on restart, restoring from its snapshot and peers. Left: a
+    container test of a replacement end to end (with task 7's scale test)
   - _Requirements: 9.4, 9.5, 9.8, 9.9, 10.6, 13.4_
 
 - [ ] 11. Layer membership group

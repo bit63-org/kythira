@@ -928,4 +928,66 @@ BOOST_AUTO_TEST_CASE(acknowledged_writes_survive_losing_one_segment_node) {
     BOOST_TEST(sim_of(assignments[1]._segment_node)._service.volumes().size() == 1U);
 }
 
+// The catalog's record of each replica's volume: set by an epoch
+// compare-and-set, so two placement leaders racing to replace the same
+// volume raise its epoch once, and it never goes back. It lives in the
+// catalog range and survives snapshots and splits.
+BOOST_AUTO_TEST_CASE(volume_assignments_change_only_by_epoch_compare_and_set) {
+    sm_type sm;
+    driver d{sm};
+    const auto first = k::volume_assignment_command{._replica = "2",
+                                                    ._segment_node = "b",
+                                                    ._volume = "kinesis-2",
+                                                    ._expected_epoch = 0,
+                                                    ._epoch = 1};
+    BOOST_TEST(d.run(first)._id == 1U);
+    // Seeding twice (two nodes that each think they lead): the second loses.
+    const auto again = d.run(first);
+    BOOST_TEST(again._status == k::apply_status::condition_failed);
+    BOOST_TEST(again._id == 1U);
+
+    auto replace = first;
+    replace._segment_node = "d";
+    replace._expected_epoch = 1;
+    replace._epoch = 2;
+    BOOST_TEST(d.run(replace)._id == 2U);
+    auto rival = replace;
+    rival._segment_node = "c";
+    BOOST_TEST(d.run(rival)._status == k::apply_status::condition_failed);
+
+    const auto it = sm.entries().find(k::volume_key("2"));
+    BOOST_REQUIRE(it != sm.entries().end());
+    const auto* rec = std::get_if<k::volume_record>(&it->second);
+    BOOST_REQUIRE(rec != nullptr);
+    BOOST_TEST(rec->_segment_node == "d");
+    BOOST_TEST(rec->_epoch == 2U);
+
+    // Refused outright: no epoch rise, a bad replica id, missing fields.
+    auto flat = replace;
+    flat._expected_epoch = 2;
+    BOOST_TEST(d.run(flat)._status == k::apply_status::invalid);
+    auto bad = first;
+    bad._replica = "a/b";
+    BOOST_TEST(d.run(bad)._status == k::apply_status::invalid);
+    bad = first;
+    bad._segment_node.clear();
+    BOOST_TEST(d.run(bad)._status == k::apply_status::invalid);
+
+    // In the catalog range, and through the codec, a snapshot and a split.
+    const k::stream_command c = replace;
+    BOOST_TEST(k::command_key(c).starts_with(k::catalog_prefix()));
+    const auto bytes = k::encode_command(c);
+    BOOST_TEST((k::encode_command(k::decode_command(bytes)) == bytes));
+    const auto id = create_and_open(d, "s", 2);
+    (void)d.run(append(k::routing_key(id, 0), 1, 2));
+    sm_type copy;
+    copy.restore_from_snapshot(sm.get_state(), d._index);
+    BOOST_TEST((copy.entries() == sm.entries()));
+    auto parts = sm.split_state({k::routing_key(id, 1)});
+    BOOST_REQUIRE_EQUAL(parts.size(), 2U);
+    sm_type left;
+    left.restore_from_snapshot(parts[0], d._index);
+    BOOST_TEST(left.entries().contains(k::volume_key("2")));
+}
+
 BOOST_AUTO_TEST_SUITE_END()

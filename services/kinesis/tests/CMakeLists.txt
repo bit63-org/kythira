@@ -139,6 +139,9 @@ kythira_kinesis_test(kinesis_catalog_test kinesis_catalog_test.cpp)
 # Task 5: the stream state machine (catalog commands, counters, segment
 # index, split hook, split/absorb law, snapshot restore).
 kythira_kinesis_test(kinesis_stream_state_machine_test kinesis_stream_state_machine_test.cpp)
+# kinesis-independent-layers task 10: the catalog's segment volume
+# assignments, seeded and moved off a lost segment node by the leader.
+kythira_kinesis_test(kinesis_volume_keeper_test kinesis_volume_keeper_test.cpp)
 
 # Task 4: the front end (SigV4, JSON and CBOR, authorization, dispatch), the
 # generated action table and static-key roles, and the compatibility
