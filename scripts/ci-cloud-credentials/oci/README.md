@@ -491,7 +491,7 @@ What exists in the tenancy's **Default identity domain** (created August 12,
 |---|---|
 | service user | `kythira-ci-wif` (SCIM id `dd1458d3b03b45a5a352caf52b2d0a5f`, `serviceUser: true`), member of `kythira-ci` |
 | confidential app | `kythira-ci-token-exchange`, client_id `2638970cead24539a393a19765fb6b6e` |
-| trust | `github-actions-kythira` (id `21dc4fc815454c7a93dd34e45400cdca`): issuer `https://token.actions.githubusercontent.com`, JWKS `…/.well-known/jwks`, rule `sub eq repo:crawlins/kythira:environment:real-cloud-tests` → impersonates the service user |
+| trust | `github-actions-kythira` (id `21dc4fc815454c7a93dd34e45400cdca`): issuer `https://token.actions.githubusercontent.com`, JWKS `…/.well-known/jwks`, rule `sub eq repo:bit63-org@359328292/kythira@1148357760:environment:real-cloud-tests` → impersonates the service user |
 
 Two facts about the trust that cost a live dispatch each to learn:
 

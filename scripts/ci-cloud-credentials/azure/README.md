@@ -360,7 +360,7 @@ also cover any other container that account later grows.
 # List every bundle you want assigned; role assignments are additive, so
 # re-running with a subset does NOT revoke the others (unlike AWS).
 scripts/ci-cloud-credentials/azure/provision-federated-identity.sh \
-    --github-org crawlins --github-repo kythira \
+    --github-org bit63-org --github-repo kythira \
     --subscription-id <sub> --resource-group kythira-realtest-rg \
     --bundles quorum-manager,key-vault,object-persistence \
     --storage-account kythirarealtestobj --storage-container kythira-raft

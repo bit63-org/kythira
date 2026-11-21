@@ -54,7 +54,7 @@
 #   --dry-run     print every write instead of doing it; reads still run
 set -euo pipefail
 
-REPO="crawlins/kythira"
+REPO="bit63-org/kythira"
 ENVIRONMENT="real-cloud-tests"
 ONLY="azure,gcp,oci,alibaba"
 ENABLE=1

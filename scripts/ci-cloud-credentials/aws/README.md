@@ -119,7 +119,7 @@ One-time setup, as an IAM admin:
 
 ```sh
 scripts/ci-cloud-credentials/aws/provision-ci-role-updater.sh \
-    --github-org crawlins --github-repo kythira --reviewer <your-login>
+    --github-org bit63-org --github-repo kythira --reviewer <your-login>
 ```
 
 It creates or updates:
@@ -335,7 +335,7 @@ replaces the policy wholesale:
 
 ```sh
 scripts/ci-cloud-credentials/aws/provision-oidc-role.sh \
-    --github-org crawlins --github-repo kythira \
+    --github-org bit63-org --github-repo kythira \
     --bundles <every bundle the role already has>
 # and, if a developer user exists:
 scripts/ci-cloud-credentials/aws/provision-developer-user.sh \
@@ -450,7 +450,7 @@ administration, and no access to anything outside the prefix.
 # List EVERY bundle you want the role to keep: put-role-policy replaces the
 # inline policy wholesale, so omitting a bundle revokes it.
 scripts/ci-cloud-credentials/aws/provision-oidc-role.sh \
-    --github-org crawlins --github-repo kythira \
+    --github-org bit63-org --github-repo kythira \
     --bundles ec2-quorum-manager,ca-cluster-node,ca-cluster-node-rpc-tls,object-persistence \
     --bucket kythira-ci-827617851594
 ```

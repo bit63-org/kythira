@@ -26,7 +26,7 @@
 #   scripts/ci-cloud-credentials/azure/provision-key-vault-ec-keys.sh [--vault-name NAME] [--repo OWNER/REPO]
 set -euo pipefail
 
-REPO="crawlins/kythira"
+REPO="bit63-org/kythira"
 VAULT_NAME=""
 
 while [[ $# -gt 0 ]]; do

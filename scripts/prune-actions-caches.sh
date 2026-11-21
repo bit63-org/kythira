@@ -74,7 +74,7 @@
 
 set -euo pipefail
 
-REPO="${GITHUB_REPOSITORY:-crawlins/kythira}"
+REPO="${GITHUB_REPOSITORY:-bit63-org/kythira}"
 DO_CLOSED=0
 DO_SUPERSEDED=0
 APPLY=0

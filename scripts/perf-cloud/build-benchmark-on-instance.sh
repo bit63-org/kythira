@@ -21,7 +21,7 @@
 set -euo pipefail
 
 REF="${1:?usage: build-benchmark-on-instance.sh <git-ref>}"
-REPO_URL="https://github.com/crawlins/kythira.git"
+REPO_URL="https://github.com/bit63-org/kythira.git"
 SRC=/home/ubuntu/kythira
 # The same commit ci.yml pins. Pinning the vcpkg *tool and scripts*, not
 # just the port versions via builtin-baseline, is what keeps a cold build

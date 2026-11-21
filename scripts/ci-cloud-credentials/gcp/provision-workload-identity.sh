@@ -47,7 +47,7 @@ Usage: provision-workload-identity.sh [OPTIONS]
 
 Required:
   --project PROJECT_ID    GCP project to create the resources in
-  --github-org ORG        e.g. crawlins
+  --github-org ORG        e.g. bit63-org
   --github-repo REPO      e.g. kythira
   --bundles LIST          Comma-separated: gcp-quorum-manager,gcp-privateca,
                            gcp-object-persistence
