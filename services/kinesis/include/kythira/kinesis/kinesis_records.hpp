@@ -33,6 +33,7 @@
 #include <functional>
 #include <span>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace kythira::kinesis {
@@ -59,39 +60,44 @@ struct shard_read {
     bool _missing = false;
 };
 
+/// A read before its records are opened: each record's stored bytes as
+/// the segment holds them (sealed for an encrypted stream). What a data
+/// node answers a front end's `read_records` with
+/// (`.kiro/specs/kinesis-independent-layers/` task 2, Requirement 5.4), so
+/// keys and plaintext stay on the front end.
+struct raw_shard_read {
+    /// Only records at or after the minimum timestamp; `_seq` is the
+    /// shard counter.
+    std::vector<segment_record> _records;
+    std::uint64_t _next_counter = 0;
+    bool _caught_up = false;
+    bool _missing = false;
+
+    friend auto operator==(const raw_shard_read&, const raw_shard_read&) -> bool = default;
+};
+
 /// Records of shard `key` at or after counter `from` (and, when
-/// `min_timestamp_ms` is positive, arrival time), within `limits`. `state`
-/// is the shard's state as copied from the replica. Sealed records go
-/// through `open`. Throws `record_segment_error` if a record fails its CRC,
-/// `record_open_error` for a sealed record with no `open`, and whatever
-/// `open` throws.
-[[nodiscard]] inline auto read_shard(const segment_store& store, const segment_fetcher& fetch,
-                                     const std::string& key, const shard_state& state,
-                                     std::uint64_t from, std::int64_t min_timestamp_ms,
-                                     const segment_read_limits& limits,
-                                     const record_opener& open = {}) -> shard_read {
-    shard_read out;
+/// `min_timestamp_ms` is positive, arrival time), within `limits`, as
+/// stored. `state` is the shard's state as copied from the replica. Throws
+/// `record_segment_error` if a record fails its CRC.
+[[nodiscard]] inline auto read_shard_raw(const segment_store& store, const segment_fetcher& fetch,
+                                         const std::string& key, const shard_state& state,
+                                         std::uint64_t from, std::int64_t min_timestamp_ms,
+                                         const segment_read_limits& limits) -> raw_shard_read {
+    raw_shard_read out;
     out._next_counter = std::max({from, state._trim_before, std::uint64_t{1}});
     std::size_t records_left = limits._max_records;
     std::uint64_t bytes_left = limits._max_bytes;
     const auto full = [&] { return records_left == 0 || bytes_left == 0; };
-    const auto take = [&](const segment_read_result& r) {
-        for (const auto& rec : r._records) {
+    const auto take = [&](segment_read_result& r) {
+        for (auto& rec : r._records) {
             out._next_counter = rec._seq + 1;
             records_left = records_left > 0 ? records_left - 1 : 0;
             bytes_left -= std::min<std::uint64_t>(bytes_left, rec._data.size());
             if (rec._timestamp_ms < min_timestamp_ms) {
                 continue;
             }
-            const bool sealed = is_sealed_record(rec._data);
-            if (sealed && !open) {
-                throw record_open_error("kinesis: a sealed record and no key to open it");
-            }
-            out._records.push_back(
-                {._counter = rec._seq,
-                 ._arrival_ms = rec._timestamp_ms,
-                 ._record = sealed ? open(rec._data) : decode_stored_record(rec._data),
-                 ._encrypted = sealed});
+            out._records.push_back(std::move(rec));
         }
         if (r._records.empty()) {
             out._next_counter = std::max(out._next_counter, r._next_seq);
@@ -125,8 +131,9 @@ struct shard_read {
             out._missing = true;
             return out;
         }
+        const bool exhausted = r->_segment_exhausted;
         take(*r);
-        if (!r->_segment_exhausted && !full()) {
+        if (!exhausted && !full()) {
             // A sealed segment that stops short of its descriptor: never
             // skip past what it should hold.
             out._missing = true;
@@ -134,11 +141,47 @@ struct shard_read {
         }
     }
     if (!full()) {
-        take(store.read(key, out._next_counter, remaining()));
+        auto r = store.read(key, out._next_counter, remaining());
+        take(r);
     }
     const auto tip = std::max(state._last_counter, store.last_seq(key).value_or(0));
     out._caught_up = out._next_counter > tip;
     return out;
+}
+
+/// Opens a raw read's records: plaintext ones are decoded, sealed ones go
+/// through `open`. Throws `record_open_error` for a sealed record with no
+/// `open`, and whatever `open` throws.
+[[nodiscard]] inline auto open_shard_read(raw_shard_read raw, const record_opener& open = {})
+    -> shard_read {
+    shard_read out;
+    out._next_counter = raw._next_counter;
+    out._caught_up = raw._caught_up;
+    out._missing = raw._missing;
+    out._records.reserve(raw._records.size());
+    for (const auto& rec : raw._records) {
+        const bool sealed = is_sealed_record(rec._data);
+        if (sealed && !open) {
+            throw record_open_error("kinesis: a sealed record and no key to open it");
+        }
+        out._records.push_back(
+            {._counter = rec._seq,
+             ._arrival_ms = rec._timestamp_ms,
+             ._record = sealed ? open(rec._data) : decode_stored_record(rec._data),
+             ._encrypted = sealed});
+    }
+    return out;
+}
+
+/// `read_shard_raw` then `open_shard_read`: what a replica that holds the
+/// shard serves itself. Throws as both do.
+[[nodiscard]] inline auto read_shard(const segment_store& store, const segment_fetcher& fetch,
+                                     const std::string& key, const shard_state& state,
+                                     std::uint64_t from, std::int64_t min_timestamp_ms,
+                                     const segment_read_limits& limits,
+                                     const record_opener& open = {}) -> shard_read {
+    return open_shard_read(read_shard_raw(store, fetch, key, state, from, min_timestamp_ms, limits),
+                           open);
 }
 
 }  // namespace kythira::kinesis
