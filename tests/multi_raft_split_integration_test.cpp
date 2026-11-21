@@ -608,7 +608,25 @@ BOOST_AUTO_TEST_CASE(a_new_leader_holding_an_unapplied_split_never_loses_a_write
         }
         return false;
     };
-    BOOST_REQUIRE(c.await([&] { return has_split(c.host(b)); }, std::chrono::seconds{5}));
+    // The heir only gets the split if the old leader keeps sending for a
+    // while; when it did not (CI, 2026-11-18: its sends stalled for 430 ms
+    // and `b` won an election without the split), say what the old leader's
+    // host was doing, which the "Slow tick" / "Slow AppendEntries send"
+    // warnings in the log above then explain.
+    const bool reached_heir =
+        c.await([&] { return has_split(c.host(b)); }, std::chrono::seconds{5});
+    if (!reached_heir) {
+        for (node_id_t id = 1; id <= c.node_count(); ++id) {
+            auto* n = c.host(id).group_node(1);
+            BOOST_TEST_MESSAGE("node " << id << (id == a ? " (old leader)" : "")
+                                       << (id == b ? " (heir)" : "")
+                                       << ": leader=" << n->is_leader()
+                                       << " last_applied=" << n->last_applied_index()
+                                       << " slow_ticks=" << c.host(id).slow_tick_count());
+        }
+    }
+    BOOST_REQUIRE_MESSAGE(reached_heir,
+                          "the split never reached the heir; see the node states above");
     for (auto r : rest) {
         BOOST_REQUIRE(!has_split(c.host(r)));
     }
@@ -678,6 +696,22 @@ BOOST_AUTO_TEST_CASE(a_new_leader_holding_an_unapplied_split_never_loses_a_write
                    ->with_state_machine(
                        [&](host_types::state_machine_type& sm) { return sm.contains(key); }));
     BOOST_TEST(!c.tiling_problem().has_value());
+}
+
+BOOST_AUTO_TEST_CASE(a_host_left_unticked_past_half_an_election_timeout_reports_it,
+                     *boost::unit_test::timeout(60)) {
+    // The diagnostic the stalled-leader case above relies on: a host whose
+    // driver stops calling tick() for longer than half the shortest election
+    // timeout (60 ms here) logs "Slow tick" and counts it on the next tick,
+    // so a follower that won an election because of the stall leaves a trail.
+    split_cluster c(3);
+    BOOST_REQUIRE(c.await_leader(1, std::chrono::seconds{20}));
+    const auto before = c.host(1).slow_tick_count();
+    c.pause_and_await(0);
+    std::this_thread::sleep_for(std::chrono::milliseconds{300});
+    c.resume();
+    BOOST_TEST(
+        c.await([&] { return c.host(1).slow_tick_count() > before; }, std::chrono::seconds{5}));
 }
 
 BOOST_AUTO_TEST_CASE(a_vetoed_key_falls_back_to_the_state_machines_suggestion,
