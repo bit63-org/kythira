@@ -2617,8 +2617,13 @@ else()
 endif()
 
 # ── clang-tidy targets ────────────────────────────────────────────────────────
-find_program(CLANG_TIDY_EXECUTABLE clang-tidy
-    HINTS "$ENV{HOME}/.local/bin" /usr/local/bin /usr/bin
+# clang-tidy-18 is the versioned name Ubuntu's clang-tidy-18 package
+# installs. GitHub's runner image also ships an unversioned clang-tidy, so
+# that name is tried first and nothing changes there; the self-hosted
+# runners' stock image has only what the job's apt step installs.
+find_program(CLANG_TIDY_EXECUTABLE
+    NAMES clang-tidy clang-tidy-18
+    HINTS "$ENV{HOME}/.local/bin" /usr/local/bin /usr/bin /usr/lib/llvm-18/bin
 )
 find_program(RUN_CLANG_TIDY_EXECUTABLE
     NAMES run-clang-tidy run-clang-tidy-18 run-clang-tidy.py run-clang-tidy-18.py
@@ -2805,6 +2810,7 @@ else()
                     -DSOURCES=${CMAKE_BINARY_DIR}/tidy-sources.txt
                     -P ${CMAKE_SOURCE_DIR}/cmake/check_compdb.cmake
             COMMAND ${RUN_CLANG_TIDY_EXECUTABLE}
+                    -clang-tidy-binary ${CLANG_TIDY_EXECUTABLE}
                     -p ${CMAKE_BINARY_DIR}
                     -j ${_TIDY_JOBS}
                     ${TIDY_SOURCES}
@@ -2820,6 +2826,7 @@ else()
             COMMAND ${CMAKE_COMMAND} -DFILE=${_COMPDB}
                     -P ${CMAKE_SOURCE_DIR}/cmake/check_compdb.cmake
             COMMAND ${RUN_CLANG_TIDY_EXECUTABLE}
+                    -clang-tidy-binary ${CLANG_TIDY_EXECUTABLE}
                     -p ${CMAKE_BINARY_DIR}
                     -fix
                     ${TIDY_SOURCES}

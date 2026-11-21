@@ -65,7 +65,7 @@ jobs:
   # Decides whether tonight builds at all, and names the snapshot. Cheap: two
   # API calls, no checkout.
   gate:
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.event.pull_request.head.repo.fork && 'ubuntu-24.04') || vars.KYTHIRA_X64_RUNNER || 'bit63' }}
     timeout-minutes: 5
     outputs:
       build: ${{ steps.decide.outputs.build }}
@@ -74,6 +74,13 @@ jobs:
       tag: ${{ steps.decide.outputs.tag }}
       previous: ${{ steps.decide.outputs.previous }}
     steps:
+      # No checkout in this job, so the shared baseline action cannot be
+      # used; install the two tools it needs on a self-hosted runner.
+      - name: Install gh and jq (self-hosted only)
+        if: runner.environment == 'self-hosted'
+        run: |
+          command -v gh >/dev/null && command -v jq >/dev/null && exit 0
+          sudo apt-get update -q && sudo apt-get install -y -q --no-install-recommends gh jq
       - name: Compare main with the newest snapshot
         id: decide
         env:
@@ -126,7 +133,7 @@ jobs:
     needs: gate
     if: needs.gate.outputs.build == 'true'
     name: Build snapshot (${{ matrix.arch }})
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.os == 'ubuntu-24.04' && ((github.event.pull_request.head.repo.fork && 'ubuntu-24.04') || vars.KYTHIRA_X64_RUNNER || 'bit63') || matrix.os }}
     # arm64's first night compiles the whole ion+rocksdb dependency tree cold.
     timeout-minutes: 360
     strategy:
@@ -172,6 +179,8 @@ jobs:
         with:
           persist-credentials: false
           ref: ${{ needs.gate.outputs.sha }}
+      - name: Self-hosted runner baseline
+        uses: ./.github/actions/self-hosted-baseline
 
       - name: Install system dependencies
         run: |
@@ -212,6 +221,13 @@ jobs:
           bucket: ${{ vars.OCI_BUILD_CACHE_BUCKET }}
           namespace: ${{ vars.OCI_BUILD_CACHE_NAMESPACE }}
           region: ${{ vars.OCI_CI_REGION }}
+          kythira-cache-url: ${{ vars.KYTHIRA_BUILD_CACHE_URL }}
+          kythira-cache-rw-user: ${{ vars.KYTHIRA_BUILD_CACHE_RW_USER }}
+          kythira-cache-rw-password: ${{ secrets.KYTHIRA_BUILD_CACHE_RW_PASSWORD }}
+          kythira-cache-pr-user: ${{ vars.KYTHIRA_BUILD_CACHE_PR_USER }}
+          kythira-cache-pr-password: ${{ secrets.KYTHIRA_BUILD_CACHE_PR_PASSWORD }}
+          kythira-cache-ro-user: ${{ vars.KYTHIRA_BUILD_CACHE_RO_USER }}
+          kythira-cache-ro-password: ${{ secrets.KYTHIRA_BUILD_CACHE_RO_PASSWORD }}
 
       # Byte-identical key to ci.yml's Ion Serializer Build job, so on x64
       # this restores the tree that job saved on main.
@@ -353,11 +369,18 @@ jobs:
   publish:
     needs: [gate, build]
     if: needs.gate.outputs.publish == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.event.pull_request.head.repo.fork && 'ubuntu-24.04') || vars.KYTHIRA_X64_RUNNER || 'bit63' }}
     timeout-minutes: 15
     permissions:
       contents: write   # create the prerelease and its tag; prune old ones
     steps:
+      # No checkout in this job, so the shared baseline action cannot be
+      # used; install the two tools it needs on a self-hosted runner.
+      - name: Install gh and jq (self-hosted only)
+        if: runner.environment == 'self-hosted'
+        run: |
+          command -v gh >/dev/null && command -v jq >/dev/null && exit 0
+          sudo apt-get update -q && sudo apt-get install -y -q --no-install-recommends gh jq
       - name: Download packages
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:

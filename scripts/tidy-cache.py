@@ -20,7 +20,10 @@ MODE:
 
 The bucket comes from the variables .github/actions/oci-build-cache
 exports: AWS_ENDPOINT_URL, AWS_REGION, AWS_ACCESS_KEY_ID,
-AWS_SECRET_ACCESS_KEY and SCCACHE_BUCKET. Objects live under clang-tidy/.
+AWS_SECRET_ACCESS_KEY and SCCACHE_BUCKET. When that action picked the
+self-hosted kythira cache instead, it exports KYTHIRA_CACHE_HTTP_URL,
+_USER and _PASSWORD and the driver talks plain HTTP with Basic auth.
+Objects live under clang-tidy/ either way.
 
 Only clean results are stored: clang-tidy exited 0 and printed no
 `file:line:col: warning|error:` line. Nothing stored is replayed, so every
@@ -44,6 +47,7 @@ start last and run alone at the end.
 from __future__ import annotations
 
 import argparse
+import base64
 import concurrent.futures
 import datetime as dt
 import hashlib
@@ -196,15 +200,21 @@ class S3Backend:
             c.close()
             self._local.conn = None
 
+    def _path(self, key: str) -> str:
+        return f"{self.base}/{self.bucket}/{PREFIX}{key}"
+
+    def _headers(self, method: str, path: str, body: bytes) -> dict[str, str]:
+        return sigv4_headers(method, self.netloc, path, self.region, self.access_key,
+                             self.secret_key, body, session_token=self.session_token)
+
     def request(self, method: str, key: str, body: bytes = b"") -> tuple[int, bytes]:
         """(status, body) for one request, retried on transport errors and 5xx."""
-        path = f"{self.base}/{self.bucket}/{PREFIX}{key}"
+        path = self._path(key)
         last = ""
         for attempt in range(len(self.backoff) + 1):
             if attempt:
                 time.sleep(self.backoff[attempt - 1])
-            headers = sigv4_headers(method, self.netloc, path, self.region, self.access_key,
-                                    self.secret_key, body, session_token=self.session_token)
+            headers = self._headers(method, path, body)
             if method == "PUT":
                 headers["content-type"] = "application/json"
                 headers["content-length"] = str(len(body))
@@ -247,6 +257,39 @@ class S3Backend:
                 pass
         snippet = data[:200].decode(errors="replace")
         raise BackendError(f"PUT {key[:12]}: HTTP {status} {snippet}")
+
+
+class HttpBackend(S3Backend):
+    """HEAD and PUT on <url>/clang-tidy/<key> with HTTP Basic auth.
+
+    The self-hosted kythira cache (redis_gateway_node's HTTP front end,
+    doc/redis-gateway.md) serves the same key space as the bucket, so only
+    the path and the Authorization header differ from S3Backend; the
+    connection reuse, retries and present-on-refused-overwrite handling are
+    inherited unchanged.
+    """
+
+    def __init__(self, url: str, user: str, password: str, writable: bool,
+                 timeout: float = TIMEOUT_S, backoff: tuple[float, ...] = RETRY_BACKOFF_S):
+        super().__init__(url, "", "", "", "", writable, timeout=timeout, backoff=backoff)
+        token = base64.b64encode(f"{user}:{password}".encode()).decode()
+        self._auth = f"Basic {token}"
+
+    @classmethod
+    def from_env(cls, writable: bool) -> "HttpBackend":
+        env = os.environ
+        missing = [v for v in ("KYTHIRA_CACHE_HTTP_URL", "KYTHIRA_CACHE_HTTP_USER",
+                               "KYTHIRA_CACHE_HTTP_PASSWORD") if not env.get(v)]
+        if missing:
+            raise ValueError("missing " + ", ".join(missing))
+        return cls(env["KYTHIRA_CACHE_HTTP_URL"], env["KYTHIRA_CACHE_HTTP_USER"],
+                   env["KYTHIRA_CACHE_HTTP_PASSWORD"], writable)
+
+    def _path(self, key: str) -> str:
+        return f"{self.base}/{PREFIX}{key}"
+
+    def _headers(self, method: str, path: str, body: bytes) -> dict[str, str]:
+        return {"host": self.netloc, "authorization": self._auth}
 
 
 # ── Analysis ────────────────────────────────────────────────────────────────
@@ -485,7 +528,10 @@ def cmd_run(args) -> int:
         backend = LocalBackend(Path(mode[len("local:"):]))
     elif requested:
         try:
-            backend = S3Backend.from_env(writable=(mode == "readwrite"))
+            # The build-cache action exports KYTHIRA_CACHE_HTTP_URL only when
+            # it picked the self-hosted kythira cache over the bucket.
+            backend_cls = HttpBackend if os.environ.get("KYTHIRA_CACHE_HTTP_URL") else S3Backend
+            backend = backend_cls.from_env(writable=(mode == "readwrite"))
         except ValueError as e:
             print(f"tidy-cache: warning: no bucket ({e}); analysing everything", file=sys.stderr)
 
