@@ -105,6 +105,33 @@ public:
         return {capacity, available};
     }
 
+    /// Asks the segment node behind `transport` to give `volume` to the
+    /// writer at `epoch` (`op::assign`), before opening it there. Throws
+    /// `record_segment_error` when the node cannot be reached, and
+    /// `std::invalid_argument` when it holds the volume at a newer epoch.
+    static void assign(const segment_volume_transport& transport, const std::string& volume,
+                       std::uint64_t epoch) {
+        (void)call_on(
+            transport, volume, epoch, volume_wire::op::assign, [](volume_wire::writer&) {}, 0);
+    }
+
+    /// The segment node's `{capacity, available}` without opening a
+    /// volume: a placement probe. `nullopt` when it cannot be reached or
+    /// does not answer.
+    [[nodiscard]] static auto probe_space(const segment_volume_transport& transport)
+        -> std::optional<std::pair<std::uint64_t, std::uint64_t>> {
+        try {
+            auto r = call_on(
+                transport, std::string(), 0, volume_wire::op::space, [](volume_wire::writer&) {},
+                0);
+            const auto capacity = r.uint();
+            const auto available = r.uint();
+            return std::pair{capacity, available};
+        } catch (const std::exception&) {
+            return std::nullopt;
+        }
+    }
+
     [[nodiscard]] auto max_record_bytes() const noexcept -> std::uint32_t override {
         return _max_record_bytes;
     }
@@ -405,15 +432,26 @@ private:
     template<typename Args>
     [[nodiscard]] auto call(volume_wire::op o, Args&& args, std::size_t arg_count) const
         -> results {
+        if (!_transport) {
+            throw std::invalid_argument("remote_segment_store: no transport");
+        }
+        return call_on(_transport, _volume, _epoch, o, std::forward<Args>(args), arg_count);
+    }
+
+    template<typename Args>
+    [[nodiscard]] static auto call_on(const segment_volume_transport& transport,
+                                      const std::string& volume, std::uint64_t epoch,
+                                      volume_wire::op o, Args&& args, std::size_t arg_count)
+        -> results {
         volume_wire::writer w;
         w.array(3 + arg_count);
         w.uint(static_cast<std::uint64_t>(o));
-        w.text(_volume);
-        w.uint(_epoch);
+        w.text(volume);
+        w.uint(epoch);
         std::forward<Args>(args)(w);
-        auto reply = _transport(w.take());
+        auto reply = transport(w.take());
         if (!reply) {
-            throw record_segment_error("remote_segment_store: volume " + _volume +
+            throw record_segment_error("remote_segment_store: volume " + volume +
                                        " is unreachable");
         }
         results res(std::move(*reply));
@@ -436,7 +474,7 @@ private:
             } catch (const std::invalid_argument&) {
             }
         }
-        message = "remote_segment_store: volume " + _volume + ": " + message;
+        message = "remote_segment_store: volume " + volume + ": " + message;
         switch (static_cast<volume_wire::status>(status)) {
             case volume_wire::status::stale_epoch:
                 throw segment_volume_fenced(message);

@@ -387,6 +387,46 @@ BOOST_AUTO_TEST_CASE(the_segment_node_reports_its_space_to_any_writer) {
     BOOST_CHECK_THROW((void)w->space(), kythira::record_segment_error);
 }
 
+// Task 10: a writer moved to a segment node that never heard of its
+// volume assigns it there at the catalog's epoch, then opens it. A newer
+// epoch fences the old writer; an older one is refused.
+BOOST_AUTO_TEST_CASE(a_writer_assigns_its_volume_at_the_catalog_epoch) {
+    scratch_dir d;
+    segment_node node(d.path());
+    BOOST_CHECK_THROW((void)node.open("moved", 2), kythira::record_segment_error);
+    kythira::remote_segment_store::assign(node.transport(), "moved", 2);
+    auto w = node.open("moved", 2);
+    const auto p = payload(1);
+    (void)w->append("s", kythira::segment_record_view{1, 0, p});
+    w->barrier();
+    // Again at the same epoch: nothing changes, the files stay.
+    kythira::remote_segment_store::assign(node.transport(), "moved", 2);
+    BOOST_TEST(w->last_seq("s") == std::optional<std::uint64_t>(1));
+    BOOST_CHECK_THROW(kythira::remote_segment_store::assign(node.transport(), "moved", 1),
+                      std::invalid_argument);
+    BOOST_CHECK_THROW(kythira::remote_segment_store::assign(node.transport(), "moved", 0),
+                      std::invalid_argument);
+    kythira::remote_segment_store::assign(node.transport(), "moved", 3);
+    BOOST_CHECK_THROW((void)w->append("s", kythira::segment_record_view{2, 0, p}),
+                      kythira::segment_volume_fenced);
+    BOOST_CHECK_THROW(kythira::remote_segment_store::assign(node.transport(), "a/b", 1),
+                      std::invalid_argument);
+    node.reachable->store(false);
+    BOOST_CHECK_THROW(kythira::remote_segment_store::assign(node.transport(), "moved", 4),
+                      kythira::record_segment_error);
+}
+
+// Task 10: placement probes a segment node's room without a volume.
+BOOST_AUTO_TEST_CASE(a_probe_reads_space_without_a_volume) {
+    scratch_dir d;
+    segment_node node(d.path());
+    const auto space = kythira::remote_segment_store::probe_space(node.transport());
+    BOOST_REQUIRE(space.has_value());
+    BOOST_TEST(space->second <= space->first);
+    node.reachable->store(false);
+    BOOST_TEST(!kythira::remote_segment_store::probe_space(node.transport()).has_value());
+}
+
 BOOST_AUTO_TEST_CASE(a_segment_is_fetched_from_a_peer_into_the_volume) {
     scratch_dir d;
     auto peer_opts = small_segments();

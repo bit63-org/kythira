@@ -48,6 +48,7 @@
 #include <kythira/kinesis/kinesis_channels.hpp>
 #include <kythira/kinesis/kinesis_hash.hpp>
 #include <kythira/kinesis/kinesis_leases.hpp>
+#include <kythira/kinesis/kinesis_volumes.hpp>
 #include <raft/record_segment_store.hpp>
 #include <raft/shard_types.hpp>
 #include <raft/splittable_state_machine.hpp>
@@ -500,6 +501,20 @@ struct lease_drop_application_command {
     std::string _application{};
 };
 
+/// Where a data replica's segment volume is (kinesis-independent-layers
+/// task 10), at the catalog group: applied only while the record's epoch is
+/// `_expected_epoch` (0: no record yet) and `_epoch` is above it, so a
+/// replacement raises the epoch exactly once however many leaders try.
+/// A refused one answers `condition_failed` with the current epoch in
+/// `_id`; an applied one answers the new epoch.
+struct volume_assignment_command {
+    std::string _replica{};
+    std::string _segment_node{};
+    std::string _volume{};
+    std::uint64_t _expected_epoch = 0;
+    std::uint64_t _epoch = 0;
+};
+
 using stream_command = std::variant<
     create_stream_command, set_stream_status_command, remove_stream_command, open_shard_command,
     append_records_command, close_shard_command, drop_shard_command, trim_shard_command,
@@ -507,7 +522,7 @@ using stream_command = std::variant<
     set_retention_command, seal_shard_command, tier_segment_command, reshard_catalog_command,
     set_ending_counters_command, set_stream_mode_command, tag_stream_command, set_policy_command,
     set_monitoring_command, set_encryption_command, consumer_command, channel_command,
-    channel_checkpoint_command, shard_tip_command, add_data_key_command>;
+    channel_checkpoint_command, shard_tip_command, add_data_key_command, volume_assignment_command>;
 
 /// 2 added the provider to a `set_encryption_command`'s data key (KMS
 /// task 15). A command is written as version 1 unless it carries a
@@ -535,6 +550,8 @@ inline constexpr std::uint8_t stream_command_version = 2;
                 return stream_key(v._account, v._name);
             } else if constexpr (std::is_same_v<T, channel_command>) {
                 return channel_key(v._account, v._name);
+            } else if constexpr (std::is_same_v<T, volume_assignment_command>) {
+                return volume_key(v._replica);
             } else if constexpr (std::is_same_v<T, channel_checkpoint_command>) {
                 return channel_checkpoint_key(v._account, v._channel_id, v._shard);
             } else if constexpr (std::is_same_v<T, append_batch_command>) {
@@ -690,6 +707,9 @@ inline auto decode_append(codec::reader& r) -> append_records_command {
                         w.str(v._data_key->_provider);
                     }
                 }
+            } else if constexpr (std::is_same_v<T, volume_assignment_command>) {
+                w.str(v._replica).str(v._segment_node).str(v._volume);
+                w.u64(v._expected_epoch).u64(v._epoch);
             } else if constexpr (std::is_same_v<T, add_data_key_command>) {
                 w.str(v._account).str(v._name).u64(v._id).str(v._key_id);
                 w.u32(v._data_key._generation).str(v._data_key._key_id).str(v._data_key._wrapped);
@@ -1055,6 +1075,16 @@ inline auto decode_append(codec::reader& r) -> append_records_command {
             out = std::move(c);
             break;
         }
+        case 27: {
+            volume_assignment_command c;
+            c._replica = r.str();
+            c._segment_node = r.str();
+            c._volume = r.str();
+            c._expected_epoch = r.u64();
+            c._epoch = r.u64();
+            out = std::move(c);
+            break;
+        }
         default:
             throw kinesis_codec_error("kinesis codec: unknown command kind");
     }
@@ -1171,8 +1201,8 @@ requires log_index<LogIndex>
 class stream_state_machine {
 public:
     using key_type = std::string;
-    using entry =
-        std::variant<std::uint64_t, stream_record, shard_state, lease_record, channel_record>;
+    using entry = std::variant<std::uint64_t, stream_record, shard_state, lease_record,
+                               channel_record, volume_record>;
     using map_type = std::map<std::string, entry, std::less<>>;
 
     stream_state_machine() = default;
@@ -1431,6 +1461,8 @@ public:
                 encode(w, *l);
             } else if (const auto* ch = std::get_if<channel_record>(&e)) {
                 encode(w, *ch);
+            } else if (const auto* vol = std::get_if<volume_record>(&e)) {
+                encode(w, *vol);
             } else {
                 const auto& sh = std::get<shard_state>(e);
                 w.u64(sh._last_counter).i64(sh._last_arrival_ms).u8(sh._open ? 1 : 0);
@@ -1500,6 +1532,9 @@ public:
                     break;
                 case 4:
                     into.insert_or_assign(std::move(key), entry{decode_channel_record(r)});
+                    break;
+                case 5:
+                    into.insert_or_assign(std::move(key), entry{decode_volume_record(r)});
                     break;
                 default:
                     throw kinesis_codec_error("kinesis codec: unknown entry kind");
@@ -1883,6 +1918,28 @@ private:
         k._generation = rec->_data_keys.empty() ? 1 : rec->_data_keys.back()._generation + 1;
         rec->_data_keys.push_back(k);
         return {._id = rec->_id, ._first_counter = k._generation};
+    }
+
+    /// The epoch compare-and-set described at `volume_assignment_command`.
+    auto apply_one(const volume_assignment_command& c) -> apply_result {
+        if (!valid_volume_replica(c._replica) || c._segment_node.empty() || c._volume.empty() ||
+            c._epoch <= c._expected_epoch) {
+            return {._status = apply_status::invalid};
+        }
+        const auto key = volume_key(c._replica);
+        auto it = _map.find(key);
+        const auto* current = it == _map.end() ? nullptr : std::get_if<volume_record>(&it->second);
+        if (it != _map.end() && current == nullptr) {
+            return {._status = apply_status::invalid};
+        }
+        const std::uint64_t have = current == nullptr ? 0 : current->_epoch;
+        if (have != c._expected_epoch) {
+            return {._status = apply_status::condition_failed, ._id = have};
+        }
+        _map.insert_or_assign(
+            key, entry{volume_record{
+                     ._segment_node = c._segment_node, ._volume = c._volume, ._epoch = c._epoch}});
+        return {._id = c._epoch};
     }
 
     /// `already_exists` for a name in use, `invalid` past `_max` consumers

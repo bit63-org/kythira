@@ -102,6 +102,13 @@ enum class op : std::uint8_t {
     /// available]` in bytes (task 10, Requirement 10.6). The volume and
     /// epoch are ignored.
     space = 19,
+    /// Gives the volume to the writer at the request's epoch, creating it
+    /// if needed (task 10). An epoch older than the volume's is refused
+    /// (`invalid_argument`); the same epoch again is a no-op. The epoch
+    /// comes from the volume assignment in the catalog, so a replica moved
+    /// to a segment node that never heard of its volume can open it there,
+    /// and a segment node needs no Raft of its own.
+    assign = 20,
 };
 
 /// Whether `o` changes the volume, and so is fenced by epoch.
@@ -477,6 +484,19 @@ public:
                     throw std::invalid_argument("volume wire: trailing bytes in the request");
                 }
                 return space_reply();
+            }
+            if (o == volume_wire::op::assign) {
+                if (!r.at_end()) {
+                    throw std::invalid_argument("volume wire: trailing bytes in the request");
+                }
+                if (epoch == 0) {
+                    throw std::invalid_argument("volume wire: a volume's epoch starts at 1");
+                }
+                assign(id, epoch);
+                volume_wire::writer w;
+                w.array(1);
+                w.uint(static_cast<std::uint64_t>(status::ok));
+                return w.take();
             }
             std::shared_ptr<record_segment_store> store;
             {
