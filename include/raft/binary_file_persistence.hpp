@@ -99,7 +99,9 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <charconv>
+#include <chrono>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
@@ -140,6 +142,30 @@ struct binary_file_persistence_options {
     std::shared_ptr<log_key_ring> _key_ring;
     log_encryption_mode _encryption = log_encryption_mode::seal;
 };
+
+/// Write-path totals over every `binary_file_persistence_engine` in the
+/// process, for a node's `INFO` (GitHub issue 942: "expose per-stage
+/// timing"). Process-wide rather than per engine because a node runs one
+/// engine per shard replica and an operator asks about the node's disk; the
+/// counters are relaxed atomics bumped once per append or barrier, which
+/// costs nothing next to the I/O they count.
+struct binary_file_persistence_totals {
+    /// Records appended, and their bytes as framed on disk.
+    std::atomic<std::uint64_t> _appends{0};
+    std::atomic<std::uint64_t> _append_bytes{0};
+    /// Time spent framing (CRC, sealing) and writing appends, under the
+    /// engine's mutex.
+    std::atomic<std::uint64_t> _append_ns{0};
+    /// Durability barriers that issued fsyncs, and the time those took.
+    std::atomic<std::uint64_t> _barriers{0};
+    std::atomic<std::uint64_t> _barrier_ns{0};
+};
+
+[[nodiscard]] inline auto binary_file_persistence_stats() noexcept
+    -> binary_file_persistence_totals& {
+    static binary_file_persistence_totals totals;
+    return totals;
+}
 
 namespace detail::binary_persistence {
 
@@ -559,6 +585,7 @@ public:
             _s->_barrier_running = true;
             ++_s->_barriers_issued;
             lock.unlock();
+            const auto started = std::chrono::steady_clock::now();
             bool ok = true;
             fiu_do_on("raft/persistence/barrier", ok = false;);
             for (const auto& f : files) {
@@ -567,6 +594,13 @@ public:
             if (ok && dir_dirty) {
                 ok = detail::binary_persistence::fsync_path(_s->_dir, O_RDONLY | O_DIRECTORY);
             }
+            auto& totals = binary_file_persistence_stats();
+            totals._barriers.fetch_add(1, std::memory_order_relaxed);
+            totals._barrier_ns.fetch_add(
+                static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                               std::chrono::steady_clock::now() - started)
+                                               .count()),
+                std::memory_order_relaxed);
             lock.lock();
             _s->_barrier_running = false;
             if (ok) {
@@ -1268,7 +1302,18 @@ private:
                 // Record it first, or the next load would skip this record.
                 write_meta(_current_term, _voted_for, index);
             }
-            auto loc = place_record(encode_record(entry), 0);
+            const auto started = std::chrono::steady_clock::now();
+            auto record = encode_record(entry);
+            const auto bytes = record._bytes.size();
+            auto loc = place_record(std::move(record), 0);
+            auto& totals = binary_file_persistence_stats();
+            totals._appends.fetch_add(1, std::memory_order_relaxed);
+            totals._append_bytes.fetch_add(bytes, std::memory_order_relaxed);
+            totals._append_ns.fetch_add(
+                static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                               std::chrono::steady_clock::now() - started)
+                                               .count()),
+                std::memory_order_relaxed);
             _dirty.insert(loc._segment);
             if (_entries.empty()) {
                 _first_index = index;

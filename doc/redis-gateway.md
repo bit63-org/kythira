@@ -492,6 +492,40 @@ counters (`kythira_cache_http_requests`, `_hits`, `_misses`, `_puts`,
 `_forwards`, `_forward_failures`, `_auth_failures`, `_forbidden`, ...)
 plus the store's.
 
+**Diagnosing slow writes.** The same section says where a write's time
+and bytes go, so a slow cache can be read from a live node instead of
+from host-wide disk and CPU figures:
+
+| Field | Meaning |
+|---|---|
+| `cache_put_body_ms` | Leader time spent waiting on clients for `PUT` body bytes. High means the writers or their source are the limit, not the cache. |
+| `cache_put_chunk_wait_ms`, `cache_put_commit_ms` | Leader time spent waiting for `put_chunk` proposals (one in flight per request) and for the `commit`. High means the shard is the limit. |
+| `cache_puts`, `cache_put_bytes`, `cache_put_chunks` | What those times were spent on. A forwarded `PUT` is timed on the leader it went to. |
+| `cache_forwards` | Requests this node relayed to a shard leader. |
+| `cache_relay_apply_waits`, `cache_relay_apply_wait_ms` | Relayed `PUT`s and `DELETE`s this node held until its own replica had applied them, and the total time. A client that writes through a follower can read the result back from that follower at once. |
+| `cache_log_append_bytes`, `cache_log_append_ms` | Raft log bytes written on this node over every shard replica, and the time spent framing and writing them. |
+| `cache_log_fsyncs`, `cache_log_fsync_ms` | Log fsync rounds (concurrent appends share one) and their total time. |
+| `cache_disk_write_bytes` | This process's bytes written to storage (`/proc/self/io`). |
+| `cache_store_written_bytes` | Bytes the chunk store wrote: new chunks, pack records, compaction copies. |
+| `cache_write_amplification` | The ratio of those two. About 2 in steady state: each chunk goes to the Raft log and then to the store. |
+| `cache_shard_<group>` | Per shard replica: `role`, the log's `last_log`, `commit` and `applied` indices, proposals still waiting (`pending`), and on a leader `slowest_follower_lag`. A shard that cannot keep up shows as a gap that keeps growing. |
+
+`GET /_metrics` carries `kythira_cache_http_put_chunks`,
+`_put_body_ns`, `_put_chunk_wait_ns` and `_put_commit_ns`, plus
+`kythira_cache_disk_write_bytes`, `kythira_cache_store_written_bytes` and
+`kythira_cache_log_append_bytes`.
+
+Two cautions when measuring from outside. First, a container's block-I/O
+counters (`docker stats`) add up every device in the cgroup's I/O stats.
+On an mdadm mirror that can be the md device plus each member, so one
+write may be counted three times. Use `cache_write_amplification`
+instead. Second, when writers stream their
+objects from somewhere else, `cache_put_body_ms` shows whether the cache or
+the source is the bottleneck. The cache-cluster test's `matrix` client mode
+(`services/redis/docker/cache-cluster/client/run.sh`) measures aggregate
+`PUT` throughput across writer counts and object sizes, along with each
+node's write amplification.
+
 ### Clients
 
 The same ACL users serve RESP and HTTP. A build farm usually has a

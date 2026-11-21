@@ -599,6 +599,29 @@ public:
     /// `shard_stats` reports it too.
     [[nodiscard]] auto last_applied_index() const -> log_index_type;
 
+    /// @brief Where this replica's log, commit and apply stand, read under
+    ///        one lock so the figures agree with each other.
+    ///
+    /// For an operator reading a live node: `_last_log - _commit` is what
+    /// the leader has appended but a quorum has not yet persisted,
+    /// `_commit - _applied` is the apply backlog, `_pending_commands` the
+    /// client proposals still waiting for their result, and on a leader
+    /// `_last_log - _slowest_match` how far its slowest follower trails.
+    /// A shard whose write path is stuck shows here as a queue that grows
+    /// (GitHub issue 942).
+    struct log_progress {
+        log_index_type _last_log{0};
+        log_index_type _commit{0};
+        log_index_type _applied{0};
+        /// Leader only: the lowest match index over its followers and
+        /// learners, or
+        /// `_last_log` when it has none.
+        log_index_type _slowest_match{0};
+        std::size_t _pending_commands{0};
+        bool _leader{false};
+    };
+    [[nodiscard]] auto progress() const -> log_progress;
+
     /// @brief When an accepted AppendEntries last left this node caught up.
     ///
     /// Set when, after the request is handled, this node's commit index has
@@ -3299,6 +3322,29 @@ auto node<Types>::log_entries_between(log_index_type from, log_index_type to) co
 template<raft_types Types> auto node<Types>::last_applied_index() const -> log_index_type {
     std::lock_guard<std::mutex> lock(_mutex);
     return _last_applied;
+}
+
+template<raft_types Types> auto node<Types>::progress() const -> log_progress {
+    log_progress p;
+    {
+        std::lock_guard<std::mutex> lock(_mutex);
+        p._last_log = get_last_log_index();
+        p._commit = _commit_index;
+        p._applied = _last_applied;
+        p._leader = _state == kythira::server_state::leader;
+        p._slowest_match = p._last_log;
+        if (p._leader) {
+            for (const auto& [peer, match] : _match_index) {
+                if (peer != _node_id && match < p._slowest_match) {
+                    p._slowest_match = match;
+                }
+            }
+        }
+    }
+    // The waiter has its own lock; taking it outside the node's keeps the
+    // two from nesting.
+    p._pending_commands = _commit_waiter.get_pending_count();
+    return p;
 }
 
 template<raft_types Types>
@@ -8614,6 +8660,9 @@ auto node<Types>::send_append_entries_to(node_id_type target) -> void {
     log_index_type prev_log_index;
     term_id_type prev_log_term;
     std::vector<log_entry_type> entries_to_send;
+    // How many entries the request carries; the reply handler needs only the
+    // count, so the entries themselves move into the request (below).
+    std::size_t entry_count = 0;
     append_entries_request_type request;
     std::chrono::milliseconds timeout;
     bool need_snapshot = false;
@@ -8679,7 +8728,7 @@ auto node<Types>::send_append_entries_to(node_id_type target) -> void {
                         break;
                     }
                     batch_bytes += size;
-                    entries_to_send.push_back(entry.value());
+                    entries_to_send.push_back(std::move(*entry));
                 } else {
                     _logger.error(
                         "Log entry not found during replication",
@@ -8688,15 +8737,21 @@ auto node<Types>::send_append_entries_to(node_id_type target) -> void {
                 }
             }
 
-            request = append_entries_request_type{_current_term, _node_id,        prev_log_index,
-                                                  prev_log_term, entries_to_send, _commit_index};
-            if (!entries_to_send.empty()) {
+            // Moved, not copied, from here on: a disk-backed cache's chunk
+            // entries are 4 MiB each, and this request used to be copied
+            // into the retry lambda, into its continuation and into the
+            // reply handler's capture, for every follower (GitHub issue
+            // 942).
+            entry_count = entries_to_send.size();
+            request = append_entries_request_type{
+                _current_term, _node_id, prev_log_index, prev_log_term, std::move(entries_to_send),
+                _commit_index};
+            if (entry_count != 0) {
                 _append_in_flight[target] =
                     append_in_flight{next_idx, std::chrono::steady_clock::now()};
             }
-            _last_append_sent[target] =
-                append_sent{prev_log_index + entries_to_send.size(), _commit_index,
-                            std::chrono::steady_clock::now()};
+            _last_append_sent[target] = append_sent{prev_log_index + entry_count, _commit_index,
+                                                    std::chrono::steady_clock::now()};
 
             _logger.debug("Sending AppendEntries",
                           {{"node_id", node_id_to_string(_node_id)},
@@ -8704,7 +8759,7 @@ auto node<Types>::send_append_entries_to(node_id_type target) -> void {
                            {"term", std::to_string(_current_term)},
                            {"prev_log_index", std::to_string(prev_log_index)},
                            {"prev_log_term", std::to_string(prev_log_term)},
-                           {"num_entries", std::to_string(entries_to_send.size())},
+                           {"num_entries", std::to_string(entry_count)},
                            {"leader_commit", std::to_string(_commit_index)}});
 
             timeout = _config.append_entries_timeout();
@@ -8722,7 +8777,7 @@ auto node<Types>::send_append_entries_to(node_id_type target) -> void {
     try {
         // Wrap the RPC call in a lambda for ErrorHandler::execute_with_retry
         auto rpc_operation =
-            [this, target, request, timeout, stop_flag = _stop_flag,
+            [this, target, request = std::move(request), timeout, stop_flag = _stop_flag,
              scope = _async_scope]() -> kythira::future_default<append_entries_response_type> {
             // The ticket is what makes this guard load-bearing rather than
             // advisory: while it is held, stop()'s drain cannot return, so
@@ -8737,12 +8792,12 @@ auto node<Types>::send_append_entries_to(node_id_type target) -> void {
         };
 
         // Execute with retry using ErrorHandler (exponential backoff with jitter)
-        auto response_future =
-            _append_entries_error_handler.execute_with_retry("append_entries", rpc_operation);
+        auto response_future = _append_entries_error_handler.execute_with_retry(
+            "append_entries", std::move(rpc_operation));
 
         // Handle response asynchronously using thenTry to get folly::Try<response>
         std::move(response_future)
-            .thenTry([this, target, next_idx, entries_to_send, start_time, stop_flag = _stop_flag,
+            .thenTry([this, target, next_idx, entry_count, start_time, stop_flag = _stop_flag,
                       scope = _async_scope](auto try_response) {
                 // The ticket is what makes this guard load-bearing rather than
                 // advisory: while it is held, stop()'s drain cannot return, so
@@ -8754,7 +8809,7 @@ auto node<Types>::send_append_entries_to(node_id_type target) -> void {
                 std::unique_lock<std::mutex> lock(_mutex);
 
                 // This RPC's slot, if it held one and nothing replaced it.
-                if (!entries_to_send.empty()) {
+                if (entry_count != 0) {
                     if (const auto it = _append_in_flight.find(target);
                         it != _append_in_flight.end() && it->second._next_index == next_idx) {
                         _append_in_flight.erase(it);
@@ -8837,7 +8892,7 @@ auto node<Types>::send_append_entries_to(node_id_type target) -> void {
                     // match_index backwards and, once the log was compacted,
                     // pushed next_index behind the snapshot and made an
                     // up-to-date follower take an InstallSnapshot.
-                    auto new_match_index = next_idx + entries_to_send.size() - 1;
+                    auto new_match_index = next_idx + entry_count - 1;
                     if (new_match_index > _match_index[target]) {
                         _match_index[target] = new_match_index;
                     }
@@ -8857,7 +8912,7 @@ auto node<Types>::send_append_entries_to(node_id_type target) -> void {
                     _metrics.set_metric_name("raft_entries_replicated");
                     _metrics.add_dimension("node_id", node_id_to_string(_node_id));
                     _metrics.add_dimension("target", node_id_to_string(target));
-                    _metrics.add_count(entries_to_send.size());
+                    _metrics.add_count(entry_count);
                     _metrics.emit();
 
                     // How far this follower trails the leader's log once the
@@ -8876,7 +8931,7 @@ auto node<Types>::send_append_entries_to(node_id_type target) -> void {
                     // Still behind: send the next batch now rather than at the
                     // next tick or command, so a lagging follower is fed one
                     // batch after another with one in flight (_append_in_flight).
-                    if (!entries_to_send.empty() && _state == kythira::server_state::leader &&
+                    if (entry_count != 0 && _state == kythira::server_state::leader &&
                         _next_index[target] <= get_last_log_index()) {
                         lock.unlock();
                         send_append_entries_to(target);

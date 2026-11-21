@@ -151,6 +151,10 @@ BOOST_AUTO_TEST_CASE(put_read_remove_loose_and_packed, *boost::unit_test::timeou
     BOOST_CHECK_EQUAL(s._packed_chunks, 1U);
     BOOST_CHECK_EQUAL(s._pack_files, 1U);
     BOOST_CHECK_EQUAL(s._pack_bytes, 100U + cache_chunk_store::pack_record_overhead);
+    // What it wrote, once each (GitHub issue 942's bytes-written-per-byte-
+    // stored figure): the loose chunk, and the pack record with its framing.
+    // The replayed puts above wrote nothing.
+    BOOST_CHECK_EQUAL(s._bytes_written, 4096U + 100U + cache_chunk_store::pack_record_overhead);
 
     BOOST_CHECK(store.remove(small_sha));
     BOOST_CHECK(store.remove(large_sha));
