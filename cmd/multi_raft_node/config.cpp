@@ -431,6 +431,9 @@ Shape (all swept axes; none requires a rebuild)
                              "S3 persistence" below.
   --data-dir PATH            Where a file-backed log lives. Refused under s3.
   --executor-stripes N       Host executor stripes (default 4).
+  --batching 0|1             Batch AppendEntries per destination (default 1).
+  --count-rpcs 0|1           Count sent RPCs for the control port's /stats
+                             (default 0: no counters in the measured process).
   --data-threads N           Threads serving the data path. A handler blocks
                              for the whole commit, so this caps how many client
                              operations a host can have in flight — measurably:
@@ -699,6 +702,10 @@ auto parse_node_options(int argc, char** argv) -> node_options {
                 o._capacity_heartbeat = to_ms(value, flag.c_str());
             } else if (flag == "--capacity-dry-run") {
                 o._capacity_dry_run = to_u64(value, flag.c_str()) != 0;
+            } else if (flag == "--batching") {
+                o._batching = to_u64(value, flag.c_str()) != 0;
+            } else if (flag == "--count-rpcs") {
+                o._count_rpcs = to_u64(value, flag.c_str()) != 0;
             } else if (flag == "--capacity-join-env") {
                 o._capacity_join_env.push_back(value);
             } else if (flag == "--split-keys") {

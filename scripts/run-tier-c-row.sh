@@ -45,6 +45,14 @@ Usage: run-tier-c-row.sh [options]
                          operations in flight per host. 0 keeps cpp-httplib's
                          default of max(8, cores-1).
   --base-port P          First port; each host takes three (default 19000).
+  --batching 0|1         Batch AppendEntries per destination on every host
+                         (default 1). .kiro/specs/multi-raft-message-batching/
+  --host-stats           Start the hosts with --count-rpcs 1, read each
+                         host's /stats before and after the driver, and print
+                         host CPU per committed write, wire requests per
+                         second and the batching counters. Turns on RPC
+                         counting in the measured hosts, so compare only rows
+                         that both used it.
   --out-dir DIR          Where the driver writes its CSV/JSON (test_results).
   --keep                 Leave the hosts running after the row.
   --help
@@ -78,6 +86,8 @@ DATA_THREADS=0
 BASE_PORT=19000
 OUT_DIR="test_results"
 KEEP=0
+BATCHING=1
+HOST_STATS=0
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -97,6 +107,8 @@ while [[ $# -gt 0 ]]; do
         --base-port) BASE_PORT="$2"; shift 2 ;;
         --out-dir) OUT_DIR="$2"; shift 2 ;;
         --keep) KEEP=1; shift ;;
+        --batching) BATCHING="$2"; shift 2 ;;
+        --host-stats) HOST_STATS=1; shift ;;
         --help|-h) usage; exit 0 ;;
         *) echo "run-tier-c-row.sh: unknown option $1" >&2; usage >&2; exit 2 ;;
     esac
@@ -162,6 +174,8 @@ for (( id = 1; id <= NODES; ++id )); do
         --transport "${TRANSPORT}"
         --persistence "${PERSISTENCE}"
         --data-threads "${DATA_THREADS}"
+        --batching "${BATCHING}"
+        --count-rpcs "${HOST_STATS}"
         "${PEER_ARGS[@]}"
         "${PEER_CONTROL_ARGS[@]}"
     )
@@ -186,7 +200,20 @@ for (( id = 1; id <= NODES; ++id )); do
     fi
 done
 
+# Each host's cumulative /stats, one JSON object per line.
+read_host_stats() {
+    for (( id = 1; id <= NODES; ++id )); do
+        curl -sf --max-time 10 "http://127.0.0.1:$(port_of "${id}" 2)/stats"
+        echo
+    done
+}
+
 mkdir -p "${OUT_DIR}"
+BENCH_STATUS=0
+if [[ ${HOST_STATS} -eq 1 ]]; then
+    read_host_stats > "${WORK_DIR}/stats-before.jsonl"
+    date +%s.%N > "${WORK_DIR}/wall-before"
+fi
 "${BENCH_BIN}" \
     "${HOST_ARGS[@]}" \
     --groups "${GROUP_COUNT}" \
@@ -203,4 +230,49 @@ mkdir -p "${OUT_DIR}"
     --repetitions "${REPETITIONS}" \
     --scenario "${SCENARIO}" \
     --axis tier-c \
-    --out-dir "${OUT_DIR}"
+    --out-dir "${OUT_DIR}" || BENCH_STATUS=$?
+
+# Host-side cost of the whole driver run (warm-up included, which is why the
+# committed count below includes it): .kiro/specs/multi-raft-message-batching/
+# task 9. Reads /stats after the driver has finished and before the hosts are
+# stopped. The window includes the driver's readiness wait, so idle heartbeat
+# traffic is in it as well as the writes.
+if [[ ${HOST_STATS} -eq 1 ]]; then
+    read_host_stats > "${WORK_DIR}/stats-after.jsonl"
+    date +%s.%N > "${WORK_DIR}/wall-after"
+    # Zero unless the driver finished: one that refused to offer load (not
+    # every group led in time) committed nothing it can vouch for.
+    COMMITTED=0
+    if [[ "${SCENARIO}" == "write" && ${BENCH_STATUS} -eq 0 ]]; then
+        COMMITTED=$(( REPETITIONS * (WARMUP + OPERATIONS) ))
+    fi
+    python3 - "${WORK_DIR}" "${COMMITTED}" "${GROUP_COUNT}" "${BATCHING}" <<'PY'
+import json, sys
+work, committed, groups, batching = sys.argv[1], int(sys.argv[2]), sys.argv[3], sys.argv[4]
+def load(name):
+    with open(f"{work}/{name}") as f:
+        return [json.loads(line) for line in f if line.strip()]
+before, after = load("stats-before.jsonl"), load("stats-after.jsonl")
+wall = float(open(f"{work}/wall-after").read()) - float(open(f"{work}/wall-before").read())
+def delta(key):
+    return sum((a[key] or 0) - (b[key] or 0) for a, b in zip(after, before))
+cpu = delta("cpu_user_seconds") + delta("cpu_system_seconds")
+row = {
+    "groups": int(groups),
+    "batching": batching == "1",
+    "window_seconds": round(wall, 3),
+    "host_cpu_seconds": round(cpu, 3),
+    "host_cpu_per_second": round(cpu / wall, 3),
+    "wire_requests_per_second": round(delta("wire_rpcs") / wall, 1),
+    "rpcs_per_second": round(delta("rpcs") / wall, 1),
+    "batches": delta("batches_sent"),
+    "batched_members": delta("batched_members"),
+    "batch_fallbacks": delta("batch_fallbacks"),
+    "committed_writes": committed,
+    "host_cpu_us_per_committed_write":
+        round(cpu * 1e6 / committed, 1) if committed else None,
+}
+print("host stats: " + json.dumps(row))
+PY
+fi
+exit "${BENCH_STATUS}"

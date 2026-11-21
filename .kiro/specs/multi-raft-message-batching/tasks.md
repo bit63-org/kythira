@@ -77,12 +77,89 @@ defaults to false and no binary turns it on.
     without a sink.
   - _Requirements: 6.2_
 
-- [ ] 9. Measure, then decide
+- [x] 9. Measure, then decide
   - `multi_raft_bench` on Beast, 3 hosts, 100 and 1000 busy groups, batching
     off and on: wire requests per second, CPU per committed entry, p99 commit
     latency. Record here. Turn batching on in `cmd/multi_raft_node` only if
     CPU per committed entry drops at 1000 groups.
   - _Requirements: 7.4_
+  - Tooling: `multi_raft_node --batching 0|1 --count-rpcs 0|1`, the control
+    port's `/stats` (process CPU, sent and wire RPCs, batch counters), and
+    `scripts/run-tier-c-row.sh --batching 0|1 --host-stats`, which reads
+    `/stats` around the driver and prints host CPU per committed write and
+    wire requests per second.
+  - 2026-11-20, Tier C in a 4-core cloud sandbox (Xeon 2.1 GHz, 3 host
+    processes plus the driver on one machine, Beast + JSON, memory
+    persistence, tick 2 ms, heartbeat 50 ms, 16 in flight, 5 x 2000 writes
+    of 128 B plus 50 warm-up each). Host figures cover the whole driver run,
+    readiness wait included.
+
+    | groups | batching | result | ops/sec (median) | p99 | host CPU per write | wire req/s | RPCs/s |
+    |---|---|---|---|---|---|---|---|
+    | 100 | off | run 1: unstable (45.5% spread) | 331.4 | 158.8 ms | 19.2 ms | 2826 | 2826 |
+    | 100 | off | runs 2, 3: not every group led within 60 s, no load offered | n/a | n/a | n/a | 2583, 2970 | same |
+    | 100 | on | stable (4.9% spread) | 524.3 | 100.3 ms | 6.4 ms | 978 | 6272 |
+    | 1000 | off | not every group led within 60 s | n/a | n/a | n/a | 55 | 55 |
+    | 1000 | on | not every group led within 60 s | n/a | n/a | n/a | 48 | 119 |
+
+  - Reading: at 100 groups batching cuts host CPU per committed write about
+    3x and p99 by a third, carries about 6 RPCs per wire request, and is
+    the only arm that reliably reaches a led cluster
+    on this machine (the hosts sit at about 3.3 of 4 cores either way). At
+    1000 groups neither arm gets every group led on 4 cores: with 55 RPCs a
+    second the hosts are still CPU-bound, which points at per-group work in
+    the hosts rather than the wire (not profiled), and this machine cannot answer the
+    1000-group question. Batching stays off in `cmd/multi_raft_node` until
+    a 1000-group run on larger hardware shows the drop this task requires.
+  - 2026-11-20, Tier C on a 48-thread host (EPYC 7443, CI runners paused,
+    1-minute load 11 to 28), same harness and flags as above, boost future
+    backend, before the completion-thread fix. All rows stable, no
+    readiness timeouts.
+
+    | groups | batching | ops/sec (median) | p99 | elections | host CPU per write | wire req/s | RPCs/s |
+    |---|---|---|---|---|---|---|---|
+    | 100 | off | 2786 | 15.5 ms | 0 of 5 | 8.0 ms | 12795 | 12795 |
+    | 100 | on | 4289 | 10.3 ms | 0 of 5 | 4.5 ms | 5312 | 21263 |
+    | 1000 | off | 2127 | 18.9 ms | 5 of 5 | 11.1 ms | 10300 | 10300 |
+    | 1000 | on | 798 | 95.4 ms | 4 of 5 | 22.6 ms | 1939 | 26495 |
+
+  - Reading: at 100 groups batching gives 54% more throughput and cuts CPU
+    per write by 43%. At 1000 groups it doubled CPU per write. gdb on the
+    stalled hosts showed every asio I/O thread in `pthread_create` on a
+    glibc lock, reached from the batch completion: the boost backend
+    starts a thread per continuation, and one batch reply resolved every
+    member future on the I/O thread. Lone AppendEntries escape this
+    because the Beast client `.via()`s each response onto its strand.
+  - A first fix completed batches on one dedicated thread. Same host, batching
+    on: 100 groups rose to 5172 ops/s (p99 6.9 ms, CPU per write 4.1 ms),
+    but 1000 groups stalled outright (0.2 ops/s, then no progress for
+    10 min), since one thread could no longer keep up with the thread
+    creation. The batcher now `.via()`s member futures onto a small pool
+    instead, so no thread is created per member. In the 4-core sandbox at
+    100 groups that gives 1291 ops/s and 2.7 ms CPU per write (was 524 and
+    6.4 ms). Pool fix on the 48-thread host, 1000-group rows the mean of 3
+    alternating runs per arm with load below 3 before each:
+
+    | groups | batching | ops/sec | p99 | elections | host CPU per write | wire req/s | RPCs/s |
+    |---|---|---|---|---|---|---|---|
+    | 100 | on | 6135 | 5.5 ms | 0 of 5 | 3.6 ms | 6923 | 27166 |
+    | 1000 | off | 2419 | 15.5 ms | 15 of 15 | 10.9 ms | 12231 | 12231 |
+    | 1000 | on | 2087 (unstable, 16-22% spread) | 26.5 ms | 0 of 15 | 14.4 ms | 6052 | ~39900 |
+
+  - Reading: the pool fix ends the stall. At 100 groups batching more than
+    doubles throughput (6135 vs 2786 ops/s) at 45% of the CPU per write.
+    At 1000 groups batching costs 32% more CPU per write, so by this task's
+    rule it stays off in `cmd/multi_raft_node`. But the two arms are not
+    doing the same work. With 1000 groups, two followers each and a 50 ms
+    heartbeat, Raft asks for about 40k AppendEntries a second. The batching
+    arm sends that (about 39.9k RPCs/s in 6k wire requests). The off arm sends
+    12k, so most heartbeats are late or missing, and every one of its
+    measured windows had an election. Its lower CPU per write comes from
+    doing less than the protocol requires.
+  - Decision (2026-11-21, project owner): batching is on by default in
+    `cmd/multi_raft_node` despite the CPU rule, because at 1000 groups it is
+    the only arm whose measured windows held no election. `--batching 0`
+    turns it off.
 
 - [ ] 10. Other transports and serializers (optional)
   - gRPC with protobuf, the CoAP backends, TCP RPC, Ion: each on its own,
