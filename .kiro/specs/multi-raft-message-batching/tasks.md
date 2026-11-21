@@ -77,7 +77,7 @@ defaults to false and no binary turns it on.
     without a sink.
   - _Requirements: 6.2_
 
-- [ ] 9. Measure, then decide
+- [x] 9. Measure, then decide
   - `multi_raft_bench` on Beast, 3 hosts, 100 and 1000 busy groups, batching
     off and on: wire requests per second, CPU per committed entry, p99 commit
     latency. Record here. Turn batching on in `cmd/multi_raft_node` only if
@@ -155,8 +155,11 @@ defaults to false and no binary turns it on.
     arm sends that (about 39.9k RPCs/s in 6k wire requests). The off arm sends
     12k, so most heartbeats are late or missing, and every one of its
     measured windows had an election. Its lower CPU per write comes from
-    doing less than the protocol requires, so turning batching on is left
-    to the project owner.
+    doing less than the protocol requires.
+  - Decision (2026-11-21, project owner): batching is on by default in
+    `cmd/multi_raft_node` despite the CPU rule, because at 1000 groups it is
+    the only arm whose measured windows held no election. `--batching 0`
+    turns it off.
 
 - [ ] 10. Other transports and serializers (optional)
   - gRPC with protobuf, the CoAP backends, TCP RPC, Ion: each on its own,
