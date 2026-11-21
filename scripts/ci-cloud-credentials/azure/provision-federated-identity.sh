@@ -24,7 +24,11 @@
 #       [--key-vault-name <vault>] \
 #       [--storage-account <acct>] [--storage-container <name>] \
 #       [--storage-resource-group <rg>] \
-#       [--dry-run]
+#       [--subject-prefix <prefix>] [--dry-run]
+#
+# --subject-prefix defaults to what the repository's OIDC settings say
+# (see ../oidc-subject.sh); with immutable subjects it carries the owner
+# and repository ids, e.g. repo:bit63-org@359328292/kythira@1148357760.
 #
 # The object-persistence bundle's three --storage-* options default to what
 # provision-object-persistence-container.sh creates by default, and the
@@ -44,6 +48,7 @@ STORAGE_ACCOUNT="kythirarealtestobj"
 STORAGE_CONTAINER="kythira-raft"
 STORAGE_RESOURCE_GROUP=""
 DRY_RUN=0
+SUBJECT_PREFIX=""
 APP_NAME="kythira-ci-real-cloud-tests"
 
 while [[ $# -gt 0 ]]; do
@@ -57,6 +62,7 @@ while [[ $# -gt 0 ]]; do
         --storage-account) STORAGE_ACCOUNT="$2"; shift 2 ;;
         --storage-container) STORAGE_CONTAINER="$2"; shift 2 ;;
         --storage-resource-group) STORAGE_RESOURCE_GROUP="$2"; shift 2 ;;
+        --subject-prefix) SUBJECT_PREFIX="$2"; shift 2 ;;
         --dry-run) DRY_RUN=1; shift ;;
         *) echo "Unknown argument: $1" >&2; exit 1 ;;
     esac
@@ -116,6 +122,11 @@ echo "== Federated identity credential (GitHub OIDC, no client secret) =="
 # deployment branches rather than this subject: a ref-scoped subject would
 # need updating every time this environment's jobs are exercised from a
 # different branch.
+# shellcheck source=../oidc-subject.sh
+source "$(dirname "${BASH_SOURCE[0]}")/../oidc-subject.sh"
+SUBJECT_PREFIX=$(oidc_sub_prefix "$GITHUB_ORG" "$GITHUB_REPO" "$SUBJECT_PREFIX")
+FIC_SUBJECT="${SUBJECT_PREFIX}:environment:real-cloud-tests"
+echo "Trusted subject: $FIC_SUBJECT"
 FIC_NAME="github-actions-real-cloud-tests"
 EXISTING_FIC=$(az ad app federated-credential list --id "$APP_ID" \
     --query "[?name=='$FIC_NAME'].name" -o tsv 2>/dev/null || true)
@@ -124,13 +135,24 @@ if [[ -z "$EXISTING_FIC" ]]; then
 {
   "name": "$FIC_NAME",
   "issuer": "https://token.actions.githubusercontent.com",
-  "subject": "repo:${GITHUB_ORG}/${GITHUB_REPO}:environment:real-cloud-tests",
+  "subject": "$FIC_SUBJECT",
   "audiences": ["api://AzureADTokenExchange"]
 }
 JSON
 )"
 else
-    echo "Federated credential '$FIC_NAME' already exists"
+    # Re-running must repair a stale subject (the repository moving to
+    # another owner, or turning on immutable subjects, changes it), not
+    # report "exists" while CI can no longer sign in.
+    CURRENT_SUBJECT=$(az ad app federated-credential show --id "$APP_ID" \
+        --federated-credential-id "$FIC_NAME" --query subject -o tsv)
+    if [[ "$CURRENT_SUBJECT" == "$FIC_SUBJECT" ]]; then
+        echo "Federated credential '$FIC_NAME' already exists"
+    else
+        echo "Federated credential '$FIC_NAME' trusts '$CURRENT_SUBJECT'; updating"
+        run az ad app federated-credential update --id "$APP_ID" \
+            --federated-credential-id "$FIC_NAME" --parameters "{\"subject\": \"$FIC_SUBJECT\"}"
+    fi
 fi
 
 echo "== Role assignments =="

@@ -22,6 +22,7 @@ set -euo pipefail
 
 GITHUB_ORG=""
 GITHUB_REPO=""
+SUBJECT_PREFIX=""
 BUNDLES=""
 ROLE_NAME="kythira-ci-real-cloud-tests"
 OIDC_PROVIDER_NAME="github-actions"
@@ -55,6 +56,9 @@ Usage: provision-oidc-role.sh --github-org ORG --github-repo REPO \
                        real-cloud-tests). The trust policy matches the OIDC
                        subject repo:ORG/REPO:environment:NAME exactly, so
                        only a job declaring that environment can assume it.
+  --subject-prefix     OIDC sub prefix to trust (default: read from the
+                       repository's OIDC settings; immutable subjects look
+                       like repo:bit63-org@359328292/kythira@1148357760)
   --profile            aliyun CLI profile to use (or $ALIYUN_PROFILE)
   --dry-run            print the calls that would run without executing them
 USAGE
@@ -65,6 +69,7 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --github-org) GITHUB_ORG="$2"; shift 2 ;;
         --github-repo) GITHUB_REPO="$2"; shift 2 ;;
+        --subject-prefix) SUBJECT_PREFIX="$2"; shift 2 ;;
         --bundles) BUNDLES="$2"; shift 2 ;;
         --bucket) BUCKET="$2"; shift 2 ;;
         --role-name) ROLE_NAME="$2"; shift 2 ;;
@@ -162,7 +167,10 @@ ROLE_ARN="acs:ram::${ACCOUNT_ID}:role/${ROLE_NAME}"
 # only to jobs that declare `environment: NAME`. Note the policy Version is the
 # string "1" — Alibaba's own versioning, NOT AWS's "2012-10-17" date, and a
 # wrong value here is rejected at create time.
-SUBJECT="repo:${GITHUB_ORG}/${GITHUB_REPO}:environment:${ENVIRONMENT}"
+# shellcheck source=../oidc-subject.sh
+source "${SCRIPT_DIR}/../oidc-subject.sh"
+SUBJECT_PREFIX=$(oidc_sub_prefix "${GITHUB_ORG}" "${GITHUB_REPO}" "${SUBJECT_PREFIX}")
+SUBJECT="${SUBJECT_PREFIX}:environment:${ENVIRONMENT}"
 echo "[step] Trusted subject: ${SUBJECT}"
 
 TRUST_POLICY="$(python3 - "$OIDC_PROVIDER_ARN" "$ISSUER_URL" "$CLIENT_ID" "$SUBJECT" <<'PY'
