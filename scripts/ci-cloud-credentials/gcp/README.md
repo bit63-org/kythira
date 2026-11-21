@@ -168,7 +168,7 @@ project, which is what every pre-existing entry meant.
 ```sh
 scripts/ci-cloud-credentials/gcp/provision-workload-identity.sh \
     --project prefab-sky-500619-s9 \
-    --github-org crawlins --github-repo kythira \
+    --github-org bit63-org --github-repo kythira \
     --bundles gcp-quorum-manager,gcp-privateca,gcp-object-persistence \
     --object-persistence-bucket kythira-ci-prefab-sky-500619-s9
 ```

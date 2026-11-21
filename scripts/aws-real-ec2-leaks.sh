@@ -54,7 +54,7 @@
 set -euo pipefail
 
 RUN_TAG="kythira:github-run-id"
-REPO="${GITHUB_REPOSITORY:-crawlins/kythira}"
+REPO="${GITHUB_REPOSITORY:-bit63-org/kythira}"
 DRY_RUN=0
 PASSES="${KYTHIRA_EC2_SWEEP_PASSES:-12}"
 PASS_SLEEP="${KYTHIRA_EC2_SWEEP_PASS_SLEEP:-15}"
