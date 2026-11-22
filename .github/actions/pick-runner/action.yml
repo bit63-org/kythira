@@ -1,0 +1,67 @@
+# Copyright (c) 2026 Clark Rawlins
+# SPDX-License-Identifier: Apache-2.0
+#
+# Picks bit63 or GitHub-hosted ubuntu-24.04 for each of a background run's
+# jobs, from the live load on both pools across every repository that
+# shares the bit63 scale set. See doc/ci_runner_pools.md.
+#
+# Needs only `scripts/pick-runner.py` and this directory checked out, so a
+# caller can use a sparse checkout. Never fails: if the pick goes wrong,
+# every job keeps the default runner.
+#
+# Repository variables (all optional; the caller passes toJSON(vars)):
+#   KYTHIRA_BACKGROUND_POOLS        auto (default) | off | <runner label>
+#   KYTHIRA_SHARED_RUNNER_REPOS     repositories sharing bit63
+#                                   (default bit63-org/kythira bit63-org/antikythera)
+#   KYTHIRA_BIT63_CAPACITY          bit63 slots (default 10, the scale set's max)
+#   KYTHIRA_HOSTED_CAPACITY         hosted slots to assume (default 20)
+#   KYTHIRA_BIT63_RESERVE           bit63 slots left for PR CI (default 1)
+
+name: Pick runner pools
+description: Choose bit63 or GitHub-hosted runners for a background run's jobs by current load
+
+inputs:
+  jobs:
+    description: Space-separated job names to place
+    required: true
+  default-runner:
+    description: The runner every job would use without a split (the caller's usual runs-on expression)
+    required: true
+  pin-self-hosted:
+    description: Space-separated job names that must stay on bit63 (LAN-only, or too big for hosted runners)
+    required: false
+    default: ''
+  vars:
+    description: The caller's `toJSON(vars)`; composite actions cannot read the vars context themselves
+    required: false
+    default: '{}'
+  token:
+    description: Token for reading Actions runs (needs actions:read)
+    required: false
+    default: ${{ github.token }}
+
+outputs:
+  runners:
+    description: JSON object mapping each job name to its runner label
+    value: ${{ steps.pick.outputs.runners || '{}' }}
+
+runs:
+  using: composite
+  steps:
+    - name: Pick runner pools
+      id: pick
+      shell: bash
+      env:
+        PICK_JOBS: ${{ inputs.jobs }}
+        PICK_DEFAULT: ${{ inputs.default-runner }}
+        PICK_PIN_SELF_HOSTED: ${{ inputs.pin-self-hosted }}
+        PICK_EVENT: ${{ github.event_name }}
+        PICK_SELF_HOSTED: bit63
+        PICK_HOSTED: ubuntu-24.04
+        PICK_MODE: ${{ fromJSON(inputs.vars).KYTHIRA_BACKGROUND_POOLS }}
+        PICK_REPOS: ${{ fromJSON(inputs.vars).KYTHIRA_SHARED_RUNNER_REPOS || 'bit63-org/kythira bit63-org/antikythera' }}
+        PICK_SELF_HOSTED_CAPACITY: ${{ fromJSON(inputs.vars).KYTHIRA_BIT63_CAPACITY }}
+        PICK_HOSTED_CAPACITY: ${{ fromJSON(inputs.vars).KYTHIRA_HOSTED_CAPACITY }}
+        PICK_RESERVE: ${{ fromJSON(inputs.vars).KYTHIRA_BIT63_RESERVE }}
+        GH_TOKEN: ${{ inputs.token }}
+      run: python3 "$GITHUB_WORKSPACE/scripts/pick-runner.py"
