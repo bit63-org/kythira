@@ -2567,15 +2567,20 @@ auto coap_client<Types, NodeId>::establish_dtls_connection(const std::string& en
         if (session_state == COAP_SESSION_STATE_ESTABLISHED) {
             break;
         }
-        if (std::chrono::steady_clock::now() > handshake_deadline) {
-            release_session();
-            throw coap_timeout_error("DTLS handshake timeout for endpoint: " + endpoint);
-        }
-        if (session_state != COAP_SESSION_STATE_NONE &&
-            session_state != COAP_SESSION_STATE_CONNECTING &&
+        // libcoap puts a new DTLS session in HANDSHAKE before returning it,
+        // and drops it to NONE when the handshake fails (an alert from the
+        // peer, ICMP unreachable, retransmits exhausted), as
+        // complete_dtls_handshake() relies on. NONE used to count as still
+        // in progress here, so a refused handshake waited out the whole
+        // budget and was reported as a timeout.
+        if (session_state != COAP_SESSION_STATE_CONNECTING &&
             session_state != COAP_SESSION_STATE_HANDSHAKE) {
             release_session();
             throw coap_security_error("DTLS handshake failed for endpoint: " + endpoint);
+        }
+        if (std::chrono::steady_clock::now() > handshake_deadline) {
+            release_session();
+            throw coap_timeout_error("DTLS handshake timeout for endpoint: " + endpoint);
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }

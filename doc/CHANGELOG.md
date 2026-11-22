@@ -3,6 +3,18 @@
 Chronological log of notable changes to Kythira, newest first. For the
 current list of outstanding work, see [TODO.md](TODO.md).
 
+### What Changed (November 22, 2026)
+
+- **A refused CoAP DTLS connection is reported at once.** When a peer
+  turned a handshake down (an untrusted certificate, an unknown PSK
+  identity), `coap_client::establish_dtls_connection()` kept waiting
+  until its 10 s handshake budget ran out and then threw
+  `coap_timeout_error`. It now throws `coap_security_error` as soon as
+  libcoap drops the session, as `complete_dtls_handshake()` already did.
+  The DTLS connection establishment and certificate validation property
+  tests, which could not fail before, now connect to a live server with
+  generated certificates and caught this.
+
 ### What Changed (November 20, 2026)
 
 - **Old `ca_cluster_node` AMIs can now be pruned automatically.** Every
