@@ -29,6 +29,11 @@
 ///   another gateway's coordinator sends to the leader of the keys' group,
 ///   submitted here with `submit_txn` when the composition root sets a
 ///   transaction handler. Signed like a forwarded write.
+/// - `POST /_kythira/kinesis/v2/...`: the data-layer API
+///   (`kinesis_data_api.hpp`, kinesis-independent-layers task 6) a front
+///   end without a replica calls, when the composition root sets its deps.
+///   Admitted when signed like a forwarded write over the path and body,
+///   or when the caller presents a layer identity the root's guard allows.
 /// - `GET /healthz`: 200 while the process serves.
 /// - `GET /metrics`: this node's per-stream and per-shard metrics in the
 ///   Prometheus text format (`kinesis_metrics.hpp`), when the composition
@@ -52,6 +57,7 @@
 /// `raft_stream_cluster` calls on a follower, and the segment fetch
 /// transport.
 
+#include <kythira/kinesis/kinesis_data_api.hpp>
 #include <kythira/kinesis/kinesis_forward.hpp>
 #include <kythira/kinesis/kinesis_front_end.hpp>
 #include <kythira/kinesis/kinesis_leases.hpp>
@@ -59,6 +65,7 @@
 #include <kythira/kinesis/kinesis_stream_state_machine.hpp>
 
 #include <raft/beast_https_server.hpp>
+#include <raft/layer_identity.hpp>
 #include <raft/layer_roles.hpp>
 #include <raft/record_segment_store.hpp>
 #include <raft/remote_segment_store.hpp>
@@ -289,6 +296,7 @@ struct gateway_stats {
     std::atomic<std::uint64_t> _forwarded_in{0};
     std::atomic<std::uint64_t> _forward_refused{0};
     std::atomic<std::uint64_t> _segments_served{0};
+    std::atomic<std::uint64_t> _data_api_served{0};
 };
 
 template<typename FrontEnd> class gateway {
@@ -313,32 +321,13 @@ public:
     [[nodiscard]] auto handle(const https::request& req, const https::request_context& ctx)
         -> https::response {
         namespace http = boost::beast::http;
-        const std::string_view target = req.target();
-        const auto q = target.find('?');
-        const auto path = target.substr(0, q);
-        const auto query = q == std::string_view::npos ? std::string_view() : target.substr(q + 1);
-        if (path == k_health_path && req.method() == http::verb::get) {
-            auto res = gateway_detail::reply(req, 200, "ok\n", "text/plain");
-            res.set(k_roles_header, _roles_text);
-            return res;
+        if (auto internal = handle_internal_route(req, ctx)) {
+            return std::move(*internal);
         }
+        const std::string_view target = req.target();
+        const auto path = target.substr(0, target.find('?'));
         if (_metrics && path == k_metrics_path && req.method() == http::verb::get) {
             return gateway_detail::reply(req, 200, _metrics(), "text/plain; version=0.0.4");
-        }
-        if (path == forward::k_path) {
-            return propose(req);
-        }
-        if (path == k_segment_path) {
-            return segment(req, query);
-        }
-        if (path == forward::k_txn_path) {
-            return txn(req);
-        }
-        if (path == k_volume_path) {
-            if (_volumes == nullptr) {
-                return gateway_detail::reply(req, 404, "not found\n", "text/plain");
-            }
-            return serve_volume(req, _secret, *_volumes, _clock());
         }
         if (!_roles.has(layers::role::gateway)) {
             return not_a_gateway(req);
@@ -354,6 +343,16 @@ public:
         res.body() = r.body;
         res.prepare_payload();
         return res;
+    }
+
+    /// The internal listener (`KINESIS_INTERNAL_LISTEN`): the internal
+    /// routes and `/healthz`, and nothing else.
+    [[nodiscard]] auto handle_internal(const https::request& req, const https::request_context& ctx)
+        -> https::response {
+        if (auto internal = handle_internal_route(req, ctx)) {
+            return std::move(*internal);
+        }
+        return gateway_detail::reply(req, 404, "not found\n", "text/plain");
     }
 
     /// The streaming route (`https::server::set_stream_handler`): takes
@@ -417,6 +416,17 @@ public:
     /// listener starts.
     void set_metrics_handler(std::function<std::string()> h) { _metrics = std::move(h); }
 
+    /// Serve the data-layer API on `data_api::k_prefix` from `deps`. Set
+    /// before the listener starts.
+    void set_data_api(data_api_deps deps) { _data_api = std::move(deps); }
+
+    /// Admit data-layer API callers presenting a layer identity this guard
+    /// allows (its rules name the routes and roles), beside those signing
+    /// with the forward secret. Set before the listener starts.
+    void set_layer_guard(std::shared_ptr<const layers::route_guard> guard) {
+        _guard = std::move(guard);
+    }
+
     /// The layers this node runs (all four unless set). Set before the
     /// listener starts.
     void set_roles(layers::role_set roles) {
@@ -434,6 +444,8 @@ private:
     lease_handler _leases;
     txn_handler _txn;
     segment_volume_service* _volumes = nullptr;
+    std::optional<data_api_deps> _data_api;
+    std::shared_ptr<const layers::route_guard> _guard;
     local_proposer _propose;
     const segment_store* _store;
     std::string _secret;
@@ -452,6 +464,63 @@ private:
                                          "application/x-amz-json-1.1");
         res.set(k_roles_header, _roles_text);
         return res;
+    }
+
+    /// `/healthz` and the routes between nodes, or nothing for anything
+    /// else.
+    auto handle_internal_route(const https::request& req, const https::request_context& ctx)
+        -> std::optional<https::response> {
+        namespace http = boost::beast::http;
+        const std::string_view target = req.target();
+        const auto q = target.find('?');
+        const auto path = target.substr(0, q);
+        const auto query = q == std::string_view::npos ? std::string_view() : target.substr(q + 1);
+        if (path == k_health_path && req.method() == http::verb::get) {
+            auto res = gateway_detail::reply(req, 200, "ok\n", "text/plain");
+            res.set(k_roles_header, _roles_text);
+            return res;
+        }
+        if (path == forward::k_path) {
+            return propose(req);
+        }
+        if (path == k_segment_path) {
+            return segment(req, query);
+        }
+        if (path == forward::k_txn_path) {
+            return txn(req);
+        }
+        if (path == k_volume_path) {
+            if (_volumes == nullptr) {
+                return gateway_detail::reply(req, 404, "not found\n", "text/plain");
+            }
+            return serve_volume(req, _secret, *_volumes, _clock());
+        }
+        if (data_api::is_data_api_path(path)) {
+            return data_api_route(req, ctx, path);
+        }
+        return std::nullopt;
+    }
+
+    auto data_api_route(const https::request& req, const https::request_context& ctx,
+                        std::string_view path) -> https::response {
+        if (!_data_api) {
+            return gateway_detail::reply(req, 404, "not found\n", "text/plain");
+        }
+        const bool signed_ok =
+            !_secret.empty() && signed_by_peer(req, data_api::signed_text(path, req.body()));
+        const bool identity_ok =
+            !signed_ok && _guard && _guard->check(req, ctx).kind == layers::verdict_kind::allowed;
+        const auto a = serve_data_api(*_data_api, signed_ok || identity_ok,
+                                      std::string_view(req.method_string()), path, req.body());
+        if (!a) {
+            return gateway_detail::reply(req, 404, "not found\n", "text/plain");
+        }
+        if (a->_status == data_api::k_refused) {
+            ++_stats._forward_refused;
+        } else {
+            ++_stats._data_api_served;
+        }
+        return gateway_detail::reply(req, a->_status, a->_body, "application/octet-stream");
     }
 
     auto refuse(const https::request& req, unsigned status, std::string_view why)

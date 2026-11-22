@@ -417,6 +417,24 @@ public:
                 return _gateway->stream(req, ctx);
             });
         _server->start();
+        if (_opt._internal_port != 0) {
+            // KINESIS_INTERNAL_LISTEN: the routes between nodes on a listener
+            // of their own (independent layers task 6).
+            https::server_config ic = hc;
+            ic.bind_address = _opt._internal_host;
+            ic.port = _opt._internal_port;
+            ic.http2 = false;
+            _internal_server = std::make_unique<https::server>(
+                ic,
+                [this](const https::request& req, const https::request_context& ctx) {
+                    return _gateway->handle_internal(req, ctx);
+                },
+                [this](bool warning, std::string_view message) {
+                    _logger->log(warning ? kythira::log_level::warning : kythira::log_level::info,
+                                 "kinesis internal listener: " + std::string(message), {});
+                });
+            _internal_server->start();
+        }
 
         _driving = true;
         _driver = std::thread([this] {
@@ -494,6 +512,9 @@ public:
         if (_server) {
             _server->stop();
         }
+        if (_internal_server) {
+            _internal_server->stop();
+        }
     }
 
     /// No tick once the host is gone.
@@ -514,9 +535,11 @@ public:
         _maintenance.reset();
         _keeper.reset();
         _server.reset();
+        _internal_server.reset();
         _volumes.reset();
         _leases.reset();
         _gateway.reset();
+        _local_data.reset();
         _service.reset();
         _front_end.reset();
         _cluster.reset();
@@ -930,6 +953,11 @@ private:
         if (_opt._metrics) {
             _gateway->set_metrics_handler([this] { return _service->metrics_text(); });
         }
+        // The data-layer API (independent layers task 6): front ends without
+        // a replica read and propose through this node's replicas.
+        _local_data = std::make_unique<kinesis::local_data_access<cluster_type>>(*_cluster);
+        _gateway->set_data_api(kinesis::data_api_deps_over(*_raft, *_cluster, *_local_data,
+                                                           std::function(address_of)));
         _gateway->set_txn_handler(
             [this](const std::vector<std::string>& keys, const std::vector<std::byte>& envelope) {
                 return _cluster->txn_submit_local(keys, envelope);
@@ -1130,8 +1158,10 @@ private:
     std::unique_ptr<kinesis::kinesis_service<cluster_type>> _service;
     std::unique_ptr<gateway_type> _gateway;
     std::unique_ptr<kinesis::lease_api<cluster_type, authorizer_type>> _leases;
+    std::unique_ptr<kinesis::local_data_access<cluster_type>> _local_data;
     std::shared_ptr<producer_type> _producer;
     std::unique_ptr<https::server> _server;
+    std::unique_ptr<https::server> _internal_server;
 
     std::atomic<bool> _driving{false};
     std::thread _driver;

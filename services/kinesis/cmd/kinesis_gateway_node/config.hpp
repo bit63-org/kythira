@@ -56,6 +56,13 @@ struct node_options {
     /// `KINESIS_LISTEN`: host:port of the API (and internal) listener.
     std::string _listen_host{"0.0.0.0"};
     std::uint16_t _listen_port{4567};
+    /// `KINESIS_INTERNAL_LISTEN`: host:port of a listener for the routes
+    /// between nodes only (forwarded writes, segments, transactions, the
+    /// data-layer API). Port 0 (unset): they share the API listener, so a
+    /// co-located node opens no new port. When set, peers are addressed on
+    /// this port unless `KINESIS_PEER_GATEWAYS` says otherwise.
+    std::string _internal_host;
+    std::uint16_t _internal_port{0};
     std::string _tls_cert_path;
     std::string _tls_key_path;
     /// `KINESIS_ALLOW_PLAINTEXT`: serve HTTP, and forward to peers over HTTP.

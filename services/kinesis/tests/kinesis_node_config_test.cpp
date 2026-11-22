@@ -504,3 +504,26 @@ BOOST_AUTO_TEST_CASE(a_segment_layer_too_small_or_unsigned_is_refused) {
     vars.erase("KINESIS_FORWARD_SECRET");
     BOOST_TEST(refused_naming(vars, "KINESIS_FORWARD_SECRET"));
 }
+
+BOOST_AUTO_TEST_CASE(the_internal_listener_is_its_own_port_when_set) {
+    // Independent layers task 6: unset, the routes between nodes share the
+    // API listener; set, they get their own and peers are addressed on it.
+    const auto shared = kn::from_env(kn::composite_env(lookup(node_vars())));
+    BOOST_TEST(shared._internal_port == 0U);
+    BOOST_TEST(kn::describe(shared).find("internal=") == std::string::npos);
+
+    auto vars = node_vars();
+    vars["KINESIS_INTERNAL_LISTEN"] = "0.0.0.0:4600";
+    const auto o = kn::from_env(kn::composite_env(lookup(vars)));
+    BOOST_TEST(o._internal_host == "0.0.0.0");
+    BOOST_TEST(o._internal_port == 4600U);
+    BOOST_TEST(o._peer_gateways.at(o._node_id).ends_with(":4600"));
+    BOOST_TEST(kn::describe(o).find("internal=0.0.0.0:4600") != std::string::npos);
+
+    // The API listener's own address: one listener, as when unset.
+    vars["KINESIS_INTERNAL_LISTEN"] = "0.0.0.0:4567";
+    BOOST_TEST(kn::from_env(kn::composite_env(lookup(vars)))._internal_port == 0U);
+
+    vars["KINESIS_INTERNAL_LISTEN"] = "no-port";
+    BOOST_CHECK_THROW(kn::from_env(kn::composite_env(lookup(vars))), std::invalid_argument);
+}
