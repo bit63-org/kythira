@@ -40,7 +40,7 @@ halves were misleading, in opposite directions:
   `grpc_transport_conversion_property_test`,
   `grpc_transport_integration_test` and `grpc_transport_example_test` —
   appear by name in the JUnit artifacts of run
-  [30947491385](https://github.com/crawlins/kythira/actions/runs/30947491385)
+  [30947491385](https://github.com/bit63-org/kythira/actions/runs/30947491385)
   (commit `1a52e1f`, August 4, 2026) and pass on all four `Build & Test`
   legs (`g++-13`/`clang++-18` × x64/arm64), in a 403/403, 0-failure,
   0-skipped suite. That settles Task **1.5** (the generated `raft.pb.h`/

@@ -11,7 +11,7 @@ and carried as a follow-up rather than absorbed.
 
 **September 9, 2026: both caches are live on `main`** and
 verified there by run
-[34296062792](https://github.com/crawlins/kythira/actions/runs/34296062792),
+[34296062792](https://github.com/bit63-org/kythira/actions/runs/34296062792),
 15 of 15 jobs green: vcpkg's archives through `x-aws` and this project's
 compiles through sccache, in one OCI bucket, with 397 archives / 5.06 GB
 banked and zero ports built from source. The `Full suite (stdexec)` leg —
@@ -20,7 +20,7 @@ the one that fought hardest — built in **4.1 minutes against 175 cold**, at
 
 **Task 10 is closed and every Requirement 6 threshold is met with room to
 spare**, read off run
-[34353211972](https://github.com/crawlins/kythira/actions/runs/34353211972):
+[34353211972](https://github.com/bit63-org/kythira/actions/runs/34353211972):
 `build-and-test` Builds of 2.23–4.05 minutes against a 15-minute ceiling, the
 stdexec leg at 4.01 against 45, hit rates of 99.82–100%, and zero
 non-cacheable calls in 4,494 requests. Nothing needed investigating and no
@@ -32,13 +32,13 @@ degrading to no compiler cache — twice, for two independent reasons, both
 violating Requirement 3.5. sccache validates its storage backend lazily, on
 the first request, so no exit status could distinguish a healthy server that
 was already listening from a dead one (PR
-[#326](https://github.com/crawlins/kythira/pull/326)); and `RUSTC_WRAPPER` was
+[#326](https://github.com/bit63-org/kythira/pull/326)); and `RUSTC_WRAPPER` was
 exported before the vcpkg install, where the lakers port's cargo build uses it
 and where no per-job guard can reach (PR
-[#328](https://github.com/crawlins/kythira/pull/328)). Neither had ever fired,
+[#328](https://github.com/bit63-org/kythira/pull/328)). Neither had ever fired,
 because the `vcpkg_installed/` tree cache had been hitting on every run. The
 re-run against both fixes is **15/15 green** (run
-[34358385332](https://github.com/crawlins/kythira/actions/runs/34358385332))
+[34358385332](https://github.com/bit63-org/kythira/actions/runs/34358385332))
 and, as a by-product, is the first controlled measurement of what the vcpkg
 cache is worth: ten legs installing in **4.41–6.51 minutes** beside one at
 **95.01**, same commit, same L1 miss, cache reachable or not.
@@ -59,9 +59,9 @@ enabled, both keys ACTIVE.
 
 That makes **four** separate defects in this spec with one shape — something
 that could not answer being read as an answer — the earlier three being PRs
-[#326](https://github.com/crawlins/kythira/pull/326),
-[#328](https://github.com/crawlins/kythira/pull/328) and
-[#329](https://github.com/crawlins/kythira/pull/329), the last of which was
+[#326](https://github.com/bit63-org/kythira/pull/326),
+[#328](https://github.com/bit63-org/kythira/pull/328) and
+[#329](https://github.com/bit63-org/kythira/pull/329), the last of which was
 also found by an `audit.sh` run and also reported a false negative about a
 credential CI was authenticating with at that moment. The rule now written at
 the site: **when a query comes back empty, say whether the QUERY failed or the
@@ -185,7 +185,7 @@ bucket does.
       each one failed in a way a green run could not distinguish from
       success**
   - Branch `measure/oci-build-cache-task1`, draft PR
-    [#320](https://github.com/crawlins/kythira/pull/320), marked DO NOT MERGE
+    [#320](https://github.com/bit63-org/kythira/pull/320), marked DO NOT MERGE
     per Requirement 1.5. It wires the composite action, `x-aws` and sccache
     into the nine legs of Requirement 5.1's table and leaves
     `ion-serializer-build` on its original wiring as an unmodified control.
@@ -401,7 +401,7 @@ bucket does.
   - _Requirements: 1.1, 1.2, 1.3, 1.4, 1.5_
 
 - [x] 1a. Throwaway closed and deleted (Requirement 1.5) — **September 8, 2026**
-  - PR [#320](https://github.com/crawlins/kythira/pull/320) closed **unmerged**,
+  - PR [#320](https://github.com/bit63-org/kythira/pull/320) closed **unmerged**,
     and the branch deleted from the remote.
   - **The read-write arm never reached `main`.** It existed only on the
     throwaway branch, which is why deleting the branch — not editing the
@@ -647,7 +647,7 @@ bucket does.
 
 - [x] 6. vcpkg binary cache to the bucket, every workflow — **done and
       verified on `main`, September 9, 2026**
-  - Merged as PR [#322](https://github.com/crawlins/kythira/pull/322).
+  - Merged as PR [#322](https://github.com/bit63-org/kythira/pull/322).
     Fifteen jobs across **five** workflows take `VCPKG_BINARY_SOURCES` from
     the composite action as `x-aws`; the `x-gha` exports and the
     "Export Actions cache credentials for vcpkg" steps that existed only to
@@ -726,7 +726,7 @@ bucket does.
     against a runner's 16 GiB plus the 24 GiB swapfile that leg adds. All four are now in the
     pool; see `doc/TODO.md` and the top-level `CMakeLists.txt`.
   - The `-j2` experiment that led here was **refuted** and its PR
-    ([#323](https://github.com/crawlins/kythira/pull/323)) closed unmerged
+    ([#323](https://github.com/bit63-org/kythira/pull/323)) closed unmerged
     rather than landed, so `main` keeps `-j3`.
   - **Both are now recorded where the next person will meet them**, which is
     all this task claims: the writer-policy deadlock is in `design.md`
@@ -787,11 +787,11 @@ bucket does.
 
   | State | Run | Result |
   | --- | --- | --- |
-  | `push` to `main` writes | [34353211972](https://github.com/crawlins/kythira/actions/runs/34353211972) | 11 legs took the read-write key; 3 objects written; **0 write errors** |
-  | `pull_request` reads, cannot write | [34349573736](https://github.com/crawlins/kythira/actions/runs/34349573736) | every leg read-only; **write errors == misses, exactly**; count unchanged |
-  | secrets withheld | [34350454484](https://github.com/crawlins/kythira/actions/runs/34350454484), `Coverage` | `enabled=false`, `Start sccache` **skipped**, job **green** |
-  | bad endpoint, take one | [34350454484](https://github.com/crawlins/kythira/actions/runs/34350454484), `ThreadSanitizer` | **FAILED — see below.** Two violations found, fixed by PRs [#326](https://github.com/crawlins/kythira/pull/326) and [#328](https://github.com/crawlins/kythira/pull/328) |
-  | bad endpoint, take two | [34358385332](https://github.com/crawlins/kythira/actions/runs/34358385332), `ThreadSanitizer` | **15/15 green**; 117 ports built from source; both probes warned; no compiler cache |
+  | `push` to `main` writes | [34353211972](https://github.com/bit63-org/kythira/actions/runs/34353211972) | 11 legs took the read-write key; 3 objects written; **0 write errors** |
+  | `pull_request` reads, cannot write | [34349573736](https://github.com/bit63-org/kythira/actions/runs/34349573736) | every leg read-only; **write errors == misses, exactly**; count unchanged |
+  | secrets withheld | [34350454484](https://github.com/bit63-org/kythira/actions/runs/34350454484), `Coverage` | `enabled=false`, `Start sccache` **skipped**, job **green** |
+  | bad endpoint, take one | [34350454484](https://github.com/bit63-org/kythira/actions/runs/34350454484), `ThreadSanitizer` | **FAILED — see below.** Two violations found, fixed by PRs [#326](https://github.com/bit63-org/kythira/pull/326) and [#328](https://github.com/bit63-org/kythira/pull/328) |
+  | bad endpoint, take two | [34358385332](https://github.com/bit63-org/kythira/actions/runs/34358385332), `ThreadSanitizer` | **15/15 green**; 117 ports built from source; both probes warned; no compiler cache |
 
   - **The writer policy is proven by a contrast, not by a count.** The same
     translation unit — the one clang TU whose command line genuinely varies
@@ -848,7 +848,7 @@ bucket does.
     failure cost Task 1 an entire run. But `--show-stats` returns 0 for the
     bottom row too. The guard could not tell a live server from a dead one,
     chose sccache over a dead one, and every compile then exited 2.
-  - **Fixed in PR [#326](https://github.com/crawlins/kythira/pull/326)**
+  - **Fixed in PR [#326](https://github.com/bit63-org/kythira/pull/326)**
     (merged to `main` as `cc11a5b`): the decision is now a probe compile of a
     five-byte C file, the only check that separates all three rows, followed by
     `sccache --zero-stats` so the probe stays out of the figures every other
@@ -859,7 +859,7 @@ bucket does.
     fourth direction was verified too: with sccache **not installed at all**
     (the composite action's transient-download-failure path) it warns and
     degrades identically. The healthy path is confirmed on `main` in run
-    [34354004247](https://github.com/crawlins/kythira/actions/runs/34354004247).
+    [34354004247](https://github.com/bit63-org/kythira/actions/runs/34354004247).
   - **A second violation, on the same requirement, that the first fix
     structurally could not catch.** `RUSTC_WRAPPER=sccache` was exported
     unconditionally, and the lakers port's cargo build runs under it *during*
@@ -869,11 +869,11 @@ bucket does.
     and the job goes red. It had never fired only because the tree cache had
     been hitting on every run, and a hit skips the install entirely. Found by
     predicting it before spending a run on it, and fixed in PR
-    [#328](https://github.com/crawlins/kythira/pull/328) by probing inside the
+    [#328](https://github.com/bit63-org/kythira/pull/328) by probing inside the
     action and gating the export.
 
   - **Take two (run
-    [34358385332](https://github.com/crawlins/kythira/actions/runs/34358385332)):
+    [34358385332](https://github.com/bit63-org/kythira/actions/runs/34358385332)):
     15 of 15 green, including the deliberately broken leg.** Requirement 3.5
     and Requirement 7.3 both satisfied, and the run doubles as the controlled
     comparison this spec had never managed — every leg took the same L1 miss
@@ -920,12 +920,12 @@ bucket does.
     **This is now twice that a verification has silently measured nothing
     because of that L1 hit.** Any future test of the vcpkg binary cache has to
     start by forcing the miss.
-  - PR [#325](https://github.com/crawlins/kythira/pull/325) closed **unmerged**
+  - PR [#325](https://github.com/bit63-org/kythira/pull/325) closed **unmerged**
     and its branch deleted, per Requirement 1.5. Nothing from it reaches `main`.
   - _Requirements: 3.5, 4.3, 7.2, 7.3, 9.4_
 
 - [x] 10. Second-run thresholds — **every threshold met, September 9, 2026,
-      on run [34353211972](https://github.com/crawlins/kythira/actions/runs/34353211972)
+      on run [34353211972](https://github.com/bit63-org/kythira/actions/runs/34353211972)
       (15/15 green), the second consecutive `push` to `main` after Task 7's
       populating run 34296062792**
 
@@ -976,7 +976,7 @@ bucket does.
     anticipates this. The demonstration that vcpkg's cache works on a real L1
     miss is Task 6's, on run 34296062792: 397 archives, zero from source.
   - **6.4 is satisfied by run
-    [34349573736](https://github.com/crawlins/kythira/actions/runs/34349573736)**,
+    [34349573736](https://github.com/bit63-org/kythira/actions/runs/34349573736)**,
     a `pull_request` against an unchanged `vcpkg.json`, showing the same
     99.82–100% rates from the read-only key. The three clang legs' single
     genuine miss is the only difference between the two runs, and it is a
@@ -1034,7 +1034,7 @@ bucket does.
     is a command substitution, so the counter incremented a subshell copy and
     the "N informational queries could not be read" summary could never fire,
     for the whole life of the script. Fixed in PR
-    [#329](https://github.com/crawlins/kythira/pull/329), with three checks
+    [#329](https://github.com/bit63-org/kythira/pull/329), with three checks
     added to `test-audit.sh` that fail against the previous version. The stub
     had to be tightened first: its `iam user list` answered with a valid user
     id whatever compartment it was handed, so it could not reproduce the bug
@@ -1090,9 +1090,9 @@ bucket does.
 
     | | read as |
     | --- | --- |
-    | 1. `--show-stats` exits 0 over a dead server | a healthy server ([#326](https://github.com/crawlins/kythira/pull/326)) |
-    | 2. `RUSTC_WRAPPER` set before any guard could run | a guarded wrapper ([#328](https://github.com/crawlins/kythira/pull/328)) |
-    | 3. a stderr diagnostic captured as stdout | an OCID ([#329](https://github.com/crawlins/kythira/pull/329)) |
+    | 1. `--show-stats` exits 0 over a dead server | a healthy server ([#326](https://github.com/bit63-org/kythira/pull/326)) |
+    | 2. `RUSTC_WRAPPER` set before any guard could run | a guarded wrapper ([#328](https://github.com/bit63-org/kythira/pull/328)) |
+    | 3. a stderr diagnostic captured as stdout | an OCID ([#329](https://github.com/bit63-org/kythira/pull/329)) |
     | 4. an **ungrouped aggregate** with no `service` field | "no Object Storage line" |
 
     The rule that would have caught all four, now written at the site: **when
@@ -1209,7 +1209,7 @@ bucket does.
     - **Why, measured rather than inferred.** `ci.yml` runs went from
       about 23 a day (October 4–26) to about 56 a day (November 10–18),
       with the 20-job runner limit saturated. And since November 6 (PR
-      [#710](https://github.com/crawlins/kythira/pull/710)) same-repo pull
+      [#710](https://github.com/bit63-org/kythira/pull/710)) same-repo pull
       requests write to the cache, so objects written per day, read off
       each object's `time-created`, rose from 0.1–3.7 GiB in late October
       to 5–7 GiB in early November and **7–32 GiB (about 14 a day) from
@@ -1256,7 +1256,7 @@ bucket does.
     | 3 | the same three | each leg's "Select credential and export the cache environment" step (citation added by this task) |
     | 6 | 34296062792 | 15/15 jobs on a `push` to `main`; `build cache: read-write key`; 397 archives / 5.06 GB, zero ports from source |
     | 7 | 34296062792 | `Full suite (stdexec)`: 561 requests, 561 hits, 0 write errors, 0 non-cacheable |
-    | 9 | pending | PR [#325](https://github.com/crawlins/kythira/pull/325), DO NOT MERGE |
+    | 9 | pending | PR [#325](https://github.com/bit63-org/kythira/pull/325), DO NOT MERGE |
     | 10 | pending | the second consecutive `push` to `main` |
 
   - **Four tasks cite no run id and correctly cannot.** 1a is a PR closed and

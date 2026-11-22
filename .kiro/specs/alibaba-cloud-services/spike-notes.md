@@ -436,7 +436,7 @@ is noise that hides the next real one, so the input is gone.
 ## Finding 13 — Live verification in CI (Task 11)
 
 **Both bundles green on the scheduled run of September 28, 2026**
-([run 36426191450](https://github.com/crawlins/kythira/actions/runs/36426191450),
+([run 36426191450](https://github.com/bit63-org/kythira/actions/runs/36426191450),
 job 108940619579):
 
 - `oss-persistence`: 7 cases, 229 s, including the fresh-engine read-back,
@@ -449,7 +449,7 @@ job 108940619579):
 
 **And the `ess-quorum-manager` bundle green again on a dispatch of October
 1, 2026**
-([run 36936632218](https://github.com/crawlins/kythira/actions/runs/36936632218),
+([run 36936632218](https://github.com/bit63-org/kythira/actions/runs/36936632218),
 124 s), audit clean. Account-side `Forbidden.RiskControl` refusals have come
 and gone around these runs; that story is in `doc/TODO.md`, and it is not a
 code fault.

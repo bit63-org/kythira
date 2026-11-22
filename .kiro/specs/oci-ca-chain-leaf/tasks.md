@@ -85,7 +85,7 @@ pinned the wrong shape.
     and issuer-chain checks
   - [x] 7.2 Run it through the real-cloud workflow (per project rules on
     real-cloud dispatch) and record the run ID here: run 37208260750
-    (https://github.com/crawlins/kythira/actions/runs/37208260750),
+    (https://github.com/bit63-org/kythira/actions/runs/37208260750),
     passed
   - _Requirements: 4.6_
 

@@ -206,7 +206,7 @@ the bucket. Percentiles are nearest-rank.
 
 CI run 40423882255 (`ci.yml`, push to `main` at `e9f8b8e2`, 28 jobs, all
 green). Each job's log was fetched with
-`gh api repos/crawlins/kythira/actions/jobs/<id>/logs`, because
+`gh api repos/bit63-org/kythira/actions/jobs/<id>/logs`, because
 `gh run view --log` does not work on this machine.
 
 - **sccache:** the jobs' final `--show-stats` sum to **6,200 hits** and
@@ -809,7 +809,7 @@ error table always said ("drop the chunk and queue a repair").
 
 ### Task 11 results (2026-11-04 and 2026-11-05, both legs)
 
-Run [41777755237](https://github.com/crawlins/kythira/actions/runs/41777755237)
+Run [41777755237](https://github.com/bit63-org/kythira/actions/runs/41777755237)
 of `.github/workflows/cache-cluster-measure.yml`, dispatched on `main` at
 28d1bc29 after main's own CI run at that commit had finished green, so the
 OCI bucket held that commit's objects. Hardware: a GitHub-hosted
@@ -864,7 +864,7 @@ installs it (#689), and both legs were run again.
 
 #### Second run, both legs (2026-11-05)
 
-Run [41924204158](https://github.com/crawlins/kythira/actions/runs/41924204158),
+Run [41924204158](https://github.com/bit63-org/kythira/actions/runs/41924204158),
 the same workflow and commands at ab4265da, after main's own CI run at that
 commit had finished its Build & Test jobs. Main had moved on by dispatch
 time, so the run was dispatched from a working branch pinned at ab4265da;

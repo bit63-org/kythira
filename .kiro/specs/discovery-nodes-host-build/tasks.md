@@ -94,7 +94,7 @@ build.
 - [x] 6. Manually dispatch `arm64-docker-smoke-test.yml` and confirm
   - Dispatched on `feat/discovery-nodes-host-build` (PR #91) on
     2026-07-23: run
-    [30006127341](https://github.com/crawlins/kythira/actions/runs/30006127341)
+    [30006127341](https://github.com/bit63-org/kythira/actions/runs/30006127341)
     completed successfully. `Run docker-poco-discovery-tests
     (poco_discovery_node image)`, `Run docker-dns-discovery-tests (bind9 +
     dns_discovery_node images)`, and `Run docker-dns-sd-discovery-tests

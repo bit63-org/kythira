@@ -1161,8 +1161,8 @@ current list of outstanding work, see [TODO.md](TODO.md).
 
 - **The CoAP row of the multi-Raft matrix now runs at the standard 2 ms
   tick.** Re-measured after the libcoap client's I/O thread stopped
-  pacing on a 5 ms sleep ([PR #392](https://github.com/crawlins/kythira/pull/392),
-  which replaced the loop [PR #227](https://github.com/crawlins/kythira/pull/227)
+  pacing on a 5 ms sleep ([PR #392](https://github.com/bit63-org/kythira/pull/392),
+  which replaced the loop [PR #227](https://github.com/bit63-org/kythira/pull/227)
   introduced). At 8 and 64 groups on 2 ms the cells that used to stop
   with no leader now commit every write, at 1787.1 and 1804.7 ops/sec
   (p50 4.61 and 7.64 ms), and servers receive 96.5% and 100% of the
@@ -2091,7 +2091,7 @@ current list of outstanding work, see [TODO.md](TODO.md).
 
 - **Proxygen HTTP transport — CI-verified everything the entry above
   described as "written and reviewed but not compiled or run."**
-  [PR #117](https://github.com/crawlins/kythira/pull/117) ran green across
+  [PR #117](https://github.com/bit63-org/kythira/pull/117) ran green across
   all four `Build & Test` legs (g++-13/clang++-18 × x64/arm64) plus
   `Coverage (clang++-18)`, on real GitHub Actions runners (unlike the
   session that wrote the code, GitHub Actions runners have normal internet
@@ -2132,7 +2132,7 @@ current list of outstanding work, see [TODO.md](TODO.md).
 ### What Changed (July 30, 2026, further continued)
 
 - **Proxygen HTTP transport — closed both remaining Known Follow-ups from
-  the entry above.** [PR #117](https://github.com/crawlins/kythira/pull/117)
+  the entry above.** [PR #117](https://github.com/bit63-org/kythira/pull/117)
   added a `KYTHIRA_SANITIZER` CMake cache option (root `CMakeLists.txt`,
   mirroring `ENABLE_COVERAGE`'s existing shape) and two new CI jobs
   (`.github/workflows/ci.yml`): `tsan` (ThreadSanitizer over
@@ -2222,7 +2222,7 @@ current list of outstanding work, see [TODO.md](TODO.md).
 
 - **Boost.Beast HTTP transport — a round-2 ThreadSanitizer pass against the
   now-split test binaries found four more genuine, pre-existing bugs**
-  beyond the two [PR #117](https://github.com/crawlins/kythira/pull/117)'s
+  beyond the two [PR #117](https://github.com/bit63-org/kythira/pull/117)'s
   own `tsan` job found against the (then still monolithic)
   `beast_transport_test` binary. Splitting the suite exercised
   connection-lifetime paths — a server stopping mid-keep-alive, a client
@@ -2841,7 +2841,7 @@ current list of outstanding work, see [TODO.md](TODO.md).
     — diagnosing it needs a live backtrace, and this sandbox has no
     `ptrace` access — and is tracked as a documented follow-up in
     `TODO.md`.
-  - **Merged to `main` via [PR #92](https://github.com/crawlins/kythira/pull/92)**
+  - **Merged to `main` via [PR #92](https://github.com/bit63-org/kythira/pull/92)**
     (rebase merge, 6 commits, all CI checks — 4 build/test matrix jobs,
     coverage, and the Packer AMI build — passing).
 
@@ -3394,7 +3394,7 @@ current list of outstanding work, see [TODO.md](TODO.md).
   - Parameterized all 7 `docker/*/Dockerfile` build stages with a
     `uname -m`-derived triplet; `chaos_node` needed no change (it has no
     vcpkg dependency) and `bind9` needed no change (no CMake build).
-  - **Verified against a real CI run** (crawlins/kythira#47): all four
+  - **Verified against a real CI run** (bit63-org/kythira#47): all four
     `build-and-test` matrix legs passed on a cold vcpkg cache, including
     the `--x-feature=edhoc` Rust/`lakers` build on both new arm64 legs, with
     no arm64-specific failures — the spike's static `supports`-expression

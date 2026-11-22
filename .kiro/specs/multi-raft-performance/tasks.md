@@ -1854,7 +1854,7 @@ and the answer is currently no for every one of them.
   - Like-for-like and indicative tables kept separate; no bare multiplier
     anywhere; H1–H7 each with a verdict and the number behind it; every metric
     with no possible like-for-like comparison saying so explicitly
-  - Absolute `https://github.com/crawlins/kythira/blob/main/doc/…` link from
+  - Absolute `https://github.com/bit63-org/kythira/blob/main/doc/…` link from
     `README.md`, since a relative one fails the `docs` CI job
   - **The like-for-like table is EMPTY, and that is the document's headline.**
     Requirement 3.3 forbids a like-for-like claim from any tier below C; every

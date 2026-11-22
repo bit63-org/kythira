@@ -268,7 +268,7 @@ Usage: provision-oidc-role.sh --github-org ORG --github-repo REPO \
            [--ref-restriction REF] \
            [--dry-run]
 
-  --github-org/--github-repo   e.g. crawlins / kythira
+  --github-org/--github-repo   e.g. bit63-org / kythira
   --bundles                    ec2-quorum-manager,ca-cluster-node,ca-cluster-node-rpc-tls
                                 (any non-empty subset, comma-separated)
   --role-name                  default: kythira-ci-real-cloud-tests

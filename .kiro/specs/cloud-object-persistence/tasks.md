@@ -1838,8 +1838,8 @@ Reference implementations to study before starting, in this order:
       declining requests, correlating with a billing-account upgrade whose
       mechanism was never confirmed and now cannot be tested.
 
-      **Runs:** [32432380565](https://github.com/crawlins/kythira/actions/runs/32432380565)
-      (all bundles) and [32441129124](https://github.com/crawlins/kythira/actions/runs/32441129124)
+      **Runs:** [32432380565](https://github.com/bit63-org/kythira/actions/runs/32432380565)
+      (all bundles) and [32441129124](https://github.com/bit63-org/kythira/actions/runs/32441129124)
       (GCS + Alibaba monitoring re-run).
 
       | Provider | Result |
@@ -1890,7 +1890,7 @@ Reference implementations to study before starting, in this order:
       `kythira-ci-artifacts` — log group `kythira-ci-object-storage`, read and
       write categories, 30-day retention — enabled *before* the next decline
       because the point was to catch one, and then run
-      [32444971282](https://github.com/crawlins/kythira/actions/runs/32444971282)
+      [32444971282](https://github.com/bit63-org/kythira/actions/runs/32444971282)
       was dispatched and allowed to fail. Audit was never the right place:
       data-plane operations are not audited by default, which is why the "take
       an opc-request-id to the audit log" step recorded since the flake was
@@ -1992,9 +1992,9 @@ Reference implementations to study before starting, in this order:
 
       **OCI's green run landed on August 23, 2026** (Finding 27), and it is
       the last thing this task owed. Runs
-      [32641351919](https://github.com/crawlins/kythira/actions/runs/32641351919),
-      [32641370321](https://github.com/crawlins/kythira/actions/runs/32641370321)
-      and [32641387727](https://github.com/crawlins/kythira/actions/runs/32641387727)
+      [32641351919](https://github.com/bit63-org/kythira/actions/runs/32641351919),
+      [32641370321](https://github.com/bit63-org/kythira/actions/runs/32641370321)
+      and [32641387727](https://github.com/bit63-org/kythira/actions/runs/32641387727)
       — **3/3 green, 5/5 cases each**, under the WIF/UPST least-privilege
       principal. Three dispatches rather than one on purpose: a single green is
       indistinguishable from the ~1-in-10 outcome this task recorded in

@@ -42,7 +42,7 @@ implemented — `include/raft/proxygen_http_transport.hpp`/`_impl.hpp`,
 `examples/raft/http_transport_comparison_benchmark.cpp`,
 `doc/http_transport_performance_comparison.md`, `CMakeLists.txt`,
 `.github/workflows/ci.yml`, `tests/tsan_suppressions.txt`, all via
-[PR #117](https://github.com/crawlins/kythira/pull/117). Reconciled against
+[PR #117](https://github.com/bit63-org/kythira/pull/117). Reconciled against
 a prior session's July 29, 2026 update, which itself reconciled this file
 against the actual implementation after an earlier drift in the other
 direction.)
@@ -590,7 +590,7 @@ accounting in `doc/coap-flake-investigation.md` Finding 6.
 
 Every other gap this section has ever listed is closed **and CI-verified** —
 see Tasks 11-15 above for what each one delivered,
-and [PR #117](https://github.com/crawlins/kythira/pull/117) for the actual
+and [PR #117](https://github.com/bit63-org/kythira/pull/117) for the actual
 CI runs. This session's own local development environment could never
 produce a working `vcpkg install` (a from-scratch bootstrap failed
 downloading `zlib`, a transitive `proxygen` dependency, from its upstream

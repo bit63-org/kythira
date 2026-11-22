@@ -7,7 +7,7 @@ equivalence against cpp-httplib, all confirmed under AddressSanitizer with
 zero findings in this project's own code). Tasks 14 (ThreadSanitizer run) and
 15 (cross-transport equivalence, delivered jointly with
 `.kiro/specs/proxygen-http-transport/`'s own Task 14 as a three-way test) are
-CI-verified via [PR #117](https://github.com/crawlins/kythira/pull/117)
+CI-verified via [PR #117](https://github.com/bit63-org/kythira/pull/117)
 (`beast-http`-labeled CTest runs, green); three further ThreadSanitizer
 passes against this spec's own (since-split) test binaries found and fixed
 six more real bugs beyond what that run surfaced — see
@@ -377,7 +377,7 @@ codebase, made possible by defining a canonical `Types` bundle whose
     three transports linked into one binary — see
     `tests/CMakeLists.txt`/`.kiro/specs/proxygen-http-transport/tasks.md`
     Task 14 for the fuller writeup). CI-verified green via
-    [PR #117](https://github.com/crawlins/kythira/pull/117).
+    [PR #117](https://github.com/bit63-org/kythira/pull/117).
   - Also kept the narrower, two-transport
     `tests/beast_cross_transport_equivalence_test.cpp` alongside the
     three-way test rather than deleting it: it surfaced a genuine,
@@ -392,7 +392,7 @@ codebase, made possible by defining a canonical `Types` bundle whose
     unrelated to this feature; the test originally worked around it
     (checking only that *some* exception is thrown on the cpp-httplib side)
     rather than fixing out-of-scope code.
-  - **Fixed** in [PR #114](https://github.com/crawlins/kythira/pull/114):
+  - **Fixed** in [PR #114](https://github.com/bit63-org/kythira/pull/114):
     `make_future_with_exception` is now templated on the concrete exception
     type, so the derived type survives on the cpp-httplib side too and the
     test asserts genuine equivalence — both transports' `status_code()`
@@ -460,7 +460,7 @@ than as a to-do list.
 - ~~`http_transport_impl.hpp`'s `make_future_with_exception` slicing derived
   exceptions~~ — done. Task 15 recorded this as a real bug it had to work
   around because it sits outside this spec's Non-Goals boundary;
-  [PR #114](https://github.com/crawlins/kythira/pull/114) fixes it by
+  [PR #114](https://github.com/bit63-org/kythira/pull/114) fixes it by
   templating the helper on the concrete exception type, and tightens
   `tests/beast_cross_transport_equivalence_test.cpp` to assert that both
   transports now surface an identically-typed exception with the same
@@ -496,7 +496,7 @@ than as a to-do list.
 
 ### Round 2: a genuine ThreadSanitizer run against the split binaries found four more real bugs
 
-[PR #117](https://github.com/crawlins/kythira/pull/117) landed the `tsan` CI
+[PR #117](https://github.com/bit63-org/kythira/pull/117) landed the `tsan` CI
 job and reported the (then still monolithic) `beast_transport_test` binary
 clean. Running each of the now-split binaries individually under
 `-DKYTHIRA_SANITIZER=thread` exercised connection-lifetime paths the

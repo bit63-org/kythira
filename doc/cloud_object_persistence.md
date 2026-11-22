@@ -222,9 +222,9 @@ above), and the sizing rule below is worked from those rather than from p50.
 
 *Batched layouts and write-behind, from GitHub-hosted CI runners* (October
 22, 2026, runs
-[39727417123](https://github.com/crawlins/kythira/actions/runs/39727417123)
+[39727417123](https://github.com/bit63-org/kythira/actions/runs/39727417123)
 for S3 and
-[39776156973](https://github.com/crawlins/kythira/actions/runs/39776156973)
+[39776156973](https://github.com/bit63-org/kythira/actions/runs/39776156973)
 for the rest, `.kiro/specs/object-store-batched-layout/` task 10). Every
 provider passed all 12 cases, Alibaba its 12 without the two fencing ones.
 p50 / p99 in ms, 8 samples for the combined write and 10 for each segment:
@@ -258,12 +258,12 @@ p50 / p99 in ms, 8 samples for the combined write and 10 for each segment:
 `max_segment_bytes` was swept from 64 KiB to 8 MiB on every provider
 (`.kiro/specs/object-store-segment-size-sweep/`): S3 on both runner
 architectures in run
-[40143696448](https://github.com/crawlins/kythira/actions/runs/40143696448),
+[40143696448](https://github.com/bit63-org/kythira/actions/runs/40143696448),
 and GCS, OCI Object Storage, Azure Blob and Alibaba OSS (x64) in run
-[40326601959](https://github.com/crawlins/kythira/actions/runs/40326601959),
+[40326601959](https://github.com/bit63-org/kythira/actions/runs/40326601959),
 both on `main` at f0e2548. Alibaba OSS ran out of time in that run, and its
 follower, truncation and recovery cases come from run
-[40576544362](https://github.com/crawlins/kythira/actions/runs/40576544362)
+[40576544362](https://github.com/bit63-org/kythira/actions/runs/40576544362)
 (October 27, 2026, `main` plus #632's longer recovery timeout). Like the
 tables above they were measured from GitHub-hosted runners, so they are
 cross-region for most providers, and OSS in `ap-southeast-1` is across the
@@ -1028,7 +1028,7 @@ cases on August 23, 2026, once the tenancy-side `404 BucketNotFound` flake
 described below stopped.
 
 **Now also verified from CI, not only from a developer machine.** Run
-[32432380565](https://github.com/crawlins/kythira/actions/runs/32432380565)
+[32432380565](https://github.com/bit63-org/kythira/actions/runs/32432380565)
 dispatched every provider's object-persistence bundle against its real
 service, under the least-privilege CI grants rather than an operator's
 credentials — which is a stronger claim than the earlier runs, because those
@@ -1039,7 +1039,7 @@ authenticated as principals that already held broader policies:
 | AWS S3 (x64 **and** arm64) | **pass**, 5/5 |
 | Azure Blob | **pass**, 5/5 |
 | Alibaba OSS | **pass** |
-| GCS | **pass**, 5/5 on re-run ([32441129124](https://github.com/crawlins/kythira/actions/runs/32441129124)). The first attempt was 4/5: `backup_verify_restore_read_back` hit a Google-side `502` ("the server encountered a temporary error… please try again in 30 seconds") after the client's retry policy was exhausted |
+| GCS | **pass**, 5/5 on re-run ([32441129124](https://github.com/bit63-org/kythira/actions/runs/32441129124)). The first attempt was 4/5: `backup_verify_restore_read_back` hit a Google-side `502` ("the server encountered a temporary error… please try again in 30 seconds") after the client's retry policy was exhausted |
 | OCI Object Storage | **did not run** in this dispatch — the read-only pre-flight was declined `404 BucketNotFound`, the tenancy flake below. **Passed 5/5 in each of 3 later dispatched runs, August 23, 2026** |
 
 **Those two failures were not the same kind of failure**, and acting on the

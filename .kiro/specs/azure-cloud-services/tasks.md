@@ -716,9 +716,9 @@ original task descriptions, not oversights:
   **This claim was re-checked on August 4, 2026 and still holds — but it very
   nearly stopped being believed for the wrong reason.** The `Real Cloud Tests
   (Azure)` job has two runs recorded as `success`
-  ([30633133161](https://github.com/crawlins/kythira/actions/runs/30633133161)
+  ([30633133161](https://github.com/bit63-org/kythira/actions/runs/30633133161)
   and
-  [30642873722](https://github.com/crawlins/kythira/actions/runs/30642873722),
+  [30642873722](https://github.com/bit63-org/kythira/actions/runs/30642873722),
   both July 31, 2026), which read as exactly the "first real run" this
   paragraph is waiting for. They are not. Querying each job's step statuses
   shows `Run quorum-manager bundle` and `Run key-vault bundle` both

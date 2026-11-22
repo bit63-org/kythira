@@ -130,7 +130,7 @@ manual dispatch that surfaced the original bug.
     (added while completing `.kiro/specs/otlp-telemetry-backend/`) from
     `[ ]` to `[x]`.
   - **Result**: 6 real `workflow_dispatch` runs against a native
-    `ubuntu-24.04-arm` runner (crawlins/kythira run IDs 29666724866,
+    `ubuntu-24.04-arm` runner (bit63-org/kythira run IDs 29666724866,
     29666927474, 29667078679, 29667217602, 29667395910, 29667537136).
     Requirements 1-5 (the actual "Dockerfile can't build chaos_node"
     bug this spec exists to fix) are **confirmed fixed**: every run's
