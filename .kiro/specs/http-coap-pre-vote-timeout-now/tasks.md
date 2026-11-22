@@ -96,7 +96,7 @@ elections working while a cluster is part-way through an upgrade.
   - [x] 6.3 Re-run the elastic-capacity Docker scenario and confirm the
     move-off-leader path no longer leaves a shard one voter over
     (passed in Container Scenario Tests run
-    [38996213264](https://github.com/crawlins/kythira/actions/runs/38996213264)
+    [38996213264](https://github.com/bit63-org/kythira/actions/runs/38996213264)
     under Docker and rootless Podman: the scenario now asserts no
     `operator_skipped{reason=unsupported}`, no `move{outcome=retargeted}`
     and exactly three voters on every shard after scale-out, and the nodes

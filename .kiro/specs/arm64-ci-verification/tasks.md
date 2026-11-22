@@ -184,7 +184,7 @@ a pre-implementation spike confirming vcpkg dependency availability for the
     concrete "verification" this spec's title refers to) before marking
     this task complete
   - **Result**: verified against a real cold-cache run on
-    crawlins/kythira#47 — all four matrix entries passed, including the
+    bit63-org/kythira#47 — all four matrix entries passed, including the
     `--x-feature=edhoc` Rust/`lakers` build on both arm64 legs, with no
     arm64-specific failures found. Measured wall-clock times: `g++-13,
     arm64` ~76 min, `clang++-18, arm64` ~46 min (`g++-13, x64` ~51 min,
@@ -226,7 +226,7 @@ a pre-implementation spike confirming vcpkg dependency availability for the
     arm64 build) as a named limitation rather than silently skipping
   - **Result**: `.github/workflows/arm64-docker-smoke-test.yml` landed on
     `main`, then was actually triggered — 5 real `workflow_dispatch` runs
-    on a native `ubuntu-24.04-arm` GitHub-hosted runner (crawlins/kythira
+    on a native `ubuntu-24.04-arm` GitHub-hosted runner (bit63-org/kythira
     run IDs 29663122464, 29663269337, 29663422680, 29663614678,
     29663814851). Real, per-image results, not simulated:
     - **`chaos_node`**: image build fails — `ninja: error: unknown

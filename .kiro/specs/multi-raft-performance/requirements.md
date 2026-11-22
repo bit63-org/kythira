@@ -764,7 +764,7 @@ already uses, so it is findable and diffable.
    subset (by tier, scenario or axis), since the full matrix will not fit in one
    sitting
 7. WHEN a `README.md` link to the new document is added THEN the system SHALL
-   use the absolute `https://github.com/crawlins/kythira/blob/main/doc/…` form,
+   use the absolute `https://github.com/bit63-org/kythira/blob/main/doc/…` form,
    since a relative link from `README.md` to `doc/` fails the `docs` CI job
 
 ### Requirement 12 — CI regression tier

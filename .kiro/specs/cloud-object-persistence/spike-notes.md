@@ -1063,8 +1063,8 @@ green.
 ## Finding 24 — The CI runs, and what measuring from a second position taught
 
 August 21, 2026. Runs
-[32432380565](https://github.com/crawlins/kythira/actions/runs/32432380565) and
-[32441129124](https://github.com/crawlins/kythira/actions/runs/32441129124):
+[32432380565](https://github.com/bit63-org/kythira/actions/runs/32432380565) and
+[32441129124](https://github.com/bit63-org/kythira/actions/runs/32441129124):
 every provider's object-persistence bundle dispatched against its real service,
 **under the least-privilege CI grants** rather than an operator's credentials.
 AWS (x64 and arm64), Azure Blob, Alibaba OSS and GCS all pass; OCI's pre-flight
@@ -1134,7 +1134,7 @@ Log group `kythira-ci-object-storage` in compartment `kythira-ci`, carrying two
 (`kythira-ci-artifacts-write`), 30-day retention, both `ACTIVE`.
 
 **Enabled before the next decline, deliberately**, since the entire point is to
-capture one. Then run [32444971282](https://github.com/crawlins/kythira/actions/runs/32444971282)
+capture one. Then run [32444971282](https://github.com/bit63-org/kythira/actions/runs/32444971282)
 dispatched the object-persistence bundle alone and was allowed to fail.
 
 ### The decline and its byte-identical twin
@@ -1642,9 +1642,9 @@ stretches were minutes; this one is over fourteen hours.
 **The suites agree.** The local real suite passed **5 of 5** consecutive runs
 (pre-registered at five, no early stop). Three CI dispatches under the
 **WIF/UPST least-privilege principal** — runs
-[32641351919](https://github.com/crawlins/kythira/actions/runs/32641351919),
-[32641370321](https://github.com/crawlins/kythira/actions/runs/32641370321),
-[32641387727](https://github.com/crawlins/kythira/actions/runs/32641387727) —
+[32641351919](https://github.com/bit63-org/kythira/actions/runs/32641351919),
+[32641370321](https://github.com/bit63-org/kythira/actions/runs/32641370321),
+[32641387727](https://github.com/bit63-org/kythira/actions/runs/32641387727) —
 were **3/3 green, 5/5 test cases each, "No errors detected"**. Three rather
 than one on purpose: a single green is indistinguishable from the ~1-in-10
 outcome Finding 25 recorded, and three consecutive are not.

@@ -39,7 +39,7 @@ failed has already failed three times consecutively.
 
 ## The resolution
 
-Fixed in [PR #140](https://github.com/crawlins/kythira/pull/140). Two changes,
+Fixed in [PR #140](https://github.com/bit63-org/kythira/pull/140). Two changes,
 both driven by the measurements below:
 
 1. **`KYTHIRA_TEST_TIMEOUT_SCALE`** (`tests/test_timeout_scale.hpp`) scales both

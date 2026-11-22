@@ -21,7 +21,7 @@ entry). Task 6.1 closed October 16, 2026:
   before its name resolved was never looked up in DNS at all. All four are
   clean after the fix, and `bounded_resolver_test` has a regression case.
 - docker_chaos: Container Scenario Tests run
-  [38937810252](https://github.com/crawlins/kythira/actions/runs/38937810252)
+  [38937810252](https://github.com/bit63-org/kythira/actions/runs/38937810252)
   (PR #565's head, October 16) passed under both Docker and rootless
   Podman, including `docker-chaos-tests`, `quorum-healing-tests` and
   `docker-mtls-chaos-tests`, whose `chaos_node` clusters talk over the
