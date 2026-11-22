@@ -104,18 +104,22 @@ except urllib.error.HTTPError as e:
         echo "the Kythira cluster or the forwarder did not come up" >&2
         exit 1
     fi
+    # --no-deps: the nodes and the forwarder are up and answering by now,
+    # and a `run` that also brings up its service's dependencies may
+    # recreate them. Under rootless Podman it did, right before terraform:
+    # the nodes keep no volume, so they came back with empty logs, and the
+    # forwarder's upstream (ddb-2) answered three PutItems 500 "no leader
+    # answered before the deadline" while the cluster re-formed.
     for c in "${clients[@]}"; do
         case "${c}" in
             aws-cli | boto3 | terraform)
-                "${compose[@]}" run --rm -e ENDPOINT=http://forwarder:8000 "${c}" ;;
+                "${compose[@]}" run --rm --no-deps -e ENDPOINT=http://forwarder:8000 "${c}" ;;
             *)
-                "${compose[@]}" run --rm -e ENDPOINT=http://forwarder:8000 \
+                "${compose[@]}" run --rm --no-deps -e ENDPOINT=http://forwarder:8000 \
                     -e SOURCE_TABLE="${source_table}" java "${c}" ;;
         esac
-        # Keep the nodes' logs after every client: a later `run` can
-        # recreate the nodes (it did before terraform under rootless
-        # Podman), and their logs, with the cause of any 500 an earlier
-        # client met, go with the old containers.
+        # Keep the nodes' logs after every client, so a 500 an earlier
+        # client met keeps its cause even if a node is ever replaced.
         "${compose[@]}" logs ddb-1 ddb-2 ddb-3 > "${out}/nodes-after-${c}.log" 2>&1 || true
     done
 elif [ "${mode}" = native ]; then
