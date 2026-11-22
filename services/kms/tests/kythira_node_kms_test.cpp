@@ -211,6 +211,10 @@ private:
             "KYTHIRA_KMS_JOB_INTERVAL_MS=200",
             "KYTHIRA_KMS_GRACE_MS=1000",
             "SOFTHSM2_CONF=" + w.conf.string(),
+            // No cloud here: without this the AWS SDK looks up its region from
+            // EC2 instance metadata, which off EC2 can hold up module start until
+            // connections to 169.254.169.254 time out.
+            "AWS_EC2_METADATA_DISABLED=true",
             "PATH=/usr/bin:/bin",
         };
         const auto log = (w.dir / "node.log").string();

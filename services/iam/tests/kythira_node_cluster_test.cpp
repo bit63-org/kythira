@@ -259,6 +259,10 @@ public:
             "KYTHIRA_KMS_API_URLS=" +
                 map("https://localhost:", [](const auto& q) { return q.kms; }),
             "KYTHIRA_KMS_PIN_FILE=" + _kms_pin.string(),
+            // No cloud here: without this the AWS SDK looks up its region from
+            // EC2 instance metadata, which off EC2 can hold up module start until
+            // connections to 169.254.169.254 time out.
+            "AWS_EC2_METADATA_DISABLED=true",
             "PATH=/usr/bin:/bin",
         };
         const auto log = (dir / "node.log").string();
