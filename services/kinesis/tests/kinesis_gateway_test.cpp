@@ -13,6 +13,7 @@
 #include <kythira/kinesis/kinesis_cluster.hpp>
 #include <kythira/kinesis/kinesis_front_end.hpp>
 #include <kythira/kinesis/kinesis_gateway.hpp>
+#include <kythira/kinesis/kinesis_data_api.hpp>
 #include <kythira/kinesis/kinesis_peer_client.hpp>
 #include <kythira/kinesis/kinesis_service.hpp>
 #include <kythira/kinesis/kinesis_static_keys.hpp>
@@ -260,6 +261,65 @@ BOOST_AUTO_TEST_CASE(a_node_without_the_gateway_role_serves_only_its_peers) {
     const auto r = forward("leader", "k", create("s"), kin::admission::none);
     BOOST_TEST_REQUIRE(r.has_value());
     BOOST_TEST((r->_status == kin::apply_status::ok));
+}
+
+BOOST_AUTO_TEST_CASE(a_front_end_reaches_the_data_layer_api_over_the_listener) {
+    // kinesis-independent-layers task 6: a data node (here without the
+    // gateway role) serves the v2 routes to a front end that signs with the
+    // forward secret; an unsigned or wrongly signed call is refused.
+    node n;
+    n._gateway->set_roles(kythira::layers::role_set::parse("data,segments"));
+    kin::local_data_access<kin::local_stream_cluster> local(*n._cluster);
+    kin::data_api_deps deps;
+    deps._local = &local;
+    deps._propose_here = [&n](const std::string& key, const std::vector<std::byte>& command,
+                              kin::admission mode) {
+        kin::data_node_proposal p;
+        p._result = n._cluster->propose(key, command, mode);
+        p._kind = p._result ? kin::data_node_proposal::kind::committed
+                            : kin::data_node_proposal::kind::failed;
+        return p;
+    };
+    deps._check = [](const std::string&, const std::optional<kin::route_ref>&) {
+        return kin::route_verdict{};
+    };
+    const std::string address = n.address();
+    deps._routes = [address](const kythira::shard_range<std::string>&) {
+        kin::data_route_cache::routes_reply reply;
+        kin::data_route r;
+        r._group_id = 1;
+        r._voters = {"self"};
+        r._leader_hint = "self";
+        reply.routes.push_back(r);
+        reply.addresses.emplace_back("self", address);
+        return reply;
+    };
+    n._gateway->set_data_api(std::move(deps));
+
+    const auto c = plain_client();
+    kin::remote_data_access remote({address},
+                                   kin::make_http_data_transport(c, std::string(k_secret)));
+    const kin::stream_command cmd = kin::create_stream_command{
+        ._account = std::string(k_account), ._name = "s", ._shard_count = 1, ._created_ms = 1};
+    const auto r =
+        remote.propose(kin::command_key(cmd), kin::encode_command(cmd), kin::admission::none);
+    BOOST_TEST_REQUIRE(r.has_value());
+    BOOST_TEST((r->_status == kin::apply_status::ok));
+    const auto found = remote.find_stream(k_account, "s");
+    BOOST_TEST_REQUIRE(found.has_value());
+    BOOST_TEST_REQUIRE(found->has_value());
+    BOOST_TEST((*found)->_name == "s");
+    BOOST_TEST(n._gateway->stats()._data_api_served.load() >= 2U);
+
+    // Unsigned, or signed with another secret: 403, and the remote access
+    // reports the group unreachable rather than an empty answer.
+    const auto bare = c.request(address, http::verb::post, kin::data_api::k_routes_path, {},
+                                std::string("\x01\x00\x00", 3));
+    BOOST_TEST_REQUIRE(bare.has_value());
+    BOOST_TEST(bare->_status == 403U);
+    kin::remote_data_access stranger({address},
+                                     kin::make_http_data_transport(c, std::string(32, 'x')));
+    BOOST_TEST(!stranger.find_stream(k_account, "s").has_value());
 }
 
 BOOST_AUTO_TEST_CASE(health_and_the_refusal_carry_the_roles_header) {

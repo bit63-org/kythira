@@ -332,6 +332,21 @@ void read_kinesis_side(const reader& r, node_options& o) {
     }
     o._listen_host = hp->first;
     o._listen_port = static_cast<std::uint16_t>(std::stoul(hp->second));
+    if (r.set("KINESIS_INTERNAL_LISTEN")) {
+        const auto internal = r.required("KINESIS_INTERNAL_LISTEN");
+        const auto ihp = kinesis::split_host_port(internal);
+        if (!ihp || std::stoul(ihp->second) == 0 || std::stoul(ihp->second) > 65535) {
+            fail("KINESIS_INTERNAL_LISTEN must be host:port, got '" + internal + "'");
+        }
+        o._internal_host = ihp->first;
+        o._internal_port = static_cast<std::uint16_t>(std::stoul(ihp->second));
+        if (o._internal_port == o._listen_port &&
+            (o._internal_host == o._listen_host || o._listen_host == "0.0.0.0")) {
+            // The same socket: one listener, as when unset.
+            o._internal_host.clear();
+            o._internal_port = 0;
+        }
+    }
     o._tls_cert_path = r.opt("KINESIS_TLS_CERT", "");
     o._tls_key_path = r.opt("KINESIS_TLS_KEY", "");
     o._allow_plaintext = r.flag("KINESIS_ALLOW_PLAINTEXT", "false");
@@ -389,7 +404,9 @@ void read_kinesis_side(const reader& r, node_options& o) {
             parse_id_map("KINESIS_PEER_GATEWAYS", r.required("KINESIS_PEER_GATEWAYS"));
     } else {
         for (const auto& [id, url] : o._peers) {
-            o._peer_gateways[id] = host_of(url) + ":" + std::to_string(o._listen_port);
+            o._peer_gateways[id] =
+                host_of(url) + ":" +
+                std::to_string(o._internal_port != 0 ? o._internal_port : o._listen_port);
         }
     }
     for (const auto& [id, gw] : o._peer_gateways) {
@@ -721,8 +738,11 @@ auto describe(const node_options& o) -> std::string {
         << "voters=" << o._peers.size() << '\n'
         << "shards=" << (o._shard_cuts.size() + 1) << '\n'
         << "listen=" << o._listen_host << ':' << o._listen_port
-        << (o._allow_plaintext ? " http" : " https") << '\n'
-        << "region=" << o._region << " partition=" << o._partition << '\n'
+        << (o._allow_plaintext ? " http" : " https") << '\n';
+    if (o._internal_port != 0) {
+        out << "internal=" << o._internal_host << ':' << o._internal_port << '\n';
+    }
+    out << "region=" << o._region << " partition=" << o._partition << '\n'
         << "data_dir=" << o._data_dir.string() << '\n'
         << "auth="
         << (o._auth == kythira::aws_auth::auth_mode::iam    ? "iam"
@@ -809,6 +829,8 @@ auto usage() -> std::string {
            "\n"
            "Kinesis:\n"
            "  KINESIS_LISTEN                   API listener host:port (0.0.0.0:4567)\n"
+           "  KINESIS_INTERNAL_LISTEN          host:port for the routes between nodes\n"
+           "                                   only (unset: they share KINESIS_LISTEN)\n"
            "  KINESIS_TLS_CERT, KINESIS_TLS_KEY     PEM chain and key (required unless\n"
            "  KINESIS_ALLOW_PLAINTEXT=true)\n"
            "  KINESIS_REGION, KINESIS_PARTITION     us-east-1, aws\n"

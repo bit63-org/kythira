@@ -77,6 +77,59 @@ public:
         return submit(key, command, mode, false);
     }
 
+    /// How `propose_here` went.
+    enum class here_kind : std::uint8_t {
+        /// Committed; `_result` is its result.
+        committed,
+        /// This node does not lead the key's group; `_leader` names the
+        /// leader when known. Nothing was proposed.
+        not_leader,
+        /// This node holds no replica of the key's group (or routes the key
+        /// nowhere). Nothing was proposed.
+        no_replica,
+        /// Proposed but not seen committed in time, or refused for another
+        /// reason: the outcome is unknown.
+        failed,
+    };
+
+    struct here_result {
+        here_kind _kind = here_kind::failed;
+        std::optional<apply_result> _result;
+        std::optional<node_id_type> _leader;
+    };
+
+    /// What the data-layer API's propose route calls
+    /// (`.kiro/specs/kinesis-independent-layers/` task 6): proposes here
+    /// only, like `propose_local`, but tells "not the leader" (with its
+    /// hint) and "no replica here" apart from an unknown outcome, so a
+    /// front end that is not a Raft member can refresh its route and try
+    /// the leader, which it must never do after an ambiguous failure.
+    auto propose_here(const std::string& key, const std::vector<std::byte>& command,
+                      admission mode = admission::none) -> here_result {
+        here_result out;
+        if (auto refused = refuse_when_full(_guard, command)) {
+            out._kind = here_kind::committed;
+            out._result = std::move(refused);
+            return out;
+        }
+        try {
+            out._result = propose_admitted(_throttle, mode, command, [&](const auto& bytes) {
+                return std::optional{decode_result(submit_unlocked(key, bytes))};
+            });
+            out._kind = out._result ? here_kind::committed : here_kind::failed;
+        } catch (const shard_not_leader_exception<group_id_type, node_id_type>& e) {
+            out._kind = here_kind::not_leader;
+            if (e.leader_hint() && *e.leader_hint() != _host.node_id()) {
+                out._leader = e.leader_hint();
+            }
+        } catch (const unknown_shard_exception<group_id_type>&) {
+            out._kind = here_kind::no_replica;
+        } catch (const std::exception&) {
+            out._kind = here_kind::failed;
+        }
+        return out;
+    }
+
     auto read(const std::string& key, const stream_reader& f) -> bool {
         const auto d = _host.resolve(key);
         if (!d) {

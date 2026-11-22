@@ -248,6 +248,37 @@ BOOST_AUTO_TEST_CASE(no_hint_a_self_hint_or_no_forwarder_fails_as_unavailable) {
     BOOST_TEST(!bare.propose("k", create("s")).has_value());
 }
 
+BOOST_AUTO_TEST_CASE(propose_here_tells_not_leader_apart_from_an_unknown_outcome) {
+    // Independent layers task 6: the data-layer API's propose route never
+    // forwards, and says whether a front end may safely try elsewhere.
+    using here = kin::raft_stream_cluster<fake_host>::here_kind;
+    fake_host host;
+    forward_log log;
+    kin::raft_stream_cluster<fake_host> c(host, make_forwarder(log));
+    const auto ok = c.propose_here("k", create("s"));
+    BOOST_TEST((ok._kind == here::committed));
+    BOOST_TEST_REQUIRE(ok._result.has_value());
+    BOOST_TEST((ok._result->_status == kin::apply_status::ok));
+
+    host._leader = "n2";
+    const auto moved = c.propose_here("k", create("t"));
+    BOOST_TEST((moved._kind == here::not_leader));
+    BOOST_TEST((moved._leader == std::optional<std::string>("n2")));
+    BOOST_TEST(!moved._result.has_value());
+    BOOST_TEST(log._leaders.empty());
+
+    // A hint naming this node itself is no hint.
+    host._leader = "n1";
+    host._hint_self = true;
+    const auto self = c.propose_here("k", create("t"));
+    BOOST_TEST((self._kind == here::not_leader));
+    BOOST_TEST(!self._leader.has_value());
+    host._hint_self = false;
+
+    host._throw_other = true;
+    BOOST_TEST((c.propose_here("k", create("t"))._kind == here::failed));
+}
+
 BOOST_AUTO_TEST_CASE(other_failures_and_unrouted_keys_are_not_now) {
     fake_host host;
     forward_log log;

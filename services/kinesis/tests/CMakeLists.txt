@@ -160,6 +160,9 @@ kythira_kinesis_test(kinesis_reads_test kinesis_reads_test.cpp)
 # (local_data_access), unreachable groups, records as stored, and the
 # service over a data_access it is handed.
 kythira_kinesis_test(kinesis_data_access_test kinesis_data_access_test.cpp)
+# Independent layers task 6: the data-layer API, a front-end-only node over
+# two layouts of data nodes, remote and hybrid access.
+kythira_kinesis_test(kinesis_data_api_test kinesis_data_api_test.cpp)
 # Task 6: forwarding proposals to the group leader (wire, HMAC) and the
 # multi-raft cluster adapter.
 kythira_kinesis_test(kinesis_forward_test kinesis_forward_test.cpp)

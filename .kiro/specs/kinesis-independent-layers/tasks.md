@@ -92,7 +92,7 @@ every role (7, 8, 10).
   - Unit tests for splits, merges, leader changes and replica moves
   - _Requirements: 6.1-6.5_
 
-- [ ] 6. Data-layer API and `remote_data_access`
+- [x] 6. Data-layer API and `remote_data_access`
   - `kinesis_data_api.hpp`: `/_kythira/kinesis/v2/` routes on the internal
     listener (`KINESIS_INTERNAL_LISTEN`, default the gateway listener) and
     their client; propose without onward forwarding, consistent reads for
@@ -101,6 +101,15 @@ every role (7, 8, 10).
     remote, per call)
   - In-process test: a front-end-only node over two layouts of data nodes
   - _Requirements: 3.2, 5.1-5.6_
+  - Built: six routes (`propose`, `transact`, `catalog`, `shard`, `read`,
+    `routes`), each signed with the forward secret over path and body or
+    admitted by the layer route guard. A data node proposes with
+    `propose_here` (never forwards) and answers 409 with a leader hint,
+    421 for a stale route epoch, 404 when it holds no replica. Reads ship
+    segment records still sealed; the front end opens them. A write that
+    got 503 is never retried (its outcome is unknown). The routes are on
+    the gateway listener unless `KINESIS_INTERNAL_LISTEN` names its own
+    port. Wiring the remote side into a node without `data` is task 7.
 
 - [ ] 7. Front end without the data role
   - Wire `remote_data_access` into the module when the node lacks `data`;
