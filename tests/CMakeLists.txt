@@ -2563,27 +2563,6 @@ if(KYTHIRA_BUILD_COAP_TRANSPORT)
     else()
         message(STATUS "coap_oscore_group_libcoap_test: skipped (requires libcoap)")
     endif()
-    # CoAP DTLS connection establishment property test needs Boost.JSON
-    add_executable(coap_dtls_connection_establishment_property_test coap_dtls_connection_establishment_property_test.cpp)
-    target_link_libraries(coap_dtls_connection_establishment_property_test PRIVATE
-        network_simulator
-        Boost::unit_test_framework
-        boost_json
-    )
-    target_compile_features(coap_dtls_connection_establishment_property_test PRIVATE cxx_std_23)
-    add_test(NAME coap_dtls_connection_establishment_property_test COMMAND coap_dtls_connection_establishment_property_test)
-    # CoAP certificate validation failure property test needs Boost.JSON
-    add_executable(coap_certificate_validation_failure_property_test coap_certificate_validation_failure_property_test.cpp)
-    target_link_libraries(coap_certificate_validation_failure_property_test PRIVATE
-        network_simulator
-        Boost::unit_test_framework
-        boost_json
-    )
-    if(TARGET certificate_authority)
-        target_link_libraries(coap_certificate_validation_failure_property_test PRIVATE certificate_authority)
-    endif()
-    target_compile_features(coap_certificate_validation_failure_property_test PRIVATE cxx_std_23)
-    add_test(NAME coap_certificate_validation_failure_property_test COMMAND coap_certificate_validation_failure_property_test)
     # HTTP server tests need Boost.JSON
 endif()  # KYTHIRA_BUILD_COAP_TRANSPORT
 add_executable(http_server_test http_server_test.cpp)
@@ -4801,6 +4780,20 @@ if(KYTHIRA_BUILD_COAP_TRANSPORT)
     set_tests_properties(coap_dtls_handshake_property_test PROPERTIES
         TIMEOUT 300
         LABELS "property;coap;dtls;handshake"
+    )
+    # Properties 9 and 10: DTLS connections to a live coap_server, and
+    # certificate validation against the same generated test PKI.
+    add_network_test(coap_dtls_connection_establishment_property_test
+        coap_dtls_connection_establishment_property_test.cpp)
+    set_tests_properties(coap_dtls_connection_establishment_property_test PROPERTIES
+        TIMEOUT 300
+        LABELS "property;coap;dtls"
+    )
+    add_network_test(coap_certificate_validation_failure_property_test
+        coap_certificate_validation_failure_property_test.cpp)
+    set_tests_properties(coap_certificate_validation_failure_property_test PROPERTIES
+        TIMEOUT 300
+        LABELS "property;coap;dtls;certificate"
     )
 
     if(TARGET certificate_authority)
