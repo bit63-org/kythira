@@ -204,6 +204,10 @@ public:
             "KYTHIRA_NODE_METRICS_BIND=127.0.0.1",
             "KYTHIRA_NODE_METRICS_PORT=" + std::to_string(_ports.metrics),
             "SOFTHSM2_CONF=" + _conf.string(),
+            // No cloud here: without this the AWS SDK looks up its region from
+            // EC2 instance metadata, which off EC2 can hold up module start until
+            // connections to 169.254.169.254 time out.
+            "AWS_EC2_METADATA_DISABLED=true",
             "PATH=/usr/bin:/bin",
         };
         if (has("iam")) {
