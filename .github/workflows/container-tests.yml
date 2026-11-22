@@ -60,9 +60,45 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Places the jobs below on bit63 or GitHub-hosted runners. Runs on the
+  # hosted pool: it takes seconds, and that pool sits nearly idle while
+  # pull-request CI runs on bit63.
+  pick-runner:
+    name: Pick runner pools
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read   # list the Actions runs whose jobs make up the load
+    outputs:
+      runners: ${{ steps.pick.outputs.runners || '{}' }}
+    steps:
+      # Only the picker itself: the job reads no other source.
+      - name: Checkout the runner picker
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: |
+            .github/actions/pick-runner
+            scripts/pick-runner.py
+          sparse-checkout-cone-mode: false
+      # doc/ci_runner_pools.md: scheduled and dispatched runs spread their
+      # jobs over bit63 and GitHub-hosted runners by current load; any other
+      # event gets the usual runner for every job.
+      - name: Pick runner pools
+        id: pick
+        uses: ./.github/actions/pick-runner
+        with:
+          jobs: docker
+          default-runner: ${{ (github.event.pull_request.head.repo.fork && 'ubuntu-24.04') || vars.KYTHIRA_X64_RUNNER || 'bit63' }}
+          vars: ${{ toJSON(vars) }}
+
   container-scenarios:
     name: Container scenarios (${{ matrix.runtime }})
-    runs-on: ${{ (matrix.runtime == 'podman' && 'ubuntu-24.04') || (github.event.pull_request.head.repo.fork && 'ubuntu-24.04') || vars.KYTHIRA_X64_RUNNER || 'bit63' }}
+    needs: pick-runner
+    # The podman leg is always GitHub-hosted: rootless Podman cannot run in
+    # an ARC pod (newuidmap fails). Only the docker leg is placed.
+    runs-on: ${{ (matrix.runtime == 'podman' && 'ubuntu-24.04') || fromJSON(needs.pick-runner.outputs.runners || '{}').docker || ((github.event.pull_request.head.repo.fork && 'ubuntu-24.04') || vars.KYTHIRA_X64_RUNNER || 'bit63') }}
     timeout-minutes: 180
 
     strategy:
