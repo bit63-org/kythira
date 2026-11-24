@@ -119,6 +119,13 @@ struct node_options {
     /// one of them and serves those volumes. Empty: every data node keeps
     /// its own segments.
     std::vector<kythira::segment_node_info> _segment_nodes;
+    /// `KINESIS_DATA_NODES`: comma-separated `host:port` of data nodes'
+    /// internal listeners (kinesis-independent-layers task 7). A front end
+    /// without the `data` role asks them for routes and reaches the data
+    /// layer only through their data-layer API; any one that answers is
+    /// enough, the routes name the rest. Required without `data`, refused
+    /// with it (a data node reaches its peers through `KYTHIRA_PEERS`).
+    std::vector<std::string> _data_nodes;
     /// `KINESIS_KMS`: the key provider encrypted streams use (task 14):
     /// `off` (StartStreamEncryption refused), `local` (data keys wrapped
     /// under `KINESIS_KMS_PASSPHRASE[_FILE]`, the same on every node) or
@@ -271,10 +278,17 @@ using env_lookup = std::function<const char*(const char*)>;
 /// when it can. All four roles and `data,segments` (a voter that serves
 /// only the internal endpoints) are served; with a segment layer
 /// (`segment_layer`, `KINESIS_SEGMENT_NODES` set), so are `data` and
-/// `segments` alone. The other sets need the later tasks of
+/// `segments` alone; with data nodes to reach (`data_layer`,
+/// `KINESIS_DATA_NODES` set), so is `gateway,front_end`, a front end that
+/// holds no replica. The other sets need the later tasks of
 /// kinesis-independent-layers.
-[[nodiscard]] auto unserved_roles(kythira::layers::role_set roles, bool segment_layer = false)
-    -> std::optional<std::string>;
+[[nodiscard]] auto unserved_roles(kythira::layers::role_set roles, bool segment_layer = false,
+                                  bool data_layer = false) -> std::optional<std::string>;
+
+/// Whether `roles` make a front end without a replica: `front_end` and no
+/// `data`, so no Raft log or segment store, every call over the data-layer
+/// API of `KINESIS_DATA_NODES`.
+[[nodiscard]] auto is_front_end_node(kythira::layers::role_set roles) -> bool;
 
 /// Whether `roles` make a segment node: `segments` and no `data`, so no
 /// Raft log, only the volumes it holds.

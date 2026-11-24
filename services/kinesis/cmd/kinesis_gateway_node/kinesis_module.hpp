@@ -21,6 +21,12 @@
 // kinesis/ in kythira_node):
 //   raft/<group>/   each group's Raft log
 //   segments/       the node's record segment store
+//
+// A node without the `data` role (kinesis-independent-layers task 7,
+// KINESIS_ROLES=gateway,front_end) opens neither: it is in no Raft group,
+// and serves the whole API, the Lease API and SubscribeToShard over
+// remote_data_access, the data-layer API of the data nodes
+// KINESIS_DATA_NODES names (kinesis_data_api.hpp).
 
 #include "config.hpp"
 #ifdef KYTHIRA_KINESIS_GATEWAY_IAM
@@ -30,6 +36,8 @@
 
 #include <kythira/kinesis/kinesis_actions.hpp>
 #include <kythira/kinesis/kinesis_compat_profile.hpp>
+#include <kythira/kinesis/kinesis_data_access.hpp>
+#include <kythira/kinesis/kinesis_data_api.hpp>
 #include <kythira/kinesis/kinesis_disk_guard.hpp>
 #include <kythira/kinesis/kinesis_front_end.hpp>
 #include <kythira/kinesis/kinesis_gateway.hpp>
@@ -287,6 +295,10 @@ public:
         if (is_segment_node(_opt._roles)) {
             return;
         }
+        if (is_front_end_node(_opt._roles)) {
+            build_front_end_node();
+            return;
+        }
         std::filesystem::create_directories(_opt._data_dir / "raft");
         open_store();
         for (const auto& [id, gw] : _opt._peer_gateways) {
@@ -343,8 +355,10 @@ public:
     }
 
     void publish(service_node::module_registry& registry) override {
-        registry.publish<service_node::aws_json_endpoint>(
-            std::string(service_node::interface_names::kinesis_put_records), _producer);
+        if (_producer) {
+            registry.publish<service_node::aws_json_endpoint>(
+                std::string(service_node::interface_names::kinesis_put_records), _producer);
+        }
     }
 
     void start(service_node::module_registry& registry) override {
@@ -390,7 +404,9 @@ public:
                     "virtual HSM is co-located");
             }
         }
-        _raft->start();
+        if (_raft) {
+            _raft->start();
+        }
 
         https::server_config hc;
         hc.bind_address = _opt._listen_host;
@@ -417,6 +433,17 @@ public:
                 return _gateway->stream(req, ctx);
             });
         _server->start();
+        if (!_raft) {
+            // A front end without data: no internal routes to serve (it
+            // holds no replica and no segments), no Raft to drive, no shard
+            // it leads to maintain.
+            _started = true;
+            std::cout << "kinesis_gateway_node " << kythira::host_node_id_text(_opt._node_id)
+                      << " ready: front end without data, data_nodes=" << _opt._data_nodes.size()
+                      << " kinesis=" << _server->port()
+                      << (_opt._allow_plaintext ? " (http)" : " (https)") << std::endl;
+            return;
+        }
         if (_opt._internal_port != 0) {
             // KINESIS_INTERNAL_LISTEN: the routes between nodes on a listener
             // of their own (independent layers task 6).
@@ -543,9 +570,12 @@ public:
         _internal_server.reset();
         _volumes.reset();
         _leases.reset();
+        _remote_leases.reset();
         _gateway.reset();
         _local_data.reset();
         _service.reset();
+        _remote_service.reset();
+        _remote_data.reset();
         _front_end.reset();
         _cluster.reset();
         _raft.reset();
@@ -583,6 +613,14 @@ public:
         }
         if (_volumes) {
             out.push_back({"segment_volumes", static_cast<double>(_volumes->volumes().size()), {}});
+        }
+        // A front end without data: how its data-layer calls fare.
+        if (_remote_data) {
+            const auto st = _remote_data->stats();
+            out.push_back({"data_api_calls", static_cast<double>(st._calls), {}});
+            out.push_back({"data_api_not_leader", static_cast<double>(st._not_leader), {}});
+            out.push_back({"data_api_stale_route", static_cast<double>(st._stale_route), {}});
+            out.push_back({"data_api_unreachable", static_cast<double>(st._unreachable), {}});
         }
         // One series per role this node runs (kinesis-independent-layers
         // Requirement 2.6), so a dashboard can count each layer.
@@ -804,9 +842,6 @@ private:
         return cfg;
     }
 
-    /// The cluster adapter, the front end, the service, the gateway and
-    /// the Lease API: everything a request reaches, built before any
-    /// listener opens.
     /// Whether `name` is this node's key provider or its previous one.
     [[nodiscard]] auto uses_kms(std::string_view name) const -> bool {
         return _opt._kms == name || _opt._kms_previous == name;
@@ -879,6 +914,9 @@ private:
         return {};
     }
 
+    /// The cluster adapter, the front end, the service, the gateway and
+    /// the Lease API: everything a request reaches, built before any
+    /// listener opens.
     void build_service() {
         const auto gateways = _opt._peer_gateways;
         const auto address_of =
@@ -914,32 +952,10 @@ private:
             return _cluster->txn_send(keys, envelope, timeout);
         });
 
-        kinesis::front_end_config fc;
-        fc._region = _opt._region;
-        fc._partition = _opt._partition;
+        const auto fc = make_front_end_config();
         _front_end = std::make_unique<front_end_type>(fc, *_authorizer);
-        kinesis::kinesis_service_config sc;
-        sc._cluster_profile = _profile;
-        sc._limits = kinesis::kinesis_limits::for_region(_opt._region);
-        // Every gateway must sign iterators with the same key, or a client's
-        // next GetRecords on another node fails; a lone node without a
-        // forwarding secret gets the service's random key.
-        if (!_opt._iterator_keys_file.empty()) {
-            sc._iterator_keys = kinesis::parse_iterator_keys(
-                read_file(_opt._iterator_keys_file, "KINESIS_ITERATOR_KEYS_FILE"));
-        } else if (!_opt._forward_secret.empty()) {
-            sc._iterator_keys = kinesis::derived_iterator_key(_opt._forward_secret);
-        }
-        // Encryption at rest (task 14), and the provider older data keys
-        // name (KMS task 15).
-        sc._kms = make_kms_provider(_opt._kms);
-        sc._kms_name = _opt._kms;
-        sc._kms_caller_ttl = _opt._kms_caller_ttl;
-        if (_opt._kms_previous != "off") {
-            sc._kms_previous.emplace(_opt._kms_previous, make_kms_provider(_opt._kms_previous));
-            sc._kms_untagged = _opt._kms_previous;
-        }
-        _service = std::make_unique<kinesis::kinesis_service<cluster_type>>(*_cluster, sc);
+        _service = std::make_unique<kinesis::kinesis_service<cluster_type>>(*_cluster,
+                                                                            make_service_config());
         _service->register_with(*_front_end);
         // Authorization sees a stream's tags and resource policy (task 15).
         _front_end->set_resource_lookup(
@@ -968,6 +984,76 @@ private:
                 return _cluster->txn_submit_local(keys, envelope);
             });
         _producer = std::make_shared<producer_type>(*_front_end);
+    }
+
+    /// A front end without the `data` role (task 7): the same front end,
+    /// service, Lease API and gateway as a data node's, over the data-layer
+    /// API of the data nodes KINESIS_DATA_NODES names instead of a cluster.
+    /// No Raft group, no store, no internal routes: a write is proposed on
+    /// the data node that leads its group, a read answered by a replica.
+    void build_front_end_node() {
+        _remote_data = std::make_unique<kinesis::remote_data_access>(
+            _opt._data_nodes, kinesis::make_http_data_transport(*_peers, _opt._forward_secret));
+        const auto fc = make_front_end_config();
+        _front_end = std::make_unique<front_end_type>(fc, *_authorizer);
+        _remote_service = std::make_unique<kinesis::kinesis_service<kinesis::data_access>>(
+            *_remote_data, make_service_config());
+        _remote_service->register_with(*_front_end);
+        _front_end->set_resource_lookup(
+            [this](std::string_view arn) { return _remote_service->resource_facts_of(arn); });
+        // A forwarded write or segment fetch never comes here (no peer
+        // names this node), and would find nothing to propose to.
+        _gateway = std::make_unique<gateway_type>(
+            *_front_end,
+            [](const std::string&, const std::vector<std::byte>&, kinesis::admission) {
+                return std::optional<kinesis::apply_result>{};
+            },
+            nullptr, _opt._forward_secret);
+        _gateway->set_roles(_opt._roles);
+        _remote_leases =
+            std::make_unique<kinesis::lease_api<kinesis::data_access, authorizer_type>>(
+                *_remote_data, *_authorizer, fc);
+        _gateway->set_lease_handler(
+            [this](const kinesis::front_end_request& r) { return _remote_leases->handle(r); });
+        if (_opt._metrics) {
+            _gateway->set_metrics_handler([this] { return _remote_service->metrics_text(); });
+        }
+        _producer = std::make_shared<producer_type>(*_front_end);
+    }
+
+    [[nodiscard]] auto make_front_end_config() const -> kinesis::front_end_config {
+        kinesis::front_end_config fc;
+        fc._region = _opt._region;
+        fc._partition = _opt._partition;
+        return fc;
+    }
+
+    /// The service's settings, the same on every front end: a data node's
+    /// and one without data must sign iterators alike and open the same
+    /// data keys, or a client moved between them fails.
+    auto make_service_config() -> kinesis::kinesis_service_config {
+        kinesis::kinesis_service_config sc;
+        sc._cluster_profile = _profile;
+        sc._limits = kinesis::kinesis_limits::for_region(_opt._region);
+        // Every gateway must sign iterators with the same key, or a client's
+        // next GetRecords on another node fails; a lone node without a
+        // forwarding secret gets the service's random key.
+        if (!_opt._iterator_keys_file.empty()) {
+            sc._iterator_keys = kinesis::parse_iterator_keys(
+                read_file(_opt._iterator_keys_file, "KINESIS_ITERATOR_KEYS_FILE"));
+        } else if (!_opt._forward_secret.empty()) {
+            sc._iterator_keys = kinesis::derived_iterator_key(_opt._forward_secret);
+        }
+        // Encryption at rest (task 14), and the provider older data keys
+        // name (KMS task 15).
+        sc._kms = make_kms_provider(_opt._kms);
+        sc._kms_name = _opt._kms;
+        sc._kms_caller_ttl = _opt._kms_caller_ttl;
+        if (_opt._kms_previous != "off") {
+            sc._kms_previous.emplace(_opt._kms_previous, make_kms_provider(_opt._kms_previous));
+            sc._kms_untagged = _opt._kms_previous;
+        }
+        return sc;
     }
 
     /// Every voter, as volume records name replicas.
@@ -1166,6 +1252,11 @@ private:
     std::unique_ptr<gateway_type> _gateway;
     std::unique_ptr<kinesis::lease_api<cluster_type, authorizer_type>> _leases;
     std::unique_ptr<kinesis::local_data_access<cluster_type>> _local_data;
+    /// A front end without data (task 7): the data layer over the API, and
+    /// the service and Lease API over it.
+    std::unique_ptr<kinesis::remote_data_access> _remote_data;
+    std::unique_ptr<kinesis::kinesis_service<kinesis::data_access>> _remote_service;
+    std::unique_ptr<kinesis::lease_api<kinesis::data_access, authorizer_type>> _remote_leases;
     std::shared_ptr<producer_type> _producer;
     std::unique_ptr<https::server> _server;
     std::unique_ptr<https::server> _internal_server;

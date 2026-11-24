@@ -451,15 +451,18 @@ BOOST_AUTO_TEST_CASE(a_data_and_segments_node_is_served) {
 }
 
 BOOST_AUTO_TEST_CASE(a_role_set_this_build_cannot_serve_is_refused_naming_what_is_missing) {
-    // No data role: the data-layer API.
-    BOOST_TEST(refused_naming(role_vars("gateway,front_end"), "data-layer API"));
-    BOOST_TEST(refused_naming(role_vars("gateway,segments"), "data-layer API"));
+    // No data role and no data nodes to reach.
+    BOOST_TEST(refused_naming(role_vars("gateway,front_end"), "KINESIS_DATA_NODES"));
+    // segments without data is a segment node, which runs nothing else.
+    BOOST_TEST(refused_naming(role_vars("gateway,front_end,segments"), "runs no other role"));
     // A segment node, or data without segments, needs a segment layer.
     BOOST_TEST(refused_naming(role_vars("segments"), "KINESIS_SEGMENT_NODES"));
     BOOST_TEST(refused_naming(role_vars("gateway,front_end,data"), "KINESIS_SEGMENT_NODES"));
     // A gateway apart from its front end, and the reverse.
     BOOST_TEST(refused_naming(role_vars("gateway,data,segments"), "hands each call"));
+    BOOST_TEST(refused_naming(role_vars("gateway,segments"), "hands each call"));
     BOOST_TEST(refused_naming(role_vars("front_end,data,segments"), "front-end API"));
+    BOOST_TEST(refused_naming(role_vars("front_end"), "task 8"));
     // Every refusal names the setting and the value it was given.
     BOOST_TEST(refused_naming(role_vars("gateway,front_end"), "KINESIS_ROLES=gateway,front_end"));
 }
@@ -479,6 +482,80 @@ BOOST_AUTO_TEST_CASE(kythira_node_never_fills_in_the_roles) {
                "gateway,front_end,data,segments");
     vars["KINESIS_ROLES"] = "data,segments";
     BOOST_TEST(kn::from_env(kn::composite_env(lookup(vars)))._roles.to_string() == "data,segments");
+}
+
+// A front end without the data role (kinesis-independent-layers task 7,
+// Requirements 2.2 and 2.3): KINESIS_DATA_NODES names the data layer it
+// reaches, KYTHIRA_PEERS may leave it out or be unset, and it opens no Raft
+// port of its own, so it needs no loopback Raft bind.
+namespace {
+
+auto front_end_vars() -> std::map<std::string, std::string> {
+    return {
+        {"KYTHIRA_NODE_ID", "21"},
+        {"KYTHIRA_RAFT_BIND", "0.0.0.0"},
+        {"KINESIS_ALLOW_PLAINTEXT", "true"},
+        {"KINESIS_STATIC_KEYS_FILE", "/k"},
+        {"KINESIS_FORWARD_SECRET", "0123456789abcdef0123"},
+        {"KINESIS_ROLES", "gateway,front_end"},
+        {"KINESIS_DATA_NODES", "data-1:4600,data-2:4600"},
+    };
+}
+
+}  // namespace
+
+BOOST_AUTO_TEST_CASE(a_front_end_without_data_names_its_data_nodes) {
+    const auto o = kn::from_env(lookup(front_end_vars()));
+    BOOST_TEST(kn::is_front_end_node(o._roles));
+    BOOST_TEST(!kn::is_segment_node(o._roles));
+    BOOST_REQUIRE_EQUAL(o._data_nodes.size(), 2U);
+    BOOST_TEST(o._data_nodes[1] == "data-2:4600");
+    BOOST_TEST(o._peers.empty());
+    const auto text = kn::describe(o);
+    BOOST_TEST(text.find("roles=gateway,front_end") != std::string::npos);
+    BOOST_TEST(text.find("data_node data-1:4600") != std::string::npos);
+    BOOST_TEST(text.find("voters=0") != std::string::npos);
+    // Nothing on disk: KINESIS_DATA_DIR is not needed.
+    BOOST_TEST(o._data_dir.empty());
+    BOOST_TEST(!kn::is_front_end_node(kn::from_env(lookup(role_vars("")))._roles));
+
+    // KYTHIRA_PEERS may be set (the same file on every node) and leave this
+    // node out.
+    auto vars = front_end_vars();
+    vars["KYTHIRA_PEERS"] = "1=http://data-1:7001,2=http://data-2:7001";
+    BOOST_TEST(kn::from_env(lookup(vars))._peers.size() == 2U);
+}
+
+BOOST_AUTO_TEST_CASE(a_front_end_without_data_is_refused_what_it_cannot_run_on) {
+    // No data nodes.
+    auto vars = front_end_vars();
+    vars.erase("KINESIS_DATA_NODES");
+    BOOST_TEST(refused_naming(vars, "KINESIS_DATA_NODES, which is not set"));
+    // Data nodes must be host:port.
+    vars = front_end_vars();
+    vars["KINESIS_DATA_NODES"] = "data-1";
+    BOOST_TEST(refused_naming(vars, "KINESIS_DATA_NODES: 'data-1' is not host:port"));
+    // It signs every data-layer call, and its iterators must verify on the
+    // data nodes' front ends too.
+    vars = front_end_vars();
+    vars.erase("KINESIS_FORWARD_SECRET");
+    BOOST_TEST(refused_naming(vars, "signs its data-layer calls"));
+    // A data node reaches its peers through KYTHIRA_PEERS, not this.
+    vars = role_vars("");
+    vars["KINESIS_DATA_NODES"] = "data-1:4600";
+    BOOST_TEST(refused_naming(vars, "KINESIS_DATA_NODES is for a front end without the data role"));
+}
+
+BOOST_AUTO_TEST_CASE(kythira_node_runs_a_front_end_only_kinesis_module) {
+    // Roles are per module (Requirement 2.5): the node's peers fill in
+    // KYTHIRA_PEERS, which a front end does not need to be in.
+    auto vars = node_vars();
+    vars["KINESIS_ROLES"] = "gateway,front_end";
+    vars["KINESIS_DATA_NODES"] = "data-1:4600";
+    vars["KINESIS_FORWARD_SECRET"] = "0123456789abcdef0123";
+    const auto o = kn::from_env(kn::composite_env(lookup(vars)));
+    BOOST_TEST(kn::is_front_end_node(o._roles));
+    BOOST_TEST(o._data_nodes == std::vector<std::string>{"data-1:4600"});
 }
 
 // The segment layer (kinesis-independent-layers task 10, Requirements 9.4
