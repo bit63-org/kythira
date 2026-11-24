@@ -3707,7 +3707,48 @@ jobs:
         # diagnoses of this leg were lost. A build that times out on its own
         # terms also leaves the `always()` reporting steps to run, instead of
         # being skipped by the platform killing the job.
-        run: cmake --build build-${{ matrix.backend }} -j3
+        #
+        # November 2026: the stdexec leg is losing its GitHub-hosted runner
+        # again (#929 twice, main run 44952188940, #955). Each time the
+        # last line is the tests' cmake_pch.hxx.gch at about step 12, then
+        # ~15 silent minutes, then exit 143 "the runner has received a
+        # shutdown signal", and the job log is gone. Ninja prints a step
+        # when it finishes on a non-terminal, so the PCH is not the culprit:
+        # what stalls are the three compiles running after it, at the start
+        # of the build, where the heaviest TUs are scheduled first (the
+        # heavy_tu pool's chain plus two unpooled neighbours). A runner that
+        # thrashes 24 GiB of swap stops answering and is reclaimed, which
+        # is the 2026-09 signature above. The boost leg, lighter per TU,
+        # has not failed this way.
+        #
+        # So on a GitHub-hosted runner the stdexec leg builds two at a time;
+        # the boost leg and any self-hosted runner keep -j3. A warm build
+        # spends most of its 15 minutes on cache hits, so the cost is a few
+        # minutes, and a cold one still fits the 300-minute budget. The
+        # sampler below is the instrumentation asked for above, written to
+        # the log every 30 s: it survives a timeout, and a green run shows
+        # how much headroom is left.
+        env:
+          BACKEND: ${{ matrix.backend }}
+          RUNNER_KIND: ${{ runner.environment }}
+        run: |
+          set -euo pipefail
+          (
+            while sleep 30; do
+              mem=$(free -m | awk '/^Mem:/{m=$3" used, "$7" avail"} /^Swap:/{s=$3} END{print m", swap "s}')
+              top=$(ps -C cc1plus -o rss= --sort=-rss 2>/dev/null | awk 'NR==1{print int($1/1024)}' || true)
+              echo "[sample] $(date -u +%H:%M:%S) MiB ${mem}; load $(cut -d' ' -f1 /proc/loadavg);" \
+                   "cc1plus $(pgrep -c cc1plus || true), largest ${top:-0} MiB"
+            done
+          ) &
+          sampler=$!
+          trap 'kill "$sampler" 2>/dev/null || true' EXIT
+          jobs=3
+          if [ "$BACKEND" = stdexec ] && [ "$RUNNER_KIND" != self-hosted ]; then
+            jobs=2
+          fi
+          echo "building with -j${jobs} (${BACKEND} backend, ${RUNNER_KIND} runner)"
+          cmake --build "build-${BACKEND}" -j"${jobs}"
 
       # Same check as build-and-test's; see scripts/check-linker.sh.
       - name: Assert binaries were linked by mold
