@@ -223,6 +223,9 @@ public:
         std::vector<pending> overflow;
         std::vector<pending> full;
         bool wake_timer = false;
+        // Completion is attached only once every batcher lock is released:
+        // see `launch`.
+        std::vector<launch> launches;
         {
             std::unique_lock lock(dest._mutex);
             if (clock::now() < dest._not_batching_until) {
@@ -251,13 +254,14 @@ public:
                 std::unique_lock send_lock(dest._send_mutex);
                 lock.unlock();
                 if (!overflow.empty()) {
-                    issue(target, std::move(overflow));
+                    launches.push_back(issue(target, std::move(overflow)));
                 }
                 if (!full.empty()) {
-                    issue(target, std::move(full));
+                    launches.push_back(issue(target, std::move(full)));
                 }
             }
         }
+        run(launches);
         if (wake_timer) {
             std::lock_guard timer_lock(_timer_mutex);
             _timer_cv.notify_one();
@@ -405,25 +409,58 @@ private:
                 continue;
             }
             auto batch = take(*d);
-            std::unique_lock send_lock(d->_send_mutex);
-            lock.unlock();
-            issue(d->_id, std::move(batch));
+            launch next;
+            {
+                std::unique_lock send_lock(d->_send_mutex);
+                lock.unlock();
+                next = issue(d->_id, std::move(batch));
+            }
+            if (next) {
+                next();
+            }
+        }
+    }
+
+    /// What is left of issuing a batch once the client has it: attaching
+    /// the completion. The caller runs it after releasing every batcher
+    /// lock, never under `_send_mutex`. A client may return a future that
+    /// is already complete (a refused or failed send, an in-process
+    /// fabric), and on the Folly backend a continuation attached to such a
+    /// future runs at once, on this thread. Completion fulfils member
+    /// promises, whose own continuations (the group's response handling)
+    /// may then send the next AppendEntries to the same destination. Under
+    /// `_send_mutex` that send blocked on the lock its own thread held:
+    /// the split suite's batching run hung for 15 minutes in most CI runs.
+    using launch = std::function<void()>;
+
+    static auto run(std::vector<launch>& launches) -> void {
+        for (auto& l : launches) {
+            if (l) {
+                l();
+            }
         }
     }
 
     /// Hand one batch to the shared client. A batch of one is still sent as
     /// a batch: it is what probes a destination after `_probe_interval`, and
     /// it keeps the receive side on one code path.
-    auto issue(const node_id_type& target, std::vector<pending> members) -> void {
+    ///
+    /// Called with `_send_mutex` held, so batches reach the client in the
+    /// order they were taken; returns the completion for the caller to
+    /// attach once that lock is released.
+    [[nodiscard]] auto issue(const node_id_type& target, std::vector<pending> members) -> launch {
         // The host calls `flush_all()` behind a run-time check, so this is
         // instantiated for a client that cannot batch as well; such a host
         // never builds a batcher, and nothing can have been queued.
         if constexpr (append_entries_batching_client<Client, Messages>) {
-            issue_batch(target, std::move(members));
+            return issue_batch(target, std::move(members));
+        } else {
+            return {};
         }
     }
 
-    auto issue_batch(const node_id_type& target, std::vector<pending> members) -> void {
+    [[nodiscard]] auto issue_batch(const node_id_type& target, std::vector<pending> members)
+        -> launch {
         auto batch = std::make_shared<in_flight_batch>();
         batch->_target = target;
         batch->_request._members.reserve(members.size());
@@ -448,15 +485,21 @@ private:
             ++_in_flight;
         }
         try {
-            _inner->send_append_entries_batch(target, batch->_request, timeout)
-                .thenTry([this, batch](auto&& result) {
-                    complete(*batch, std::forward<decltype(result)>(result));
-                    finish_flight();
-                })
-                .detach();
+            auto sent = _inner->send_append_entries_batch(target, batch->_request, timeout);
+            auto held = std::make_shared<decltype(sent)>(std::move(sent));
+            return [this, batch, held] {
+                std::move(*held)
+                    .thenTry([this, batch](auto&& result) {
+                        complete(*batch, std::forward<decltype(result)>(result));
+                        finish_flight();
+                    })
+                    .detach();
+            };
         } catch (...) {
-            fail_all(*batch, std::current_exception());
-            finish_flight();
+            return [this, batch, error = std::current_exception()] {
+                fail_all(*batch, error);
+                finish_flight();
+            };
         }
     }
 

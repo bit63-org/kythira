@@ -29,7 +29,10 @@
 
 #include <chrono>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <functional>
+#include <future>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -443,6 +446,58 @@ BOOST_AUTO_TEST_CASE(a_full_queue_is_flushed_without_waiting) {
         std::move(b).get();
         std::move(c).get();
     }
+}
+
+// A member's continuation that sends again must not find the batcher's
+// locks held. The client here answers inside the call, so the batch future
+// is already complete when the batcher attaches its completion; on the
+// Folly backend that completion, and the member continuation below, run on
+// the sending thread at once. The continuation's two sends fill a batch to
+// the same destination, which takes that destination's send lock: before
+// the fix the batcher still held it, and this deadlocked. Backends that
+// run continuations elsewhere pass either way.
+BOOST_AUTO_TEST_CASE(a_completion_may_send_to_the_same_destination) {
+    fake_client client;
+    client.answer_batches_with(answer_all_ok);
+    batcher_type batcher(client, config(2));
+
+    std::promise<std::size_t> finished;
+    auto done = finished.get_future();
+    std::thread scenario([&] {
+        try {
+            std::vector<kythira::future_default<ae_response>> again;
+            std::mutex again_mutex;
+            auto a = batcher.send(2, append_for(10, 1), 100ms);
+            auto chained = std::move(a).thenValue([&](ae_response) {
+                auto c = batcher.send(2, append_for(12, 1), 100ms);
+                auto d = batcher.send(2, append_for(13, 1), 100ms);
+                std::lock_guard lock(again_mutex);
+                again.push_back(std::move(c));
+                again.push_back(std::move(d));
+            });
+            auto b = batcher.send(2, append_for(11, 1), 100ms);  // fills the first batch
+            std::move(chained).get();
+            std::move(b).get();
+            std::vector<kythira::future_default<ae_response>> sent;
+            {
+                std::lock_guard lock(again_mutex);
+                sent = std::move(again);
+            }
+            for (auto& f : sent) {
+                std::move(f).get();
+            }
+            finished.set_value(client.batches().size());
+        } catch (...) {
+            finished.set_exception(std::current_exception());
+        }
+    });
+    if (done.wait_for(10s) != std::future_status::ready) {
+        // A deadlocked thread cannot be joined; report and leave at once.
+        std::fprintf(stderr, "a_completion_may_send_to_the_same_destination: deadlocked\n");
+        std::_Exit(1);
+    }
+    scenario.join();
+    BOOST_TEST(done.get() == 2U);
 }
 
 // Requirement 3.4: a member too big for any batch goes alone.
