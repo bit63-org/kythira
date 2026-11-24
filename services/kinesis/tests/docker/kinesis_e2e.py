@@ -553,10 +553,18 @@ def channel_check(args):
             )
         time.sleep(3)
     # Within a shard a key's records were written in order; delivery keeps
-    # it. A batch re-delivered after a lost checkpoint lands on the same
-    # key and replaces itself, so only the producer's own retries repeat.
+    # it. A batch delivered again after a lost checkpoint starts at the
+    # same record and may hold more (records kept arriving), so it repeats
+    # a stretch already seen: skip records seen before, and every new one
+    # must come after the last new one.
     for (shard, key), got in by_shard_key.items():
-        for a, b in zip(got, got[1:]):
+        first_seen = []
+        known = set()
+        for i in got:
+            if i not in known:
+                known.add(i)
+                first_seen.append(i)
+        for a, b in zip(first_seen, first_seen[1:]):
             if b < a:
                 fail(f"{shard} key {key}: {b} delivered after {a}")
     print(json.dumps({"delivered": len(seen), "lines": total, "objects": objects}))

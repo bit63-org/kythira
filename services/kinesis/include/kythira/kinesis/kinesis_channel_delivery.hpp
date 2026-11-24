@@ -25,7 +25,10 @@
 /// Delivery is at least once and in sequence order within a shard. An
 /// object's key names the shard and its first and last sequence numbers
 /// and its time path comes from the first record's arrival, so a batch
-/// retried after a failed checkpoint lands on the same key. A child shard
+/// retried with the same records after a failed checkpoint lands on the
+/// same key. A retry that read further (more records arrived meanwhile)
+/// writes a longer object starting at the same sequence number, which
+/// repeats the earlier object's records. A child shard
 /// is delivered only once its parents' checkpoints passed their ending
 /// counters, so a key's records arrive in order across a reshard.
 ///
