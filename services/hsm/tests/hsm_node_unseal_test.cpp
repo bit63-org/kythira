@@ -24,6 +24,7 @@
 #include <sys/stat.h>
 
 #include <array>
+#include <chrono>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
@@ -158,6 +159,24 @@ BOOST_AUTO_TEST_CASE(shares_are_kept_sealed_never_overwritten_and_pruned_behind)
     m.store.prune(a.catalog.mk_check);
     BOOST_TEST(m.store.find(b.catalog.mk_check).has_value());
     BOOST_TEST(m.store.find(a.catalog.mk_check).has_value());
+    m.store.prune(b.catalog.mk_check);
+    BOOST_TEST(!m.store.find(a.catalog.mk_check).has_value());
+    BOOST_TEST(m.store.find(b.catalog.mk_check).has_value());
+}
+
+// File times come from a coarse clock, so two shares written within one
+// tick used to tie, and prune() keeps a tie: the older share outlived a
+// rekey on a fast disk (seen on CI's tmpfs scratch). Here the held
+// share's time is pushed ahead of the clock, which is the tie and worse.
+BOOST_AUTO_TEST_CASE(a_newer_share_prunes_an_older_one_written_in_the_same_tick) {
+    member m;
+    split_key a(2, 3);
+    split_key b(2, 3);
+    BOOST_TEST(m.store.put(a.shares[0]));
+    for (const auto& e : fs::directory_iterator(m.dir.path / "shares")) {
+        fs::last_write_time(e.path(), fs::file_time_type::clock::now() + std::chrono::seconds(5));
+    }
+    BOOST_TEST(m.store.put(b.shares[0]));
     m.store.prune(b.catalog.mk_check);
     BOOST_TEST(!m.store.find(a.catalog.mk_check).has_value());
     BOOST_TEST(m.store.find(b.catalog.mk_check).has_value());

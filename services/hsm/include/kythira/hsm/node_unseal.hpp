@@ -231,6 +231,7 @@ public:
         }
         const auto bin = shamir_encode_binary(share);
         node_unseal_detail::write_private_file(path, _sealer->seal(bin.view(), share.check_value));
+        order_after_others(path);
         return true;
     }
 
@@ -281,6 +282,39 @@ private:
     [[nodiscard]] auto path_of(std::span<const std::uint8_t, 8> check) const
         -> std::filesystem::path {
         return _dir / ("share-" + node_unseal_detail::hex(check) + ".sealed");
+    }
+
+    /// prune() orders shares by modification time, so a share must be
+    /// strictly newer than every share already held. File times come
+    /// from the kernel's coarse clock (a few milliseconds per tick), so
+    /// two shares written within one tick tie, and a tie is kept: on
+    /// tmpfs, or any disk fast enough, a rekey's older share then
+    /// survived pruning. Moving the new file's time just past the newest
+    /// other one keeps the order of delivery without changing the
+    /// on-disk format.
+    void order_after_others(const std::filesystem::path& path) {
+        std::error_code ec;
+        auto mine = std::filesystem::last_write_time(path, ec);
+        if (ec) {
+            return;
+        }
+        auto newest = mine;
+        bool behind = false;
+        for (const auto& entry : std::filesystem::directory_iterator(_dir, ec)) {
+            const auto name = entry.path().filename().string();
+            if (entry.path() == path || !name.starts_with("share-") || !name.ends_with(".sealed")) {
+                continue;
+            }
+            std::error_code tec;
+            const auto t = entry.last_write_time(tec);
+            if (!tec && t >= newest) {
+                newest = t;
+                behind = true;
+            }
+        }
+        if (behind) {
+            std::filesystem::last_write_time(path, newest + std::chrono::microseconds(1), ec);
+        }
     }
 
     std::filesystem::path _dir;
