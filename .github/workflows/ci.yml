@@ -436,7 +436,18 @@ jobs:
             --expect KYTHIRA_REDIS_LUA_SANDBOX=ON
 
       - name: Build
-        run: cmake --build build -j$(nproc)
+        # arm64 compiles three at a time instead of four. On 2026-11-20 the
+        # g++-13 arm64 leg had its runner shut down (exit 143, "The runner
+        # has received a shutdown signal") mid-compile, around step 830 of
+        # 1899 in the DynamoDB module's tests, on PRs #917 and #918 alike:
+        # the same out-of-memory signature as the link wave above, now in
+        # the compile wave. g++ needs more memory per TU than clang, and
+        # the arm runner has 16 GB for four workers. Three was not enough
+        # for g++: on 2026-11-24 it lost its runner the same way at -j3
+        # (step 835 of 1925, #964), so g++ on arm64 compiles two at a time
+        # and clang, which has not failed this way, three. x64 keeps
+        # -j$(nproc).
+        run: cmake --build build -j${{ matrix.arch_label == 'arm64' && (startsWith(matrix.compiler, 'g++') && '2' || '3') || '$(nproc)' }}
 
       # .kiro/specs/mold-linker/ Requirement 5.3: configure fails if mold is
       # missing, and this catches every other way of linking with ld.bfd
