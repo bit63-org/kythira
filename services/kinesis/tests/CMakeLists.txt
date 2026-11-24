@@ -195,6 +195,11 @@ kythira_kinesis_test(kinesis_data_access_test kinesis_data_access_test.cpp)
 # Independent layers task 6: the data-layer API, a front-end-only node over
 # two layouts of data nodes, remote and hybrid access.
 kythira_kinesis_test(kinesis_data_api_test kinesis_data_api_test.cpp)
+# Independent layers task 7: the front-end role split off and folded back
+# (both ways, and stopping at a mixed layout) under one client's writes,
+# reads and leases; the mixed layout's per-call choice; no data node.
+kythira_kinesis_test(kinesis_layouts_test kinesis_layouts_test.cpp)
+target_link_libraries(kinesis_layouts_test PRIVATE kythira_kinesis_layouts kythira_test_support)
 # Task 6: forwarding proposals to the group leader (wire, HMAC) and the
 # multi-raft cluster adapter.
 kythira_kinesis_test(kinesis_forward_test kinesis_forward_test.cpp)

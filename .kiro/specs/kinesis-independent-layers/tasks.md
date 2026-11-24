@@ -111,12 +111,36 @@ every role (7, 8, 10).
     the gateway listener unless `KINESIS_INTERNAL_LISTEN` names its own
     port. Wiring the remote side into a node without `data` is task 7.
 
-- [ ] 7. Front end without the data role
+- [x] 7. Front end without the data role
   - Wire `remote_data_access` into the module when the node lacks `data`;
     `KINESIS_DATA_NODES`; the whole API served from a front-end-only node
   - Run the in-process service tests parameterised over layouts
     (co-located, front end apart, mixed)
   - _Requirements: 2.3, 3.4, 15.1_
+  - Built: `KINESIS_ROLES=gateway,front_end` with `KINESIS_DATA_NODES`
+    (`host:port,...` of data nodes' internal listeners, the route cache's
+    seeds) builds the same front end, service, Lease API and gateway as a
+    data node over `remote_data_access`, and opens no Raft group, store,
+    data directory or internal listener. `KYTHIRA_PEERS` may leave it out
+    or be unset (Requirement 2.2); it needs the forward secret, which signs
+    its data-layer calls and derives the iterator key every front end
+    shares. `KINESIS_DATA_NODES` on a node with `data` is refused. Its
+    `/metrics` counts data-layer calls, not-leader and stale-route answers,
+    and unreachable calls. `front_end` without `gateway` (and the reverse)
+    still waits on task 8.
+  - Nine in-process suites (service, reads, reshard, throttle, leases,
+    tags, channels, encryption, fan-out) run three times from one binary,
+    `KINESIS_TEST_LAYOUT` unset, `front_end_apart` and `mixed`
+    (`tests/kinesis_layouts.hpp`): apart is `remote_data_access` over the
+    peer client and a data node's gateway on loopback; mixed is a hybrid
+    front end holding only the catalog group. `kinesis_layouts_test` moves
+    one client's writes, iterators and leases co-located to apart and
+    back, apart to co-located and back, and through mixed in the middle,
+    checking every acknowledged record is read once in order and every
+    lease holds (the front-end role's migration both ways, ahead of task
+    14's chaos runs). Running them found that the internal listener must
+    take a whole `PutRecords` command (`KINESIS_MAX_BODY_BYTES`, as the
+    module already sets it).
 
 - [ ] 8. Gateway apart from the front end
   - `kinesis_authenticated_call.hpp`: the SigV4-verified handoff (CBOR),

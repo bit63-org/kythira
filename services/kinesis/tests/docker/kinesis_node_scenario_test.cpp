@@ -18,7 +18,11 @@
 //     reads what it wrote;
 //   * with one node stopped the other two keep taking writes and serving
 //     reads, and the stopped node catches up when it starts again and
-//     serves every record itself.
+//     serves every record itself;
+//   * kin-fe, a front end without the data role (kinesis-independent-layers
+//     task 7), serves the same streams over the data nodes' data-layer API:
+//     it reads what the data nodes took, creates a stream and takes writes
+//     the data nodes then serve, with iterators valid on either side.
 //
 // A second case (task 9, Requirement 15) runs three unmodified KCL 2.x
 // workers (the `kcl` profile) with their leases on the cluster, one worker
@@ -146,6 +150,9 @@ std::string endpoint(int n) {
     return "http://" + service(n) + ":4567";
 }
 
+/// kin-fe: the front end without the data role.
+const std::string k_front_end_endpoint = "http://kin-fe:4567";
+
 /// The AWS CLI v2 against node `target`.
 os::CmdResult aws_cli(int target, std::initializer_list<std::string> args,
                       const char* key_id = k_client_id, const char* secret = k_client_secret) {
@@ -258,7 +265,8 @@ struct stack_fixture {
     stack_fixture() {
         os::try_exec(os::real_exec, compose_cmd({"down", "-v", "--remove-orphans"}));
         try {
-            os::checked_exec(os::real_exec, compose_cmd({"up", "-d", "kin-1", "kin-2", "kin-3"}));
+            os::checked_exec(os::real_exec,
+                             compose_cmd({"up", "-d", "kin-1", "kin-2", "kin-3", "kin-fe"}));
         } catch (...) {
             dump_logs();
             throw;
@@ -528,6 +536,29 @@ BOOST_AUTO_TEST_CASE(sdks_against_a_cluster_by_service_name) {
                    },
                    120s),
                "kin-1 never served all 600 records after restarting");
+
+    // 6. A front end without data (independent layers task 7): it reads
+    //    every record the data nodes took, alternating pages with them, and
+    //    what it creates and writes the data nodes serve.
+    {
+        auto c = boto3({"consume", "--endpoints", k_front_end_endpoint + "," + endpoint(1),
+                        "--stream", "py", "--expect", "600"});
+        BOOST_REQUIRE_MESSAGE(c.code == 0, "consume through kin-fe failed:\n" << c.out);
+    }
+    {
+        auto r =
+            boto3({"create", "--endpoint", k_front_end_endpoint, "--stream", "fe", "--shards", "2"},
+                  k_admin_id, k_admin_secret);
+        BOOST_REQUIRE_MESSAGE(r.code == 0, "create through kin-fe failed:\n" << r.out);
+        auto p = boto3({"produce", "--endpoint", k_front_end_endpoint, "--stream", "fe", "--count",
+                        "200", "--tag", "f"});
+        BOOST_REQUIRE_MESSAGE(p.code == 0, "produce through kin-fe failed:\n" << p.out);
+        auto c = boto3({"consume", "--endpoints",
+                        endpoint(2) + "," + k_front_end_endpoint + "," + endpoint(3), "--stream",
+                        "fe", "--expect", "200"});
+        BOOST_REQUIRE_MESSAGE(c.code == 0, "the data nodes did not serve kin-fe's writes:\n"
+                                               << c.out);
+    }
 }
 
 // Task 9: KCL 2.x on the native lease layer, through a kill of every node.

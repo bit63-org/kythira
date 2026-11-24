@@ -108,6 +108,20 @@ services:
       - ./keys.txt:/etc/kinesis/keys:ro
       - kin-3-data:/var/lib/kinesis
 
+  # A front end without the data role (kinesis-independent-layers task 7):
+  # in no Raft group and nothing on disk, every call over the data-layer
+  # API of the three data nodes, reached by service name. KYTHIRA_PEERS
+  # (from the shared settings) leaves it out, as it may.
+  kin-fe:
+    <<: *node
+    environment:
+      <<: *env
+      KYTHIRA_NODE_ID: "11"
+      KINESIS_ROLES: gateway,front_end
+      KINESIS_DATA_NODES: "kin-1:4567,kin-2:4567,kin-3:4567"
+    volumes:
+      - ./keys.txt:/etc/kinesis/keys:ro
+
   # The in-memory S3 mock (cmd/chaos_s3_mock, staged into the node image)
   # that the tiering case tiers to, in the `s3` profile: S3 on :9000 and
   # its fault knobs on :9001, reached by service name. Its objects live in

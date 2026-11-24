@@ -183,8 +183,26 @@ void read_segment_layer(const reader& r, node_options& o) {
         fail("KINESIS_SEGMENT_NODES: " + std::string(e.what()));
     }
     const auto text = r.opt("KINESIS_ROLES", "gateway,front_end,data,segments");
-    if (const auto gap = unserved_roles(o._roles, !o._segment_nodes.empty())) {
+    // The data layer a front end without `data` reaches (task 7).
+    o._data_nodes = split_list(r.opt("KINESIS_DATA_NODES", ""));
+    for (const auto& n : o._data_nodes) {
+        if (!kinesis::split_host_port(n)) {
+            fail("KINESIS_DATA_NODES: '" + n + "' is not host:port");
+        }
+    }
+    if (const auto gap =
+            unserved_roles(o._roles, !o._segment_nodes.empty(), !o._data_nodes.empty())) {
         fail("KINESIS_ROLES=" + text + ": " + *gap);
+    }
+    if (!o._data_nodes.empty() && o._roles.has(kythira::layers::role::data)) {
+        fail("KINESIS_DATA_NODES is for a front end without the data role; KINESIS_ROLES=" + text +
+             " has data, and a data node reaches its peers through KYTHIRA_PEERS");
+    }
+    if (is_front_end_node(o._roles) && o._forward_secret.size() < 16) {
+        fail(
+            "KINESIS_FORWARD_SECRET (or _FILE) of at least 16 bytes is required without the data "
+            "role: the front end signs its data-layer calls with it, and its shard iterators "
+            "must verify on every node");
     }
     const auto self = kythira::host_node_id_text(o._node_id);
     if (is_segment_node(o._roles) && !kythira::segment_node_of(o._segment_nodes, self)) {
@@ -221,19 +239,25 @@ void read_raft_side(const reader& r, node_options& o) {
     }
     o._raft_port = static_cast<std::uint16_t>(raft_port);
     // Raft RPC has no TLS here; off loopback that has to be asked for. A
-    // segment node opens no Raft port.
+    // node without the data role (a segment node, a front end) is in no
+    // Raft group.
     o._allow_plaintext_raft = r.flag("KYTHIRA_ALLOW_PLAINTEXT_RAFT", "false");
     const bool segment_node = is_segment_node(o._roles);
-    if (!segment_node && !o._allow_plaintext_raft && !is_loopback_address(o._bind_address)) {
+    const bool voter = o._roles.has(kythira::layers::role::data);
+    if (voter && !o._allow_plaintext_raft && !is_loopback_address(o._bind_address)) {
         fail("refusing to serve plaintext, unauthenticated Raft RPC on KYTHIRA_RAFT_BIND=" +
              o._bind_address +
              " (set KYTHIRA_RAFT_BIND to a loopback address, or "
              "KYTHIRA_ALLOW_PLAINTEXT_RAFT=true on a network you trust)");
     }
-    o._peers = parse_id_map("KYTHIRA_PEERS", r.required("KYTHIRA_PEERS"));
     // A segment node is not a voter: KYTHIRA_PEERS names the data voters
-    // whose volumes it holds.
-    if (!segment_node && !o._peers.contains(o._node_id)) {
+    // whose volumes it holds. A front end without data needs none
+    // (Requirement 2.2): KINESIS_DATA_NODES names its data layer.
+    const bool front_end_node = !voter && !segment_node;
+    if (!front_end_node || r.set("KYTHIRA_PEERS")) {
+        o._peers = parse_id_map("KYTHIRA_PEERS", r.required("KYTHIRA_PEERS"));
+    }
+    if (voter && !o._peers.contains(o._node_id)) {
         fail("KYTHIRA_PEERS must include this node's own id " +
              kythira::host_node_id_text(o._node_id));
     }
@@ -386,7 +410,9 @@ void read_kinesis_side(const reader& r, node_options& o) {
     } else {
         o._static_keys_file = r.required("KINESIS_STATIC_KEYS_FILE");
     }
-    o._data_dir = r.required("KINESIS_DATA_DIR");
+    // A front end without data keeps nothing on disk.
+    o._data_dir = is_front_end_node(o._roles) ? r.opt("KINESIS_DATA_DIR", "")
+                                              : r.required("KINESIS_DATA_DIR");
 
     if (r.set("KINESIS_FORWARD_SECRET") && r.set("KINESIS_FORWARD_SECRET_FILE")) {
         fail("set KINESIS_FORWARD_SECRET or KINESIS_FORWARD_SECRET_FILE, not both");
@@ -711,7 +737,12 @@ auto volume_assignments(const node_options& o) -> std::vector<kythira::volume_as
     return kythira::initial_volume_assignments("kinesis", replicas, o._segment_nodes);
 }
 
-auto unserved_roles(kythira::layers::role_set roles, bool segment_layer)
+auto is_front_end_node(kythira::layers::role_set roles) -> bool {
+    using kythira::layers::role;
+    return roles.has(role::front_end) && !roles.has(role::data);
+}
+
+auto unserved_roles(kythira::layers::role_set roles, bool segment_layer, bool data_layer)
     -> std::optional<std::string> {
     using kythira::layers::role;
     if (roles.empty()) {
@@ -724,16 +755,6 @@ auto unserved_roles(kythira::layers::role_set roles, bool segment_layer)
         }
         return std::nullopt;
     }
-    if (!roles.has(role::data)) {
-        return "a node without the data role reaches the data layer through the data-layer "
-               "API of data nodes (kinesis-independent-layers task 6), which this build does "
-               "not have yet; add data";
-    }
-    if (!roles.has(role::segments) && !segment_layer) {
-        return "data without segments keeps its record segments on a volume on a segment "
-               "node, and KINESIS_SEGMENT_NODES names none; list the segment nodes there or "
-               "add segments";
-    }
     if (roles.has(role::gateway) && !roles.has(role::front_end)) {
         return "gateway without front_end hands each call to a front end "
                "(kinesis-independent-layers task 8), which this build does not have yet; add "
@@ -741,8 +762,25 @@ auto unserved_roles(kythira::layers::role_set roles, bool segment_layer)
     }
     if (roles.has(role::front_end) && !roles.has(role::gateway)) {
         return "front_end without gateway serves the internal front-end API "
-               "(kinesis-independent-layers task 7), which this build does not have yet; add "
+               "(kinesis-independent-layers task 8), which this build does not have yet; add "
                "gateway";
+    }
+    if (!roles.has(role::data)) {
+        if (roles.has(role::segments)) {
+            return "segments without data makes a segment node, which runs no other role; "
+                   "drop segments, or add data";
+        }
+        if (!data_layer) {
+            return "a front end without the data role reaches the data layer through the "
+                   "data nodes listed in KINESIS_DATA_NODES, which is not set; list their "
+                   "internal listeners there, or add data";
+        }
+        return std::nullopt;
+    }
+    if (!roles.has(role::segments) && !segment_layer) {
+        return "data without segments keeps its record segments on a volume on a segment "
+               "node, and KINESIS_SEGMENT_NODES names none; list the segment nodes there or "
+               "add segments";
     }
     return std::nullopt;
 }
@@ -753,7 +791,7 @@ auto describe(const node_options& o) -> std::string {
         << "roles=" << o._roles.to_string() << '\n'
         << "raft=" << o._bind_address << ':' << o._raft_port
         << (o._allow_plaintext_raft ? " (plaintext allowed)" : "") << '\n'
-        << "voters=" << o._peers.size() << '\n'
+        << "voters=" << (o._roles.has(kythira::layers::role::data) ? o._peers.size() : 0) << '\n'
         << "shards=" << (o._shard_cuts.size() + 1) << '\n'
         << "listen=" << o._listen_host << ':' << o._listen_port
         << (o._allow_plaintext ? " http" : " https") << '\n';
@@ -776,6 +814,9 @@ auto describe(const node_options& o) -> std::string {
         << '\n';
     for (const auto& [id, gw] : o._peer_gateways) {
         out << "peer_gateway " << kythira::host_node_id_text(id) << '=' << gw << '\n';
+    }
+    for (const auto& n : o._data_nodes) {
+        out << "data_node " << n << '\n';
     }
     for (const auto& n : o._segment_nodes) {
         out << "segment_node " << n._id << '=' << n._endpoint
@@ -866,7 +907,8 @@ auto usage() -> std::string {
            "                                   or the file's keys first and IAM for the rest\n"
            "  KINESIS_STATIC_KEYS_FILE         access keys: id secret account name role\n"
            "                                   (required with static and both)\n"
-           "  KINESIS_DATA_DIR                 Raft state and record segments (required)\n"
+           "  KINESIS_DATA_DIR                 Raft state and record segments (required\n"
+           "                                   with the data or segments role)\n"
            "  KINESIS_FORWARD_SECRET[_FILE]    shared by the gateways; required with >1 voter\n"
            "  KINESIS_ITERATOR_KEYS_FILE       shard-iterator keys: id secret, first signs\n"
            "                                   (default: derived from the forward secret)\n"
@@ -882,8 +924,12 @@ auto usage() -> std::string {
            "                                   front_end, data, segments (all four);\n"
            "                                   data,segments serves only peers; data alone\n"
            "                                   keeps segments on a segment node, segments\n"
-           "                                   alone is one (both need KINESIS_SEGMENT_NODES)\n"
+           "                                   alone is one (both need KINESIS_SEGMENT_NODES);\n"
+           "                                   gateway,front_end holds no replica (needs\n"
+           "                                   KINESIS_DATA_NODES)\n"
            "  KINESIS_SEGMENT_NODES            the segment layer: id=host:port[@group],...\n"
+           "  KINESIS_DATA_NODES               a front end's data layer: host:port,... of\n"
+           "                                   data nodes' internal listeners\n"
            "  KINESIS_KMS                      key provider for encrypted streams: off, local,\n"
            "                                   aws, pkcs11 or kythira (off; kythira_node:\n"
            "                                   kythira when the KMS module runs)\n"

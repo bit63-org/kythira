@@ -3,6 +3,19 @@
 Chronological log of notable changes to Kythira, newest first. For the
 current list of outstanding work, see [TODO.md](TODO.md).
 
+### What Changed (November 24, 2026)
+
+- **A Kinesis node can serve the whole API without holding any data.**
+  `KINESIS_ROLES=gateway,front_end` with `KINESIS_DATA_NODES` naming data
+  nodes' internal listeners runs a front end that is in no Raft group and
+  keeps nothing on disk: every read and write goes over the data-layer
+  API to the data node that holds or leads the stream's group. It shares
+  the data nodes' forwarding secret, so iterators and leases carry over
+  when clients move between it and a co-located node, in either
+  direction. The Kinesis in-process service suites now also run with
+  their front end apart from the data layer and in a mixed layout
+  (`.kiro/specs/kinesis-independent-layers/` task 7).
+
 ### What Changed (November 22, 2026)
 
 - **A refused CoAP DTLS connection is reported at once.** When a peer
