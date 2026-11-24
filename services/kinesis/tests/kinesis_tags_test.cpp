@@ -16,6 +16,8 @@
 #include <kythira/kinesis/kinesis_front_end.hpp>
 #include <kythira/kinesis/kinesis_service.hpp>
 
+#include "kinesis_layouts.hpp"
+
 #include <raft/record_segment_store.hpp>
 
 #include <boost/json.hpp>
@@ -83,7 +85,8 @@ struct fixture {
     kin::local_stream_cluster cluster{store.get(), [this] { return now; }};
     allow_all auth;
     kin::front_end<allow_all> fe{kin::front_end_config{}, auth};
-    std::unique_ptr<kin::kinesis_service<kin::local_stream_cluster>> service;
+    std::unique_ptr<kin::test::layered_access> layer;
+    std::unique_ptr<kin::kinesis_service<kin::data_access>> service;
 
     fixture() {
         // These cases call faster than AWS's per-account control-plane
@@ -91,8 +94,8 @@ struct fixture {
         // kinesis_throttle_test covers the rates.
         kin::kinesis_service_config cfg;
         cfg._control_plane._rates.clear();
-        service = std::make_unique<kin::kinesis_service<kin::local_stream_cluster>>(cluster,
-                                                                                    std::move(cfg));
+        service = std::make_unique<kin::kinesis_service<kin::data_access>>(
+            kin::test::layer_over(layer, cluster), std::move(cfg));
         service->register_with(fe);
         fe.set_resource_lookup(
             [this](std::string_view arn) { return service->resource_facts_of(arn); });

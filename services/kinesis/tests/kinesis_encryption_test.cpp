@@ -18,6 +18,8 @@
 #include <kythira/kinesis/kinesis_kms_aws.hpp>
 #include <kythira/kinesis/kinesis_service.hpp>
 
+#include "kinesis_layouts.hpp"
+
 #include <raft/record_segment_store.hpp>
 #include <raft/sigv4_verifier.hpp>
 
@@ -96,14 +98,15 @@ auto config_with(kin::key_provider kms) -> kin::kinesis_service_config {
 struct gateway {
     allow_all auth;
     kin::front_end<allow_all> fe{kin::front_end_config{}, auth};
-    std::unique_ptr<kin::kinesis_service<kin::local_stream_cluster>> service;
+    std::unique_ptr<kin::test::layered_access> layer;
+    std::unique_ptr<kin::kinesis_service<kin::data_access>> service;
 
     gateway(kin::local_stream_cluster& cluster, kin::key_provider kms)
         : gateway(cluster, config_with(std::move(kms))) {}
 
     gateway(kin::local_stream_cluster& cluster, kin::kinesis_service_config config) {
-        service = std::make_unique<kin::kinesis_service<kin::local_stream_cluster>>(
-            cluster, std::move(config));
+        service = std::make_unique<kin::kinesis_service<kin::data_access>>(
+            kin::test::layer_over(layer, cluster), std::move(config));
         service->register_with(fe);
     }
 

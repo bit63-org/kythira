@@ -697,6 +697,10 @@ struct remote_data_options {
     /// no replica) before it gives up as unreachable.
     int _attempts = 4;
     route_cache_options _routes{};
+    /// The clock arrival and creation times are stamped with; empty is
+    /// this node's wall clock. Tests that drive a data node's clock hand
+    /// the same one here, as NTP keeps every real layer's in step.
+    std::function<std::int64_t()> _clock;
 };
 
 struct remote_data_stats {
@@ -707,8 +711,9 @@ struct remote_data_stats {
     std::uint64_t _unreachable = 0;
 };
 
-/// `data_access` over the data-layer API: a front end without the `data`
-/// role (task 7 wires it in). Thread-safe.
+/// `data_access` over the data-layer API: what a front end without the
+/// `data` role serves the whole API over (task 7, `KINESIS_DATA_NODES`).
+/// Thread-safe.
 class remote_data_access final : public data_access {
 public:
     /// @param seeds data-node addresses ("host:port", names resolved at
@@ -801,6 +806,9 @@ public:
     /// This node's wall clock, as `raft_stream_cluster::now_ms` is every
     /// co-located node's: every layer runs NTP.
     [[nodiscard]] auto now_ms() -> std::int64_t override {
+        if (_options._clock) {
+            return _options._clock();
+        }
         return std::chrono::duration_cast<std::chrono::milliseconds>(
                    std::chrono::system_clock::now().time_since_epoch())
             .count();

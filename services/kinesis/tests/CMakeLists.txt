@@ -134,6 +134,36 @@ function(kythira_kinesis_test test_name source_file)
         TIMEOUT 120)
 endfunction()
 
+# kinesis-independent-layers task 7 (Requirement 15.1): the in-process
+# service tests again, the same binary with its front end in each other
+# role layout (KINESIS_TEST_LAYOUT, tests/kinesis_layouts.hpp): apart from
+# the data layer over the real internal transport, and mixed (a replica of
+# the catalog group here, the stream groups on a data node).
+#
+# The layouts compile once, here, rather than in every suite: the HTTPS
+# listener, peer client and remote access they instantiate took
+# kinesis_service_test from 1.3 GB to 4.1 GB of compiler memory as a
+# header, enough to get arm64 runners killed. They are two TUs, the data
+# node's gateway and listener (kinesis_layouts_node.cpp, about 4.5 GB at
+# -O2) apart from the remote and hybrid access (kinesis_layouts.cpp, about
+# 3 GB), since one TU holding both took 5.4 GB; the pair goes in the
+# `heavy_tu` pool (top-level CMakeLists.txt).
+add_library(kythira_kinesis_layouts STATIC kinesis_layouts.cpp kinesis_layouts_node.cpp)
+target_link_libraries(kythira_kinesis_layouts PUBLIC kythira_kinesis kythira_test_pch)
+target_precompile_headers(kythira_kinesis_layouts REUSE_FROM kythira_test_pch)
+set_target_properties(kythira_kinesis_layouts PROPERTIES JOB_POOL_COMPILE heavy_tu)
+function(kythira_kinesis_layout_tests test_name)
+    target_link_libraries(${test_name} PRIVATE kythira_kinesis_layouts)
+    foreach(layout IN ITEMS front_end_apart mixed)
+        add_test(NAME ${test_name}_${layout} COMMAND ${test_name})
+        set_tests_properties(${test_name}_${layout} PROPERTIES
+            ENVIRONMENT "KINESIS_TEST_LAYOUT=${layout}"
+            WORKING_DIRECTORY "${CMAKE_BINARY_DIR}/tests"
+            LABELS "unit;kinesis;kinesis-module;kinesis-layouts"
+            TIMEOUT 180)
+    endforeach()
+endfunction()
+
 # Task 5: hash keys, sequence numbers, routing keys and catalog records.
 kythira_kinesis_test(kinesis_catalog_test kinesis_catalog_test.cpp)
 # Task 5: the stream state machine (catalog commands, counters, segment
@@ -153,9 +183,11 @@ kythira_kinesis_test(kinesis_compat_profile_test kinesis_compat_profile_test.cpp
 # Task 6: stream lifecycle and writes, through the front end over the
 # in-process cluster.
 kythira_kinesis_test(kinesis_service_test kinesis_service_test.cpp)
+kythira_kinesis_layout_tests(kinesis_service_test)
 # Task 7: shard iterators, the shard reader, GetShardIterator and
 # GetRecords.
 kythira_kinesis_test(kinesis_reads_test kinesis_reads_test.cpp)
+kythira_kinesis_layout_tests(kinesis_reads_test)
 # Independent layers task 2: the named data-layer queries
 # (local_data_access), unreachable groups, records as stored, and the
 # service over a data_access it is handed.
@@ -169,23 +201,28 @@ kythira_kinesis_test(kinesis_forward_test kinesis_forward_test.cpp)
 # Task 8: per-shard token buckets, leader-side write admission and the
 # throttling errors on the API.
 kythira_kinesis_test(kinesis_throttle_test kinesis_throttle_test.cpp)
+kythira_kinesis_layout_tests(kinesis_throttle_test)
 # Task 9: lease records (versions, conditions, pages, snapshots) and the
 # Lease API over them.
 kythira_kinesis_test(kinesis_leases_test kinesis_leases_test.cpp)
+kythira_kinesis_layout_tests(kinesis_leases_test)
 # Task 10: retention calls, the seal/tier/trim entries, the maintenance pass
 # (trim, tier, fetch-back, eviction) and the disk guard.
 kythira_kinesis_test(kinesis_retention_test kinesis_retention_test.cpp)
 # Task 11: SplitShard, MergeShards and UpdateShardCount (lineage, routing,
 # refusals, tiling) and the repair of an abandoned reshard.
 kythira_kinesis_test(kinesis_reshard_test kinesis_reshard_test.cpp)
+kythira_kinesis_layout_tests(kinesis_reshard_test)
 # Task 12: UpdateStreamMode and the on-demand capacity controller.
 kythira_kinesis_test(kinesis_on_demand_test kinesis_on_demand_test.cpp)
 # Task 15: tags (both forms), resource policies, enhanced monitoring, the
 # account calls and the Prometheus metrics.
 kythira_kinesis_test(kinesis_tags_test kinesis_tags_test.cpp)
+kythira_kinesis_layout_tests(kinesis_tags_test)
 # Task 19: channels (catalog records, the five Channel operations, tags
 # on channel ARNs, no deleting a stream that feeds a channel).
 kythira_kinesis_test(kinesis_channels_test kinesis_channels_test.cpp)
+kythira_kinesis_layout_tests(kinesis_channels_test)
 # Task 19: channel delivery to general purpose S3 (freshness and size
 # triggers, record formats, GZIP/ZSTD, the dead-letter location, parents
 # before children, FAILED for a compression the node cannot write).
@@ -206,6 +243,7 @@ kythira_kinesis_test(kinesis_channel_tables_test kinesis_channel_tables_test.cpp
 # Task 14: encryption at rest (the local key provider, sealed records, the
 # AWS KMS adapter against a fake KMS, Start/StopStreamEncryption).
 kythira_kinesis_test(kinesis_encryption_test kinesis_encryption_test.cpp)
+kythira_kinesis_layout_tests(kinesis_encryption_test)
 # KMS task 15: KINESIS_KMS=kythira against a fake kms.client: each caller's
 # own GenerateDataKey and Decrypt, the caller TTL, producer generations.
 kythira_kinesis_test(kinesis_kms_kythira_test kinesis_kms_kythira_test.cpp)
@@ -219,6 +257,7 @@ kythira_kinesis_test(kinesis_kms_pkcs11_test kinesis_kms_pkcs11_test.cpp)
 kythira_kinesis_test(kinesis_in_process_test kinesis_in_process_test.cpp)
 kythira_kinesis_test(kinesis_fanout_test kinesis_fanout_test.cpp)
 target_link_libraries(kinesis_fanout_test PRIVATE kythira_test_support)
+kythira_kinesis_layout_tests(kinesis_fanout_test)
 # Task 6: the gateway's HTTP surface on a real listener (API, internal
 # propose and segment endpoints, health) and the peer client over plain
 # HTTP and verified TLS. certificate_authority issues the test PKI.

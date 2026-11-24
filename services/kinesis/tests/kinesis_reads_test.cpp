@@ -19,6 +19,8 @@
 #include <kythira/kinesis/kinesis_records.hpp>
 #include <kythira/kinesis/kinesis_service.hpp>
 
+#include "kinesis_layouts.hpp"
+
 #include <raft/record_segment_store.hpp>
 
 #include <boost/json.hpp>
@@ -110,7 +112,8 @@ struct fixture {
     kin::local_stream_cluster cluster{store.get(), [this] { return clock; }};
     allow_all auth;
     kin::front_end<allow_all> fe{kin::front_end_config{}, auth};
-    kin::kinesis_service<kin::local_stream_cluster> service{cluster, service_config()};
+    kin::test::layered_access layer{cluster};
+    kin::kinesis_service<kin::data_access> service{layer.get(), service_config()};
 
     fixture() { service.register_with(fe); }
 
@@ -641,7 +644,8 @@ BOOST_AUTO_TEST_CASE(a_shard_without_a_store_is_an_internal_failure) {
     kin::local_stream_cluster cluster{nullptr, [&clock] { return clock; }};
     allow_all auth;
     kin::front_end<allow_all> fe{kin::front_end_config{}, auth};
-    kin::kinesis_service<kin::local_stream_cluster> service{cluster};
+    kin::test::layered_access layer{cluster};
+    kin::kinesis_service<kin::data_access> service{layer.get()};
     service.register_with(fe);
     const auto call = [&](std::string_view op, const json::value& body) {
         kin::front_end_request r;

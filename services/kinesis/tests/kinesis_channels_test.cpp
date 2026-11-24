@@ -19,6 +19,8 @@
 #include <kythira/kinesis/kinesis_service.hpp>
 #include <kythira/kinesis/kinesis_stream_state_machine.hpp>
 
+#include "kinesis_layouts.hpp"
+
 #include <boost/json.hpp>
 
 #include <string>
@@ -54,7 +56,8 @@ struct fixture {
     kin::local_stream_cluster cluster{nullptr, [this] { return clock; }};
     allow_all auth;
     kin::front_end<allow_all> fe{kin::front_end_config{}, auth};
-    kin::kinesis_service<kin::local_stream_cluster> service{cluster, no_rates()};
+    kin::test::layered_access layer{cluster};
+    kin::kinesis_service<kin::data_access> service{layer.get(), no_rates()};
 
     fixture() { service.register_with(fe); }
 

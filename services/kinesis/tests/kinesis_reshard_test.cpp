@@ -19,6 +19,8 @@
 #include <kythira/kinesis/kinesis_hash.hpp>
 #include <kythira/kinesis/kinesis_service.hpp>
 
+#include "kinesis_layouts.hpp"
+
 #include <raft/record_segment_store.hpp>
 
 #include <boost/json.hpp>
@@ -83,11 +85,12 @@ struct fixture {
     kin::local_stream_cluster cluster{store.get()};
     allow_all auth;
     kin::front_end<allow_all> fe{kin::front_end_config{}, auth};
-    std::unique_ptr<kin::kinesis_service<kin::local_stream_cluster>> service;
+    std::unique_ptr<kin::test::layered_access> layer;
+    std::unique_ptr<kin::kinesis_service<kin::data_access>> service;
 
     fixture() {
-        service = std::make_unique<kin::kinesis_service<kin::local_stream_cluster>>(
-            cluster, kin::kinesis_service_config{});
+        service = std::make_unique<kin::kinesis_service<kin::data_access>>(
+            kin::test::layer_over(layer, cluster), kin::kinesis_service_config{});
         service->register_with(fe);
     }
 
