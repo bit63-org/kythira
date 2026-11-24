@@ -190,13 +190,33 @@ void read_segment_layer(const reader& r, node_options& o) {
             fail("KINESIS_DATA_NODES: '" + n + "' is not host:port");
         }
     }
-    if (const auto gap =
-            unserved_roles(o._roles, !o._segment_nodes.empty(), !o._data_nodes.empty())) {
+    // The front ends a gateway without its own hands calls to (task 8).
+    o._front_ends = split_list(r.opt("KINESIS_FRONT_ENDS", ""));
+    for (const auto& n : o._front_ends) {
+        if (!kinesis::split_host_port(n)) {
+            fail("KINESIS_FRONT_ENDS: '" + n + "' is not host:port");
+        }
+    }
+    if (const auto gap = unserved_roles(o._roles, !o._segment_nodes.empty(), !o._data_nodes.empty(),
+                                        !o._front_ends.empty())) {
         fail("KINESIS_ROLES=" + text + ": " + *gap);
     }
-    if (!o._data_nodes.empty() && o._roles.has(kythira::layers::role::data)) {
+    using kythira::layers::role;
+    if (!o._data_nodes.empty() && o._roles.has(role::data)) {
         fail("KINESIS_DATA_NODES is for a front end without the data role; KINESIS_ROLES=" + text +
              " has data, and a data node reaches its peers through KYTHIRA_PEERS");
+    }
+    if (!o._data_nodes.empty() && !o._roles.has(role::front_end)) {
+        fail("KINESIS_DATA_NODES is for a front end; KINESIS_ROLES=" + text +
+             " has no front_end, and a gateway reaches the data layer only through the front "
+             "ends in KINESIS_FRONT_ENDS");
+    }
+    if (!o._front_ends.empty() && o._roles.has(role::front_end)) {
+        fail("KINESIS_FRONT_ENDS is for a gateway without the front_end role; KINESIS_ROLES=" +
+             text + " has front_end, which executes this node's calls itself");
+    }
+    if (!o._front_ends.empty() && !o._roles.has(role::gateway)) {
+        fail("KINESIS_FRONT_ENDS is for a gateway; KINESIS_ROLES=" + text + " has no gateway");
     }
     if (is_front_end_node(o._roles) && o._forward_secret.size() < 16) {
         fail(
@@ -204,6 +224,14 @@ void read_segment_layer(const reader& r, node_options& o) {
             "role: the front end signs its data-layer calls with it, and its shard iterators "
             "must verify on every node");
     }
+    if (o._roles.has(role::gateway) != o._roles.has(role::front_end) &&
+        o._forward_secret.size() < 16) {
+        fail(
+            "KINESIS_FORWARD_SECRET (or _FILE) of at least 16 bytes is required when the "
+            "gateway and front_end roles are on different nodes: it signs the authenticated "
+            "call a gateway hands a front end, which a front end accepts only from a gateway");
+    }
+    o._drain_timeout = r.ms("KINESIS_DRAIN_TIMEOUT_MS", "10000");
     const auto self = kythira::host_node_id_text(o._node_id);
     if (is_segment_node(o._roles) && !kythira::segment_node_of(o._segment_nodes, self)) {
         fail("KINESIS_ROLES=" + text + ": a segment node must be listed in KINESIS_SEGMENT_NODES " +
@@ -252,9 +280,10 @@ void read_raft_side(const reader& r, node_options& o) {
     }
     // A segment node is not a voter: KYTHIRA_PEERS names the data voters
     // whose volumes it holds. A front end without data needs none
-    // (Requirement 2.2): KINESIS_DATA_NODES names its data layer.
-    const bool front_end_node = !voter && !segment_node;
-    if (!front_end_node || r.set("KYTHIRA_PEERS")) {
+    // (Requirement 2.2): KINESIS_DATA_NODES names its data layer; nor does
+    // a gateway without a front end, which reaches only KINESIS_FRONT_ENDS.
+    const bool stateless_node = !voter && !segment_node;
+    if (!stateless_node || r.set("KYTHIRA_PEERS")) {
         o._peers = parse_id_map("KYTHIRA_PEERS", r.required("KYTHIRA_PEERS"));
     }
     if (voter && !o._peers.contains(o._node_id)) {
@@ -410,9 +439,10 @@ void read_kinesis_side(const reader& r, node_options& o) {
     } else {
         o._static_keys_file = r.required("KINESIS_STATIC_KEYS_FILE");
     }
-    // A front end without data keeps nothing on disk.
-    o._data_dir = is_front_end_node(o._roles) ? r.opt("KINESIS_DATA_DIR", "")
-                                              : r.required("KINESIS_DATA_DIR");
+    // A front end or a gateway without data keeps nothing on disk.
+    o._data_dir = is_front_end_node(o._roles) || is_gateway_node(o._roles)
+                      ? r.opt("KINESIS_DATA_DIR", "")
+                      : r.required("KINESIS_DATA_DIR");
 
     if (r.set("KINESIS_FORWARD_SECRET") && r.set("KINESIS_FORWARD_SECRET_FILE")) {
         fail("set KINESIS_FORWARD_SECRET or KINESIS_FORWARD_SECRET_FILE, not both");
@@ -742,8 +772,14 @@ auto is_front_end_node(kythira::layers::role_set roles) -> bool {
     return roles.has(role::front_end) && !roles.has(role::data);
 }
 
-auto unserved_roles(kythira::layers::role_set roles, bool segment_layer, bool data_layer)
-    -> std::optional<std::string> {
+auto is_gateway_node(kythira::layers::role_set roles) -> bool {
+    using kythira::layers::role;
+    return roles.has(role::gateway) && !roles.has(role::front_end) && !roles.has(role::data) &&
+           !roles.has(role::segments);
+}
+
+auto unserved_roles(kythira::layers::role_set roles, bool segment_layer, bool data_layer,
+                    bool front_end_layer) -> std::optional<std::string> {
     using kythira::layers::role;
     if (roles.empty()) {
         return "names no role; a node runs at least one of gateway, front_end, data, segments";
@@ -755,22 +791,17 @@ auto unserved_roles(kythira::layers::role_set roles, bool segment_layer, bool da
         }
         return std::nullopt;
     }
-    if (roles.has(role::gateway) && !roles.has(role::front_end)) {
-        return "gateway without front_end hands each call to a front end "
-               "(kinesis-independent-layers task 8), which this build does not have yet; add "
-               "front_end";
-    }
-    if (roles.has(role::front_end) && !roles.has(role::gateway)) {
-        return "front_end without gateway serves the internal front-end API "
-               "(kinesis-independent-layers task 8), which this build does not have yet; add "
-               "gateway";
+    if (roles.has(role::gateway) && !roles.has(role::front_end) && !front_end_layer) {
+        return "a gateway without front_end hands each call to a front end on another node, "
+               "listed in KINESIS_FRONT_ENDS, which is not set; list the front ends' listeners "
+               "there, or add front_end";
     }
     if (!roles.has(role::data)) {
         if (roles.has(role::segments)) {
             return "segments without data makes a segment node, which runs no other role; "
                    "drop segments, or add data";
         }
-        if (!data_layer) {
+        if (roles.has(role::front_end) && !data_layer) {
             return "a front end without the data role reaches the data layer through the "
                    "data nodes listed in KINESIS_DATA_NODES, which is not set; list their "
                    "internal listeners there, or add data";
@@ -818,6 +849,10 @@ auto describe(const node_options& o) -> std::string {
     for (const auto& n : o._data_nodes) {
         out << "data_node " << n << '\n';
     }
+    for (const auto& n : o._front_ends) {
+        out << "front_end " << n << '\n';
+    }
+    out << "drain_timeout_ms=" << o._drain_timeout.count() << '\n';
     for (const auto& n : o._segment_nodes) {
         out << "segment_node " << n._id << '=' << n._endpoint
             << (n._placement_group.empty() ? std::string() : " group=" + n._placement_group)
@@ -925,11 +960,17 @@ auto usage() -> std::string {
            "                                   data,segments serves only peers; data alone\n"
            "                                   keeps segments on a segment node, segments\n"
            "                                   alone is one (both need KINESIS_SEGMENT_NODES);\n"
-           "                                   gateway,front_end holds no replica (needs\n"
-           "                                   KINESIS_DATA_NODES)\n"
+           "                                   front_end without data holds no replica\n"
+           "                                   (needs KINESIS_DATA_NODES); gateway without\n"
+           "                                   front_end hands calls on (needs\n"
+           "                                   KINESIS_FRONT_ENDS)\n"
            "  KINESIS_SEGMENT_NODES            the segment layer: id=host:port[@group],...\n"
            "  KINESIS_DATA_NODES               a front end's data layer: host:port,... of\n"
            "                                   data nodes' internal listeners\n"
+           "  KINESIS_FRONT_ENDS               a gateway's front ends: host:port,... of\n"
+           "                                   their listeners\n"
+           "  KINESIS_DRAIN_TIMEOUT_MS         how long a stopping gateway lets calls in\n"
+           "                                   flight finish (10000)\n"
            "  KINESIS_KMS                      key provider for encrypted streams: off, local,\n"
            "                                   aws, pkcs11 or kythira (off; kythira_node:\n"
            "                                   kythira when the KMS module runs)\n"

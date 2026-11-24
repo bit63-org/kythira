@@ -72,12 +72,14 @@
 #include <array>
 #include <cctype>
 #include <chrono>
+#include <cstdint>
 #include <exception>
 #include <functional>
 #include <map>
 #include <memory>
 #include <optional>
 #include <set>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -101,6 +103,44 @@ struct front_end_request {
     std::string _body;
     std::string _source_ip;
     bool _secure = true;
+};
+
+/// What an authenticated call is: a Kinesis API operation, or a Lease API
+/// request (`kinesis_lease_api.hpp`).
+enum class call_kind : std::uint8_t {
+    api,
+    lease
+};
+
+/// A request the gateway has framed, decoded and verified, for the front end
+/// to authorize and execute (kinesis-independent-layers task 8, Requirement
+/// 4.1, design "Gateway hands over an authenticated call"). Co-located, the
+/// front end makes one for itself and executes it at once; with the gateway
+/// apart, `kinesis_authenticated_call.hpp` carries it between the two.
+///
+/// It holds no signature: the principal is what the gateway verified, and
+/// the front end trusts it only from a caller it admits as a gateway.
+struct authenticated_call {
+    call_kind _kind = call_kind::api;
+    /// API: the operation, the decoded and model-validated input, and the
+    /// encoding to answer in.
+    std::string _operation;
+    boost::json::object _input;
+    aws_json::body_encoding _encoding = aws_json::body_encoding::json;
+    std::string _request_id;
+    aws_auth::principal_context _principal;
+    /// The request context IAM conditions read (`aws:SourceIp`,
+    /// `aws:SecureTransport`, `aws:UserAgent`); request tags and
+    /// `aws:CurrentTime` come from the input and the front end's clock.
+    std::string _source_ip;
+    std::string _user_agent;
+    bool _secure = true;
+    /// Lease API: the REST request without its signature headers.
+    std::string _method;
+    std::string _path;
+    std::string _query;
+    std::vector<std::pair<std::string, std::string>> _headers;
+    std::string _body;
 };
 
 /// The events of a streaming answer (`SubscribeToShard`, task 13), pulled
@@ -302,7 +342,7 @@ public:
     }
 
     [[nodiscard]] auto handles(std::string_view operation) const -> bool {
-        return _handlers.contains(operation);
+        return _handlers.contains(operation) || _served_elsewhere.contains(operation);
     }
 
     /// Supplies resource tags and policies to authorization. Without it,
@@ -332,10 +372,30 @@ public:
     }
 
     [[nodiscard]] auto handle_streaming(const front_end_request& req) -> reply {
+        auto gate = authenticate(req);
+        if (!gate._call) {
+            return std::move(gate._answer);
+        }
+        return execute(*gate._call);
+    }
+
+    /// The gateway's half of a request (kinesis-independent-layers task 8):
+    /// steps 1 to 3, framing, SigV4 and decoding, plus STS
+    /// `GetCallerIdentity`, which needs nothing past the signature. Either
+    /// the call to execute or the answer to send at once.
+    struct gate_result {
+        std::optional<authenticated_call> _call;
+        aws_json::http_response _answer;
+    };
+
+    [[nodiscard]] auto authenticate(const front_end_request& req) -> gate_result {
+        const auto answer = [](aws_json::http_response r) {
+            return gate_result{std::nullopt, std::move(r)};
+        };
         const auto target = detail::header_value(req, "x-amz-target");
         const auto content_type = detail::header_value(req, "content-type");
         if (target.empty() && is_sts_query(req, content_type)) {
-            return handle_sts(req);
+            return answer(handle_sts(req));
         }
         const aws_json::http_request_view view{req._method, req._path, content_type, target,
                                                req._body};
@@ -348,7 +408,8 @@ public:
             // Framing faults (method, content type, prefix, operation) and
             // body limits are the codec's to word.
             auto parsed = _codec.parse(view);
-            return _codec.respond(parsed ? unknown_operation() : parsed.error(), id, encoding);
+            return answer(
+                _codec.respond(parsed ? unknown_operation() : parsed.error(), id, encoding));
         }
 
         sigv4::service_rules rules;
@@ -360,30 +421,55 @@ public:
         const sigv4::request sreq{req._method, req._path, req._query, req._headers, req._body};
         const auto who = _authorizer.authenticate(sreq, rules);
         if (!who) {
-            return _codec.respond(auth_error(who.error()), id, encoding);
+            return answer(_codec.respond(auth_error(who.error()), id, encoding));
         }
 
-        const auto h = _handlers.find(op->name);
-        if (h == _handlers.end()) {
-            return _codec.respond(unknown_operation(), id, encoding);
+        if (!handles(op->name)) {
+            return answer(_codec.respond(unknown_operation(), id, encoding));
         }
         auto parsed = _codec.parse(view);
         if (!parsed) {
-            return _codec.respond(parsed.error(), id, encoding);
+            return answer(_codec.respond(parsed.error(), id, encoding));
         }
-        auto& input = parsed->input;
+        authenticated_call call;
+        call._kind = call_kind::api;
+        call._operation = op->name;
+        call._input = std::move(parsed->input);
+        call._encoding = encoding;
+        call._request_id = std::move(id);
+        call._principal = *who;
+        call._source_ip = req._source_ip;
+        call._user_agent = std::string(detail::header_value(req, "user-agent"));
+        call._secure = req._secure;
+        return gate_result{std::move(call), {}};
+    }
+
+    /// The front end's half: steps 4 to 6 on a call `authenticate` made,
+    /// here or on a gateway this front end trusts. The principal is taken as
+    /// verified.
+    [[nodiscard]] auto execute(authenticated_call& call) -> reply {
+        const auto encoding = call._encoding;
+        const auto& id = call._request_id;
+        const auto* op = _codec.model().find_operation(call._operation);
+        const auto h = _handlers.find(call._operation);
+        if (op == nullptr || h == _handlers.end()) {
+            // A gateway that knows an operation this front end does not
+            // serve (SplitShard without transactions, a newer gateway).
+            return _codec.respond(unknown_operation(), id, encoding);
+        }
+        auto& input = call._input;
 
         call_context ctx;
         ctx._operation = op->name;
         ctx._request_id = id;
-        ctx._principal = *who;
+        ctx._principal = call._principal;
         ctx._region = _config._region;
         ctx._partition = _config._partition;
         ctx._encoding = encoding;
         const auto* acts = find_operation_actions(op->name);
         ctx._replica_read_ok = acts != nullptr && !acts->writes;
-        ctx._authorize = [this, &ctx, &req](aws_auth::authz_request r) {
-            auto denied = check(ctx, req, std::move(r));
+        ctx._authorize = [this, &ctx, &call](aws_auth::authz_request r) {
+            auto denied = check(ctx, call, std::move(r));
             if (!denied) {
                 ctx._authorized = true;
             }
@@ -425,12 +511,31 @@ public:
         }
     }
 
+    /// A gateway without a local front end hands every call on, so it has
+    /// no handlers; it still answers an operation no front end serves with
+    /// UnknownOperationException before reading the body, as a co-located
+    /// node does. `operations` are those the front ends serve
+    /// (`kinesis_service::k_operations`).
+    void set_operations_served_elsewhere(std::span<const std::string_view> operations) {
+        for (const auto o : operations) {
+            _served_elsewhere.emplace(o);
+        }
+    }
+
+    /// The InternalFailure answer for a call, in its encoding: what a
+    /// gateway answers when no front end executed it.
+    [[nodiscard]] auto internal_failure_for(const authenticated_call& call) const
+        -> aws_json::http_response {
+        return _codec.respond(internal_failure(), call._request_id, call._encoding);
+    }
+
 private:
     front_end_config _config;
     Authorizer& _authorizer;
     aws_json::codec _codec;
     std::map<std::string, front_end_handler, std::less<>> _handlers;
     std::set<std::string, std::less<>> _actions;
+    std::set<std::string, std::less<>> _served_elsewhere;
     resource_lookup _lookup;
 
     [[nodiscard]] static auto codec_options(const front_end_config& cfg)
@@ -623,12 +728,12 @@ private:
         return std::nullopt;
     }
 
-    [[nodiscard]] auto check(const call_context& ctx, const front_end_request& req,
+    [[nodiscard]] auto check(const call_context& ctx, const authenticated_call& call,
                              aws_auth::authz_request r) -> std::optional<aws_json::error> {
-        r.source_ip = req._source_ip;
-        r.user_agent = std::string(detail::header_value(req, "user-agent"));
+        r.source_ip = call._source_ip;
+        r.user_agent = call._user_agent;
         r.region = _config._region;
-        r.secure_transport = req._secure;
+        r.secure_transport = call._secure;
         if (r.resource != "*") {
             if (r.resource_account.empty()) {
                 if (const auto parts = parse_kinesis_arn(r.resource);

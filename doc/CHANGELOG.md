@@ -5,6 +5,19 @@ current list of outstanding work, see [TODO.md](TODO.md).
 
 ### What Changed (November 24, 2026)
 
+- **A Kinesis gateway can run apart from the front end.**
+  `KINESIS_ROLES=gateway` with `KINESIS_FRONT_ENDS` runs a gateway that
+  terminates client connections, checks request framing and SigV4, and
+  hands each call to a front end on another node, which authorizes and
+  executes it. A shard's reads and an account's control-plane calls
+  always go to the same front end, so AWS's per-shard and per-account
+  limits still hold with several front ends. SubscribeToShard, the Lease
+  API and /metrics work through the gateway, and on SIGTERM it drains:
+  it stops accepting connections, ends event streams with the error
+  clients resubscribe on, and lets calls in flight finish. Every node with
+  the front-end role serves gateways, so gateways can be put in front of
+  an existing cluster and taken away again
+  (`.kiro/specs/kinesis-independent-layers/` task 8).
 - **A Kinesis node can serve the whole API without holding any data.**
   `KINESIS_ROLES=gateway,front_end` with `KINESIS_DATA_NODES` naming data
   nodes' internal listeners runs a front end that is in no Raft group and

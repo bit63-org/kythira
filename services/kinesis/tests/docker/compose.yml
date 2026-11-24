@@ -122,6 +122,20 @@ services:
     volumes:
       - ./keys.txt:/etc/kinesis/keys:ro
 
+  # A gateway without a front end (kinesis-independent-layers task 8): it
+  # verifies each call and hands it to kin-fe (a front end without data) or
+  # kin-1 (a co-located node), by affinity, wired by service name. It keeps
+  # nothing on disk and joins no Raft group.
+  kin-gw:
+    <<: *node
+    environment:
+      <<: *env
+      KYTHIRA_NODE_ID: "12"
+      KINESIS_ROLES: gateway
+      KINESIS_FRONT_ENDS: "kin-fe:4567,kin-1:4567"
+    volumes:
+      - ./keys.txt:/etc/kinesis/keys:ro
+
   # The in-memory S3 mock (cmd/chaos_s3_mock, staged into the node image)
   # that the tiering case tiers to, in the `s3` profile: S3 on :9000 and
   # its fault knobs on :9001, reached by service name. Its objects live in

@@ -54,6 +54,7 @@
 #include <boost/json.hpp>
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <charconv>
 #include <cstddef>
@@ -135,7 +136,9 @@ namespace lease_detail {
     return std::nullopt;
 }
 
-[[nodiscard]] inline auto header(const front_end_request& r, std::string_view name)
+/// `name`'s value in a request's or a call's headers, ignoring case.
+template<typename Request>
+[[nodiscard]] auto header(const Request& r, std::string_view name)
     -> std::optional<std::string_view> {
     for (const auto& [k, v] : r._headers) {
         if (k.size() == name.size() &&
@@ -193,7 +196,71 @@ namespace lease_detail {
            ",\"lease\":" + render_fields(e._lease) + "}";
 }
 
+[[nodiscard]] inline auto lease_error(unsigned status, std::string_view type,
+                                      std::string_view message,
+                                      std::optional<std::uint64_t> version = std::nullopt)
+    -> aws_json::http_response {
+    boost::json::object o{{"__type", type}, {"message", message}};
+    if (version) {
+        o["version"] = *version;
+    }
+    aws_json::http_response r;
+    r.status = status;
+    r.headers = {{"Content-Type", "application/json"}};
+    r.body = boost::json::serialize(o);
+    return r;
+}
+
+/// The headers a lease call carries to its front end: the conditions and
+/// the user agent, never the signature.
+inline constexpr std::array<std::string_view, 3> k_call_headers = {"if-match", "if-none-match",
+                                                                   "user-agent"};
+
 }  // namespace lease_detail
+
+/// The gateway's half of a Lease API request (kinesis-independent-layers
+/// task 8, Requirement 4.6): SigV4 for the `kinesis` service, then the
+/// request as an authenticated call for a front end's `lease_api::execute`.
+/// Either the call or the answer to send at once.
+struct lease_gate {
+    std::optional<authenticated_call> _call;
+    aws_json::http_response _answer;
+};
+
+template<aws_auth::aws_request_authorizer Authorizer>
+[[nodiscard]] auto authenticate_lease_request(Authorizer& authorizer,
+                                              const front_end_config& config,
+                                              const front_end_request& req) -> lease_gate {
+    sigv4::service_rules rules;
+    rules.service = "kinesis";
+    rules.protocol = sigv4::error_protocol::json;
+    if (!config._region.empty()) {
+        rules.regions = {config._region};
+    }
+    const sigv4::request sreq{req._method, req._path, req._query, req._headers, req._body};
+    const auto who = authorizer.authenticate(sreq, rules);
+    if (!who) {
+        const auto& e = who.error();
+        return {std::nullopt,
+                lease_detail::lease_error(static_cast<unsigned>(e.http_status), e.code, e.message)};
+    }
+    authenticated_call c;
+    c._kind = call_kind::lease;
+    c._principal = *who;
+    c._source_ip = req._source_ip;
+    c._secure = req._secure;
+    c._user_agent = std::string(lease_detail::header(req, "user-agent").value_or(""));
+    c._method = req._method;
+    c._path = req._path;
+    c._query = req._query;
+    c._body = req._body;
+    for (const auto name : lease_detail::k_call_headers) {
+        if (const auto v = lease_detail::header(req, name)) {
+            c._headers.emplace_back(std::string(name), std::string(*v));
+        }
+    }
+    return {std::move(c), {}};
+}
 
 /// `Cluster` is any `data_layer`: every lease read and write is a
 /// proposal, so a front end without a replica serves the API through the
@@ -209,7 +276,21 @@ public:
 
     [[nodiscard]] auto handle(const front_end_request& req) -> aws_json::http_response {
         try {
-            return dispatch(req);
+            auto gate = authenticate_lease_request(_authorizer, _config, req);
+            if (!gate._call) {
+                return std::move(gate._answer);
+            }
+            return dispatch(*gate._call);
+        } catch (const std::exception&) {
+            return error(500, "InternalFailure", "Internal service failure.");
+        }
+    }
+
+    /// A Lease API call a gateway authenticated: authorized and served here
+    /// as `handle` serves a request after its signature checks.
+    [[nodiscard]] auto execute(const authenticated_call& call) -> aws_json::http_response {
+        try {
+            return dispatch(call);
         } catch (const std::exception&) {
             return error(500, "InternalFailure", "Internal service failure.");
         }
@@ -224,15 +305,7 @@ private:
                                     std::string_view message,
                                     std::optional<std::uint64_t> version = std::nullopt)
         -> aws_json::http_response {
-        boost::json::object o{{"__type", type}, {"message", message}};
-        if (version) {
-            o["version"] = *version;
-        }
-        aws_json::http_response r;
-        r.status = status;
-        r.headers = {{"Content-Type", "application/json"}};
-        r.body = boost::json::serialize(o);
-        return r;
+        return lease_detail::lease_error(status, type, message, version);
     }
 
     [[nodiscard]] static auto ok(std::string body, std::optional<std::uint64_t> version)
@@ -256,7 +329,7 @@ private:
                std::string(account) + ":table/" + std::string(app);
     }
 
-    auto dispatch(const front_end_request& req) -> aws_json::http_response {
+    auto dispatch(const authenticated_call& req) -> aws_json::http_response {
         // /v1/leases/<app>[/<key>]
         auto rest = std::string_view(req._path).substr(k_lease_path_prefix.size());
         const auto slash = rest.find('/');
@@ -264,19 +337,7 @@ private:
         const auto raw_key =
             slash == std::string_view::npos ? std::string_view() : rest.substr(slash + 1);
         const auto key = lease_detail::percent_decode(raw_key);
-
-        sigv4::service_rules rules;
-        rules.service = "kinesis";
-        rules.protocol = sigv4::error_protocol::json;
-        if (!_config._region.empty()) {
-            rules.regions = {_config._region};
-        }
-        const sigv4::request sreq{req._method, req._path, req._query, req._headers, req._body};
-        const auto who = _authorizer.authenticate(sreq, rules);
-        if (!who) {
-            const auto& e = who.error();
-            return error(static_cast<unsigned>(e.http_status), e.code, e.message);
-        }
+        const auto* who = &req._principal;
 
         if (!valid_application(app)) {
             return validation(
@@ -307,7 +368,7 @@ private:
         az.action = "dynamodb:" + action;
         az.resource = table_arn(who->account, application);
         az.source_ip = req._source_ip;
-        az.user_agent = std::string(lease_detail::header(req, "user-agent").value_or(""));
+        az.user_agent = req._user_agent;
         az.region = _config._region;
         az.secure_transport = req._secure;
         if (const auto d = _authorizer.authorize(*who, az); !d.allowed) {
@@ -355,7 +416,7 @@ private:
         return ok(lease_detail::render_entry(page._leases.front()), r->_id);
     }
 
-    auto list(const front_end_request& req, const std::string& account, const std::string& app)
+    auto list(const authenticated_call& req, const std::string& account, const std::string& app)
         -> aws_json::http_response {
         const auto prefix = lease_detail::query_param(req._query, "prefix").value_or("");
         const auto after = lease_detail::query_param(req._query, "start-after").value_or("");
@@ -408,7 +469,7 @@ private:
         return ok("{\"deleted\":" + std::to_string(r->_first_counter) + "}", std::nullopt);
     }
 
-    auto write(const front_end_request& req, const std::string& account, const std::string& app,
+    auto write(const authenticated_call& req, const std::string& account, const std::string& app,
                const std::string& key) -> aws_json::http_response {
         lease_write_command c;
         c._account = account;

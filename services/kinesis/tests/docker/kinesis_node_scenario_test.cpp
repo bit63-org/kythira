@@ -22,7 +22,11 @@
 //   * kin-fe, a front end without the data role (kinesis-independent-layers
 //     task 7), serves the same streams over the data nodes' data-layer API:
 //     it reads what the data nodes took, creates a stream and takes writes
-//     the data nodes then serve, with iterators valid on either side.
+//     the data nodes then serve, with iterators valid on either side;
+//   * kin-gw, a gateway without a front end (task 8), hands the same calls
+//     to kin-fe and kin-1 by affinity: it reads what the others took, with
+//     pages alternating between it and a data node, and creates and writes
+//     a stream the data nodes then serve.
 //
 // A second case (task 9, Requirement 15) runs three unmodified KCL 2.x
 // workers (the `kcl` profile) with their leases on the cluster, one worker
@@ -152,6 +156,8 @@ std::string endpoint(int n) {
 
 /// kin-fe: the front end without the data role.
 const std::string k_front_end_endpoint = "http://kin-fe:4567";
+/// kin-gw: the gateway without a front end.
+const std::string k_gateway_endpoint = "http://kin-gw:4567";
 
 /// The AWS CLI v2 against node `target`.
 os::CmdResult aws_cli(int target, std::initializer_list<std::string> args,
@@ -265,8 +271,8 @@ struct stack_fixture {
     stack_fixture() {
         os::try_exec(os::real_exec, compose_cmd({"down", "-v", "--remove-orphans"}));
         try {
-            os::checked_exec(os::real_exec,
-                             compose_cmd({"up", "-d", "kin-1", "kin-2", "kin-3", "kin-fe"}));
+            os::checked_exec(os::real_exec, compose_cmd({"up", "-d", "kin-1", "kin-2", "kin-3",
+                                                         "kin-fe", "kin-gw"}));
         } catch (...) {
             dump_logs();
             throw;
@@ -558,6 +564,26 @@ BOOST_AUTO_TEST_CASE(sdks_against_a_cluster_by_service_name) {
                         "fe", "--expect", "200"});
         BOOST_REQUIRE_MESSAGE(c.code == 0, "the data nodes did not serve kin-fe's writes:\n"
                                                << c.out);
+    }
+
+    // 7. A gateway without a front end (independent layers task 8): every
+    //    call verified at kin-gw and executed on kin-fe or kin-1.
+    {
+        auto c = boto3({"consume", "--endpoints", k_gateway_endpoint + "," + endpoint(2),
+                        "--stream", "py", "--expect", "600"});
+        BOOST_REQUIRE_MESSAGE(c.code == 0, "consume through kin-gw failed:\n" << c.out);
+        auto r =
+            boto3({"create", "--endpoint", k_gateway_endpoint, "--stream", "gw", "--shards", "2"},
+                  k_admin_id, k_admin_secret);
+        BOOST_REQUIRE_MESSAGE(r.code == 0, "create through kin-gw failed:\n" << r.out);
+        auto p = boto3({"produce", "--endpoint", k_gateway_endpoint, "--stream", "gw", "--count",
+                        "200", "--tag", "g"});
+        BOOST_REQUIRE_MESSAGE(p.code == 0, "produce through kin-gw failed:\n" << p.out);
+        auto d = boto3({"consume", "--endpoints",
+                        endpoint(3) + "," + k_gateway_endpoint + "," + endpoint(1), "--stream",
+                        "gw", "--expect", "200"});
+        BOOST_REQUIRE_MESSAGE(d.code == 0, "the data nodes did not serve kin-gw's writes:\n"
+                                               << d.out);
     }
 }
 
