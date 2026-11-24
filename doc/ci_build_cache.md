@@ -41,6 +41,13 @@ sccache's key already covers the compiler binary and every flag, so entries
 from g++-13 and clang++-18, x64 and arm64, Release and coverage cannot
 collide, and one prefix keeps the lifecycle rule and the audit simple.
 
+What the key must **not** cover is where the runner checked the tree out.
+The action exports `SCCACHE_BASEDIRS=$GITHUB_WORKSPACE`, so sccache strips
+the checkout's absolute path from the preprocessed source before hashing
+it. Without that, a GitHub-hosted runner (`/home/runner/work/...`) and a
+self-hosted one (`/home/runner/_work/...`) building the same commit share
+almost nothing: 6 hits in 91 compiles was measured on a bit63 job.
+
 The 30/90 asymmetry is the point of having two rules: a vcpkg archive is
 minutes of build per object and there are few of them; an sccache object is
 seconds and there are tens of thousands.

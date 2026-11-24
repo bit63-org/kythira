@@ -247,6 +247,15 @@ runs:
           # lakers port's cargo build sees no RUSTC_WRAPPER and no
           # credentials, which is the rustc coverage ccache never had.
           echo "VCPKG_KEEP_ENV_VARS=RUSTC_WRAPPER;SCCACHE_BUCKET;SCCACHE_ENDPOINT;SCCACHE_REGION;SCCACHE_S3_KEY_PREFIX;SCCACHE_S3_USE_SSL;SCCACHE_S3_RW_MODE;AWS_ENDPOINT_URL;AWS_REGION;AWS_ACCESS_KEY_ID;AWS_SECRET_ACCESS_KEY;AWS_REQUEST_CHECKSUM_CALCULATION;AWS_RESPONSE_CHECKSUM_VALIDATION;AWS_CONFIG_FILE"
+          # Key entries by paths relative to the checkout. sccache hashes
+          # the preprocessed source, whose line markers carry absolute
+          # paths, so the same tree checked out at /home/runner/work/...
+          # (GitHub-hosted) and /home/runner/_work/... (self-hosted
+          # runners) shares almost no entries: 6 hits in 91 compiles on a
+          # bit63 job reading the bucket main's hosted jobs fill. sccache
+          # strips this prefix before hashing (its CCACHE_BASEDIR), which a
+          # two-directory build confirmed (0 hits without, 1 of 2 with).
+          echo "SCCACHE_BASEDIRS=${GITHUB_WORKSPACE}"
         } >> "$GITHUB_ENV"
         echo "enabled=true" >> "$GITHUB_OUTPUT"
 
