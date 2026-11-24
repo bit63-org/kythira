@@ -81,13 +81,16 @@ shard:
   shard closed by a reshard has been read to its end.
 - After the object is written it moves the checkpoint, as a
   compare-and-set from where it read. If two nodes both believed they led
-  the shard, one commits and the other's object is a duplicate written to
-  the same key.
+  the shard, one commits and the other's object is a duplicate.
 - A child shard is delivered only once its parents have been delivered to
   their ends, so a partition key's records arrive in order across a
   reshard.
 
-Delivery is at least once, and in sequence order within a shard.
+Delivery is at least once, and in sequence order within a shard. A
+batch delivered again after a lost checkpoint starts at the same record
+and holds at least the records it held before, so a reader that takes a
+shard's objects in sequence order sees an earlier stretch repeated, never
+a record ahead of one that preceded it.
 
 **Object keys.** `OutputKeyTemplate`, or
 `!{kinesis:stream-name}/!{timestamp:yyyy/MM/dd/HH}/` when left out, then
@@ -97,7 +100,10 @@ the compression's extension (`.gz`, `.zst`). The template takes
 batch's first record's arrival time), `!{kinesis:stream-name}`,
 `!{kinesis:shard-id}` and `!{kinesis:channel-name}`; anything else is
 copied as written. The key depends only on the batch, so a batch retried
-after a lost checkpoint overwrites the same object.
+with the same records overwrites the same object. A node that retries
+after a lost checkpoint has usually seen more records arrive, and then
+writes a longer object with the same first sequence number next to the
+earlier one.
 
 **Storage class and bucket owner.** Each object is written with the
 destination's `StorageClass` (S3's default when left out) and its
