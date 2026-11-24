@@ -16,6 +16,8 @@
 #include <kythira/kinesis/kinesis_front_end.hpp>
 #include <kythira/kinesis/kinesis_service.hpp>
 
+#include "kinesis_layouts.hpp"
+
 #include <boost/json.hpp>
 
 #include <algorithm>
@@ -57,10 +59,12 @@ struct fixture {
     kin::local_stream_cluster cluster{nullptr, [this] { return clock; }};
     allow_all auth;
     kin::front_end<allow_all> fe{kin::front_end_config{}, auth};
-    kin::kinesis_service<kin::local_stream_cluster> service;
+    // The front end's layout (co-located, apart, mixed), as built.
+    kin::test::layered_access layer{cluster};
+    kin::kinesis_service<kin::data_access> service;
 
     explicit fixture(kin::kinesis_service_config cfg = {})
-        : service(cluster, without_control_rates(std::move(cfg))) {
+        : service(layer.get(), without_control_rates(std::move(cfg))) {
         service.register_with(fe);
     }
 

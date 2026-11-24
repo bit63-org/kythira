@@ -18,6 +18,8 @@
 #include <kythira/kinesis/kinesis_leases.hpp>
 #include <kythira/kinesis/kinesis_stream_state_machine.hpp>
 
+#include "kinesis_layouts.hpp"
+
 #include <raft/sigv4_verifier.hpp>
 #include <raft/static_key_authorizer.hpp>
 
@@ -133,14 +135,14 @@ struct api_fixture {
                                    },
                                    "aws",
                                    [] { return std::chrono::system_clock::time_point(k_now); }};
-    std::unique_ptr<kin::lease_api<kin::local_stream_cluster, az::static_key_authorizer>> api;
+    std::unique_ptr<kin::test::layered_access> layer;
+    std::unique_ptr<kin::lease_api<kin::data_access, az::static_key_authorizer>> api;
 
     api_fixture() {
         auth.register_service(kin::kinesis_static_roles());
         auth.register_service(kin::lease_static_roles());
-        api =
-            std::make_unique<kin::lease_api<kin::local_stream_cluster, az::static_key_authorizer>>(
-                cluster, auth, kin::front_end_config{});
+        api = std::make_unique<kin::lease_api<kin::data_access, az::static_key_authorizer>>(
+            kin::test::layer_over(layer, cluster), auth, kin::front_end_config{});
     }
 
     auto call(std::string method, std::string path, std::string body = {},

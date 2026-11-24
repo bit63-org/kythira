@@ -21,6 +21,8 @@
 #include <kythira/kinesis/kinesis_service.hpp>
 #include <kythira/kinesis/kinesis_stream_state_machine.hpp>
 
+#include "kinesis_layouts.hpp"
+
 #include <raft/aws_eventstream.hpp>
 #include <raft/beast_https_server.hpp>
 #include <raft/record_segment_store.hpp>
@@ -118,11 +120,12 @@ struct fixture {
     kin::local_stream_cluster cluster{store.get()};
     allow_all auth;
     front_end_type fe{kin::front_end_config{}, auth};
-    std::unique_ptr<kin::kinesis_service<kin::local_stream_cluster>> service;
+    std::unique_ptr<kin::test::layered_access> layer;
+    std::unique_ptr<kin::kinesis_service<kin::data_access>> service;
 
     explicit fixture(kin::kinesis_service_config config = fast_config()) {
-        service =
-            std::make_unique<kin::kinesis_service<kin::local_stream_cluster>>(cluster, config);
+        service = std::make_unique<kin::kinesis_service<kin::data_access>>(
+            kin::test::layer_over(layer, cluster), config);
         service->register_with(fe);
         fe.set_resource_lookup(
             [this](std::string_view arn) { return service->resource_facts_of(arn); });
