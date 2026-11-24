@@ -343,12 +343,23 @@ public:
     auto call(std::size_t i, std::string_view op, const std::string& body) -> answer {
         answer out;
         const auto deadline = std::chrono::steady_clock::now() + 30s;
+        bool retried = false;
         do {
             out = call_once(i, op, body);
+            // Each attempt spends a token of the operation's quota before
+            // the catalog answers, so retrying through an election can
+            // drain a slow quota (CreateKey's 5/s over three members) and
+            // turn the call into a ThrottlingException the test never
+            // asked about. Only a first attempt's throttle is the answer.
+            if (retried && out.str("__type") == "ThrottlingException") {
+                std::this_thread::sleep_for(1s);
+                continue;
+            }
             if (out.status == 200 || (out.status >= 400 && out.status < 500 &&
                                       out.str("__type") != "DependencyTimeoutException")) {
                 return out;
             }
+            retried = true;
             std::this_thread::sleep_for(200ms);
         } while (std::chrono::steady_clock::now() < deadline);
         return out;
