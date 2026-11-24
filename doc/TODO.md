@@ -1943,6 +1943,18 @@ unverified completion claim.
         both was tested locally, and the upstream report is pending. The test
         process uses the same httplib build, so its wild-address crashes may
         share this cause; the next survey (~November 23) will tell.
+      **Re-surveyed November 24, 2026, and de-allowlisted.** Over the 251
+      `ci.yml` runs from #835's merge (2026-11-19 01:19Z) to November 24
+      (2,614 test jobs; the ~1,500 Build & Test and Full suite jobs run
+      this test), it was never rescued by a retry and never failed: no
+      segfault in the test process or a host, no bind failure, no lost or
+      unanswered key. The host crash inside `gai_suspend` is gone with
+      glibc's async resolver. The test process's own wild-address crash
+      has not come back either, which fits it sharing that cause, but at
+      2 in ~2,500 jobs before it was too rare for 1,500 clean jobs to
+      prove it. It is off `.github/ctest-retry-allowlist.txt`; if it
+      crashes again, a rescue now raises a warning (a failure in strict
+      mode) and the crash backtrace of 5da9983 says where.
     - Fixed the same day, all test-side: `kythira_future_continuation_operations_property_test`
       (11: the clock started after Folly's `delayed()` timer had already
       begun, so a loaded runner read 0 ms), `behavioral_preservation_property_test`
