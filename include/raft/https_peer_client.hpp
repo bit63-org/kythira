@@ -64,6 +64,15 @@ struct peer_response {
     std::string _body;
 };
 
+/// `peer_client::exchange`'s answer: the response, and whether any of the
+/// request was written. A call that failed before it was sent (no route,
+/// refused, failed TLS handshake) cannot have run on the peer, so a caller
+/// may try it elsewhere; one that failed after may have run.
+struct peer_outcome {
+    std::optional<peer_response> _response;
+    bool _sent = false;
+};
+
 /// "host:port" or "[v6]:port" split into host and port; nullopt when
 /// malformed.
 [[nodiscard]] inline auto split_host_port(std::string_view hp)
@@ -113,9 +122,17 @@ public:
     [[nodiscard]] auto request(std::string_view host_port, boost::beast::http::verb method,
                                std::string_view target, const headers& extra,
                                std::string body = {}) const -> std::optional<peer_response> {
+        return exchange(host_port, method, target, extra, std::move(body))._response;
+    }
+
+    /// `request`, saying whether the request was sent when it fails.
+    [[nodiscard]] auto exchange(std::string_view host_port, boost::beast::http::verb method,
+                                std::string_view target, const headers& extra,
+                                std::string body = {}) const -> peer_outcome {
+        peer_outcome out;
         const auto hp = split_host_port(host_port);
         if (!hp) {
-            return std::nullopt;
+            return out;
         }
         try {
             namespace http = boost::beast::http;
@@ -127,11 +144,12 @@ public:
             }
             req.body() = std::move(body);
             req.prepare_payload();
-            return _config._tls ? exchange_tls(hp->first, hp->second, req)
-                                : exchange_plain(hp->first, hp->second, req);
+            out._response = _config._tls ? exchange_tls(hp->first, hp->second, req, out._sent)
+                                         : exchange_plain(hp->first, hp->second, req, out._sent);
         } catch (const std::exception&) {
-            return std::nullopt;
+            out._response.reset();
         }
+        return out;
     }
 
 private:
@@ -141,10 +159,11 @@ private:
     // (beast_deadline.hpp): a blocking Beast call ignores it, so a dial to
     // an address nothing answers waited out the kernel's SYN retries.
     template<typename Stream, typename Request>
-    [[nodiscard]] auto send(boost::asio::io_context& ioc, Stream& stream, const Request& req) const
-        -> std::optional<peer_response> {
+    [[nodiscard]] auto send(boost::asio::io_context& ioc, Stream& stream, const Request& req,
+                            bool& sent) const -> std::optional<peer_response> {
         namespace http = boost::beast::http;
         using beast_deadline::run;
+        sent = true;
         if (run(ioc, [&](auto h) { http::async_write(stream, req, std::move(h)); })) {
             return std::nullopt;
         }
@@ -192,14 +211,15 @@ private:
 
     template<typename Request>
     [[nodiscard]] auto exchange_plain(const std::string& host, const std::string& port,
-                                      const Request& req) const -> std::optional<peer_response> {
+                                      const Request& req, bool& sent) const
+        -> std::optional<peer_response> {
         boost::asio::io_context ioc;
         boost::beast::tcp_stream stream(ioc);
         stream.expires_after(_config._timeout);
         if (!connect(ioc, stream, host, port)) {
             return std::nullopt;
         }
-        auto out = send(ioc, stream, req);
+        auto out = send(ioc, stream, req, sent);
         boost::beast::error_code ec;
         (void)stream.socket().shutdown(boost::asio::ip::tcp::socket::shutdown_both, ec);
         return out;
@@ -207,7 +227,8 @@ private:
 
     template<typename Request>
     [[nodiscard]] auto exchange_tls(const std::string& host, const std::string& port,
-                                    const Request& req) const -> std::optional<peer_response> {
+                                    const Request& req, bool& sent) const
+        -> std::optional<peer_response> {
         namespace ssl = boost::asio::ssl;
         ssl::context ctx(ssl::context::tls_client);
         ctx.set_options(ssl::context::default_workarounds | ssl::context::no_sslv2 |
@@ -236,7 +257,7 @@ private:
             })) {
             return std::nullopt;
         }
-        auto out = send(ioc, stream, req);
+        auto out = send(ioc, stream, req, sent);
         // A peer that drops the connection is fine; never past the deadline.
         (void)beast_deadline::run(ioc, [&](auto h) { stream.async_shutdown(std::move(h)); });
         return out;

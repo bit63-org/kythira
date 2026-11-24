@@ -336,18 +336,20 @@ public:
         _acceptors = net_bind::open_asio_acceptors(_accept_ioc, _config.bind_address, _config.port,
                                                    "https server");
         _port = _acceptors.front()->local_endpoint().port();
+        _accepting = true;
         _running = true;
         for (const auto& a : _acceptors) {
             _accept_threads.emplace_back([this, a] { accept_loop(a); });
         }
     }
 
-    /// Stops accepting, ends every connection and joins every thread.
-    void stop() {
-        _tls_subscription.reset();
-        if (!_running.exchange(false)) {
-            return;
-        }
+    /// Stops accepting new connections and leaves the open ones serving,
+    /// for a server that drains before it stops: requests in flight finish
+    /// and streams run on until `stop`. The listening port is closed, so a
+    /// load balancer's next dial goes elsewhere. Idempotent.
+    void stop_accepting() {
+        const std::scoped_lock lock(_acceptors_mu);
+        _accepting.store(false);
         for (const auto& a : _acceptors) {
             // Wakes the blocking accept(); the acceptor is closed only after
             // its thread is joined.
@@ -364,6 +366,15 @@ public:
         }
         _accept_threads.clear();
         _acceptors.clear();
+    }
+
+    /// Stops accepting, ends every connection and joins every thread.
+    void stop() {
+        _tls_subscription.reset();
+        if (!_running.exchange(false)) {
+            return;
+        }
+        stop_accepting();
         std::list<std::shared_ptr<connection>> live;
         {
             const std::lock_guard lock(_connections_mu);
@@ -534,7 +545,8 @@ private:
             tcp::socket socket(_accept_ioc);
             (void)acceptor->accept(socket, ec);
             if (ec) {
-                if (!_running.load() || ec == boost::asio::error::bad_descriptor ||
+                if (!_running.load() || !_accepting.load() ||
+                    ec == boost::asio::error::bad_descriptor ||
                     ec == boost::asio::error::operation_aborted) {
                     return;
                 }
@@ -919,6 +931,8 @@ private:
     std::shared_ptr<boost::asio::ssl::context> _ssl_ctx;
     kythira::tls_material_source::subscription _tls_subscription;
     std::shared_ptr<http_detail::connection_gate> _gate;
+    std::mutex _acceptors_mu;
+    std::atomic<bool> _accepting{false};
     std::vector<std::shared_ptr<tcp::acceptor>> _acceptors;
     std::vector<std::thread> _accept_threads;
     std::mutex _connections_mu;
