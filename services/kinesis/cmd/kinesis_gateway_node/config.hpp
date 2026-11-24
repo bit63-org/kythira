@@ -126,6 +126,17 @@ struct node_options {
     /// enough, the routes name the rest. Required without `data`, refused
     /// with it (a data node reaches its peers through `KYTHIRA_PEERS`).
     std::vector<std::string> _data_nodes;
+    /// `KINESIS_FRONT_ENDS`: comma-separated `host:port` of front ends'
+    /// listeners (kinesis-independent-layers task 8). A gateway without the
+    /// `front_end` role hands each authenticated call to one of them, chosen
+    /// by affinity (`kinesis_affinity.hpp`). Required for such a gateway,
+    /// refused on a node with `front_end`. Any node with the `front_end`
+    /// role serves the front-end API, co-located ones included.
+    std::vector<std::string> _front_ends;
+    /// `KINESIS_DRAIN_TIMEOUT_MS`: how long a stopping gateway lets calls in
+    /// flight finish after it stops accepting connections (Requirement
+    /// 4.7).
+    std::chrono::milliseconds _drain_timeout{10000};
     /// `KINESIS_KMS`: the key provider encrypted streams use (task 14):
     /// `off` (StartStreamEncryption refused), `local` (data keys wrapped
     /// under `KINESIS_KMS_PASSPHRASE[_FILE]`, the same on every node) or
@@ -279,16 +290,22 @@ using env_lookup = std::function<const char*(const char*)>;
 /// only the internal endpoints) are served; with a segment layer
 /// (`segment_layer`, `KINESIS_SEGMENT_NODES` set), so are `data` and
 /// `segments` alone; with data nodes to reach (`data_layer`,
-/// `KINESIS_DATA_NODES` set), so is `gateway,front_end`, a front end that
-/// holds no replica. The other sets need the later tasks of
-/// kinesis-independent-layers.
+/// `KINESIS_DATA_NODES` set), so is a front end without `data`; with front
+/// ends to hand calls to (`front_end_layer`, `KINESIS_FRONT_ENDS` set), so
+/// is a gateway without `front_end` (task 8).
 [[nodiscard]] auto unserved_roles(kythira::layers::role_set roles, bool segment_layer = false,
-                                  bool data_layer = false) -> std::optional<std::string>;
+                                  bool data_layer = false, bool front_end_layer = false)
+    -> std::optional<std::string>;
 
 /// Whether `roles` make a front end without a replica: `front_end` and no
 /// `data`, so no Raft log or segment store, every call over the data-layer
 /// API of `KINESIS_DATA_NODES`.
 [[nodiscard]] auto is_front_end_node(kythira::layers::role_set roles) -> bool;
+
+/// Whether `roles` make a gateway alone (task 8): `gateway` without
+/// `front_end`, `data` or `segments`, so nothing on disk and every call
+/// handed to a front end in `KINESIS_FRONT_ENDS`.
+[[nodiscard]] auto is_gateway_node(kythira::layers::role_set roles) -> bool;
 
 /// Whether `roles` make a segment node: `segments` and no `data`, so no
 /// Raft log, only the volumes it holds.

@@ -200,6 +200,16 @@ kythira_kinesis_test(kinesis_data_api_test kinesis_data_api_test.cpp)
 # reads and leases; the mixed layout's per-call choice; no data node.
 kythira_kinesis_test(kinesis_layouts_test kinesis_layouts_test.cpp)
 target_link_libraries(kinesis_layouts_test PRIVATE kythira_kinesis_layouts kythira_test_support)
+# Independent layers task 8: the gateway apart from the front end (the
+# authenticated call, affinity, failover, trust, Lease API, EFO relay,
+# drain); kinesis_layouts_test covers the gateway role's migration paths.
+kythira_kinesis_test(kinesis_gateway_apart_test kinesis_gateway_apart_test.cpp)
+target_link_libraries(kinesis_gateway_apart_test PRIVATE kythira_test_support)
+# Both gateway tests instantiate the HTTPS listener, the peer client and
+# the gateway (kinesis_gateway_layouts.hpp): about 4 GB per TU with g++-13
+# -O3, so they compile in the `heavy_tu` pool.
+set_target_properties(kinesis_layouts_test kinesis_gateway_apart_test
+    PROPERTIES JOB_POOL_COMPILE heavy_tu)
 # Task 6: forwarding proposals to the group leader (wire, HMAC) and the
 # multi-raft cluster adapter.
 kythira_kinesis_test(kinesis_forward_test kinesis_forward_test.cpp)

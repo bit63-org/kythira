@@ -8,9 +8,15 @@
 // across every move; the mixed layout's per-call choice of local or remote;
 // and a front end whose data nodes are all gone failing retryably.
 //
+// The gateway apart from the front end (task 8, Requirements 4.1-4.6 and
+// 15.7): the same client moved onto gateways that hand its calls to a
+// co-located node's front end, to a front end without data, and to a mixed
+// one, and back off them again, in both directions.
+//
 // Each front end is a separate service object over the real internal
 // transport (kinesis_layouts.hpp), all over one data layer, as a cluster
-// migrating between layouts runs them side by side.
+// migrating between layouts runs them side by side; each gateway reaches
+// its front end over the real internal transport too.
 
 #define BOOST_TEST_MODULE kinesis_layouts_test
 
@@ -21,7 +27,7 @@
 #include <kythira/kinesis/kinesis_lease_api.hpp>
 #include <kythira/kinesis/kinesis_service.hpp>
 
-#include "kinesis_layouts.hpp"
+#include "kinesis_gateway_layouts.hpp"
 
 #include <raft/record_segment_store.hpp>
 
@@ -115,9 +121,50 @@ struct data_layer {
     kin::local_stream_cluster cluster{store.get(), [this] { return clock; }};
 };
 
+/// Where a client sends its calls: a front end's own listener, or a
+/// gateway in front of one.
+struct endpoint {
+    endpoint() = default;
+    endpoint(const endpoint&) = delete;
+    auto operator=(const endpoint&) -> endpoint& = delete;
+    endpoint(endpoint&&) = delete;
+    auto operator=(endpoint&&) -> endpoint& = delete;
+    virtual ~endpoint() = default;
+
+    virtual auto handle(const kin::front_end_request& r) -> aj::http_response = 0;
+    virtual auto lease_handle(const kin::front_end_request& r) -> aj::http_response = 0;
+    [[nodiscard]] virtual auto name() const -> std::string = 0;
+
+    auto call(std::string_view op, const json::value& body) -> aj::http_response {
+        kin::front_end_request r;
+        r._method = "POST";
+        r._path = "/";
+        r._body = json::serialize(body);
+        r._headers = {{"Content-Type", "application/x-amz-json-1.1"},
+                      {"X-Amz-Target", "Kinesis_20131202." + std::string(op)}};
+        return handle(r);
+    }
+
+    auto ok(std::string_view op, const json::value& body) -> json::object {
+        const auto r = call(op, body);
+        BOOST_REQUIRE_MESSAGE(r.status == 200U, name() + " " + std::string(op) + ": " + r.body);
+        return json::parse(r.body).as_object();
+    }
+
+    auto lease(std::string method, std::string path, std::string body = {},
+               std::vector<std::pair<std::string, std::string>> headers = {}) -> aj::http_response {
+        kin::front_end_request r;
+        r._method = std::move(method);
+        r._path = std::move(path);
+        r._body = std::move(body);
+        r._headers = std::move(headers);
+        return lease_handle(r);
+    }
+};
+
 /// One front end in `kind`'s layout: its own service, Lease API and front
 /// end over the shared data layer.
-struct front_end_node {
+struct front_end_node final : endpoint {
     kt::layered_access layer;
     allow_all auth;
     kin::front_end<allow_all> fe{kin::front_end_config{}, auth};
@@ -131,31 +178,39 @@ struct front_end_node {
         service.register_with(fe);
     }
 
-    auto call(std::string_view op, const json::value& body) -> aj::http_response {
-        kin::front_end_request r;
-        r._method = "POST";
-        r._path = "/";
-        r._body = json::serialize(body);
-        r._headers = {{"Content-Type", "application/x-amz-json-1.1"},
-                      {"X-Amz-Target", "Kinesis_20131202." + std::string(op)}};
+    auto handle(const kin::front_end_request& r) -> aj::http_response override {
         return fe.handle(r);
     }
-
-    auto ok(std::string_view op, const json::value& body) -> json::object {
-        const auto r = call(op, body);
-        BOOST_REQUIRE_MESSAGE(r.status == 200U, std::string(kt::layout_name(layer.kind())) + " " +
-                                                    std::string(op) + ": " + r.body);
-        return json::parse(r.body).as_object();
-    }
-
-    auto lease(std::string method, std::string path, std::string body = {},
-               std::vector<std::pair<std::string, std::string>> headers = {}) -> aj::http_response {
-        kin::front_end_request r;
-        r._method = std::move(method);
-        r._path = std::move(path);
-        r._body = std::move(body);
-        r._headers = std::move(headers);
+    auto lease_handle(const kin::front_end_request& r) -> aj::http_response override {
         return leases.handle(r);
+    }
+    [[nodiscard]] auto name() const -> std::string override {
+        return std::string(kt::layout_name(layer.kind()));
+    }
+};
+
+/// A gateway without a front end in front of `target`'s front end, which
+/// serves it over the front-end API as a node with the `front_end` role
+/// does (task 8).
+struct gateway_node final : endpoint {
+    front_end_node& target;
+    kt::loopback_front_end<kin::front_end<allow_all>> served;
+    allow_all auth;
+    kt::gateway_apart<allow_all> gateway;
+
+    explicit gateway_node(front_end_node& f)
+        : target(f),
+          served(f.fe, [&f](const kin::authenticated_call& c) { return f.leases.execute(c); }),
+          gateway(auth, {served.address()}) {}
+
+    auto handle(const kin::front_end_request& r) -> aj::http_response override {
+        return gateway.handle(r);
+    }
+    auto lease_handle(const kin::front_end_request& r) -> aj::http_response override {
+        return gateway.handle(r);
+    }
+    [[nodiscard]] auto name() const -> std::string override {
+        return "gateway -> " + target.name();
     }
 };
 
@@ -173,7 +228,7 @@ struct client {
     std::map<std::string, std::string> iterators;
     int next = 0;
 
-    void write(front_end_node& f, int records) {
+    void write(endpoint& f, int records) {
         json::array recs;
         for (int i = 0; i < records; ++i) {
             const auto n = next++;
@@ -189,7 +244,7 @@ struct client {
 
     /// Reads every shard on `f` until it has caught up, from where the
     /// last front end left off (or the trim horizon the first time).
-    void catch_up(front_end_node& f) {
+    void catch_up(endpoint& f) {
         for (const auto& shard : shard_ids(f)) {
             auto it = iterators.find(shard);
             if (it == iterators.end()) {
@@ -214,7 +269,7 @@ struct client {
         }
     }
 
-    static auto shard_ids(front_end_node& f) -> std::vector<std::string> {
+    static auto shard_ids(endpoint& f) -> std::vector<std::string> {
         std::vector<std::string> out;
         const auto listed = f.ok("ListShards", {{"StreamName", "orders"}});
         for (const auto& s : listed.at("Shards").as_array()) {
@@ -236,29 +291,44 @@ struct client {
 
 const std::vector<std::pair<std::string, std::string>> k_create{{"if-none-match", "*"}};
 
-auto lease_owner(front_end_node& f, const std::string& path) -> std::string {
+auto lease_owner(endpoint& f, const std::string& path) -> std::string {
     const auto r = f.lease("GET", path);
     BOOST_REQUIRE_MESSAGE(r.status == 200U, path + ": " + r.body);
     return std::string(
         json::parse(r.body).as_object().at("lease").as_object().at("leaseOwner").as_string());
 }
 
+/// One stop of a move: a front end's layout, reached directly or through a
+/// gateway apart from it.
+struct stop {
+    kt::layout_kind _kind;
+    bool _via_gateway = false;
+};
+
 /// One client moved through `stops`, writing, reading and taking a lease at
 /// each: every record it was acknowledged is read once and in order, every
 /// lease taken at one stop holds at the next, and a lease cannot be taken
 /// twice from two front ends.
-void move_through(const std::vector<kt::layout_kind>& stops) {
+void move_through(const std::vector<stop>& stops) {
     data_layer d;
     std::vector<std::unique_ptr<front_end_node>> nodes;
-    for (const auto k : stops) {
-        nodes.push_back(std::make_unique<front_end_node>(d, k));
+    std::vector<std::unique_ptr<gateway_node>> gateways;
+    std::vector<endpoint*> endpoints;
+    for (const auto& s : stops) {
+        nodes.push_back(std::make_unique<front_end_node>(d, s._kind));
+        if (s._via_gateway) {
+            gateways.push_back(std::make_unique<gateway_node>(*nodes.back()));
+            endpoints.push_back(gateways.back().get());
+        } else {
+            endpoints.push_back(nodes.back().get());
+        }
     }
-    nodes.front()->ok("CreateStream", {{"StreamName", "orders"}, {"ShardCount", 3}});
+    endpoints.front()->ok("CreateStream", {{"StreamName", "orders"}, {"ShardCount", 3}});
 
     client c;
-    for (std::size_t i = 0; i < nodes.size(); ++i) {
-        auto& f = *nodes[i];
-        BOOST_TEST_CONTEXT("stop " << i << " (" << kt::layout_name(stops[i]) << ")") {
+    for (std::size_t i = 0; i < endpoints.size(); ++i) {
+        auto& f = *endpoints[i];
+        BOOST_TEST_CONTEXT("stop " << i << " (" << f.name() << ")") {
             c.catch_up(f);  // with the previous stop's iterators
             c.write(f, 12);
             c.catch_up(f);
@@ -278,7 +348,7 @@ void move_through(const std::vector<kt::layout_kind>& stops) {
     }
     c.check();
     // Every front end, whatever its layout, now answers the same.
-    for (auto& n : nodes) {
+    for (auto* n : endpoints) {
         client fresh;
         fresh.written = c.written;
         fresh.catch_up(*n);
@@ -288,6 +358,18 @@ void move_through(const std::vector<kt::layout_kind>& stops) {
                        .at("OpenShardCount")
                        .as_int64() == 3);
     }
+    // A gateway's calls ran on its front end, never on its own.
+    for (const auto& g : gateways) {
+        BOOST_TEST(g->served.executed() > 0U, g->name());
+    }
+}
+
+void move_through(const std::vector<kt::layout_kind>& kinds) {
+    std::vector<stop> stops;
+    for (const auto k : kinds) {
+        stops.push_back({k, false});
+    }
+    move_through(stops);
 }
 
 }  // namespace
@@ -312,6 +394,26 @@ BOOST_AUTO_TEST_CASE(the_front_end_role_folds_in_and_splits_off_again) {
 BOOST_AUTO_TEST_CASE(a_move_stops_at_a_mixed_layout_and_reverses) {
     move_through({layout_kind::co_located, layout_kind::mixed, layout_kind::front_end_apart,
                   layout_kind::mixed, layout_kind::co_located});
+}
+
+// Splitting the gateway role off (task 8, Requirement 15.7, the gateway
+// role both ways): gateways are started in front of a co-located node's
+// front end and the client moves onto them, then onto a gateway whose
+// front end holds no data, and back off both.
+BOOST_AUTO_TEST_CASE(the_gateway_role_splits_off_and_folds_back) {
+    move_through({{layout_kind::co_located, false},
+                  {layout_kind::co_located, true},
+                  {layout_kind::front_end_apart, true},
+                  {layout_kind::co_located, true},
+                  {layout_kind::co_located, false}});
+}
+
+BOOST_AUTO_TEST_CASE(the_gateway_role_folds_in_and_splits_off_again) {
+    move_through({{layout_kind::front_end_apart, true},
+                  {layout_kind::front_end_apart, false},
+                  {layout_kind::co_located, false},
+                  {layout_kind::mixed, true},
+                  {layout_kind::front_end_apart, true}});
 }
 
 // Requirement 3.2: the mixed front end answers what its replica holds

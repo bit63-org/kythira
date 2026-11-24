@@ -338,6 +338,45 @@ inline constexpr std::string_view k_b64 =
     return it;
 }
 
+/// What a gateway reads from an iterator to route the `GetRecords` that
+/// carries it (kinesis-independent-layers task 8, design "Affinity keeps
+/// each bucket in one place"): the account, stream name and shard ordinal,
+/// **without checking the MAC**. Only for routing: the front end the call
+/// lands on decodes the token with `decode_iterator`, so a forged token
+/// steers a call to some front end and fails there. nullopt when the token
+/// is not shaped like an iterator.
+struct iterator_route {
+    std::string _account;
+    std::string _stream;
+    std::uint32_t _ordinal = 0;
+};
+
+[[nodiscard]] inline auto peek_iterator_route(std::string_view token)
+    -> std::optional<iterator_route> {
+    using namespace iterator_detail;
+    const auto raw = unb64(token);
+    if (!raw || raw->size() < 1 + 4 + 8 + 4 + 8 + 8 + 8 + k_account_digits + 1 + k_mac_bytes) {
+        return std::nullopt;
+    }
+    const std::string_view text(raw->data(), raw->size() - k_mac_bytes);
+    std::size_t at = 0;
+    if (static_cast<std::uint8_t>(text[at++]) != k_version) {
+        return std::nullopt;
+    }
+    at += 4 + 8;  // key id, stream id
+    iterator_route r;
+    r._ordinal = static_cast<std::uint32_t>(*get_u(text, at, 4));
+    at += 8 + 8 + 8;  // counter, minimum timestamp, issue time
+    r._account = std::string(text.substr(at, k_account_digits));
+    at += k_account_digits;
+    const auto len = static_cast<std::size_t>(static_cast<unsigned char>(text[at++]));
+    if (len == 0 || text.size() - at != len) {
+        return std::nullopt;
+    }
+    r._stream = std::string(text.substr(at, len));
+    return r;
+}
+
 /// Whether `it` has outlived `lifetime_ms` at `now_ms`.
 [[nodiscard]] inline auto iterator_expired(const shard_iterator& it, std::int64_t now_ms,
                                            std::int64_t lifetime_ms) -> bool {

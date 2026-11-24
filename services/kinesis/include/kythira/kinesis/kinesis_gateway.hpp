@@ -44,8 +44,31 @@
 ///   composition root sets a lease handler; otherwise the front end, which
 ///   refuses it.
 ///
+/// - `POST /_kythira/kinesis/fe/v1/...`: the front-end API
+///   (`kinesis_authenticated_call.hpp`, kinesis-independent-layers task 8)
+///   a gateway on another node hands its authenticated calls to, on a node
+///   with the `front_end` role when the composition root sets a
+///   `front_end_server`. Admitted when signed with the forward secret over
+///   the path and body, or from a caller whose layer identity the root's
+///   guard allows (the `gateway` role).
+/// - `POST /_kythira/kinesis/v1/drain`: begins draining the gateway
+///   (Requirement 4.7), signed with the forward secret over the path.
+///
 /// The internal endpoints answer 404 when no forwarding secret is
 /// configured: a single-node gateway has no peers to listen to.
+///
+/// A gateway without the `front_end` role (task 8) keeps the public half of
+/// every request: it frames, decodes and verifies the request
+/// (`front_end::authenticate`, `authenticate_lease_request`) and hands the
+/// authenticated call to a front end on another node through
+/// `remote_front_ends`, chosen by affinity; `SubscribeToShard` is relayed
+/// as a `remote_event_source`.
+///
+/// Draining (Requirement 4.7): once `begin_drain` runs, `/healthz` answers
+/// 503 so load balancers stop sending, every answer closes its connection,
+/// calls in flight finish (`in_flight`), and every event stream ends with
+/// the retryable `InternalFailureException` so its client resubscribes
+/// elsewhere. The composition root stops the listener accepting.
 ///
 /// A node without the `gateway` role (`KINESIS_ROLES=data,segments`,
 /// kinesis-independent-layers task 4) keeps the internal endpoints,
@@ -57,9 +80,11 @@
 /// `raft_stream_cluster` calls on a follower, and the segment fetch
 /// transport.
 
+#include <kythira/kinesis/kinesis_authenticated_call.hpp>
 #include <kythira/kinesis/kinesis_data_api.hpp>
 #include <kythira/kinesis/kinesis_forward.hpp>
 #include <kythira/kinesis/kinesis_front_end.hpp>
+#include <kythira/kinesis/kinesis_lease_api.hpp>
 #include <kythira/kinesis/kinesis_leases.hpp>
 #include <kythira/kinesis/kinesis_peer_client.hpp>
 #include <kythira/kinesis/kinesis_stream_state_machine.hpp>
@@ -83,6 +108,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -105,6 +131,9 @@ inline constexpr std::string_view k_volume_path = "/_kythira/kinesis/v1/volume";
     return out;
 }
 inline constexpr std::string_view k_health_path = "/healthz";
+/// Begins draining the gateway (task 8): `POST`, signed with the
+/// forwarding secret over the path.
+inline constexpr std::string_view k_drain_path = "/_kythira/kinesis/v1/drain";
 inline constexpr std::string_view k_metrics_path = "/metrics";
 /// The node's role set, on `/healthz` and on a refusal for want of one.
 inline constexpr std::string_view k_roles_header = "x-kythira-roles";
@@ -293,6 +322,7 @@ namespace gateway_detail {
 }
 
 struct gateway_stats {
+    std::atomic<std::uint64_t> _front_end_calls_served{0};
     std::atomic<std::uint64_t> _forwarded_in{0};
     std::atomic<std::uint64_t> _forward_refused{0};
     std::atomic<std::uint64_t> _segments_served{0};
@@ -321,27 +351,12 @@ public:
     [[nodiscard]] auto handle(const https::request& req, const https::request_context& ctx)
         -> https::response {
         namespace http = boost::beast::http;
-        if (auto internal = handle_internal_route(req, ctx)) {
-            return std::move(*internal);
+        const in_flight_guard counted(_in_flight);
+        auto res = handle_any(req, ctx);
+        if (draining()) {
+            // Clients reconnect, and the listener no longer takes them.
+            res.keep_alive(false);
         }
-        const std::string_view target = req.target();
-        const auto path = target.substr(0, target.find('?'));
-        if (_metrics && path == k_metrics_path && req.method() == http::verb::get) {
-            return gateway_detail::reply(req, 200, _metrics(), "text/plain; version=0.0.4");
-        }
-        if (!_roles.has(layers::role::gateway)) {
-            return not_a_gateway(req);
-        }
-        const auto r = _leases && path.starts_with(k_lease_path_prefix)
-                           ? _leases(gateway_detail::to_front_end_request(req, ctx))
-                           : _front_end.handle(gateway_detail::to_front_end_request(req, ctx));
-        https::response res{static_cast<http::status>(r.status), req.version()};
-        for (const auto& [k, v] : r.headers) {
-            res.set(k, v);
-        }
-        res.keep_alive(req.keep_alive());
-        res.body() = r.body;
-        res.prepare_payload();
         return res;
     }
 
@@ -349,6 +364,7 @@ public:
     /// routes and `/healthz`, and nothing else.
     [[nodiscard]] auto handle_internal(const https::request& req, const https::request_context& ctx)
         -> https::response {
+        const in_flight_guard counted(_in_flight);
         if (auto internal = handle_internal_route(req, ctx)) {
             return std::move(*internal);
         }
@@ -368,7 +384,8 @@ public:
             !_roles.has(layers::role::gateway)) {
             return std::nullopt;
         }
-        auto r = _front_end.handle_streaming(gateway_detail::to_front_end_request(req, ctx));
+        const auto fr = gateway_detail::to_front_end_request(req, ctx);
+        auto r = _remote ? remote_stream(fr) : _front_end.handle_streaming(fr);
         https::streaming_response out;
         out.head = https::response{static_cast<http::status>(r._response.status), req.version()};
         for (const auto& [k, v] : r._response.headers) {
@@ -382,11 +399,23 @@ public:
             };
             return out;
         }
-        // A last message can come with `_done`: send it, then end.
-        out.next = [events = r._events, done = false](std::string& chunk) mutable {
+        const auto encoding = req[http::field::content_type] == aws_json::k_cbor_content_type
+                                  ? aws_json::body_encoding::cbor
+                                  : aws_json::body_encoding::json;
+        // A last message can come with `_done`: send it, then end. A drain
+        // ends the stream with the retryable error, so the client
+        // resubscribes on another gateway.
+        out.next = [this, events = r._events, encoding, done = false](std::string& chunk) mutable {
             if (done) {
                 chunk.clear();
                 return false;
+            }
+            if (draining()) {
+                events->cancel();
+                done = true;
+                chunk = front_end_api::retryable_failure_event(
+                    encoding, "The gateway is draining; subscribe again.");
+                return true;
             }
             auto p = events->next(std::chrono::milliseconds(500));
             chunk = std::move(p._message);
@@ -427,6 +456,60 @@ public:
         _guard = std::move(guard);
     }
 
+    /// Hand every call to the front ends `remote` reaches instead of the
+    /// local front end (a node without the `front_end` role, task 8): the
+    /// local one only frames, decodes and verifies. Set before the listener
+    /// starts.
+    void set_remote_front_ends(std::shared_ptr<remote_front_ends> remote) {
+        _remote = std::move(remote);
+    }
+
+    /// Authenticates a Lease API request for a remote front end
+    /// (`authenticate_lease_request`). Set with `set_remote_front_ends`.
+    using lease_authenticator = std::function<lease_gate(const front_end_request&)>;
+    void set_lease_authenticator(lease_authenticator a) { _lease_auth = std::move(a); }
+
+    /// Serve the front-end API from `server` (a node with the `front_end`
+    /// role, task 8). Set before the listener starts; it must outlive the
+    /// gateway.
+    void set_front_end_server(front_end_server* server) { _fe_server = server; }
+
+    /// Called once when a drain begins, by `begin_drain` or the drain
+    /// route: the composition root stops the listener accepting there.
+    void set_drain_hook(std::function<void()> hook) { _drain_hook = std::move(hook); }
+
+    /// Begins draining (Requirement 4.7). Idempotent.
+    void begin_drain() {
+        if (_draining.exchange(true)) {
+            return;
+        }
+        if (_drain_hook) {
+            _drain_hook();
+        }
+    }
+
+    [[nodiscard]] auto draining() const noexcept -> bool {
+        return _draining.load(std::memory_order_acquire);
+    }
+
+    /// Requests being answered now, on either listener.
+    [[nodiscard]] auto in_flight() const noexcept -> std::uint64_t {
+        return _in_flight.load(std::memory_order_acquire);
+    }
+
+    /// Waits until no request is in flight or `bound` passes: how long a
+    /// drain lets calls finish. Whether they all did.
+    [[nodiscard]] auto await_idle(std::chrono::milliseconds bound) const -> bool {
+        const auto until = std::chrono::steady_clock::now() + bound;
+        while (in_flight() > 0) {
+            if (std::chrono::steady_clock::now() >= until) {
+                return false;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        return true;
+    }
+
     /// The layers this node runs (all four unless set). Set before the
     /// listener starts.
     void set_roles(layers::role_set roles) {
@@ -437,7 +520,27 @@ public:
     [[nodiscard]] auto roles() const noexcept -> layers::role_set { return _roles; }
 
 private:
+    /// Counts a request for as long as it is answered.
+    class in_flight_guard {
+    public:
+        explicit in_flight_guard(std::atomic<std::uint64_t>& n) : _n(n) { ++_n; }
+        in_flight_guard(const in_flight_guard&) = delete;
+        auto operator=(const in_flight_guard&) -> in_flight_guard& = delete;
+        in_flight_guard(in_flight_guard&&) = delete;
+        auto operator=(in_flight_guard&&) -> in_flight_guard& = delete;
+        ~in_flight_guard() { --_n; }
+
+    private:
+        std::atomic<std::uint64_t>& _n;
+    };
+
     FrontEnd& _front_end;
+    std::shared_ptr<remote_front_ends> _remote;
+    lease_authenticator _lease_auth;
+    front_end_server* _fe_server = nullptr;
+    std::function<void()> _drain_hook;
+    std::atomic<bool> _draining{false};
+    std::atomic<std::uint64_t> _in_flight{0};
     layers::role_set _roles{layers::role_set::all()};
     std::string _roles_text{layers::role_set::all().to_string()};
     std::function<std::string()> _metrics;
@@ -451,6 +554,134 @@ private:
     std::string _secret;
     clock_fn _clock;
     gateway_stats _stats;
+
+    auto handle_any(const https::request& req, const https::request_context& ctx)
+        -> https::response {
+        namespace http = boost::beast::http;
+        if (auto internal = handle_internal_route(req, ctx)) {
+            return std::move(*internal);
+        }
+        const std::string_view target = req.target();
+        const auto path = target.substr(0, target.find('?'));
+        if (_metrics && path == k_metrics_path && req.method() == http::verb::get) {
+            return gateway_detail::reply(req, 200, _metrics(), "text/plain; version=0.0.4");
+        }
+        if (!_roles.has(layers::role::gateway)) {
+            return not_a_gateway(req);
+        }
+        const auto fr = gateway_detail::to_front_end_request(req, ctx);
+        aws_json::http_response r;
+        if (path.starts_with(k_lease_path_prefix) && (_leases || (_remote && _lease_auth))) {
+            r = _remote ? remote_lease(fr) : _leases(fr);
+        } else {
+            r = _remote ? remote_call(fr) : _front_end.handle(fr);
+        }
+        https::response res{static_cast<http::status>(r.status), req.version()};
+        for (const auto& [k, v] : r.headers) {
+            res.set(k, v);
+        }
+        res.keep_alive(req.keep_alive());
+        res.body() = r.body;
+        res.prepare_payload();
+        return res;
+    }
+
+    /// What a gateway answers for a call no front end took or answered: the
+    /// retryable InternalFailure every Kinesis client retries.
+    [[nodiscard]] auto unexecuted(const authenticated_call& call) const -> aws_json::http_response {
+        if (call._kind == call_kind::lease) {
+            return lease_detail::lease_error(500, "InternalFailure", "Internal service failure.");
+        }
+        return _front_end.internal_failure_for(call);
+    }
+
+    auto remote_call(const front_end_request& fr) -> aws_json::http_response {
+        auto gate = _front_end.authenticate(fr);
+        if (!gate._call) {
+            return std::move(gate._answer);
+        }
+        auto o = _remote->call(*gate._call);
+        if (o._fate != remote_front_ends::fate::answered) {
+            return unexecuted(*gate._call);
+        }
+        return std::move(o._answer._response);
+    }
+
+    auto remote_lease(const front_end_request& fr) -> aws_json::http_response {
+        auto gate = _lease_auth(fr);
+        if (!gate._call) {
+            return std::move(gate._answer);
+        }
+        auto o = _remote->call(*gate._call);
+        if (o._fate != remote_front_ends::fate::answered) {
+            return unexecuted(*gate._call);
+        }
+        return std::move(o._answer._response);
+    }
+
+    auto remote_stream(const front_end_request& fr) -> typename FrontEnd::reply {
+        auto gate = _front_end.authenticate(fr);
+        if (!gate._call) {
+            return std::move(gate._answer);
+        }
+        auto o = _remote->call(*gate._call, /*subscribe=*/true);
+        if (o._fate != remote_front_ends::fate::answered) {
+            return unexecuted(*gate._call);
+        }
+        if (o._answer._session.empty()) {
+            return std::move(o._answer._response);
+        }
+        return typename FrontEnd::reply(std::move(o._answer._response),
+                                        std::make_shared<remote_event_source>(
+                                            *_remote, o._address, std::move(o._answer._session),
+                                            gate._call->_encoding, nullptr));
+    }
+
+    /// The front-end API, for a gateway on another node.
+    auto front_end_route(const https::request& req, const https::request_context& ctx,
+                         std::string_view path) -> https::response {
+        if (_fe_server == nullptr || !_roles.has(layers::role::front_end)) {
+            // Not a front end: the call did not run, try another.
+            auto res = gateway_detail::reply(req, front_end_api::k_not_executed,
+                                             "no front end here\n", "text/plain");
+            res.set(front_end_api::k_not_executed_header, "1");
+            return res;
+        }
+        const bool signed_ok =
+            !_secret.empty() && signed_by_peer(req, front_end_api::signed_text(path, req.body()));
+        const bool identity_ok =
+            !signed_ok && _guard && _guard->check(req, ctx).kind == layers::verdict_kind::allowed;
+        auto a = _fe_server->serve(signed_ok || identity_ok, std::string_view(req.method_string()),
+                                   path, req.body());
+        if (!a) {
+            return gateway_detail::reply(req, 404, "not found\n", "text/plain");
+        }
+        if (a->_status == front_end_api::k_refused) {
+            ++_stats._forward_refused;
+        } else {
+            ++_stats._front_end_calls_served;
+        }
+        auto res =
+            gateway_detail::reply(req, a->_status, std::move(a->_body), "application/octet-stream");
+        if (a->_not_executed) {
+            res.set(front_end_api::k_not_executed_header, "1");
+        }
+        return res;
+    }
+
+    auto drain_route(const https::request& req) -> https::response {
+        if (_secret.empty()) {
+            return gateway_detail::reply(req, 404, "not found\n", "text/plain");
+        }
+        if (req.method() != boost::beast::http::verb::post) {
+            return refuse(req, 405, "method not allowed");
+        }
+        if (!signed_by_peer(req, k_drain_path)) {
+            return refuse(req, 403, "bad or stale forwarding signature");
+        }
+        begin_drain();
+        return gateway_detail::reply(req, 202, "draining\n", "text/plain");
+    }
 
     /// A client call to a node that runs no gateway: 404, in the API's own
     /// error shape, naming the node's roles so an operator sees at once
@@ -476,9 +707,18 @@ private:
         const auto path = target.substr(0, q);
         const auto query = q == std::string_view::npos ? std::string_view() : target.substr(q + 1);
         if (path == k_health_path && req.method() == http::verb::get) {
-            auto res = gateway_detail::reply(req, 200, "ok\n", "text/plain");
+            // A draining gateway reports unhealthy so load balancers stop
+            // sending it clients.
+            auto res = draining() ? gateway_detail::reply(req, 503, "draining\n", "text/plain")
+                                  : gateway_detail::reply(req, 200, "ok\n", "text/plain");
             res.set(k_roles_header, _roles_text);
             return res;
+        }
+        if (front_end_api::is_front_end_api_path(path)) {
+            return front_end_route(req, ctx, path);
+        }
+        if (path == k_drain_path) {
+            return drain_route(req);
         }
         if (path == forward::k_path) {
             return propose(req);

@@ -142,7 +142,7 @@ every role (7, 8, 10).
     take a whole `PutRecords` command (`KINESIS_MAX_BODY_BYTES`, as the
     module already sets it).
 
-- [ ] 8. Gateway apart from the front end
+- [x] 8. Gateway apart from the front end
   - `kinesis_authenticated_call.hpp`: the SigV4-verified handoff (CBOR),
     the front end's role check and trust of the asserted principal; the
     core `sigv4_verifier` entry point that returns principal and context
@@ -152,6 +152,61 @@ every role (7, 8, 10).
   - EFO over a streaming internal call; Lease API and `/metrics` through
     the gateway; drain
   - _Requirements: 4.1-4.7, 8.2-8.5, 12.5_
+  - Built: `front_end` splits into `authenticate` (framing, SigV4, decode,
+    STS `GetCallerIdentity`) and `execute` (stream check, authorization,
+    handler); `handle` is both, so a co-located node is unchanged. The
+    entry point that verifies without dispatching already existed:
+    `aws_request_authorizer::authenticate`, so `sigv4_verifier.hpp` is
+    untouched (Requirement 12.5). `authenticate_lease_request` and
+    `lease_api::execute` split the Lease API the same way.
+  - The handoff: five routes under `/_kythira/kinesis/fe/v1/` (`call`,
+    `subscribe`, `pull`, `cancel`, `metrics`) on every node with
+    `front_end`, co-located ones included, so gateways can be put in front
+    of an existing cluster. The wire is the catalog codec the data-layer
+    API uses, with the input as its JSON text, not CBOR: one binary codec
+    for every internal route. A front end admits a caller signing with the
+    forward secret over path and body, or a layer identity with `gateway`
+    when a route guard is set; anything else is 403 before the call is
+    read. The answer is the client's HTTP response, already in the
+    client's encoding.
+  - Affinity: rendezvous hashing (stable FNV-1a + SplitMix64) of
+    (account, stream name, shard ordinal) for `GetRecords` (read from the
+    iterator without its MAC), `GetShardIterator` and `SubscribeToShard`;
+    of the account for the control plane; writes and leases in turn. The
+    design keys by stream id, which a gateway cannot know without the
+    catalog; the name in its account names the same stream. A front end
+    that could not be reached, or answered 503 `x-kythira-not-executed`
+    (draining, not a front end), goes to the back of every order for two
+    seconds and the call tries the next one once; a call sent without an
+    answer is not retried and answers InternalFailure. `peer_client` gained
+    `exchange`, which says whether the request was written.
+  - EFO: `subscribe` executes the call and keeps the `event_source` as a
+    session; the gateway long-polls `pull` (up to 64 messages per answer)
+    and relays messages unparsed. A failed pull or a lost session ends the
+    client's stream with `InternalFailureException`; an unpulled session
+    is cancelled after 30 s. A sequence of long polls rather than one
+    chunked response, because the internal client is one request, one
+    response.
+  - Roles: `gateway` alone needs `KINESIS_FRONT_ENDS` and the forward
+    secret, and keeps nothing on disk; `front_end` without `gateway`
+    serves only gateways; `gateway,data[,segments]` hands its calls on.
+    The in-process producer is published only with both `gateway` and
+    `front_end` (Requirement 12.3).
+  - Drain: `POST /_kythira/kinesis/v1/drain` (signed) or SIGTERM: the
+    listener stops accepting (`https::server::stop_accepting`, new),
+    `/healthz` answers 503, answers close their connections, event streams
+    end with the retryable error, and calls in flight get up to
+    `KINESIS_DRAIN_TIMEOUT_MS` (10 s); a front end answers new calls as
+    not executed. `/metrics` on a gateway alone is one front end's, then
+    the gateway's own handoff counters.
+  - Tests: `kinesis_gateway_apart_test` (affinity, wire, trust, failover,
+    unanswered calls, Lease API, EFO relay and restart, drain, metrics);
+    `kinesis_layouts_test` moves one client onto gateways in front of a
+    co-located, an apart and a mixed front end and back off, both ways
+    (the gateway role's migration paths, ahead of task 14); config cases;
+    `kin-gw` in the container scenario. Layer identities are checked when
+    a route guard is set; the daemon wires none yet (TLS identities are
+    task 3's).
 
 - [x] 9. Volume service and `remote_segment_store`
   - `include/raft/segment_volume_service.hpp` (one `record_segment_store`

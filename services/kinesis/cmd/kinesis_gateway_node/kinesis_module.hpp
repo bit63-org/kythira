@@ -27,6 +27,15 @@
 // and serves the whole API, the Lease API and SubscribeToShard over
 // remote_data_access, the data-layer API of the data nodes
 // KINESIS_DATA_NODES names (kinesis_data_api.hpp).
+//
+// A node without the `front_end` role (task 8, KINESIS_ROLES=gateway)
+// keeps only the public half: it frames, decodes and verifies each request
+// and hands the authenticated call to a front end in KINESIS_FRONT_ENDS,
+// chosen by affinity (kinesis_authenticated_call.hpp). Every node with the
+// `front_end` role serves that front-end API on its listener, co-located
+// nodes included, so gateways can be started in front of an existing
+// cluster and removed again. A node without the `gateway` role refuses
+// client calls with LayerNotServed and serves only the internal routes.
 
 #include "config.hpp"
 #ifdef KYTHIRA_KINESIS_GATEWAY_IAM
@@ -35,6 +44,7 @@
 #include "tier.hpp"
 
 #include <kythira/kinesis/kinesis_actions.hpp>
+#include <kythira/kinesis/kinesis_authenticated_call.hpp>
 #include <kythira/kinesis/kinesis_compat_profile.hpp>
 #include <kythira/kinesis/kinesis_data_access.hpp>
 #include <kythira/kinesis/kinesis_data_api.hpp>
@@ -295,6 +305,10 @@ public:
         if (is_segment_node(_opt._roles)) {
             return;
         }
+        if (is_gateway_node(_opt._roles)) {
+            build_gateway_node();
+            return;
+        }
         if (is_front_end_node(_opt._roles)) {
             build_front_end_node();
             return;
@@ -434,13 +448,19 @@ public:
             });
         _server->start();
         if (!_raft) {
-            // A front end without data: no internal routes to serve (it
-            // holds no replica and no segments), no Raft to drive, no shard
-            // it leads to maintain.
+            // A front end or a gateway without data: no data-layer routes to
+            // serve (it holds no replica and no segments), no Raft to drive,
+            // no shard it leads to maintain. A front end serves the
+            // front-end API on this listener.
             _started = true;
             std::cout << "kinesis_gateway_node " << kythira::host_node_id_text(_opt._node_id)
-                      << " ready: front end without data, data_nodes=" << _opt._data_nodes.size()
-                      << " kinesis=" << _server->port()
+                      << " ready: "
+                      << (is_gateway_node(_opt._roles)
+                              ? "gateway without front end, front_ends=" +
+                                    std::to_string(_opt._front_ends.size())
+                              : "front end without data, data_nodes=" +
+                                    std::to_string(_opt._data_nodes.size()))
+                      << " roles=" << _opt._roles.to_string() << " kinesis=" << _server->port()
                       << (_opt._allow_plaintext ? " (http)" : " (https)") << std::endl;
             return;
         }
@@ -534,6 +554,21 @@ public:
     /// No request in flight, in-process or over the listener, once the host
     /// stops.
     void drain() override {
+        // A gateway drains before it stops (Requirement 4.7): it stops
+        // accepting connections, lets calls in flight finish up to
+        // KINESIS_DRAIN_TIMEOUT_MS, and ends event streams with the
+        // retryable error; a front end refuses new calls as not executed
+        // so gateways take them elsewhere.
+        if (_gateway && _server && !_drained.exchange(true)) {
+            _gateway->begin_drain();
+            if (_fe_server) {
+                _fe_server->drain();
+            }
+            if (!_gateway->await_idle(_opt._drain_timeout)) {
+                log_info("kinesis gateway: drain bound passed with " +
+                         std::to_string(_gateway->in_flight()) + " call(s) in flight");
+            }
+        }
         if (_producer) {
             _producer->close();
         }
@@ -572,6 +607,9 @@ public:
         _leases.reset();
         _remote_leases.reset();
         _gateway.reset();
+        _fe_server.reset();
+        _remote_fe.reset();
+        _fe_peers.reset();
         _local_data.reset();
         _service.reset();
         _remote_service.reset();
@@ -621,6 +659,20 @@ public:
             out.push_back({"data_api_not_leader", static_cast<double>(st._not_leader), {}});
             out.push_back({"data_api_stale_route", static_cast<double>(st._stale_route), {}});
             out.push_back({"data_api_unreachable", static_cast<double>(st._unreachable), {}});
+        }
+        // Task 8: how the handoff between gateways and front ends fares.
+        if (_remote_fe) {
+            auto& st = _remote_fe->stats();
+            out.push_back({"front_end_calls", static_cast<double>(st._calls.load()), {}});
+            out.push_back({"front_end_failovers", static_cast<double>(st._failovers.load()), {}});
+            out.push_back({"front_end_unplaced", static_cast<double>(st._unplaced.load()), {}});
+            out.push_back({"front_end_unanswered", static_cast<double>(st._unanswered.load()), {}});
+        }
+        if (_fe_server) {
+            const auto& st = _fe_server->stats();
+            out.push_back({"authenticated_calls", static_cast<double>(st._calls.load()), {}});
+            out.push_back({"authenticated_refused", static_cast<double>(st._refused.load()), {}});
+            out.push_back({"event_sessions", static_cast<double>(_fe_server->sessions()), {}});
         }
         // One series per role this node runs (kinesis-independent-layers
         // Requirement 2.6), so a dashboard can count each layer.
@@ -983,7 +1035,113 @@ private:
             [this](const std::vector<std::string>& keys, const std::vector<std::byte>& envelope) {
                 return _cluster->txn_submit_local(keys, envelope);
             });
-        _producer = std::make_shared<producer_type>(*_front_end);
+        wire_layers([this](const kinesis::authenticated_call& c) { return _leases->execute(c); },
+                    [this] { return _service->metrics_text(); });
+    }
+
+    /// The task 8 half of every node's wiring, once its front end and
+    /// gateway exist: with `front_end`, serve the front-end API to gateways
+    /// on other nodes; with `gateway` and no `front_end`, hand calls to
+    /// KINESIS_FRONT_ENDS. The in-process producer is published only by a
+    /// node that runs both, since it is the gateway and the front end in
+    /// one call (Requirement 12.3); elsewhere DynamoDB's streaming
+    /// destination misses the registry and uses its network client.
+    void wire_layers(
+        std::function<aws_json::http_response(const kinesis::authenticated_call&)> lease,
+        std::function<std::string()> metrics) {
+        using kythira::layers::role;
+        if (_opt._roles.has(role::front_end)) {
+            kinesis::front_end_routes routes;
+            routes._execute = [this](kinesis::authenticated_call& c) {
+                auto r = _front_end->execute(c);
+                return kinesis::front_end_routes::execution{std::move(r._response),
+                                                            std::move(r._events)};
+            };
+            routes._lease = std::move(lease);
+            if (_opt._metrics) {
+                routes._metrics = std::move(metrics);
+            }
+            _fe_server = std::make_unique<kinesis::front_end_server>(std::move(routes));
+            _gateway->set_front_end_server(_fe_server.get());
+        } else if (_opt._roles.has(role::gateway)) {
+            wire_remote_front_ends();
+        }
+        _gateway->set_drain_hook([this] {
+            if (_server) {
+                _server->stop_accepting();
+            }
+        });
+        if (_opt._roles.has(role::gateway) && _opt._roles.has(role::front_end)) {
+            _producer = std::make_shared<producer_type>(*_front_end);
+        }
+    }
+
+    /// A gateway without a local front end: calls go to KINESIS_FRONT_ENDS
+    /// over a client whose timeout covers a front end's longest call (a
+    /// write's commit timeout, then its own data-layer retries).
+    void wire_remote_front_ends() {
+        _fe_peers = std::make_unique<kinesis::peer_client>(kinesis::peer_client_config{
+            ._tls = !_opt._allow_plaintext,
+            ._ca_path = _opt._peer_ca_path,
+            ._timeout = _opt._command_timeout * 2 + std::chrono::seconds{5},
+            ._user_agent = std::string(kinesis::k_peer_user_agent),
+        });
+        _remote_fe = std::make_shared<kinesis::remote_front_ends>(
+            _opt._front_ends,
+            kinesis::make_http_front_end_transport(*_fe_peers, _opt._forward_secret));
+        _front_end->set_operations_served_elsewhere(
+            kinesis::kinesis_service<kinesis::data_access>::k_operations);
+        _gateway->set_remote_front_ends(_remote_fe);
+        _gateway->set_lease_authenticator(
+            [this, fc = make_front_end_config()](const kinesis::front_end_request& r) {
+                return kinesis::authenticate_lease_request(*_authorizer, fc, r);
+            });
+    }
+
+    /// A gateway alone (task 8): no store, no Raft, no data access and no
+    /// handlers. Its front end object only frames, decodes and verifies;
+    /// every call goes to a front end in KINESIS_FRONT_ENDS. `/metrics` is
+    /// a front end's, executed there, with this gateway's own counters
+    /// after it.
+    void build_gateway_node() {
+        _front_end = std::make_unique<front_end_type>(make_front_end_config(), *_authorizer);
+        _gateway = std::make_unique<gateway_type>(
+            *_front_end,
+            [](const std::string&, const std::vector<std::byte>&, kinesis::admission) {
+                return std::optional<kinesis::apply_result>{};
+            },
+            nullptr, _opt._forward_secret);
+        _gateway->set_roles(_opt._roles);
+        wire_layers({}, {});
+        if (_opt._metrics) {
+            _gateway->set_metrics_handler(
+                [this] { return _remote_fe->metrics().value_or("") + gateway_metrics_text(); });
+        }
+    }
+
+    /// A gateway's own counters, in the Prometheus text format.
+    [[nodiscard]] auto gateway_metrics_text() const -> std::string {
+        std::ostringstream out;
+        const auto line = [&out](std::string_view name, double v) {
+            out << "# TYPE kythira_kinesis_gateway_" << name << " gauge\n"
+                << "kythira_kinesis_gateway_" << name << ' ' << v << '\n';
+        };
+        if (_remote_fe) {
+            auto& st = _remote_fe->stats();
+            line("front_end_calls", static_cast<double>(st._calls.load()));
+            line("front_end_failovers", static_cast<double>(st._failovers.load()));
+            line("front_end_unplaced", static_cast<double>(st._unplaced.load()));
+            line("front_end_unanswered", static_cast<double>(st._unanswered.load()));
+            line("streams_relayed", static_cast<double>(st._streams_relayed.load()));
+            line("streams_broken", static_cast<double>(st._streams_broken.load()));
+            line("front_ends", static_cast<double>(_remote_fe->front_ends().addresses().size()));
+            line("front_ends_suspect", static_cast<double>(_remote_fe->front_ends().suspects()));
+        }
+        if (_gateway) {
+            line("in_flight", static_cast<double>(_gateway->in_flight()));
+            line("draining", _gateway->draining() ? 1.0 : 0.0);
+        }
+        return out.str();
     }
 
     /// A front end without the `data` role (task 7): the same front end,
@@ -1018,7 +1176,9 @@ private:
         if (_opt._metrics) {
             _gateway->set_metrics_handler([this] { return _remote_service->metrics_text(); });
         }
-        _producer = std::make_shared<producer_type>(*_front_end);
+        wire_layers(
+            [this](const kinesis::authenticated_call& c) { return _remote_leases->execute(c); },
+            [this] { return _remote_service->metrics_text(); });
     }
 
     [[nodiscard]] auto make_front_end_config() const -> kinesis::front_end_config {
@@ -1258,6 +1418,13 @@ private:
     std::unique_ptr<kinesis::kinesis_service<kinesis::data_access>> _remote_service;
     std::unique_ptr<kinesis::lease_api<kinesis::data_access, authorizer_type>> _remote_leases;
     std::shared_ptr<producer_type> _producer;
+    /// Task 8: the front-end API this node serves gateways (with
+    /// `front_end`), or the front ends it hands calls to (a gateway
+    /// without), over their own client.
+    std::unique_ptr<kinesis::front_end_server> _fe_server;
+    std::unique_ptr<kinesis::peer_client> _fe_peers;
+    std::shared_ptr<kinesis::remote_front_ends> _remote_fe;
+    std::atomic<bool> _drained{false};
     std::unique_ptr<https::server> _server;
     std::unique_ptr<https::server> _internal_server;
 
