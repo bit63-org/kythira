@@ -859,14 +859,41 @@ void dump_cluster_diagnostic_state(const std::vector<std::string>& ips,
                                           std::string(TEST_AUTH_TOKEN) +
                                           "' http://localhost:8443/v1/root-ca 2>&1",
                                       std::chrono::seconds(15));
-            auto log_tail = ssh_execute(ip, private_key_pem,
-                                        "sudo grep -i 'leader\\|election\\|redirect\\|trust\\|"
-                                        "cutover\\|peer.cert' /tmp/ca_cluster_node.log 2>&1 | "
-                                        "tail -30",
-                                        std::chrono::seconds(15));
+            // Separate filters, not one: a leader's debug log repeats
+            // "Sending AppendEntries ... [state=leader]" and its read_state
+            // lines several times a second, so a single 'leader' match filled
+            // the whole tail with them, and a follower's election lines did
+            // the same to anything older. On the 2026-11-23 weekly run that
+            // pushed out every line that could say why the leader's
+            // AppendEntries never reached the other survivor, and "Exception
+            // sending AppendEntries" (the RPC's own error) matched nothing.
+            auto role_tail = ssh_execute(
+                ip, private_key_pem,
+                "sudo grep -i 'election\\|pre-vote\\|becom\\|leader changed\\|redirect' "
+                "/tmp/ca_cluster_node.log 2>&1 | "
+                "grep -v 'Sending AppendEntries\\|read_state\\|verify leadership' | tail -25",
+                std::chrono::seconds(15));
+            // When this node last heard a leader, and from whom: a follower
+            // whose election timer keeps firing has stopped receiving them.
+            auto last_append = ssh_execute(ip, private_key_pem,
+                                           "sudo grep 'Received AppendEntries' "
+                                           "/tmp/ca_cluster_node.log 2>&1 | tail -2",
+                                           std::chrono::seconds(15));
+            auto problem_tail = ssh_execute(
+                ip, private_key_pem,
+                "sudo grep -i ' WARNING:\\| ERROR:\\|\\[warn\\]\\|\\[error\\]\\|exception\\|"
+                "reject\\|handshake\\|trust\\|cutover\\|peer.cert\\|peer identity' "
+                "/tmp/ca_cluster_node.log 2>&1 | "
+                // Timestamps off, so a per-heartbeat error collapses into
+                // one counted line and leaves room for the rarer ones.
+                "sed -E 's/^[0-9-]+ [0-9:.]+ //' | uniq -c | tail -40",
+                std::chrono::seconds(15));
             std::cerr << "=== " << ip << " /v1/root-ca headers ===\n"
-                      << status << "\n=== " << ip << " recent leader/election/trust log ===\n"
-                      << log_tail << "\n";
+                      << status << "\n=== " << ip << " recent role/election log ===\n"
+                      << role_tail << "\n=== " << ip << " last AppendEntries received ===\n"
+                      << last_append << "\n=== " << ip
+                      << " recent warnings, errors and RPC trust log ===\n"
+                      << problem_tail << "\n";
         } catch (const std::exception& e) {
             std::cerr << "=== " << ip << ": could not fetch state: " << e.what() << "\n";
         }
