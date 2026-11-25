@@ -853,6 +853,23 @@ set_tests_properties(segment_volume_test PROPERTIES
     LABELS "unit;persistence;kinesis;layers"
 )
 
+# The in-place store move (.kiro/specs/kinesis-independent-layers/ task 13):
+# a replica's segments go from a local directory to a segment node's volume
+# and back under writes, the tail behind a bounded, measured fence.
+# Header-only, in-process segment node.
+add_executable(segment_store_move_test segment_store_move_test.cpp)
+target_link_libraries(segment_store_move_test PRIVATE
+    Boost::unit_test_framework
+    OpenSSL::Crypto
+    Threads::Threads
+)
+target_compile_features(segment_store_move_test PRIVATE cxx_std_23)
+add_test(NAME segment_store_move_test COMMAND segment_store_move_test)
+set_tests_properties(segment_store_move_test PROPERTIES
+    TIMEOUT 300
+    LABELS "unit;persistence;kinesis;layers"
+)
+
 # Where each data replica's segment volume goes
 # (.kiro/specs/kinesis-independent-layers/ task 10): distinct segment nodes,
 # placement groups preferred, room first, epochs on replacement. Header-only.
