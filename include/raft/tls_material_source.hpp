@@ -14,7 +14,7 @@
 ///
 /// - `static_tls_material_source`: fixed PEM strings. Never changes.
 /// - `file_tls_material_source`: PEM files, re-read on `refresh()` and, when
-///   given a poll interval, on its own thread whenever a file's mtime moves.
+///   given a poll interval, on its own thread whenever a file's stamp moves.
 /// - `issuing_tls_material_source<P>` (issuing_tls_material_source.hpp):
 ///   obtains and renews its own certificate from a `certificate_provider`.
 ///
@@ -26,6 +26,7 @@
 #include <openssl/evp.h>
 #include <openssl/pem.h>
 #include <openssl/x509.h>
+#include <sys/stat.h>
 
 #include <atomic>
 #include <chrono>
@@ -372,9 +373,13 @@ struct tls_material_paths {
 /// update.
 ///
 /// With a poll interval the source is self-refreshing: a thread compares
-/// every path's mtime against the values from the last successful load and
-/// calls `refresh()` when one differs. A failed load is reported and retried
-/// at the next poll, and the thread keeps running.
+/// every path's stamp (mtime, inode and size) against the values from the
+/// last successful load and calls `refresh()` when one differs. The inode
+/// and size matter on filesystems whose timestamps only advance once per
+/// kernel tick (tmpfs among them): two atomic replacements in the same
+/// tick leave the mtime unchanged, but each rename brings a new inode. A
+/// failed load is reported and retried at the next poll, and the thread
+/// keeps running.
 class file_tls_material_source final : public basic_tls_material_source {
 public:
     /// Loads the files once and throws (`std::invalid_argument` or
@@ -422,9 +427,17 @@ public:
     }
 
 private:
-    struct mtimes {
-        std::optional<std::filesystem::file_time_type> chain, key, roots;
-        auto operator==(const mtimes&) const -> bool = default;
+    struct file_stamp {
+        std::int64_t mtime_ns = 0;
+        std::uint64_t device = 0;
+        std::uint64_t inode = 0;
+        std::int64_t size = 0;
+        auto operator==(const file_stamp&) const -> bool = default;
+    };
+
+    struct stamps {
+        std::optional<file_stamp> chain, key, roots;
+        auto operator==(const stamps&) const -> bool = default;
     };
 
     static auto read_file(const std::string& path) -> std::string {
@@ -440,34 +453,36 @@ private:
         return contents.str();
     }
 
-    static auto mtime_of(const std::string& path)
-        -> std::optional<std::filesystem::file_time_type> {
+    static auto stamp_of(const std::string& path) -> std::optional<file_stamp> {
         if (path.empty()) {
             return std::nullopt;
         }
-        std::error_code ec;
-        auto t = std::filesystem::last_write_time(path, ec);
-        if (ec) {
+        struct ::stat st = {};
+        if (::stat(path.c_str(), &st) != 0) {
             return std::nullopt;
         }
-        return t;
+        return file_stamp{.mtime_ns = static_cast<std::int64_t>(st.st_mtim.tv_sec) * 1'000'000'000 +
+                                      st.st_mtim.tv_nsec,
+                          .device = static_cast<std::uint64_t>(st.st_dev),
+                          .inode = static_cast<std::uint64_t>(st.st_ino),
+                          .size = static_cast<std::int64_t>(st.st_size)};
     }
 
-    auto current_mtimes() const -> mtimes {
-        return {mtime_of(_paths.certificate_chain_path), mtime_of(_paths.private_key_path),
-                mtime_of(_paths.root_certificates_path)};
+    auto current_stamps() const -> stamps {
+        return {stamp_of(_paths.certificate_chain_path), stamp_of(_paths.private_key_path),
+                stamp_of(_paths.root_certificates_path)};
     }
 
     auto load() -> void {
         std::lock_guard<std::mutex> lock(_load_mutex);
         // Taken before reading, so a write that lands mid-read moves the
-        // mtime past what is recorded and the next poll reads again.
-        auto before = current_mtimes();
+        // stamp past what is recorded and the next poll reads again.
+        auto before = current_stamps();
         tls_material m{.certificate_chain_pem = read_file(_paths.certificate_chain_path),
                        .private_key_pem = read_file(_paths.private_key_path),
                        .root_certificates_pem = read_file(_paths.root_certificates_path)};
         publish(std::move(m), "file_tls_material_source");
-        _loaded_mtimes = before;
+        _loaded_stamps = before;
     }
 
     auto poll(std::stop_token stop, std::chrono::milliseconds interval) -> void {
@@ -484,7 +499,7 @@ private:
             bool changed = false;
             {
                 std::lock_guard<std::mutex> lock(_load_mutex);
-                changed = current_mtimes() != _loaded_mtimes;
+                changed = current_stamps() != _loaded_stamps;
             }
             if (!changed) {
                 continue;
@@ -493,14 +508,14 @@ private:
                 refresh();
             } catch (const std::exception&) {
                 // Reported by refresh(); the old material stays and the
-                // unchanged recorded mtimes make the next poll try again.
+                // unchanged recorded stamps make the next poll try again.
             }
         }
     }
 
     tls_material_paths _paths;
     std::mutex _load_mutex;
-    mtimes _loaded_mtimes;  // Guarded by _load_mutex.
+    stamps _loaded_stamps;  // Guarded by _load_mutex.
     std::jthread _poll_thread;
 };
 
