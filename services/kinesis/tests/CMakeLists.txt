@@ -99,6 +99,24 @@ if(TARGET kinesis_gateway_node)
                 $<TARGET_FILE:kinesis_gateway_node> --check-config)
     set_tests_properties(kinesis_gateway_node_config_auth_unknown PROPERTIES
         PASS_REGULAR_EXPRESSION "KINESIS_AUTH: static, iam or both, not 'password'")
+    # Independent layers task 13: KINESIS_VOTERS lists the founding
+    # voters, and a peer left out joins as an evacuation target; an id
+    # outside KYTHIRA_PEERS is refused. `--admin` takes GET or POST only.
+    add_test(NAME kinesis_gateway_node_config_voters
+        COMMAND "${CMAKE_COMMAND}" -E env ${_kinesis_env} KYTHIRA_NODE_ID=2 KINESIS_VOTERS=1
+                $<TARGET_FILE:kinesis_gateway_node> --check-config)
+    set_tests_properties(kinesis_gateway_node_config_voters PROPERTIES
+        PASS_REGULAR_EXPRESSION "voters=1 \\(1\\) joining")
+    add_test(NAME kinesis_gateway_node_config_voters_unknown
+        COMMAND "${CMAKE_COMMAND}" -E env ${_kinesis_env} KINESIS_VOTERS=1,9
+                $<TARGET_FILE:kinesis_gateway_node> --check-config)
+    set_tests_properties(kinesis_gateway_node_config_voters_unknown PROPERTIES
+        PASS_REGULAR_EXPRESSION "KINESIS_VOTERS: 9 is not in KYTHIRA_PEERS")
+    add_test(NAME kinesis_gateway_node_admin_method
+        COMMAND "${CMAKE_COMMAND}" -E env ${_kinesis_env}
+                $<TARGET_FILE:kinesis_gateway_node> --admin PUT evacuate)
+    set_tests_properties(kinesis_gateway_node_admin_method PROPERTIES
+        PASS_REGULAR_EXPRESSION "METHOD is GET or POST, not PUT")
     # Service colocation task 5: the module's settings in kythira_node,
     # filled in from the node's (cmd/kinesis_gateway_node/config.cpp).
     add_raft_completion_test(kinesis_node_config_test kinesis_node_config_test.cpp)
@@ -116,6 +134,9 @@ if(TARGET kinesis_gateway_node)
         kinesis_gateway_node_config_auth_iam_no_keys
         kinesis_gateway_node_config_auth_both_needs_keys
         kinesis_gateway_node_config_auth_unknown
+        kinesis_gateway_node_config_voters
+        kinesis_gateway_node_config_voters_unknown
+        kinesis_gateway_node_admin_method
         kinesis_node_config_test
         PROPERTIES LABELS "unit;kinesis;kinesis-module" TIMEOUT 60)
 endif()

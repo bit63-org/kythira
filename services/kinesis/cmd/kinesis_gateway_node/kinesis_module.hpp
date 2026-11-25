@@ -38,6 +38,7 @@
 // client calls with LayerNotServed and serves only the internal routes.
 
 #include "config.hpp"
+#include "migration_admin.hpp"
 #ifdef KYTHIRA_KINESIS_GATEWAY_IAM
 #include "iam_auth.hpp"
 #endif
@@ -60,6 +61,7 @@
 #include <kythira/kinesis/kinesis_lease_api.hpp>
 #include <kythira/kinesis/kinesis_channel_delivery.hpp>
 #include <kythira/kinesis/kinesis_maintenance.hpp>
+#include <kythira/kinesis/kinesis_migration.hpp>
 #include <kythira/kinesis/kinesis_on_demand.hpp>
 #include <kythira/kinesis/kinesis_peer_client.hpp>
 #include <kythira/kinesis/kinesis_raft_cluster.hpp>
@@ -85,6 +87,8 @@
 #include <raft/persistence.hpp>
 #include <raft/record_segment_store.hpp>
 #include <raft/remote_segment_store.hpp>
+#include <raft/replica_evacuation.hpp>
+#include <raft/segment_store_move.hpp>
 #include <raft/segment_volume_placement.hpp>
 #include <raft/segment_volume_service.hpp>
 #include <raft/service_module.hpp>
@@ -285,6 +289,9 @@ public:
                 return std::string("KINESIS_COMPAT refused");
             }
             _profile = *profile;
+            if (auto refused = check_held_replicas()) {
+                return refused;
+            }
         } catch (const std::exception& e) {
             return std::string(e.what());
         }
@@ -314,6 +321,14 @@ public:
             return;
         }
         std::filesystem::create_directories(_opt._data_dir / "raft");
+        _raft_client = [&host](const kythira::host_node_id& id, const std::string& url) {
+            host.client().add_peer(id, url);
+        };
+        {
+            const std::scoped_lock lock(_gateways_mu);
+            _gateways = _opt._peer_gateways;
+        }
+        load_learned_peers();
         open_store();
         for (const auto& [id, gw] : _opt._peer_gateways) {
             if (id != _opt._node_id) {
@@ -342,9 +357,15 @@ public:
                                                 d._stream + " at " + std::to_string(d._first_seq));
         };
 
-        for (const auto& [id, url] : _opt._peers) {
-            _voters.push_back(id);
-        }
+        _voters = _opt._voters;
+        // A data node outside the founding voters joins (task 13): it
+        // creates no group, and takes replicas only as an evacuation adds
+        // it, learning each descriptor from its peers.
+        // A founding voter whose replicas were deleted after it left
+        // (left_marker) joins as well.
+        std::error_code left_ec;
+        _joining = std::find(_voters.begin(), _voters.end(), _opt._node_id) == _voters.end() ||
+                   std::filesystem::exists(kinesis::left_marker(_opt._data_dir), left_ec);
         _raft = std::make_unique<raft_host>(make_raft_config(host, space));
 
         // Initial tiling: cuts sorted and deduplicated, one group per range.
@@ -353,7 +374,7 @@ public:
         cuts.erase(std::unique(cuts.begin(), cuts.end()), cuts.end());
         std::optional<std::string> start;
         std::uint64_t group = 1;
-        for (std::size_t i = 0; i <= cuts.size(); ++i) {
+        for (std::size_t i = 0; !_joining && i <= cuts.size(); ++i) {
             std::optional<std::string> end =
                 i < cuts.size() ? std::optional<std::string>{cuts[i]} : std::nullopt;
             _raft->create_group(descriptor_type{
@@ -363,7 +384,7 @@ public:
                 ._voters = _voters});
             start = end;
         }
-        _groups = cuts.size() + 1;
+        _groups = _joining ? 0 : cuts.size() + 1;
 
         build_service();
     }
@@ -596,6 +617,12 @@ public:
         if (_driver.joinable()) {
             _driver.join();
         }
+        if (_move_thread.joinable()) {
+            _move_thread.join();
+        }
+        if (_migration) {
+            _migration->stop();
+        }
         if (_raft) {
             _raft->stop();
         }
@@ -604,6 +631,7 @@ public:
         _channels.reset();
         _channel_destinations.reset();
         _on_demand.reset();
+        _migration.reset();
         _maintenance.reset();
         _keeper.reset();
         _server.reset();
@@ -630,9 +658,12 @@ public:
         }
         // A replica whose volume does not answer has stopped applying
         // (Requirement 9.5): say so, so the data layer replaces it.
-        if (_remote != nullptr && !_volume_reachable.load(std::memory_order_acquire)) {
-            return {false, "segment volume " + _remote->volume() +
-                               " is unreachable on segment node " + _volume_node};
+        {
+            const std::scoped_lock lock(_store_mu);
+            if (_remote != nullptr && !_volume_reachable.load(std::memory_order_acquire)) {
+                return {false, "segment volume " + _remote->volume() +
+                                   " is unreachable on segment node " + _volume_node};
+            }
         }
         // Placement moved this node's volume: it restarts into the new one.
         {
@@ -700,28 +731,54 @@ private:
     /// yet, or has not assigned the volume yet, is waited for; one that
     /// stays away fails the start.
     void open_store() {
-        if (_opt._roles.has(kythira::layers::role::segments)) {
-            std::filesystem::create_directories(_opt._data_dir / "segments");
-            kythira::record_segment_store_options so;
-            so._data_dir = _opt._data_dir / "segments";
-            _store = std::make_unique<kythira::record_segment_store>(so);
-            return;
-        }
         const auto self = kythira::host_node_id_text(_opt._node_id);
         // The catalog's word, as this node last saw it, wins over the
-        // settings' first placement: after a replacement the volume is
-        // somewhere the settings do not say.
+        // settings: after a replacement the volume is somewhere the settings
+        // do not say, and after a store move (task 13) the segments may be
+        // local on a node without `segments` or on a volume on one with it.
         auto assignment = saved_assignment(self);
-        if (!assignment) {
-            assignment = kythira::assignment_of(volume_assignments(_opt), self);
+        const bool local = assignment ? assignment->_segment_node == kinesis::k_local_store
+                                      : _opt._roles.has(kythira::layers::role::segments);
+        std::unique_ptr<kythira::segment_store> inner;
+        if (local) {
+            inner = open_local_store();
+            const std::scoped_lock lock(_store_mu);
+            _opened = assignment;
+        } else {
+            if (!assignment) {
+                assignment = kythira::assignment_of(volume_assignments(_opt), self);
+            }
+            if (!assignment) {
+                throw std::invalid_argument("kinesis: no segment volume is placed for node " +
+                                            self);
+            }
+            inner = open_volume_store(*assignment, k_volume_wait);
         }
-        const auto node =
-            assignment ? kythira::segment_node_of(_opt._segment_nodes, assignment->_segment_node)
-                       : std::nullopt;
-        if (!assignment || !node) {
-            throw std::invalid_argument("kinesis: no segment volume is placed for node " + self);
+        // Every store call goes through the movable store, so an in-place
+        // move can swap what is underneath (task 13).
+        auto movable = std::make_unique<kythira::movable_segment_store>(std::move(inner));
+        _movable = movable.get();
+        _store = std::move(movable);
+    }
+
+    [[nodiscard]] auto open_local_store() const -> std::unique_ptr<kythira::segment_store> {
+        std::filesystem::create_directories(_opt._data_dir / "segments");
+        kythira::record_segment_store_options so;
+        so._data_dir = _opt._data_dir / "segments";
+        return std::make_unique<kythira::record_segment_store>(so);
+    }
+
+    /// Opens `assignment`'s volume, waiting up to `wait` for its segment
+    /// node (one that is not up yet, or has not assigned the volume yet),
+    /// and makes it the volume this node watches.
+    auto open_volume_store(const kythira::volume_assignment& assignment,
+                           std::chrono::milliseconds wait, bool watch = true)
+        -> std::unique_ptr<kythira::remote_segment_store> {
+        const auto node = kythira::segment_node_of(_opt._segment_nodes, assignment._segment_node);
+        if (!node) {
+            throw std::invalid_argument("kinesis: segment node " + assignment._segment_node +
+                                        " is not in KINESIS_SEGMENT_NODES");
         }
-        _volume_node = node->_id;
         auto inner = kinesis::make_volume_transport(*_peers, _opt._forward_secret, node->_endpoint);
         kythira::segment_volume_transport transport =
             [this, inner = std::move(inner)](std::vector<std::byte> request) {
@@ -729,31 +786,37 @@ private:
                 _volume_reachable.store(r.has_value(), std::memory_order_release);
                 return r;
             };
-        const auto deadline = std::chrono::steady_clock::now() + k_volume_wait;
+        const auto deadline = std::chrono::steady_clock::now() + wait;
+        std::unique_ptr<kythira::remote_segment_store> remote;
         for (;;) {
             try {
                 // A segment node that never held this volume (a replacement
-                // moved it there) creates it at the catalog's epoch.
-                kythira::remote_segment_store::assign(transport, assignment->_volume,
-                                                      assignment->_epoch);
-                auto remote = std::make_unique<kythira::remote_segment_store>(
-                    transport, assignment->_volume, assignment->_epoch);
-                _remote = remote.get();
-                _store = std::move(remote);
+                // or a store move put it there) creates it at the catalog's
+                // epoch.
+                kythira::remote_segment_store::assign(transport, assignment._volume,
+                                                      assignment._epoch);
+                remote = std::make_unique<kythira::remote_segment_store>(
+                    transport, assignment._volume, assignment._epoch);
                 break;
             } catch (const kythira::record_segment_error& e) {
                 if (std::chrono::steady_clock::now() >= deadline) {
                     throw kythira::record_segment_error(
                         "kinesis: segment node " + node->_id + " (" + node->_endpoint +
-                        ") did not open volume " + assignment->_volume + ": " + e.what());
+                        ") did not open volume " + assignment._volume + ": " + e.what());
                 }
                 std::this_thread::sleep_for(std::chrono::milliseconds(500));
             }
         }
-        _opened = *assignment;
-        log_info("kinesis: record segments on volume " + assignment->_volume + " epoch " +
-                 std::to_string(assignment->_epoch) + " at segment node " + node->_id + " (" +
+        if (watch) {
+            const std::scoped_lock lock(_store_mu);
+            _remote = remote.get();
+            _volume_node = node->_id;
+            _opened = assignment;
+        }
+        log_info("kinesis: record segments on volume " + assignment._volume + " epoch " +
+                 std::to_string(assignment._epoch) + " at segment node " + node->_id + " (" +
                  node->_endpoint + ")");
+        return remote;
     }
 
     /// The volumes KINESIS_SEGMENT_NODES places on this node, when it is
@@ -828,6 +891,7 @@ private:
     [[nodiscard]] auto segment_space() -> std::optional<std::pair<std::uint64_t, std::uint64_t>> {
         const std::scoped_lock lock(_space_mu);
         const auto now = std::chrono::steady_clock::now();
+        const std::scoped_lock store_lock(_store_mu);
         if (_remote != nullptr && (!_space || now - _space_at >= std::chrono::seconds{5})) {
             _space_at = now;
             try {
@@ -888,6 +952,17 @@ private:
         cfg.executor_stripes = _opt._executor_stripes;
         cfg.policy_interval = _opt._policy_interval;
         cfg.partitioner = kythira::make_partitioner<std::string>(stream_partitioner{});
+        // A replica an evacuation places here (task 13) is created when its
+        // leader first reaches this node: the descriptor, membership
+        // included, comes from a peer that holds the group.
+        cfg.lookup_descriptor =
+            [this](const std::uint64_t& group) -> std::optional<descriptor_type> {
+            if (!_admin_peers) {
+                return std::nullopt;
+            }
+            return lookup_descriptor_from_peers<descriptor_type>(
+                *_admin_peers, _opt._forward_secret, other_data_gateways(), group);
+        };
         // A data node on a volume reports its segment node's storage, so
         // the data layer's capacity policy counts the segment layer's room
         // (Requirement 10.6).
@@ -975,11 +1050,13 @@ private:
     /// the Lease API: everything a request reaches, built before any
     /// listener opens.
     void build_service() {
-        const auto gateways = _opt._peer_gateways;
+        // The settings' gateways, and any an evacuation named since (task
+        // 13): a leader hint can name a node that joined.
         const auto address_of =
-            [gateways](const kythira::host_node_id& id) -> std::optional<std::string> {
-            const auto it = gateways.find(id);
-            return it == gateways.end() ? std::nullopt : std::optional{it->second};
+            [this](const kythira::host_node_id& id) -> std::optional<std::string> {
+            const std::scoped_lock lock(_gateways_mu);
+            const auto it = _gateways.find(id);
+            return it == _gateways.end() ? std::nullopt : std::optional{it->second};
         };
         // On a volume, the guarded disk is the segment node's.
         _guard = _remote == nullptr ? std::make_unique<kinesis::disk_guard>(
@@ -1042,6 +1119,7 @@ private:
             });
         wire_layers([this](const kinesis::authenticated_call& c) { return _leases->execute(c); },
                     [this] { return _service->metrics_text(); });
+        build_migration_admin();
     }
 
     /// The task 8 half of every node's wiring, once its front end and
@@ -1285,7 +1363,26 @@ private:
                          " unplaceable=" + std::to_string(p._unplaceable) +
                          " failures=" + std::to_string(p._failures));
             }
-            if (_remote == nullptr || !_opened || !p._self || *p._self == *_opened) {
+            std::optional<kythira::volume_assignment> opened;
+            bool on_volume = false;
+            {
+                const std::scoped_lock lock(_store_mu);
+                opened = _opened;
+                on_volume = _remote != nullptr;
+            }
+            if (!opened || (p._self && *p._self == *opened)) {
+                return;
+            }
+            // A store move (task 13) saved its new record here before the
+            // catalog took it: publish it, never restart away from it.
+            if (!p._self || p._self->_epoch < opened->_epoch) {
+                if (publish_assignment(*opened, p._self ? p._self->_epoch : 0)) {
+                    log_info("kinesis: published this node's segment store record at epoch " +
+                             std::to_string(opened->_epoch));
+                }
+                return;
+            }
+            if (!on_volume) {
                 return;
             }
             const std::scoped_lock lock(_moved_mu);
@@ -1301,6 +1398,295 @@ private:
         } catch (const std::exception& e) {
             log_info(std::string("kinesis volumes: pass failed: ") + e.what());
         }
+    }
+
+    // ── live migration (kinesis-independent-layers task 13) ─────────────────
+
+    /// A node without the `data` role refuses to start while its data
+    /// directory holds Raft replicas (Requirement 11.3): they would be
+    /// silently abandoned. An evacuation's release, or
+    /// KINESIS_DISCARD_REPLICAS, lets it start and deletes them.
+    [[nodiscard]] auto check_held_replicas() const -> std::optional<std::string> {
+        if (_opt._data_dir.empty()) {
+            return std::nullopt;
+        }
+        if (_opt._roles.has(kythira::layers::role::data)) {
+            // Back as a data node: an earlier release no longer holds, so a
+            // later start without the role refuses again until the next
+            // evacuation of this node is released.
+            std::error_code ec;
+            std::filesystem::remove(kinesis::released_marker(_opt._data_dir), ec);
+            return std::nullopt;
+        }
+        const auto held = kinesis::held_replica_dirs(_opt._data_dir);
+        if (held.empty()) {
+            return std::nullopt;
+        }
+        std::error_code ec;
+        const bool released = std::filesystem::exists(kinesis::released_marker(_opt._data_dir), ec);
+        if (!released && !_opt._discard_replicas) {
+            return "KINESIS_ROLES=" + _opt._roles.to_string() + " has no data role, but " +
+                   (_opt._data_dir / "raft").string() + " holds " + std::to_string(held.size()) +
+                   " Raft replica(s). Evacuate this node first (POST " +
+                   std::string(kinesis::k_admin_path_prefix) +
+                   "evacuate, then release), or set KINESIS_DISCARD_REPLICAS=true to delete them";
+        }
+        std::filesystem::remove_all(_opt._data_dir / "raft", ec);
+        if (ec) {
+            return "cannot delete " + (_opt._data_dir / "raft").string() + ": " + ec.message();
+        }
+        // The node has left the groups it founded: a later start with the
+        // data role must join (take replicas only from an evacuation), not
+        // bootstrap empty groups under its old membership.
+        std::ofstream(kinesis::left_marker(_opt._data_dir), std::ios::trunc)
+            << "this node's replicas were deleted after it left its groups\n";
+        return std::nullopt;
+    }
+
+    [[nodiscard]] auto learned_peers_path() const -> std::filesystem::path {
+        return _opt._data_dir / "kinesis-peers.json";
+    }
+
+    /// Targets an evacuation named before a restart: the cluster must still
+    /// reach a node its settings do not list.
+    void load_learned_peers() {
+        std::ifstream in(learned_peers_path());
+        if (!in) {
+            return;
+        }
+        const std::string text((std::istreambuf_iterator<char>(in)), {});
+        std::error_code ec;
+        const auto v = boost::json::parse(text, ec);
+        if (ec || !v.is_array()) {
+            log_info("kinesis migration: ignoring malformed " + learned_peers_path().string());
+            return;
+        }
+        for (const auto& e : v.as_array()) {
+            std::string why;
+            auto r = kinesis::parse_evacuation_request(
+                boost::json::serialize(
+                    boost::json::object{{"node", "0"}, {"targets", boost::json::array{e}}}),
+                why);
+            if (r && !r->_targets.empty()) {
+                apply_target(r->_targets.front());
+            }
+        }
+    }
+
+    /// Dials `t` for Raft and addresses its gateway; saved for restarts.
+    void learn_target(const kinesis::migration_target& t) {
+        apply_target(t);
+        const std::scoped_lock lock(_gateways_mu);
+        _learned.insert_or_assign(t._id, t);
+        boost::json::array out;
+        for (const auto& [id, target] : _learned) {
+            boost::json::object o;
+            o["id"] = kythira::host_node_id_text(id);
+            o["raft"] = target._raft;
+            o["gateway"] = target._gateway;
+            out.push_back(std::move(o));
+        }
+        auto tmp = learned_peers_path();
+        tmp += ".tmp";
+        {
+            std::ofstream f(tmp, std::ios::trunc);
+            f << boost::json::serialize(out) << "\n";
+        }
+        std::error_code ec;
+        std::filesystem::rename(tmp, learned_peers_path(), ec);
+    }
+
+    void apply_target(const kinesis::migration_target& t) {
+        if (t._id == _opt._node_id) {
+            return;
+        }
+        if (!t._raft.empty() && _raft_client) {
+            _raft_client(t._id, t._raft);
+        }
+        if (!t._gateway.empty()) {
+            const std::scoped_lock lock(_gateways_mu);
+            _gateways.insert_or_assign(t._id, t._gateway);
+        }
+    }
+
+    /// Every other data node's gateway: the settings' and the learned.
+    [[nodiscard]] auto other_data_gateways() const -> std::vector<std::string> {
+        std::vector<std::string> out;
+        const std::scoped_lock lock(_gateways_mu);
+        for (const auto& [id, gw] : _gateways) {
+            if (id != _opt._node_id) {
+                out.push_back(gw);
+            }
+        }
+        return out;
+    }
+
+    void build_migration_admin() {
+        _admin_peers = std::make_unique<kinesis::peer_client>(kinesis::peer_client_config{
+            ._tls = !_opt._allow_plaintext,
+            ._ca_path = _opt._peer_ca_path,
+            ._timeout = std::chrono::milliseconds{2000},
+            ._user_agent = std::string(kinesis::k_peer_user_agent),
+        });
+        typename migration_admin<raft_host>::hooks h;
+        h._learn_target = [this](const kinesis::migration_target& t) { learn_target(t); };
+        h._peer_gateways = [this] { return other_data_gateways(); };
+        h._release = [this] {
+            std::ofstream marker(kinesis::released_marker(_opt._data_dir), std::ios::trunc);
+            marker << "released by an evacuation\n";
+            log_info("kinesis migration: released; this node may restart without the data role");
+        };
+        h._unrelease = [this] {
+            std::error_code ec;
+            if (std::filesystem::remove(kinesis::released_marker(_opt._data_dir), ec)) {
+                log_info("kinesis migration: an evacuation targets this node; release withdrawn");
+            }
+        };
+        h._store_move = [this](const https::request& req) { return store_move_route(req); };
+        h._log = [this](const std::string& m) { log_info(m); };
+        _migration = std::make_unique<migration_admin<raft_host>>(
+            *_raft, _opt._node_id, _voters.size(), *_admin_peers, _opt._forward_secret,
+            std::move(h));
+        _gateway->set_admin_handler(
+            [this](const https::request& req, std::string_view op, std::string_view query) {
+                return _migration->handle(req, op, query);
+            });
+    }
+
+    /// Writes this replica's segment store record through the catalog,
+    /// replacing the one at `expected`.
+    auto publish_assignment(const kythira::volume_assignment& a, std::uint64_t expected) -> bool {
+        const kinesis::volume_assignment_command c{._replica = a._replica,
+                                                   ._segment_node = a._segment_node,
+                                                   ._volume = a._volume,
+                                                   ._expected_epoch = expected,
+                                                   ._epoch = a._epoch};
+        const auto r = _cluster->propose(kinesis::volume_key(a._replica),
+                                         kinesis::encode_command(c), kinesis::admission::none);
+        return r && r->_status == kinesis::apply_status::ok;
+    }
+
+    auto store_move_route(const https::request& req) -> https::response {
+        const auto json = [&req](unsigned status, std::string body) {
+            return kinesis::gateway_detail::reply(req, status, std::move(body), "application/json");
+        };
+        if (req.method() == boost::beast::http::verb::get) {
+            const std::scoped_lock lock(_move_mu);
+            return json(200,
+                        _move_status.empty() ? std::string(R"({"state":"none"})") : _move_status);
+        }
+        std::string why;
+        auto r = kinesis::parse_store_move_request(req.body(), why);
+        if (!r) {
+            return json(400, boost::json::serialize(boost::json::object{{"message", why}}));
+        }
+        if (!_keeper) {
+            return json(409, R"({"message":"no segment layer: set KINESIS_SEGMENT_NODES"})");
+        }
+        {
+            const std::scoped_lock lock(_store_mu);
+            const bool local = _remote == nullptr;
+            if (local && r->_to == kinesis::store_move_request::destination::local) {
+                return json(409, R"({"message":"the segments are already local"})");
+            }
+            if (!local && r->_to == kinesis::store_move_request::destination::volume &&
+                (r->_segment_node.empty() || r->_segment_node == _volume_node)) {
+                return json(409, R"({"message":"the segments are already on that volume"})");
+            }
+        }
+        if (_moving.exchange(true)) {
+            return json(409, R"({"message":"a store move is running"})");
+        }
+        if (_move_thread.joinable()) {
+            _move_thread.join();
+        }
+        {
+            const std::scoped_lock lock(_move_mu);
+            _move_status = R"({"state":"running"})";
+        }
+        _move_thread = std::thread([this, request = *r] {
+            run_store_move(request);
+            _moving.store(false);
+        });
+        return json(202, R"({"started":true})");
+    }
+
+    /// The in-place store move (Requirement 11.5): copy, fence, switch, then
+    /// the record through the catalog. The record is saved locally under
+    /// the fence, so a crash after the switch reopens the new store, and
+    /// the volume keeper publishes a saved record the catalog lacks.
+    void run_store_move(const kinesis::store_move_request& r) {
+        const auto self = kythira::host_node_id_text(_opt._node_id);
+        boost::json::object status;
+        try {
+            const auto current = kythira::assignment_of(_keeper->assignments(), self);
+            const std::uint64_t epoch = current ? current->_epoch : 0;
+            kythira::volume_assignment next{._replica = self, ._epoch = epoch + 1};
+            std::unique_ptr<kythira::segment_store> target;
+            kythira::remote_segment_store* target_remote = nullptr;
+            std::string target_node;
+            if (r._to == kinesis::store_move_request::destination::local) {
+                next._segment_node = std::string(kinesis::k_local_store);
+                next._volume = std::string(kinesis::k_local_store);
+                target = open_local_store();
+            } else {
+                target_node = r._segment_node;
+                if (target_node.empty()) {
+                    const auto placed = kythira::assignment_of(volume_assignments(_opt), self);
+                    if (!placed) {
+                        throw std::invalid_argument("no segment node is placed for this node");
+                    }
+                    target_node = placed->_segment_node;
+                }
+                next._segment_node = target_node;
+                next._volume = kythira::volume_id_for("kinesis", self);
+                auto remote = open_volume_store(next, std::chrono::seconds{10}, /*watch=*/false);
+                target_remote = remote.get();
+                target = std::move(remote);
+            }
+            kythira::segment_store_move_options options;
+            if (r._max_fence_bytes != 0) {
+                options._max_fence_bytes = r._max_fence_bytes;
+            }
+            auto [report, old] = _movable->move_to(
+                std::move(target), options,
+                [&](kythira::segment_store&, kythira::segment_store&) { save_assignment(next); });
+            {
+                const std::scoped_lock lock(_store_mu);
+                _remote = target_remote;
+                _volume_node = target_node;
+                _opened = next;
+            }
+            _volume_reachable.store(true, std::memory_order_release);
+            const bool published = publish_assignment(next, epoch);
+            // The old copy is no longer read by anything.
+            for (const auto& stream : old->streams()) {
+                old->drop_stream(stream);
+            }
+            status["state"] = "done";
+            status["to"] = next._segment_node;
+            status["epoch"] = next._epoch;
+            status["published"] = published;
+            status["rounds"] = report._rounds;
+            status["fence_retries"] = report._fence_retries;
+            status["sealed_segments"] = report._sealed_segments;
+            status["sealed_bytes"] = report._sealed_bytes;
+            status["prefix_bytes"] = report._prefix_bytes;
+            status["fence_records"] = report._fence_records;
+            status["fence_bytes"] = report._fence_bytes;
+            status["fence_installs"] = report._fence_installs;
+            status["pause_us"] = report._pause.count();
+            log_info("kinesis migration: segment store moved to " + next._segment_node +
+                     " at epoch " + std::to_string(next._epoch) + ", pause " +
+                     std::to_string(report._pause.count()) + " us, fence " +
+                     std::to_string(report._fence_bytes) + " bytes");
+        } catch (const std::exception& e) {
+            status["state"] = "refused";
+            status["message"] = e.what();
+            log_info(std::string("kinesis migration: store move refused: ") + e.what());
+        }
+        const std::scoped_lock lock(_move_mu);
+        _move_status = boost::json::serialize(status);
     }
 
     void maintain() {
@@ -1382,7 +1768,12 @@ private:
     static constexpr std::int64_t k_volume_replace_after_ms = 60'000;
 
     std::unique_ptr<kythira::segment_store> _store;
-    /// `_store` when it is a volume on a segment node.
+    /// `_store` itself: every store call goes through it (task 13).
+    kythira::movable_segment_store* _movable = nullptr;
+    /// Guards `_remote`, `_volume_node` and `_opened`, which a store move
+    /// changes while the node runs.
+    mutable std::mutex _store_mu;
+    /// The store underneath `_store` when it is a volume on a segment node.
     kythira::remote_segment_store* _remote = nullptr;
     std::string _volume_node;
     std::atomic<bool> _volume_reachable{true};
@@ -1406,6 +1797,19 @@ private:
     kinesis::segment_fetcher _fetch;
     std::vector<kythira::host_node_id> _voters;
     std::size_t _groups = 0;
+    /// Outside the founding voters: replicas come only from evacuations.
+    bool _joining = false;
+
+    // Live migration (task 13).
+    std::function<void(const kythira::host_node_id&, const std::string&)> _raft_client;
+    mutable std::mutex _gateways_mu;
+    std::map<kythira::host_node_id, std::string> _gateways;
+    std::map<kythira::host_node_id, kinesis::migration_target> _learned;
+    std::unique_ptr<kinesis::peer_client> _admin_peers;
+    std::atomic<bool> _moving{false};
+    std::thread _move_thread;
+    std::mutex _move_mu;
+    std::string _move_status;
 
     std::unique_ptr<raft_host> _raft;
     /// The leader's write buckets (task 8): what a stream with the
@@ -1445,6 +1849,7 @@ private:
     std::unique_ptr<kinesis::channel_delivery<cluster_type, kinesis::kinesis_service<cluster_type>>>
         _channels;
     std::unique_ptr<kinesis::on_demand_controller<cluster_type>> _on_demand;
+    std::unique_ptr<migration_admin<raft_host>> _migration;
     std::atomic<bool> _maintaining{false};
     std::thread _maintainer;
     std::atomic<bool> _started{false};

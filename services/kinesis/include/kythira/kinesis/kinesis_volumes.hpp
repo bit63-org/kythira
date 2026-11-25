@@ -39,6 +39,12 @@ struct volume_record {
     friend auto operator==(const volume_record&, const volume_record&) -> bool = default;
 };
 
+/// The `_segment_node` (and `_volume`) of a record whose replica keeps its
+/// segments in its own directory: an in-place store move off a volume
+/// writes it (kinesis-independent-layers task 13), and the volume keeper
+/// never replaces it. `@` cannot start a KINESIS_SEGMENT_NODES id.
+inline constexpr std::string_view k_local_store = "@local";
+
 [[nodiscard]] inline auto volumes_prefix() -> std::string {
     return catalog_prefix() + "volumes/";
 }
