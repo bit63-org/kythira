@@ -50,6 +50,8 @@ class local_stream_cluster;
 
 namespace kythira::kinesis::test {
 
+struct cluster_handle;
+
 enum class layout_kind : std::uint8_t {
     co_located,
     front_end_apart,
@@ -98,6 +100,9 @@ inline constexpr std::string_view k_secret = "layout-test-forward-secret-0123456
 class layered_access {
 public:
     explicit layered_access(local_stream_cluster& cluster, layout_kind kind = configured_layout());
+    /// Over any data layer (kinesis_cluster_handle.hpp): the migration path
+    /// tests' replicated one, whose replicas move between nodes.
+    layered_access(const cluster_handle& handle, layout_kind kind);
 
     layered_access(const layered_access&) = delete;
     auto operator=(const layered_access&) -> layered_access& = delete;

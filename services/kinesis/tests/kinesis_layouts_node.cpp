@@ -43,8 +43,10 @@ struct refuse_all {
 }  // namespace
 
 struct loopback_data_node::impl {
-    explicit impl(local_stream_cluster& cluster)
-        : _view(cluster, [](const std::string&) { return true; }), _local(_view) {
+    explicit impl(cluster_handle cluster)
+        : _cluster(std::move(cluster)),
+          _view(_cluster, [](const std::string&) { return true; }),
+          _local(_view) {
         data_api_deps deps;
         deps._local = &_local;
         deps._propose_here = [this](const std::string& key, const std::vector<std::byte>& command,
@@ -118,16 +120,17 @@ struct loopback_data_node::impl {
         return r;
     }
 
-    replica_view<local_stream_cluster> _view;
-    local_data_access<replica_view<local_stream_cluster>> _local;
+    cluster_handle _cluster;
+    replica_view<cluster_handle> _view;
+    local_data_access<replica_view<cluster_handle>> _local;
     refuse_all _auth;
     front_end_type _fe{front_end_config{}, _auth};
     std::unique_ptr<gateway_type> _gateway;
     std::unique_ptr<https::server> _server;
 };
 
-loopback_data_node::loopback_data_node(local_stream_cluster& cluster)
-    : _impl(std::make_unique<impl>(cluster)) {}
+loopback_data_node::loopback_data_node(cluster_handle cluster)
+    : _impl(std::make_unique<impl>(std::move(cluster))) {}
 
 loopback_data_node::~loopback_data_node() = default;
 

@@ -23,22 +23,28 @@
 namespace kythira::kinesis::test {
 
 struct layered_access::impl {
-    std::unique_ptr<local_data_access<local_stream_cluster>> _co_located;
+    // Declared first: everything below refers to it.
+    cluster_handle _cluster;
+    std::unique_ptr<local_data_access<cluster_handle>> _co_located;
     std::unique_ptr<layout_detail::loopback_data_node> _data_node;
     std::unique_ptr<peer_client> _peers;
     std::unique_ptr<remote_data_access> _remote;
-    std::unique_ptr<layout_detail::replica_view<local_stream_cluster>> _catalog_view;
-    std::unique_ptr<local_data_access<layout_detail::replica_view<local_stream_cluster>>>
-        _catalog_local;
-    std::unique_ptr<hybrid_data_access<layout_detail::replica_view<local_stream_cluster>>> _hybrid;
+    std::unique_ptr<layout_detail::replica_view<cluster_handle>> _catalog_view;
+    std::unique_ptr<local_data_access<layout_detail::replica_view<cluster_handle>>> _catalog_local;
+    std::unique_ptr<hybrid_data_access<layout_detail::replica_view<cluster_handle>>> _hybrid;
     data_access* _access = nullptr;
 };
 
 layered_access::layered_access(local_stream_cluster& cluster, layout_kind kind)
+    : layered_access(cluster_handle::of(cluster), kind) {}
+
+layered_access::layered_access(const cluster_handle& handle, layout_kind kind)
     : _kind(kind), _impl(std::make_unique<impl>()) {
     auto& i = *_impl;
+    i._cluster = handle;
+    auto& cluster = i._cluster;
     if (kind == layout_kind::co_located) {
-        i._co_located = std::make_unique<local_data_access<local_stream_cluster>>(cluster);
+        i._co_located = std::make_unique<local_data_access<cluster_handle>>(cluster);
         i._access = i._co_located.get();
         return;
     }
@@ -55,14 +61,13 @@ layered_access::layered_access(local_stream_cluster& cluster, layout_kind kind)
     }
     // Mixed: this node holds the catalog group, the data node the
     // stream groups.
-    i._catalog_view = std::make_unique<layout_detail::replica_view<local_stream_cluster>>(
+    i._catalog_view = std::make_unique<layout_detail::replica_view<cluster_handle>>(
         cluster, [](const std::string& key) { return key.starts_with(catalog_prefix()); });
     i._catalog_local =
-        std::make_unique<local_data_access<layout_detail::replica_view<local_stream_cluster>>>(
+        std::make_unique<local_data_access<layout_detail::replica_view<cluster_handle>>>(
             *i._catalog_view);
-    i._hybrid =
-        std::make_unique<hybrid_data_access<layout_detail::replica_view<local_stream_cluster>>>(
-            *i._catalog_local, *i._remote);
+    i._hybrid = std::make_unique<hybrid_data_access<layout_detail::replica_view<cluster_handle>>>(
+        *i._catalog_local, *i._remote);
     i._access = i._hybrid.get();
 }
 
