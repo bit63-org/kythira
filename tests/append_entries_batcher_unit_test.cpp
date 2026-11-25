@@ -547,6 +547,31 @@ BOOST_AUTO_TEST_CASE(stop_sends_what_is_queued) {
     BOOST_TEST(std::move(a).get().success());
 }
 
+// A chain built on a member future can finish after the batcher is gone:
+// the node's ErrorHandler flattens a delayed resend into it, and that
+// completes from a timer thread. On the boost backend `via()` is sticky, so
+// the late link still submits to the batcher's completion executor, and it
+// used to find the executor's pool already freed (a glibc mutex abort or a
+// segfault in multi_raft_split_integration_test_batching).
+BOOST_AUTO_TEST_CASE(a_member_chain_may_finish_after_the_batcher_is_gone) {
+    fake_client client;
+    client.answer_batches_with(answer_all_ok);
+    auto late = std::make_shared<kythira::promise_default<int>>();
+    std::optional<kythira::future_default<int>> tail;
+    {
+        batcher_type batcher(client, config());
+        batcher.start();
+        auto member = batcher.send(2, append_for(10, 1), 100ms);
+        tail.emplace(std::move(member)
+                         .thenValue([late](ae_response) { return late->getFuture(); })
+                         .thenValue([](int v) { return v + 1; }));
+        // Destroying the batcher sends the queued member and runs its
+        // continuation, which leaves the chain waiting on `late`.
+    }
+    late->setValue(41);
+    BOOST_TEST(std::move(*tail).get() == 42);
+}
+
 // Requirement 4.1 / 4.2: an older peer gets every member again, alone; the
 // destination is skipped until the probe interval passes, then probed.
 BOOST_AUTO_TEST_CASE(an_older_peer_is_sent_to_alone_until_the_probe) {

@@ -162,7 +162,17 @@ public:
     append_entries_batcher(append_entries_batcher&&) = delete;
     auto operator=(append_entries_batcher&&) -> append_entries_batcher& = delete;
 
-    ~append_entries_batcher() { stop(); }
+    ~append_entries_batcher() {
+        stop();
+#if defined(KYTHIRA_FUTURE_BACKEND_BOOST)
+        // Chains built on member futures may outlive the batcher (a retry
+        // timer, a flattened continuation) and still hold the executor.
+        // Retire its pool now so those later links run without it.
+        if (_completion_pool) {
+            _completion_pool->retire();
+        }
+#endif
+    }
 
     [[nodiscard]] auto config() const -> const batching_config& { return _cfg; }
 
@@ -178,7 +188,7 @@ public:
         std::lock_guard lock(_timer_mutex);
 #if defined(KYTHIRA_FUTURE_BACKEND_BOOST)
         if (!_completion_pool) {
-            _completion_pool = std::make_unique<executor_default>(completion_threads());
+            _completion_pool = std::make_shared<completion_executor>(completion_threads());
             _completion_executor.store(_completion_pool.get(), std::memory_order_release);
         }
 #endif
@@ -625,11 +635,16 @@ private:
     /// started (unit tests drive it by hand) hands back the plain future.
     /// The Folly and stdexec backends do not start a thread per
     /// continuation, so their futures are left as they are.
+    ///
+    /// `via()` is sticky on the boost backend: every link chained after it,
+    /// however far down and however late, submits to the same executor.
+    /// That is why the executor is a `completion_executor` and not the
+    /// pool itself; see that class.
     auto member_future(promise_type& promise) -> future_type {
         auto future = promise.getFuture();
 #if defined(KYTHIRA_FUTURE_BACKEND_BOOST)
         if (auto* pool = _completion_executor.load(std::memory_order_acquire)) {
-            return std::move(future).via(pool->handle());
+            return std::move(future).via(*pool);
         }
 #endif
         return future;
@@ -692,11 +707,84 @@ private:
     bool _stopping{false};
     std::thread _timer;
 
-    // Boost backend only: where member futures' continuations run (see
-    // member_future()). Created by start() and kept until destruction, so
-    // a continuation chained after stop() still has somewhere to run.
-    std::unique_ptr<executor_default> _completion_pool;
-    std::atomic<executor_default*> _completion_executor{nullptr};
+#if defined(KYTHIRA_FUTURE_BACKEND_BOOST)
+    /// @brief Where member futures' continuations run on the boost backend
+    ///        (see member_future()), for as long as anything chained on a
+    ///        member future can still submit to it.
+    ///
+    /// Boost's `then(Ex&, F)` holds its executor by reference and
+    /// `Future::via()` is sticky, so every later link of a member's chain
+    /// submits to this object, including links that complete long after
+    /// the batcher is gone. The node's AppendEntries path builds exactly
+    /// such chains: ErrorHandler retries flatten a delayed resend into the
+    /// chain, and the resend's completion arrives from a timer thread. With
+    /// the bare pool as the executor, a chain that finished after its host
+    /// was destroyed pushed onto the freed pool's queue; that was the
+    /// `pthread_mutex_unlock ... PTHREAD_MUTEX_ERRORCHECK_NP` abort and the
+    /// segfaults in multi_raft_split_integration_test_batching on the boost
+    /// and No Folly CI jobs, usually in the case after the one whose host
+    /// had just been torn down.
+    ///
+    /// So the chain holds this object, via `keep_alive()`, and this object
+    /// holds the pool only until `retire()`. After that, work goes to a
+    /// detached thread of its own: what boost's plain `then()` would have
+    /// done with it anyway, and only for stragglers. The chain must not own
+    /// the pool itself: the last owner could then be one of the pool's own
+    /// threads, and `basic_thread_pool`'s destructor would join itself.
+    class completion_executor : public std::enable_shared_from_this<completion_executor> {
+    public:
+        explicit completion_executor(std::size_t threads)
+            : _pool(std::make_unique<executor_default>(threads)) {}
+
+        completion_executor(const completion_executor&) = delete;
+        auto operator=(const completion_executor&) -> completion_executor& = delete;
+        completion_executor(completion_executor&&) = delete;
+        auto operator=(completion_executor&&) -> completion_executor& = delete;
+
+        ~completion_executor() { retire(); }
+
+        /// Read by `Future::via()`: every link of the chain pins this.
+        [[nodiscard]] auto keep_alive() -> std::shared_ptr<void> {
+            return this->weak_from_this().lock();
+        }
+
+        template<typename Work> auto submit(Work&& work) -> void {
+            {
+                std::lock_guard lock(_mutex);
+                if (_pool) {
+                    _pool->submit(std::forward<Work>(work));
+                    return;
+                }
+            }
+            std::thread(std::forward<Work>(work)).detach();
+        }
+
+        /// Stop using the pool, then drain and join it. Not under `_mutex`:
+        /// queued work that submits again finds no pool and runs detached.
+        auto retire() -> void {
+            std::unique_ptr<executor_default> pool;
+            {
+                std::lock_guard lock(_mutex);
+                pool = std::move(_pool);
+            }
+            pool.reset();
+        }
+
+        // The rest of the duck-typed interface `executor_ref` expects.
+        auto close() -> void {}
+        auto closed() -> bool { return false; }
+        auto try_executing_one() -> bool { return false; }
+
+    private:
+        std::mutex _mutex;
+        std::unique_ptr<executor_default> _pool;
+    };
+
+    // Created by start() and retired by the destructor, not stop(), so a
+    // continuation chained after stop() still runs on the pool.
+    std::shared_ptr<completion_executor> _completion_pool;
+    std::atomic<completion_executor*> _completion_executor{nullptr};
+#endif
 
     std::mutex _flight_mutex;
     std::condition_variable _flight_cv;
