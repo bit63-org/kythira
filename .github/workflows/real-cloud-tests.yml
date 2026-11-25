@@ -726,6 +726,35 @@ jobs:
           scripts/run-real-cloud-suite.sh 'real-ec2' '^aws_quorum_manager_real_ec2_test$' \
             "Check that AWS_CI_ROLE_ARN is assumable via OIDC and carries the ec2-quorum-manager policy."
 
+      # The OIDC session assumed at "Re-configure AWS credentials for the test
+      # steps" lasts one hour, and the bundles above it are not bounded by
+      # anything: on run 36337979088 the ec2-quorum-manager bundle alone ran
+      # 53m43s, so the rpc-tls bundle below started 60m12s after that refresh
+      # and every one of its cases failed in the fixture ctor with
+      # `ExpiredToken: The security token included in the request is expired`.
+      # It read as an rpc-tls defect and was not one.
+      #
+      # Refresh per bundle rather than raising --session-duration-seconds, for
+      # the same reason the audit's refresh below gives: a duration long enough
+      # today is silently wrong the first time the suite grows. Re-assuming
+      # mid-job works for AWS (the audit step has always done it); note this is
+      # NOT true of google-github-actions/auth, whose ID token is fixed at job
+      # start.
+      #
+      # The refresh comes BEFORE the AMI lookup, not after it: the lookup is
+      # itself an AWS call. On the weekly runs of 2026-11-09 and 11-16
+      # (42644360412, 43891607395; x64) the ec2-quorum-manager bundle ran
+      # close to an hour (55m38s on the second), and "Resolve
+      # ca_cluster_node AMI ID" then failed with `RequestExpired` on the old
+      # session, one step before the refresh would have replaced it.
+      - name: Re-configure AWS credentials for the ca-cluster-node bundles (OIDC)
+        if: ${{ env.BUNDLE_CA_CLUSTER == 'true' || env.BUNDLE_CA_CLUSTER_RPC_TLS == 'true' }}
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars.AWS_CI_ROLE_ARN }}
+          role-session-name: kythira-ci-real-cloud-tests-ca-cluster
+          aws-region: ${{ vars.AWS_REAL_CLOUD_TESTS_REGION || 'us-east-1' }}
+
       # Both ca-cluster-node bundles need a pre-built AMI with
       # /usr/local/bin/ca_cluster_node already installed (they SSH in and
       # start the binary directly - unlike ec2-quorum-manager, which only
@@ -755,28 +784,6 @@ jobs:
           fi
           echo "ami_id=${AMI_ID}" >> "$GITHUB_OUTPUT"
 
-      # The OIDC session assumed at "Re-configure AWS credentials for the test
-      # steps" lasts one hour, and the bundles above it are not bounded by
-      # anything: on run 36337979088 the ec2-quorum-manager bundle alone ran
-      # 53m43s, so the rpc-tls bundle below started 60m12s after that refresh
-      # and every one of its cases failed in the fixture ctor with
-      # `ExpiredToken: The security token included in the request is expired`.
-      # It read as an rpc-tls defect and was not one.
-      #
-      # Refresh per bundle rather than raising --session-duration-seconds, for
-      # the same reason the audit's refresh below gives: a duration long enough
-      # today is silently wrong the first time the suite grows. Re-assuming
-      # mid-job works for AWS (the audit step has always done it); note this is
-      # NOT true of google-github-actions/auth, whose ID token is fixed at job
-      # start.
-      - name: Re-configure AWS credentials for the ca-cluster-node bundles (OIDC)
-        if: ${{ env.BUNDLE_CA_CLUSTER == 'true' || env.BUNDLE_CA_CLUSTER_RPC_TLS == 'true' }}
-        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
-        with:
-          role-to-assume: ${{ vars.AWS_CI_ROLE_ARN }}
-          role-session-name: kythira-ci-real-cloud-tests-ca-cluster
-          aws-region: ${{ vars.AWS_REAL_CLOUD_TESTS_REGION || 'us-east-1' }}
-
       - name: Run ca-cluster-node bundle
         if: ${{ env.BUNDLE_CA_CLUSTER == 'true' }}
         env:
@@ -801,6 +808,16 @@ jobs:
           scripts/run-real-cloud-suite.sh 'real-ec2' '^ca_cluster_node_rpc_tls_real_ec2_test$' \
             "Check AWS_CI_ROLE_ARN's ca-cluster-node policy and that the resolved AMI has /usr/local/bin/ca_cluster_node installed."
 
+      # Refreshed before the AMI lookup below for the reason the
+      # ca-cluster-node refresh above gives: the lookup is an AWS call too.
+      - name: Re-configure AWS credentials for the chaos-crash bundle (OIDC)
+        if: ${{ env.BUNDLE_CHAOS_CRASH == 'true' }}
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars.AWS_CI_ROLE_ARN }}
+          role-session-name: kythira-ci-real-cloud-tests-chaos-crash
+          aws-region: ${{ vars.AWS_REAL_CLOUD_TESTS_REGION || 'us-east-1' }}
+
       # The newest ca_cluster_node AMI that also carries chaos_node; an
       # older AMI from before --with-chaos-node has no kythira:chaos-node tag.
       - name: Resolve chaos_node AMI ID
@@ -822,14 +839,6 @@ jobs:
             exit 1
           fi
           echo "ami_id=${AMI_ID}" >> "$GITHUB_OUTPUT"
-
-      - name: Re-configure AWS credentials for the chaos-crash bundle (OIDC)
-        if: ${{ env.BUNDLE_CHAOS_CRASH == 'true' }}
-        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
-        with:
-          role-to-assume: ${{ vars.AWS_CI_ROLE_ARN }}
-          role-session-name: kythira-ci-real-cloud-tests-chaos-crash
-          aws-region: ${{ vars.AWS_REAL_CLOUD_TESTS_REGION || 'us-east-1' }}
 
       - name: Run chaos-crash bundle
         if: ${{ env.BUNDLE_CHAOS_CRASH == 'true' }}
