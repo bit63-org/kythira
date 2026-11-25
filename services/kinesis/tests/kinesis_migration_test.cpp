@@ -21,9 +21,10 @@
 // a front-end restart along the way); the front-end role likewise; the
 // data role evacuated to data-only nodes and back; segments moved from
 // local stores to segment-node volumes and back by replica replacement;
-// and the whole way from co-located to the four-way split and back,
-// stopping and reversing in the middle. The in-place store move path
-// waits for task 13's store move.
+// the same in place, each replica keeping its node, log and state machine
+// while only its store moves (task 13's store move); and the whole way
+// from co-located to the four-way split and back, stopping and reversing
+// in the middle.
 //
 // The data layer is one Raft group played by hand, as the stream state
 // machine's segment_layer suite plays it: an entry is acknowledged once a
@@ -33,8 +34,11 @@
 // fence, restores the leader's snapshot (fetching the active segment's
 // prefix from its peers), picks up what sealed meanwhile, joins as a voter
 // and the old replica leaves. Moving the leader's replica hands leadership
-// on. Front ends and gateways are the real ones over the real internal
-// transport (kinesis_layouts.hpp, kinesis_gateway_layouts.hpp).
+// on. A store moves the way a node's store-move admin call moves it: the
+// replica's store is a movable_segment_store, which copies the segments to
+// the new store while writes go on and switches behind a fence that holds
+// the replica's store calls, and so its apply loop. Front ends and gateways are the real ones over
+// the real internal transport (kinesis_layouts.hpp, kinesis_gateway_layouts.hpp).
 
 #define BOOST_TEST_MODULE kinesis_migration_test
 
@@ -52,6 +56,7 @@
 #include <raft/aws_eventstream.hpp>
 #include <raft/record_segment_store.hpp>
 #include <raft/remote_segment_store.hpp>
+#include <raft/segment_store_move.hpp>
 #include <raft/segment_volume_service.hpp>
 
 #include <boost/json.hpp>
@@ -263,6 +268,36 @@ public:
         ++_moves;
     }
 
+    /// Moves the store of the replica on `node` to `kind` in place while
+    /// proposals and reads go on: the replica stays, its segments are
+    /// copied to a new store, which takes over behind a fence.
+    auto move_store(const std::string& node, store_kind kind)
+        -> kythira::segment_store_move_report {
+        replica* r = nullptr;
+        {
+            const std::scoped_lock lock(_mutex);
+            const auto it =
+                std::ranges::find_if(_voters, [&](const auto& v) { return v->_node == node; });
+            if (it == _voters.end()) {
+                throw std::invalid_argument("no replica on " + node);
+            }
+            r = it->get();
+        }
+        // Outside the lock: the copy rounds run while entries apply, and
+        // the fence holds the replica's store calls, not the group's lock
+        // (a proposal waits on the store, never the other way round).
+        auto [dir, target] = make_store({node, kind});
+        auto [report, old] = r->_store->move_to(std::move(target), {});
+        const std::scoped_lock lock(_mutex);
+        r->_kind = kind;
+        std::swap(r->_dir, dir);
+        _old_stores.push_back({std::move(dir), std::move(old)});
+        _longest_fence =
+            std::max<std::chrono::steady_clock::duration>(_longest_fence, report._pause);
+        ++_store_moves;
+        return report;
+    }
+
     /// Where the replicas are now, leader first.
     [[nodiscard]] auto placements() const -> std::vector<placement> {
         const std::scoped_lock lock(_mutex);
@@ -297,6 +332,11 @@ public:
         return _moves;
     }
 
+    [[nodiscard]] auto store_moves() const -> int {
+        const std::scoped_lock lock(_mutex);
+        return _store_moves;
+    }
+
     [[nodiscard]] auto longest_fence() const -> std::chrono::steady_clock::duration {
         const std::scoped_lock lock(_mutex);
         return _longest_fence;
@@ -315,8 +355,17 @@ private:
         std::string _node;
         store_kind _kind = store_kind::local;
         std::unique_ptr<temp_dir> _dir;
-        std::unique_ptr<kythira::segment_store> _store;
+        // Movable, so a store move swaps what is underneath while the
+        // state machine and the peers keep this address.
+        std::unique_ptr<kythira::movable_segment_store> _store;
         std::unique_ptr<sm_type> _sm;
+    };
+
+    // A store a move left behind, kept until the end like a retired
+    // replica.
+    struct old_store {
+        std::unique_ptr<temp_dir> _dir;
+        std::unique_ptr<kythira::segment_store> _store;
     };
 
     // An entry is acknowledged once a majority applied it and passed the
@@ -359,27 +408,36 @@ private:
         }
     }
 
+    // A new, empty store for a replica on `p`: a directory of its own, or
+    // a new volume on the node's segment node.
+    auto make_store(const placement& p)
+        -> std::pair<std::unique_ptr<temp_dir>, std::unique_ptr<kythira::segment_store>> {
+        if (p._store == store_kind::local) {
+            auto dir = std::make_unique<temp_dir>();
+            auto o = store_options();
+            o._data_dir = dir->_path;
+            auto store = std::make_unique<kythira::record_segment_store>(o);
+            return {std::move(dir), std::move(store)};
+        }
+        // A volume on the node's own segment node, at the first epoch:
+        // a replacement replica or store is a new volume, never a reused one.
+        auto& seg = _segment_nodes["s-" + p._node];
+        if (!seg) {
+            seg = std::make_unique<segment_node>();
+        }
+        const auto volume = "kinesis-" + p._node + "-" + std::to_string(++_volume_ids);
+        seg->_service.assign(volume, 1);
+        return {nullptr,
+                std::make_unique<kythira::remote_segment_store>(seg->transport(), volume, 1)};
+    }
+
     auto make_replica(const placement& p) -> std::unique_ptr<replica> {
         auto r = std::make_unique<replica>();
         r->_node = p._node;
         r->_kind = p._store;
-        if (p._store == store_kind::local) {
-            r->_dir = std::make_unique<temp_dir>();
-            auto o = store_options();
-            o._data_dir = r->_dir->_path;
-            r->_store = std::make_unique<kythira::record_segment_store>(o);
-        } else {
-            // A volume on the node's own segment node, at the first epoch:
-            // a replacement replica is a new volume, never a reused one.
-            auto& seg = _segment_nodes["s-" + p._node];
-            if (!seg) {
-                seg = std::make_unique<segment_node>();
-            }
-            const auto volume = "kinesis-" + p._node + "-" + std::to_string(++_volume_ids);
-            seg->_service.assign(volume, 1);
-            r->_store =
-                std::make_unique<kythira::remote_segment_store>(seg->transport(), volume, 1);
-        }
+        auto [dir, store] = make_store(p);
+        r->_dir = std::move(dir);
+        r->_store = std::make_unique<kythira::movable_segment_store>(std::move(store));
         // Sealed segments are fetched on read when missing; called with the
         // lock held (reads and the fence), so the voters are stable.
         auto* self = r.get();
@@ -413,8 +471,10 @@ private:
     std::map<std::string, std::unique_ptr<segment_node>> _segment_nodes;
     std::vector<std::unique_ptr<replica>> _voters;
     std::vector<std::unique_ptr<replica>> _retired;
+    std::vector<old_store> _old_stores;
     std::chrono::steady_clock::duration _longest_fence{};
     int _moves = 0;
+    int _store_moves = 0;
     int _volume_ids = 0;
 };
 
@@ -1043,6 +1103,24 @@ public:
         take_lease();
     }
 
+    /// Moves every replica's store to `to` in place, one replica at a
+    /// time, with the clients and the replicas where they are.
+    void move_stores(store_kind to) {
+        for (const auto& p : _data.placements()) {
+            BOOST_TEST_CONTEXT("store of " << p._node) {
+                const auto before = issue_iterators(*_now);
+                const auto report = _data.move_store(p._node, to);
+                BOOST_TEST_MESSAGE(p._node << " store moved: " << report._sealed_segments
+                                           << " sealed segments, " << report._rounds
+                                           << " rounds, fence " << report._fence_records
+                                           << " records in " << report._pause.count() << " us");
+                check_iterators(before);
+                _traffic->advance();
+            }
+        }
+        take_lease();
+    }
+
     /// The front end behind the clients' gateway restarts on its port, as a
     /// rolling restart does: in-flight calls fail, event streams end.
     void restart_front_end() {
@@ -1125,8 +1203,8 @@ public:
             "acknowledged "
             << t.acked_data().size() << ", ambiguous " << t.maybe_data().size() << " ("
             << t.failed_puts() << " failed calls), " << t.failed_reads() << " failed reads, "
-            << t.subscriptions() << " subscriptions, " << _data.moves()
-            << " replica moves, longest fence "
+            << t.subscriptions() << " subscriptions, " << _data.moves() << " replica moves, "
+            << _data.store_moves() << " store moves, longest fence "
             << std::chrono::duration_cast<std::chrono::microseconds>(_data.longest_fence()).count()
             << " us");
     }
@@ -1321,6 +1399,28 @@ BOOST_AUTO_TEST_CASE(segments_move_off_volumes_and_back_by_replica_replacement) 
     r.move_replicas(k_data_only);
     r.move_replicas(on({"v4", "v5", "v6"}, store_kind::volume));
     BOOST_TEST(r.data().volumes() == 6U);
+    r.finish();
+}
+
+// Segments moved in place: each replica keeps its node, its log and its
+// state machine, and only its store moves, from the node's disk to a volume
+// on a segment node and back, with the clients on the replicas' own nodes.
+BOOST_AUTO_TEST_CASE(segments_move_to_volumes_and_back_in_place) {
+    rig r(k_colocated, k_direct);
+    r.move_stores(store_kind::volume);
+    BOOST_TEST(r.data().volumes() == 3U);
+    r.move_stores(store_kind::local);
+    BOOST_TEST(r.data().store_moves() == 6);
+    BOOST_TEST(r.data().moves() == 0);
+    r.finish();
+}
+
+BOOST_AUTO_TEST_CASE(segments_move_off_volumes_and_back_in_place) {
+    rig r(k_on_volumes, k_gateway_apart);
+    r.move_stores(store_kind::local);
+    r.move_stores(store_kind::volume);
+    BOOST_TEST(r.data().volumes() == 6U);
+    BOOST_TEST(r.data().store_moves() == 6);
     r.finish();
 }
 
