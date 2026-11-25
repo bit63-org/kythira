@@ -685,19 +685,35 @@ BOOST_AUTO_TEST_CASE(a_500_mb_object_round_trips, *boost::unit_test::timeout(900
 // was stored, and that the amplification stays near the design's double
 // write (log, then chunk store) rather than drifting upward unnoticed. The
 // bound is loose: compaction rewrites, snapshots and pack sidecars add a
-// little on top of the 2x.
+// little on top of the 2x. A PUT answered 503 is retried, as sccache, vcpkg
+// and rclone retry it; each cell still reports its first answers and how
+// many PUTs needed a retry, and the /_metrics counters naming what refused.
 BOOST_AUTO_TEST_CASE(write_throughput_matrix, *boost::unit_test::timeout(1800)) {
     auto r = run_client("matrix");
     const auto cells = r.all("MATRIX");
     BOOST_REQUIRE(!cells.empty());
     for (const auto& c : cells) {
+        const std::string first =
+            c.contains("statuses") ? ", first answers " + c.at("statuses") : std::string{};
+        const std::string retried =
+            c.contains("retried") ? ", retried " + c.at("retried") : std::string{};
         BOOST_TEST_MESSAGE("writers=" << c.at("writers") << " size=" << c.at("size") << ": "
                                       << c.at("mib_per_s") << " MiB/s (" << c.at("ok") << "/"
-                                      << c.at("puts") << " PUTs in " << c.at("seconds") << " s)");
-        // `failed` lists each other status and its count, e.g. 503x19.
+                                      << c.at("puts") << " PUTs in " << c.at("seconds") << " s"
+                                      << first << retried << ")");
+        // `failed` lists each last status other than 201 and its count, e.g.
+        // 503x19; `statuses` tallies the first answers.
         BOOST_TEST(c.at("ok") == c.at("puts"),
                    "writers=" << c.at("writers") << " size=" << c.at("size") << " failed "
-                              << (c.contains("failed") ? c.at("failed") : "?"));
+                              << (c.contains("failed") ? c.at("failed") : "?") << ", statuses "
+                              << (c.contains("statuses") ? c.at("statuses") : "?"));
+    }
+    for (const auto& line : r.all("MATRIX_REFUSALS")) {
+        std::ostringstream counters;
+        for (const auto& [name, value] : line) {
+            counters << ' ' << name << '=' << value;
+        }
+        BOOST_TEST_MESSAGE("refused PUTs:" << counters.str());
     }
     const auto nodes = r.all("AMPLIFICATION");
     BOOST_REQUIRE_EQUAL(nodes.size(), 3u);

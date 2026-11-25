@@ -223,15 +223,43 @@ metric() {
         "${url}/_metrics" 2>/dev/null | awk -v n="$name" '$1 == n { print $2; found = 1 } END { if (!found) print 0 }'
 }
 
-# PUT one object of fresh random bytes and print its status:
-# matrix_put <url> <bytes> <key>. Fresh bytes because the chunk store keeps
-# one copy of identical chunks, and repeated content would hide the store's
-# writes from the amplification figure; real sccache objects are unique.
-# Streamed, so the client never holds an object: curl sends it chunked.
+# PUT one object of fresh random bytes and print the status of every
+# attempt on one line, first to last: matrix_put <url> <bytes> <key>.
+# Fresh bytes because the chunk store keeps one copy of identical chunks,
+# and repeated content would hide the store's writes from the amplification
+# figure; real sccache objects are unique. Streamed, so the client never
+# holds an object: curl sends it chunked.
+#
+# A 503 is the cache's "retry" answer (no leader here, or the proposal or
+# commit did not go through), and sccache, vcpkg and rclone all retry it,
+# so this does too, up to KYTHIRA_PUT_ATTEMPTS times with a short pause.
+# The cell still reports every first answer, so refusals stay visible.
 matrix_put() {
-    head -c "$2" /dev/urandom |
-        curl -sS -o /dev/null -w '%{http_code}\n' -u "${user}:${password}" -T - "$1/$3" \
-            2>/dev/null || echo 000
+    local attempt code codes=""
+    for ((attempt = 1; attempt <= ${KYTHIRA_PUT_ATTEMPTS:-4}; attempt++)); do
+        code=$(head -c "$2" /dev/urandom |
+            curl -sS -o /dev/null -w '%{http_code}' -u "${user}:${password}" -T - "$1/$3" \
+                2>/dev/null) || code=000
+        codes="${codes:+${codes} }${code}"
+        [[ "$code" == 503 ]] || break
+        sleep "0.$((RANDOM % 5 + 1))"
+    done
+    echo "$codes"
+}
+
+# The /_metrics counters that say why a PUT got 503, summed over the nodes,
+# as name=value pairs on one line.
+refusal_counters() {
+    local n name line=""
+    for name in put_no_leader put_chunk_failures put_commit_refused forward_failures \
+        auth_failures connections_rejected; do
+        local sum=0
+        for n in "${nodes[@]}"; do
+            sum=$(( sum + $(metric "$n" "kythira_cache_http_${name}") ))
+        done
+        line="${line:+${line} }${name}=${sum}"
+    done
+    echo "$line"
 }
 
 # One cell: matrix_cell <writers> <size>. Writes max(writers,
@@ -252,21 +280,45 @@ matrix_cell() {
     for ((i = 0; i < count; i++)); do
         echo "${nodes[i % ${#nodes[@]}]} $bytes sccache/$(printf '%x' $((i % 16)))/${run}/${i}" >> "$jobs"
     done
-    local begin end statuses
+    local begin end attempts before
+    before=$(refusal_counters)
     begin=$(date +%s.%N)
-    statuses=$(xargs -P "$writers" -L 1 bash -c 'matrix_put "$@"' _ < "$jobs")
+    attempts=$(xargs -P "$writers" -L 1 bash -c 'matrix_put "$@"' _ < "$jobs")
     end=$(date +%s.%N)
-    local ok failed_codes
-    ok=$(grep -c '^201$' <<<"$statuses")
-    # Each status other than 201, with its count (000 is a curl failure), so
-    # a short cell says why: "503x19" or "000x2,500x1"; "none" when all
-    # succeeded.
-    failed_codes=$(grep -v '^201$' <<<"$statuses" | grep . | sort | uniq -c |
+    # One line per PUT, its attempts' statuses first to last. ok counts PUTs
+    # whose last attempt stored the object; retried counts PUTs that needed
+    # more than one attempt.
+    local ok retried
+    ok=$(awk '$NF == 201' <<<"$attempts" | wc -l)
+    retried=$(awk 'NF > 1' <<<"$attempts" | wc -l)
+    # Every first answer and how often, e.g. 201:2037,503:11, so a cell
+    # says how often the cache refused, failed or never answered (000) a
+    # PUT the first time, even when a retry then stored it.
+    local tally
+    tally=$(awk '{print $1}' <<<"$attempts" | sort | uniq -c |
+        awk '{printf "%s%s:%s", (NR > 1 ? "," : ""), $2, $1}')
+    # Each last answer other than 201, with its count (000 is a curl
+    # failure), so a short cell says why: "503x19" or "000x2,500x1";
+    # "none" when every PUT was stored.
+    local failed_codes
+    failed_codes=$(awk '$NF != 201 {print $NF}' <<<"$attempts" | sort | uniq -c |
         awk '{ printf "%s%sx%s", (NR > 1 ? "," : ""), $2, $1 }')
     local seconds rate
     seconds=$(awk -v a="$begin" -v b="$end" 'BEGIN{printf "%.2f", b - a}')
     rate=$(awk -v n="$ok" -v s="$bytes" -v t="$seconds" 'BEGIN{printf "%.2f", (t > 0 ? n * s / t / 1048576 : 0)}')
-    echo "KYTHIRA_MATRIX writers=${writers} size=${size} bytes=${bytes} puts=${count} ok=${ok} failed=${failed_codes:-none} seconds=${seconds} mib_per_s=${rate}"
+    echo "KYTHIRA_MATRIX writers=${writers} size=${size} bytes=${bytes} puts=${count} ok=${ok} failed=${failed_codes:-none} seconds=${seconds} mib_per_s=${rate} statuses=${tally} retried=${retried}"
+    # When any PUT was refused, which part of the path refused it: the
+    # counters' growth over the cell, summed over the nodes.
+    if (( retried > 0 || ok != count )); then
+        local after_c delta="" pair
+        after_c=$(refusal_counters)
+        for pair in $after_c; do
+            local name="${pair%%=*}" now="${pair#*=}" was
+            was=$(tr ' ' '\n' <<<"$before" | awk -F= -v n="$name" '$1 == n {print $2}')
+            delta="${delta:+${delta} }${name}=$(( now - ${was:-0} ))"
+        done
+        echo "KYTHIRA_MATRIX_REFUSALS writers=${writers} size=${size} ${delta}"
+    fi
     while read -r node _ key; do
         curl -sS -o /dev/null -u "${user}:${password}" -X DELETE "${node}/${key}" 2>/dev/null || true
     done < "$jobs"
