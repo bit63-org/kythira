@@ -1005,7 +1005,7 @@ public:
         }
         segment_read_result out;
         out._next_seq = from_seq;
-        read_view(*view, from_seq, limits, out);
+        (void)read_view(*view, from_seq, limits, out);
         out._segment_exhausted = view->_sealed && (out._next_seq > view->_last_seq);
         return out;
     }
@@ -1024,8 +1024,10 @@ public:
             if (!view || view->_last_seq < out._next_seq) {
                 continue;
             }
-            read_view(*view, out._next_seq, limits, out);
-            if (out._records.size() >= limits._max_records || bytes_of(out) >= limits._max_bytes) {
+            // A record that did not fit stops the read here: going on to
+            // the next segment would skip the rest of this one.
+            if (read_view(*view, out._next_seq, limits, out) ||
+                out._records.size() >= limits._max_records || bytes_of(out) >= limits._max_bytes) {
                 break;
             }
         }
@@ -1607,8 +1609,11 @@ private:
     /// Append to `out` the records of `v` at or after `from_seq`, within
     /// `limits` (counted together with what `out` already holds), and move
     /// `out._next_seq` past them.
-    void read_view(const segment_view& v, std::uint64_t from_seq, const segment_read_limits& limits,
-                   segment_read_result& out) const {
+    /// Appends `v`'s records at or after `from_seq` to `out` within
+    /// `limits`; true when a record was left out because it would pass the
+    /// byte limit.
+    auto read_view(const segment_view& v, std::uint64_t from_seq, const segment_read_limits& limits,
+                   segment_read_result& out) const -> bool {
         namespace s = detail::segments;
         std::uint64_t bytes = bytes_of(out);
         const auto start = seek_offset(v, from_seq);
@@ -1633,12 +1638,13 @@ private:
             }
             const auto n = b._record._data.size();
             if (!out._records.empty() && bytes + n > limits._max_bytes) {
-                break;
+                return true;
             }
             bytes += n;
             out._next_seq = b._record._seq + 1;
             out._records.push_back(std::move(b._record));
         }
+        return false;
     }
 
     void open_all() {
