@@ -283,13 +283,58 @@ every role (7, 8, 10).
     group's leader, and the Docker test, land with task 7, which is the
     first task with front-end-only nodes to scale.
 
-- [ ] 13. Live migration operations
+- [x] 13. Live migration operations
   - `evacuate` admin call over the placement operators; refuse to start
     without `data` while holding replicas
   - In-place store move (copy sealed, copy active prefix, bounded fence,
     switch, assignment through Raft) with its pause measured
   - Unit and in-process tests of each operation on its own
   - _Requirements: 11.2-11.5_
+  - Status: done.
+    - Evacuation: `include/raft/replica_evacuation.hpp` is a stateless
+      planner (`next_evacuation_step`: add the target as a learner, resume
+      it, promote, hand leadership off, remove the evacuee) and
+      `replica_evacuator`, which each group's leader runs one change at a
+      time. `tests/replica_evacuation_test.cpp` covers the planner and
+      moves every replica off a node and back on a four-host fabric under
+      writes, none lost.
+    - The admin calls are under `/_kythira/kinesis/v1/admin/`, signed with
+      the forwarding secret (`kinesis_migration.hpp`,
+      `cmd/kinesis_gateway_node/migration_admin.hpp`): `evacuate` (fanned
+      out to every data node), its status merged across them, `cancel`,
+      `release`, `descriptor` (what a joining node's lazy replica
+      creation asks its peers) and `store-move`.
+      `kinesis_gateway_node --admin` makes one call.
+    - `KINESIS_VOTERS` names the founding voters, and a data node left out
+      joins as an evacuation target. A node holding replicas refuses to
+      start without `data` until it was released (or
+      `KINESIS_DISCARD_REPLICAS`); a released node that later starts as a
+      data node joins rather than re-forming its groups.
+    - The store move: `include/raft/segment_store_move.hpp`
+      (`movable_segment_store::move_to`) copies in rounds, takes the
+      fence once the tail is under `_max_fence_bytes`, appends the tail,
+      checks the copy, switches and reports the pause. Segments above
+      `_max_call_bytes` are copied as batched appends, because a segment
+      node's gateway caps request bodies. The node saves the new
+      assignment under the fence and then writes it to the catalog at the
+      next epoch, since proposing under the fence could stall the apply
+      loop. `keep_volumes` republishes a saved record newer than the
+      catalog's. `tests/segment_store_move_test.cpp` moves local to
+      volume and back under a writer and checks the files are byte
+      identical. The move tests found a `record_segment_store::read` bug,
+      fixed with a conformance case: a byte limit reached inside a
+      segment skipped the rest of it.
+    - Checked against real daemons on loopback: four nodes evacuating
+      node 1 to node 4, restarting node 1 without `data` and back, then
+      evacuating node 4 to node 1, with 4,019 acknowledged writes all read
+      back. One data node and one segment node moving local to volume,
+      back, and to the volume again (48 MB of active segments) under
+      writes, with pauses of 9 to 52 ms, restarting on the volume, and
+      all 24,065 writes read back.
+    - Left for task 14: the store move's in-process migration test and
+      the container scenario. Known limitation: until a restart, the disk
+      guard and capacity probe keep following the store the node started
+      with.
 
 - [ ] 14. Migration path tests
   - One in-process test per path, each run in both directions and each
