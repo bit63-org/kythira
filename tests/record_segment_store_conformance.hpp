@@ -302,6 +302,34 @@ template<typename Harness> struct cases {
         BOOST_TEST(r._next_seq == 61U);
     }
 
+    /// A byte limit that stops a read part way through one segment ends the
+    /// read there: it must not go on into the next segment and skip the
+    /// rest of the first. GetRecords reads past the indexed segments this
+    /// way, so a skip there lost records to a consumer.
+    static void a_byte_limit_inside_a_segment_never_skips_to_the_next() {
+        Harness h;
+        scratch_dir d;
+        record_segment_store store(options_for(h, d.path()));
+        append_range(h, store, h.stream(0), 1, 200);
+        BOOST_REQUIRE_GE(store.local_segments(h.stream(0)).size(), 3U);
+        std::vector<segment_record> got;
+        std::uint64_t next = 1;
+        for (int i = 0; i < 10'000; ++i) {
+            // Odd byte limits, so a record fails to fit somewhere inside a
+            // segment rather than at its end.
+            auto r = store.read(h.stream(0), next,
+                                {._max_records = 1000,
+                                 ._max_bytes = 700U + static_cast<std::uint64_t>(i % 5) * 131U});
+            if (r._records.empty()) {
+                break;
+            }
+            next = r._next_seq;
+            got.insert(got.end(), std::make_move_iterator(r._records.begin()),
+                       std::make_move_iterator(r._records.end()));
+        }
+        check_records(h, got, 1, 200);
+    }
+
     static void read_segment_walks_one_segment_at_a_time() {
         Harness h;
         scratch_dir d;
@@ -698,6 +726,7 @@ template<typename Harness> struct cases {
     KYTHIRA_RSC_CASE(harness_type, rolls_on_record_age)                                     \
     KYTHIRA_RSC_CASE(harness_type, reads_honour_limits_and_always_progress)                 \
     KYTHIRA_RSC_CASE(harness_type, read_segment_walks_one_segment_at_a_time)                \
+    KYTHIRA_RSC_CASE(harness_type, a_byte_limit_inside_a_segment_never_skips_to_the_next)   \
     KYTHIRA_RSC_CASE(harness_type,                                                          \
                      a_restart_keeps_barriered_records_and_resumes_the_active_segment)      \
     KYTHIRA_RSC_CASE(harness_type, an_open_truncates_a_torn_tail)                           \
