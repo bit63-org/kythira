@@ -308,6 +308,22 @@ every role (7, 8, 10).
     Docker and rootless Podman
   - A CI job runs the in-process path tests on every Kinesis change; the
     docker-chaos path runs in the Kinesis module workflow
+  - Status: the in-process paths are `kinesis_migration_test`, which the
+    Kinesis module workflow runs with the rest of the `kinesis` label on
+    every Kinesis change. Each path runs both ways under a producer, a
+    GetRecords consumer and a SubscribeToShard consumer, and checks every
+    acknowledged record is read once and in order by both, sequence
+    numbers only rise, TRIM_HORIZON and LATEST iterators issued before
+    each step work after it, and every lease taken stays held. Covered:
+    the gateway role (with a drain and a front-end restart), the front-end
+    role, the data role evacuated to data-only nodes and back, segments to
+    volumes and back by replica replacement, and the whole way to the
+    four-way split and back, reversing half way. The data layer is one
+    hand-played Raft group whose replicas move as a learner (sealed
+    segments copied under traffic, then a fence for the snapshot and the
+    active prefix); `tests/kinesis_cluster_handle.hpp` lets the compiled
+    layouts run over it. Left: the in-place store move path (needs task
+    13's store move) and the docker-chaos scenario
   - _Requirements: 11.1, 11.6, 11.7, 13.1-13.3, 15.4, 15.7_
 
 - [ ] 15. Compose layout, differential and measurement

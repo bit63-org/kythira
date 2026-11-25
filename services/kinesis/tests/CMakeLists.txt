@@ -210,6 +210,18 @@ target_link_libraries(kinesis_gateway_apart_test PRIVATE kythira_test_support)
 # -O3, so they compile in the `heavy_tu` pool.
 set_target_properties(kinesis_layouts_test kinesis_gateway_apart_test
     PROPERTIES JOB_POOL_COMPILE heavy_tu)
+# Independent layers task 14: every migration path between role layouts
+# (gateway, front end, data evacuation, segments to volumes and back, the
+# whole way to the four-way split), both ways, under a producer, a
+# GetRecords consumer and an EFO consumer. The Kinesis module workflow runs
+# it with the rest of the `kinesis` label on every Kinesis change. Same
+# listener and gateway instantiations as kinesis_layouts_test, so heavy_tu.
+kythira_kinesis_test(kinesis_migration_test kinesis_migration_test.cpp)
+target_link_libraries(kinesis_migration_test PRIVATE kythira_kinesis_layouts kythira_test_support)
+set_target_properties(kinesis_migration_test PROPERTIES JOB_POOL_COMPILE heavy_tu)
+set_tests_properties(kinesis_migration_test PROPERTIES
+    LABELS "unit;kinesis;kinesis-module;kinesis-migration"
+    TIMEOUT 300)
 # Task 6: forwarding proposals to the group leader (wire, HMAC) and the
 # multi-raft cluster adapter.
 kythira_kinesis_test(kinesis_forward_test kinesis_forward_test.cpp)

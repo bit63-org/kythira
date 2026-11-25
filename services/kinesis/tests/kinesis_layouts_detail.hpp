@@ -8,6 +8,8 @@
 // apart from the remote and hybrid access, so neither TU holds both:
 // together they took one TU to 5.4 GB of compiler memory at -O2.
 
+#include "kinesis_cluster_handle.hpp"
+
 #include <kythira/kinesis/kinesis_cluster.hpp>
 #include <kythira/kinesis/kinesis_data_access.hpp>
 
@@ -62,7 +64,7 @@ private:
 /// here.
 class loopback_data_node {
 public:
-    explicit loopback_data_node(local_stream_cluster& cluster);
+    explicit loopback_data_node(cluster_handle cluster);
 
     loopback_data_node(const loopback_data_node&) = delete;
     auto operator=(const loopback_data_node&) -> loopback_data_node& = delete;
