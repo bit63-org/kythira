@@ -1,0 +1,4 @@
+antikythera-proto is header-only and provides CMake targets:
+
+    find_package(antikythera-proto CONFIG REQUIRED)
+    target_link_libraries(main PRIVATE antikythera::proto)

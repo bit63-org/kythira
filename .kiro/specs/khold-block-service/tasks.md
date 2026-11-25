@@ -18,16 +18,21 @@ spec.
 
 ## Phase 1: khold serves network volumes
 
-- [ ] 1. Module skeleton
+- [x] 1. Module skeleton
   - `KHOLD` Kconfig option (default off), `services/khold/`, module
     number 12 in `module_numbers`, boundary list,
     `configs/ci_no_khold_defconfig`, `khold-module.yml` (Docker and
     rootless Podman, path-filtered)
   - Consume antikythera's `src/proto/` through the overlay port; a test
     reproducing its hold wire and report vectors byte for byte
+  - Done: `vcpkg-overlays/antikythera-proto` pins antikythera after
+    bit63-org/antikythera#117; `khold_proto_vectors_test` reproduces
+    vectors 4 and 6-11. khold builds only where `std::expected` compiles
+    (GCC 13+, Clang 19+), so the Clang 18 legs and clang-tidy skip it
+    (`services/khold/README.md`)
   - _Requirements: 1.1-1.4_
 
-- [ ] 2. **(antikythera)** Hold wire version 2 and `VolumeLayout` codecs
+- [x] 2. **(antikythera)** Hold wire version 2 and `VolumeLayout` codecs
   - `src/proto/hold_wire_v2.hpp` beside version 1: group ID and term in
     the header, `REDIRECT` with leader, endpoint and term, statuses
     `not_leader`, `no_space`, `repairing`, real `DISCARD` and
@@ -39,6 +44,10 @@ spec.
   - Reports: `group_status`, `capacity`, `lagging` and `media_error`
     faults
   - Test vectors, fuzz targets, version 1 unchanged
+  - Done in bit63-org/antikythera#117: the faults are a `group_fault`
+    report kind (lagging, caught_up, media_error, fail_slow, no_space,
+    checksum_unrepairable) rather than new volume fault kinds, so hold's
+    exhaustive fault switch is untouched; vectors 6-11
   - _Requirements: 11.1, 11.2, 11.5, 16.3_
 
 - [x] 3. Core: append sink on log persistence

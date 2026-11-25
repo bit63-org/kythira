@@ -25,6 +25,7 @@
     "./vcpkg-overlays/poco-dnssd",
     "./vcpkg-overlays/cantcoap",
     "./vcpkg-overlays/libnyoci",
-    "./vcpkg-overlays/lua51"
+    "./vcpkg-overlays/lua51",
+    "./vcpkg-overlays/antikythera-proto"
   ]
 }

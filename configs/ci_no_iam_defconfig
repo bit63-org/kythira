@@ -52,3 +52,4 @@ CONFIG_SNS=y
 # and clang-tidy cover it. Needs only OpenSSL, which every leg has.
 # configs/ci_no_s3_defconfig is this file without it.
 CONFIG_S3=y
+CONFIG_KHOLD=y

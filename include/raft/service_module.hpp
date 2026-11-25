@@ -42,6 +42,9 @@ inline constexpr std::uint8_t kms = 7;
 inline constexpr std::uint8_t s3 = 8;
 /// 9 is reserved for the SQS module (.kiro/specs/sqs-compatible-queues/).
 inline constexpr std::uint8_t sns = 10;
+/// 11 is reserved for the EC2 module (.kiro/specs/ec2-compatible-api/).
+/// The khold block service (.kiro/specs/khold-block-service/).
+inline constexpr std::uint8_t khold = 12;
 /// The largest number a module may take: 255 would put the end of its
 /// range past 2^64.
 inline constexpr std::uint8_t max = 254;

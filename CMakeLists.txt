@@ -974,6 +974,43 @@ else()
 endif()
 kythira_kconfig_require(S3 KYTHIRA_BUILD_S3 "OpenSSL")
 
+# khold-block-service spec: the services/khold/ module (a Raft-replicated
+# block service beside antikythera's hold). Off unless CONFIG_KHOLD=y, like
+# every new module. Needs antikythera's wire formats from the
+# antikythera-proto overlay port, and a C++ library with std::expected,
+# which those headers use: GCC 13+ or Clang 19+ over libstdc++. Clang 18
+# over libstdc++ 13 (the clang build legs and clang-tidy) reports
+# __cpp_concepts 201907 and libstdc++ hides std::expected from it, so on
+# that toolchain the module is skipped with a status line instead of failing
+# a strict configure: the missing piece is the compiler, not a package
+# vcpkg could supply. Entered with add_subdirectory(services/khold) below,
+# after tests/.
+kythira_kconfig_gate(KHOLD)
+set(KYTHIRA_BUILD_KHOLD FALSE)
+set(KYTHIRA_KHOLD_TOOLCHAIN_OK FALSE)
+if(_KYTHIRA_GATE_KHOLD AND DEFINED KCONFIG_KHOLD)
+    include(CheckCXXSourceCompiles)
+    check_cxx_source_compiles(
+        "#include <expected>\nint main() { std::expected<int, int> e{1}; return *e - 1; }"
+        KYTHIRA_HAS_STD_EXPECTED)
+    if(KYTHIRA_HAS_STD_EXPECTED)
+        set(KYTHIRA_KHOLD_TOOLCHAIN_OK TRUE)
+        find_package(antikythera-proto CONFIG QUIET)
+    endif()
+endif()
+if(KYTHIRA_KHOLD_TOOLCHAIN_OK AND antikythera-proto_FOUND)
+    set(KYTHIRA_BUILD_KHOLD TRUE)
+    message(STATUS "khold module enabled (services/khold/, .kiro/specs/khold-block-service/)")
+elseif(_KYTHIRA_GATE_KHOLD AND DEFINED KCONFIG_KHOLD AND NOT KYTHIRA_KHOLD_TOOLCHAIN_OK)
+    message(STATUS "khold module skipped: ${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION} "
+                   "does not provide std::expected, which antikythera's headers need")
+else()
+    message(STATUS "khold module disabled (CONFIG_KHOLD=n, or antikythera-proto not found)")
+endif()
+if(KYTHIRA_KHOLD_TOOLCHAIN_OK)
+    kythira_kconfig_require(KHOLD KYTHIRA_BUILD_KHOLD "the antikythera-proto overlay port")
+endif()
+
 # Core's generator of AWS JSON service models (include/raft/aws_json_protocol.hpp),
 # exported for the modules that pin a botocore model (DynamoDB, Kinesis), so
 # they reach it by variable rather than by core's source path.
@@ -2425,6 +2462,12 @@ if(KYTHIRA_BUILD_S3)
     add_subdirectory(services/s3)
 endif()
 
+# The khold module (services/README.md, .kiro/specs/khold-block-service/),
+# entered likewise.
+if(KYTHIRA_BUILD_KHOLD)
+    add_subdirectory(services/khold)
+endif()
+
 # kythira_node, the composite daemon (.kiro/specs/service-colocation/),
 # after every module, so the module libraries it links whole-archive exist.
 add_subdirectory(cmd/kythira_node)
@@ -2655,6 +2698,14 @@ file(GLOB_RECURSE TIDY_SOURCES
     "${CMAKE_SOURCE_DIR}/services/*/cmd/*.cpp"
     "${CMAKE_SOURCE_DIR}/services/*/tests/*.cpp"
 )
+# khold builds only where std::expected compiles (see its gate above), which
+# clang-tidy-18 over libstdc++ 13 is not, so its files have no compile
+# command here; drop them rather than fail the "every file has an entry"
+# check. They are analysed nowhere until the tidy toolchain reaches Clang 19
+# (services/khold/README.md).
+if(NOT KYTHIRA_BUILD_KHOLD)
+    list(FILTER TIDY_SOURCES EXCLUDE REGEX "/services/khold/")
+endif()
 list(SORT TIDY_SOURCES)
 
 # configs/tidy-variant-sources.txt names the translation units that only
