@@ -1245,6 +1245,17 @@ add_raft_completion_test(raft_snapshot_boundary_replication_test raft_snapshot_b
 # cluster makes — a follower's run in one call, term before vote, "no vote"
 # stored after a term change.
 add_raft_completion_test(raft_batched_durable_writes_test raft_batched_durable_writes_test.cpp)
+# .kiro/specs/khold-block-service/ task 3: the append sink. The adaptor's
+# contract (descriptors in the log, payloads in the sink, one durable point,
+# recovery after a crash), a three-node cluster over it whose state machines
+# see the full commands, and the benchmark rows (excluded from CI by label:
+# a no-sink baseline beside the adaptor's cost).
+add_raft_completion_test(append_sink_unit_test append_sink_unit_test.cpp)
+add_raft_completion_test(raft_append_sink_cluster_test raft_append_sink_cluster_test.cpp)
+set_tests_properties(append_sink_unit_test raft_append_sink_cluster_test PROPERTIES
+    LABELS "unit;khold")
+add_raft_completion_test(append_sink_benchmark_test append_sink_benchmark_test.cpp)
+set_tests_properties(append_sink_benchmark_test PROPERTIES LABELS "benchmark;performance")
 # A follower's write-behind barrier, taken with the node's lock released,
 # outlived by a newer leader's AppendEntries that truncates what it covered:
 # the old request is not acknowledged, and its barrier does not count for the

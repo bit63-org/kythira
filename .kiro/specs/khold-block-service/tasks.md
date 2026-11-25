@@ -41,12 +41,17 @@ spec.
   - Test vectors, fuzz targets, version 1 unchanged
   - _Requirements: 11.1, 11.2, 11.5, 16.3_
 
-- [ ] 3. Core: append sink on log persistence
+- [x] 3. Core: append sink on log persistence
   - A persistence-engine hook that hands a state machine an entry's
     payload at append time, before commit, and stores only the
     descriptor in the log; the durable point covers both
   - Unchanged behaviour for every existing state machine; a benchmark
     row shows append cost unchanged without a sink
+  - Done: `include/raft/append_sink.hpp`, a persistence-engine adaptor
+    (`append_sink_persistence`) rather than a change to `node`: reads
+    rehydrate payloads through the sink, so the node, replication and
+    `apply` see full entries; a barrier syncs the sink first; start-up
+    recovery truncates descriptors whose payload a crash lost
   - _Requirements: 7.4_
 
 - [ ] 4. Core: witness voters
