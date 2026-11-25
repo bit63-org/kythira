@@ -344,10 +344,18 @@ public:
     }
 
     /// A call to `group` was refused by a node that is not its leader;
-    /// `hint` is the leader it named, if any.
+    /// `hint` is the leader it named, if any. A leader with no known
+    /// address (a node that joined the group after the routes were
+    /// fetched) drops the row instead, so the next call fetches the routes
+    /// again and learns where it is; kept, the hint would point at a node
+    /// no call can reach.
     void on_not_leader(const GroupId& group, const std::optional<NodeId>& hint) {
         const std::lock_guard lock(_mu);
         ++_stats.not_leader;
+        if (hint && !_addresses.contains(*hint)) {
+            _map.erase_group(group);
+            return;
+        }
         auto row = _map.find(group);
         if (!row || row->_leader_hint == hint) {
             return;
@@ -366,10 +374,18 @@ public:
     }
 
     /// A node refused a call whose epoch was stale and sent the current
-    /// route.
+    /// route. A replica it names with no known address (one that joined) drops
+    /// the row instead, as `on_not_leader` does, so the next call fetches
+    /// the routes with their addresses.
     void on_stale_epoch(const descriptor_type& current) {
         const std::lock_guard lock(_mu);
         ++_stats.stale_epoch;
+        const auto unknown = [this](const NodeId& n) { return !_addresses.contains(n); };
+        if (std::ranges::any_of(current._voters, unknown) ||
+            std::ranges::any_of(current._learners, unknown)) {
+            _map.erase_group(current._group_id);
+            return;
+        }
         learn_locked(current);
     }
 
