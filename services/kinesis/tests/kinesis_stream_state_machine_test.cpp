@@ -11,6 +11,7 @@
 
 #include <boost/test/unit_test.hpp>
 
+#include <kythira/kinesis/kinesis_records.hpp>
 #include <kythira/kinesis/kinesis_stream_state_machine.hpp>
 
 #include <raft/record_segment_store.hpp>
@@ -756,6 +757,91 @@ BOOST_AUTO_TEST_CASE(restore_truncates_a_tail_past_the_snapshot) {
     BOOST_TEST(r._status == k::apply_status::ok);
     BOOST_TEST(r._first_counter == 5U);
     BOOST_TEST((b.get_state() == a.get_state()));
+}
+
+// A replica killed while its shard's segment was active comes back with a
+// short, unsealed copy of a segment the others sealed while it was down,
+// and catches up by snapshot, so the entries that would have filled and
+// sealed it are never replayed. Reading the shard there must fetch the
+// sealed segment in place of the short copy. It used to report the read
+// missing on every attempt, so GetRecords through that node failed until
+// the next restart: the Docker scenario's KCL worker on the restarted node
+// stalled on that shard and never processed what was written while the
+// node was down.
+BOOST_AUTO_TEST_CASE(a_short_copy_of_a_segment_sealed_while_down_is_fetched_on_read) {
+    temp_dir da;
+    temp_dir db;
+    auto store_a = make_store(da);
+    auto store_b = make_store(db);
+    sm_type a(store_a.get());
+    std::vector<std::string> fetched;
+    auto fetch = [&](const kythira::record_segment_descriptor& desc) {
+        fetched.push_back(desc._stream + "@" + std::to_string(desc._first_seq));
+        const std::vector<std::string> peers{"a"};
+        if (!store_b->fetch_segment(desc, peers,
+                                    [&](const std::string&, const std::string& stream,
+                                        std::uint64_t first, std::uint64_t length) {
+                                        return store_a->read_segment_bytes(stream, first, length);
+                                    })) {
+            throw kythira::record_segment_error("fetch failed");
+        }
+    };
+    sm_type b(store_b.get(), fetch);
+    driver d{a};
+    driver d_b{b};
+    const auto both = [&](const k::stream_command& c) {
+        (void)d.run(c);
+        (void)d_b.run(c);
+    };
+    // Both replicas take the stream and the first records: B's active
+    // segment holds them, unsealed.
+    const auto created = k::create_stream_command{
+        ._account = test_account, ._name = "s", ._shard_count = 1, ._created_ms = 1000};
+    const auto id = d.run(created)._id;
+    (void)d_b.run(created);
+    const auto key = k::routing_key(id, 0);
+    both(k::open_shard_command{key});
+    both(k::set_stream_status_command{test_account, "s", id, k::stream_status::active});
+    both(append(key, 100, 3, 40, 0));
+    BOOST_TEST_REQUIRE(store_b->local_segments(key).size() == 1U);
+    BOOST_TEST_REQUIRE(!store_b->local_segments(key).front()._sealed);
+
+    // B is down: A takes enough records to seal that segment and roll on.
+    for (int i = 0; i < 10; ++i) {
+        (void)d.run(append(key, 200 + i, 3, 40, static_cast<std::uint32_t>(10 + (3 * i))));
+    }
+    const auto* a_shard = a.find_shard(key);
+    BOOST_TEST_REQUIRE(a_shard != nullptr);
+    BOOST_TEST_REQUIRE(!a_shard->_sealed.empty());
+    BOOST_TEST_REQUIRE(a_shard->_sealed.front()._first_seq ==
+                       store_b->local_segments(key).front()._first_seq);
+    const auto total = a_shard->_last_counter;
+
+    // B catches up by snapshot.
+    b.restore_from_snapshot(a.get_state(), d._index);
+    fetched.clear();
+
+    // Read the whole shard on B, as GetRecords pages through it.
+    std::vector<std::uint64_t> counters;
+    std::uint64_t from = 1;
+    for (int page = 0; page < 50 && from <= total; ++page) {
+        const auto* st = b.find_shard(key);
+        BOOST_TEST_REQUIRE(st != nullptr);
+        const auto r = k::read_shard_raw(*store_b, fetch, key, *st, from, 0,
+                                         {._max_records = 7, ._max_bytes = 1 << 20});
+        BOOST_TEST_REQUIRE(!r._missing, "page " << page << " from " << from << " missing");
+        for (const auto& rec : r._records) {
+            counters.push_back(rec._seq);
+        }
+        from = r._next_counter;
+    }
+    BOOST_TEST_REQUIRE(counters.size() == total);
+    for (std::size_t i = 0; i < counters.size(); ++i) {
+        BOOST_TEST(counters[i] == i + 1);
+    }
+    // The short copy was replaced by the sealed segment, once.
+    BOOST_TEST(!fetched.empty());
+    BOOST_TEST((store_b->local_segments(key).front() == a_shard->_sealed.front()));
 }
 
 BOOST_AUTO_TEST_SUITE_END()
