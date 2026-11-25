@@ -291,13 +291,17 @@ def lineage_consume(args):
         if time.time() > deadline:
             fail(f"{len(missing)} of {args.count} records never read, first {missing[0]}")
         time.sleep(2)
+    # A write whose answer was lost (a 5 s propose timeout while its entry
+    # still commits, a dropped connection) is retried by botocore, up to
+    # ten attempts, and by the producer on the next node; each attempt can
+    # commit, so a record can repeat any number of times. The producer
+    # sends one write at a time, so the copies sit together in its key:
+    # never an older record after a newer one, which also rules out a read
+    # that returns a stretch twice.
     for key, got in by_key.items():
         for a, b in zip(got, got[1:]):
             if b < a:
                 fail(f"key {key}: {b} arrived after {a}")
-        for i in set(got):
-            if got.count(i) > 2:
-                fail(f"key {key}: {i} arrived {got.count(i)} times")
     dups = sum(len(g) - len(set(g)) for g in by_key.values())
     print(json.dumps({"consumed": len(seen), "shards": shards, "duplicates": dups}))
 
