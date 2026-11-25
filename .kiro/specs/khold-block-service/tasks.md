@@ -78,12 +78,20 @@ spec.
     descriptors only (`describing_append_sink::describe`)
   - _Requirements: 5.2_
 
-- [ ] 5. Core: commit predicates and lagging entries
+- [x] 5. Core: commit predicates and lagging entries
   - Per-group commit predicate replacing "majority"; khold's predicate
     (majority, every non-lagging data replica, at least one data
     replica), `lagging(member)` and `in_sync(member)` entries, the member
     deadline, the `majority` option
   - Property tests with crashes and partitions at every step
+  - Done: `raft_configuration::_commit_rule` (`majority`, the default,
+    or `all_in_sync`) and `_member_deadline`; the lagging marks are
+    `cluster_configuration::lagging()`, set and cleared by plain
+    configuration entries the leader appends from the heartbeat tick, so
+    they revert on truncation and ride in snapshots. Each index is judged
+    by the configuration in force at it, so a write before a marker
+    commits only with the marker. Reporting a lagging member to the
+    controller (7.3) is the stripe group's, task 7
   - _Requirements: 7.1-7.3, 7.5, 7.6_
 
 - [ ] 6. Block store

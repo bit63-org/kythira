@@ -1265,6 +1265,13 @@ add_raft_completion_test(witness_configuration_unit_test witness_configuration_u
 add_raft_completion_test(raft_witness_voter_test raft_witness_voter_test.cpp)
 set_tests_properties(witness_configuration_unit_test PROPERTIES LABELS "unit;khold")
 set_tests_properties(raft_witness_voter_test PROPERTIES LABELS "unit;khold" TIMEOUT 300)
+# Task 5: commit predicates. all_in_sync on the general shape: writes
+# acknowledged on every data replica, a stalled one recorded lagging after
+# the member deadline (and never before its marker commits), in sync once
+# it catches up, no pause when the witness fails, the majority option, and
+# random crash and partition schedules.
+add_raft_completion_test(raft_commit_predicate_test raft_commit_predicate_test.cpp)
+set_tests_properties(raft_commit_predicate_test PROPERTIES LABELS "unit;khold" TIMEOUT 300)
 # A follower's write-behind barrier, taken with the node's lock released,
 # outlived by a newer leader's AppendEntries that truncates what it covered:
 # the old request is not acknowledged, and its barrier does not count for the

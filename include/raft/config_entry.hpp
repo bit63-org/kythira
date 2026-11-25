@@ -98,6 +98,14 @@ auto serialize_configuration(const cluster_configuration<NodeId>& cfg,
         }
         obj["witnesses"] = std::move(witnesses);
     }
+    // Lagging members likewise (task 5), only when there are any.
+    if (!cfg.lagging().empty()) {
+        boost::json::array lagging;
+        for (const auto& n : cfg.lagging()) {
+            lagging.push_back(config_entry_detail::encode_id(n));
+        }
+        obj["lagging"] = std::move(lagging);
+    }
 
     if (placement != nullptr && !placement->empty()) {
         // Placement-group assignments ride along with the configuration so
@@ -162,6 +170,11 @@ auto deserialize_configuration(const std::vector<std::byte>& data)
     if (obj.contains("witnesses")) {
         for (const auto& n : obj["witnesses"].as_array()) {
             cfg._witnesses.push_back(config_entry_detail::decode_id<NodeId>(n));
+        }
+    }
+    if (obj.contains("lagging")) {
+        for (const auto& n : obj["lagging"].as_array()) {
+            cfg._lagging.push_back(config_entry_detail::decode_id<NodeId>(n));
         }
     }
 

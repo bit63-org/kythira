@@ -172,6 +172,14 @@ struct cluster_configuration {
     /// can describe an entry (an `append_sink_persistence`) sends it
     /// descriptors rather than payloads. Empty unless a witness was added.
     std::vector<NodeId> _witnesses{};
+    /// Data voters the leader has recorded as lagging
+    /// (`.kiro/specs/khold-block-service/` task 5): under
+    /// `commit_rule::all_in_sync` an entry commits without them. A lagging
+    /// marker is a plain configuration entry, like a learner add, so it
+    /// takes effect for entries from its own index on, reverts if the
+    /// entry is truncated and is carried by snapshots. Empty unless a
+    /// member is lagging.
+    std::vector<NodeId> _lagging{};
 
     [[nodiscard]] auto nodes() const -> const std::vector<NodeId>& { return _nodes; }
     [[nodiscard]] auto is_joint_consensus() const -> bool { return _is_joint_consensus; }
@@ -180,6 +188,7 @@ struct cluster_configuration {
     }
     [[nodiscard]] auto learners() const -> const std::vector<NodeId>& { return _learners; }
     [[nodiscard]] auto witnesses() const -> const std::vector<NodeId>& { return _witnesses; }
+    [[nodiscard]] auto lagging() const -> const std::vector<NodeId>& { return _lagging; }
 };
 
 /// @brief Concept for a Raft snapshot: captures state-machine state and the log prefix it replaces.
@@ -926,6 +935,20 @@ enum class application_failure_policy : std::uint8_t {
     skip    ///< Skip the failed entry and continue — risks inconsistency.
 };
 
+/// @brief A group's commit predicate (`.kiro/specs/khold-block-service/`
+/// task 5, Requirement 7). Every rule also needs the entry on at least one
+/// data voter (a voter that is not a witness), which a group without
+/// witnesses always meets.
+enum class commit_rule : std::uint8_t {
+    /// A majority of voters (of each side, while joint): Raft's rule.
+    majority,
+    /// A majority, and every data voter the configuration in force at the
+    /// entry does not record as lagging. A data follower that misses the
+    /// member deadline is recorded lagging through a committed
+    /// configuration entry, and recorded in sync again once it catches up.
+    all_in_sync
+};
+
 /// @brief Default Raft node configuration with conservative production-ready defaults.
 struct raft_configuration {
     // ── Timing ────────────────────────────────────────────────────────────────
@@ -962,6 +985,12 @@ struct raft_configuration {
     /// (`.kiro/specs/file-install-snapshot/` Requirement 7.1). Off keeps the
     /// whole log, which is logged once at start.
     bool _persistent_log_compaction{true};
+    /// The group's commit predicate. `majority` (the default) is Raft's
+    /// rule, so a group that sets nothing behaves as before.
+    kythira::commit_rule _commit_rule{kythira::commit_rule::majority};
+    /// Under `commit_rule::all_in_sync`: how long the leader waits for a
+    /// data follower to acknowledge an entry before recording it lagging.
+    std::chrono::milliseconds _member_deadline{1000};
     /// Persistent state machines only: when compaction finds the durable
     /// applied index more than this many entries behind the applied index,
     /// it asks the state machine to sync first, if it can
@@ -1125,6 +1154,10 @@ struct raft_configuration {
     [[nodiscard]] auto persistent_log_compaction() const -> bool {
         return _persistent_log_compaction;
     }
+    [[nodiscard]] auto commit_rule() const -> kythira::commit_rule { return _commit_rule; }
+    [[nodiscard]] auto member_deadline() const -> std::chrono::milliseconds {
+        return _member_deadline;
+    }
     [[nodiscard]] auto persistent_sync_lag_entries() const -> std::size_t {
         return _persistent_sync_lag_entries;
     }
@@ -1259,6 +1292,10 @@ struct raft_configuration {
 
         if (_quorum_peer_dead_after < std::chrono::milliseconds{0}) {
             errors.emplace_back("quorum_peer_dead_after must not be negative");
+        }
+
+        if (_member_deadline <= std::chrono::milliseconds{0}) {
+            errors.emplace_back("member_deadline must be positive");
         }
 
         return errors;

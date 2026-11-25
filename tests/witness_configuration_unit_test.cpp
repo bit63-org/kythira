@@ -2,11 +2,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /// @file witness_configuration_unit_test.cpp
-/// @brief Witnesses in stored configurations (.kiro/specs/khold-block-service/
-///        task 4): configuration log entries and snapshots carry
-///        `witnesses()`, and a configuration without witnesses is stored byte
-///        for byte as it was before witnesses existed, so stores written by
-///        either version open in the other.
+/// @brief Witnesses and lagging members in stored configurations
+///        (.kiro/specs/khold-block-service/ tasks 4 and 5): configuration log
+///        entries and snapshots carry `witnesses()` and `lagging()`, and a
+///        configuration with neither is stored byte for byte as it was before
+///        they existed, so stores written by either version open in the
+///        other.
 
 #define BOOST_TEST_MODULE witness_configuration_unit_test
 #include <boost/test/unit_test.hpp>
@@ -152,4 +153,31 @@ BOOST_AUTO_TEST_CASE(snapshots_without_witnesses_are_unchanged) {
         return total;
     };
     BOOST_TEST(size_of(b.path) > size_of(a.path));
+}
+
+BOOST_AUTO_TEST_CASE(lagging_members_are_stored_with_or_without_witnesses) {
+    // With a witness: the general shape with its other data replica lagging.
+    auto general = with_witness();
+    general._lagging = {2};
+    const auto back = kythira::deserialize_configuration<std::uint64_t>(
+        kythira::serialize_configuration(general));
+    BOOST_TEST(back.lagging() == general.lagging());
+    BOOST_TEST(back.witnesses() == general.witnesses());
+    for (const auto& c : {general, [] {
+                              // Without one: the binary snapshot writes an empty
+                              // witness list so the lagging list can follow it.
+                              config_t p{{1, 2, 3}, false, std::nullopt, {}};
+                              p._lagging = {3};
+                              return p;
+                          }()}) {
+        const auto file = snapshot_round_trip<kythira::file_persistence_engine<>>(c);
+        BOOST_TEST(file.lagging() == c.lagging());
+        BOOST_TEST(file.witnesses() == c.witnesses());
+        const auto binary = snapshot_round_trip<kythira::binary_file_persistence_engine<>>(c);
+        BOOST_TEST(binary.lagging() == c.lagging());
+        BOOST_TEST(binary.witnesses() == c.witnesses());
+    }
+    // Neither key appears without lagging members.
+    BOOST_TEST(text(kythira::serialize_configuration(with_witness())).find("lagging") ==
+               std::string::npos);
 }
