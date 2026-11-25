@@ -20,6 +20,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstddef>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -406,4 +407,33 @@ BOOST_AUTO_TEST_CASE(file_source_polling_reloads_and_survives_failures) {
     files.write(material_of(b, roots));
     std::this_thread::sleep_for(100ms);
     BOOST_TEST(source.generation() == 3U);
+}
+
+// On a coarse file clock (tmpfs advances mtimes once per kernel tick) a
+// replacement can land with the same mtime as the files it replaces. Pin
+// the new files' mtimes to the old ones to make that tie certain: the poll
+// must still see the change, through the new inodes.
+BOOST_AUTO_TEST_CASE(file_source_polling_sees_a_replacement_in_the_same_clock_tick) {
+    raft::testing::certificate_authority ca;
+    const auto& roots = ca.root_certificate_pem();
+    auto a = issue(ca, "node-a");
+    auto b = issue(ca, "node-b");
+    temp_material_dir files;
+    files.write(material_of(a, roots));
+    const auto p = files.paths();
+    const std::vector<std::string> names{p.certificate_chain_path, p.private_key_path,
+                                         p.root_certificates_path};
+    std::vector<std::filesystem::file_time_type> before;
+    for (const auto& n : names) {
+        before.push_back(std::filesystem::last_write_time(n));
+    }
+
+    kythira::file_tls_material_source source(p, 20ms, [](std::string_view) {});
+    files.write(material_of(b, roots));
+    for (std::size_t i = 0; i < names.size(); ++i) {
+        std::filesystem::last_write_time(names[i], before[i]);
+    }
+
+    BOOST_REQUIRE(eventually([&] { return source.generation() == 2U; }));
+    BOOST_TEST(source.current()->certificate_chain_pem == b.certificate_pem);
 }
