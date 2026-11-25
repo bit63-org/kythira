@@ -8,9 +8,16 @@ FROM ubuntu:24.04@sha256:534baea6a22c03a63003dbc8dbe78fe34bc0d7e595d9a9dc9834884
 # -DKYTHIRA_LINKER=mold rather than relying on auto, so a missing mold fails
 # configure, and check-linker.sh then fails the stage if the binary's
 # .comment does not name mold.
+#
+# python3: configuring the tree needs an interpreter even though only
+# one binary is built. services/iam generates a header from JSON at
+# configure time, and several service test directories register Python
+# checks with find_package(Python3 REQUIRED). Without it configure stops
+# at the first of those ("Could NOT find Python3"), which is how the
+# weekly AMI builds failed from 2026-11-23.
 RUN apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y \
-        g++ cmake ninja-build pkg-config libssl-dev mold && \
+        g++ cmake ninja-build pkg-config libssl-dev mold python3 && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /src
