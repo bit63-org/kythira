@@ -362,13 +362,14 @@ every role (7, 8, 10).
     each step work after it, and every lease taken stays held. Covered:
     the gateway role (with a drain and a front-end restart), the front-end
     role, the data role evacuated to data-only nodes and back, segments to
-    volumes and back by replica replacement, and the whole way to the
-    four-way split and back, reversing half way. The data layer is one
+    volumes and back by replica replacement and by the in-place store move
+    (each replica's store is a `movable_segment_store`, moved under
+    traffic), and the whole way to the four-way split and back, reversing
+    half way. The data layer is one
     hand-played Raft group whose replicas move as a learner (sealed
     segments copied under traffic, then a fence for the snapshot and the
     active prefix); `tests/kinesis_cluster_handle.hpp` lets the compiled
-    layouts run over it. Left: the in-place store move path (needs task
-    13's store move) and the docker-chaos scenario
+    layouts run over it. Left: the docker-chaos scenario
   - _Requirements: 11.1, 11.6, 11.7, 13.1-13.3, 15.4, 15.7_
 
 - [ ] 15. Compose layout, differential and measurement
