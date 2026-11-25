@@ -1487,6 +1487,10 @@ add_raft_completion_test(elastic_shard_placement_driver_test
 # elastic-shard-capacity spec, task 14: a machine admitted end to end onto
 # real multi-Raft hosts over the in-process message fabric.
 add_raft_completion_test(elastic_capacity_fabric_test elastic_capacity_fabric_test.cpp)
+# kinesis-independent-layers task 13: a node's replicas evacuated to a new
+# node and back over the placement operators, on real multi-Raft hosts over
+# the in-process message fabric, under writes.
+add_raft_completion_test(replica_evacuation_test replica_evacuation_test.cpp)
 # elastic-shard-capacity spec, task 15: seeded property runs, lease-holder
 # failover in every intent state, and provider chaos. Manual clock only.
 add_raft_completion_test(elastic_capacity_failover_test elastic_capacity_failover_test.cpp)
