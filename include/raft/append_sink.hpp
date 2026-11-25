@@ -97,6 +97,17 @@ concept append_sink = requires(S& sink, const LogEntry& entry, LogIndex index) {
     { sink.release_before(index) } -> std::same_as<void>;
 };
 
+/// @brief Optional: a sink that can describe an entry without taking it.
+///
+/// `describe(entry)` returns the descriptor `on_append` would store for a
+/// full entry, with no side effects. When the sink has it, the adaptor
+/// offers `witness_entry()`, and a leader sends witnesses descriptors
+/// instead of payloads (`.kiro/specs/khold-block-service/` task 4).
+template<typename S, typename LogEntry>
+concept describing_append_sink = requires(S& sink, const LogEntry& entry) {
+    { sink.describe(entry) } -> std::same_as<LogEntry>;
+};
+
 /// @brief A `persistence_engine` that routes `normal` entries' payloads to an
 ///        append sink and stores their descriptors in `Engine`.
 ///
@@ -199,6 +210,18 @@ public:
     template<typename LogIndex> auto delete_log_entries_before(LogIndex index) -> void {
         _engine.delete_log_entries_before(index);
         _sink->release_before(static_cast<log_index_t>(index));
+    }
+
+    /// @brief The entry as a witness receives it: a `normal` entry's
+    ///        descriptor, any other entry unchanged. Offered only when the
+    ///        sink can describe entries.
+    [[nodiscard]] auto witness_entry(const log_entry_t& entry) -> log_entry_t
+    requires describing_append_sink<Sink, log_entry_t>
+    {
+        if (!takes_payload(entry)) {
+            return entry;
+        }
+        return _sink->describe(entry);
     }
 
     // ── bulk_append / hard_state, conditionally ──────────────────────────────

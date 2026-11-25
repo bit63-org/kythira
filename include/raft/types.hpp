@@ -165,6 +165,13 @@ struct cluster_configuration {
     bool _is_joint_consensus;
     std::optional<std::vector<NodeId>> _old_nodes;
     std::vector<NodeId> _learners;
+    /// Voters that are witnesses (`.kiro/specs/khold-block-service/` task 4):
+    /// each is also listed in `_nodes` or, during joint consensus, in
+    /// `_old_nodes`, and votes and counts toward quorum like any voter. A
+    /// witness never campaigns and never leads, and a leader whose engine
+    /// can describe an entry (an `append_sink_persistence`) sends it
+    /// descriptors rather than payloads. Empty unless a witness was added.
+    std::vector<NodeId> _witnesses{};
 
     [[nodiscard]] auto nodes() const -> const std::vector<NodeId>& { return _nodes; }
     [[nodiscard]] auto is_joint_consensus() const -> bool { return _is_joint_consensus; }
@@ -172,6 +179,7 @@ struct cluster_configuration {
         return _old_nodes;
     }
     [[nodiscard]] auto learners() const -> const std::vector<NodeId>& { return _learners; }
+    [[nodiscard]] auto witnesses() const -> const std::vector<NodeId>& { return _witnesses; }
 };
 
 /// @brief Concept for a Raft snapshot: captures state-machine state and the log prefix it replaces.

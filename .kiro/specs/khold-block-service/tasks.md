@@ -54,12 +54,19 @@ spec.
     recovery truncates descriptors whose payload a crash lost
   - _Requirements: 7.4_
 
-- [ ] 4. Core: witness voters
+- [x] 4. Core: witness voters
   - A member kind that votes and stores descriptors, never campaigns,
     never receives payloads; joint consensus and learner promotion
     handle it
   - Raft property tests: no election of a candidate behind the witness,
     no witness leadership under any schedule
+  - Done: `cluster_configuration::witnesses()`, a subset of the voters
+    carried in configuration entries and snapshots (omitted when empty,
+    so stores without witnesses are byte for byte unchanged);
+    `node::promote_to_witness` promotes a learner through the same joint
+    path as `promote_to_voter`; a witness never starts an election,
+    refuses TimeoutNow and transfers, never serves catch-up, and is sent
+    descriptors only (`describing_append_sink::describe`)
   - _Requirements: 5.2_
 
 - [ ] 5. Core: commit predicates and lagging entries

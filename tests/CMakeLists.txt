@@ -1256,6 +1256,15 @@ set_tests_properties(append_sink_unit_test raft_append_sink_cluster_test PROPERT
     LABELS "unit;khold")
 add_raft_completion_test(append_sink_benchmark_test append_sink_benchmark_test.cpp)
 set_tests_properties(append_sink_benchmark_test PROPERTIES LABELS "benchmark;performance")
+# Task 4: witness voters. Witnesses in stored configurations (log entries
+# and snapshots, unchanged bytes without them), and a cluster of two data
+# replicas and a witness: the witness never campaigns, holds descriptors
+# only, refuses a candidate behind it, and random crash and partition
+# schedules never make it leader or lose an acknowledged write.
+add_raft_completion_test(witness_configuration_unit_test witness_configuration_unit_test.cpp)
+add_raft_completion_test(raft_witness_voter_test raft_witness_voter_test.cpp)
+set_tests_properties(witness_configuration_unit_test PROPERTIES LABELS "unit;khold")
+set_tests_properties(raft_witness_voter_test PROPERTIES LABELS "unit;khold" TIMEOUT 300)
 # A follower's write-behind barrier, taken with the node's lock released,
 # outlived by a newer leader's AppendEntries that truncates what it covered:
 # the old request is not acknowledged, and its barrier does not count for the

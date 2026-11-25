@@ -736,6 +736,13 @@ private:
             }
             obj["learners"] = learners;
         }
+        if (!snap.configuration().witnesses().empty()) {
+            boost::json::array witnesses;
+            for (const auto& n : snap.configuration().witnesses()) {
+                witnesses.push_back(persistence_node_id::to_json(n));
+            }
+            obj["witnesses"] = witnesses;
+        }
         return boost::json::serialize(obj);
     }
 
@@ -760,6 +767,11 @@ private:
         if (obj.contains("learners")) {
             for (const auto& n : obj["learners"].as_array()) {
                 snap._configuration._learners.push_back(snapshot_member(n));
+            }
+        }
+        if (obj.contains("witnesses")) {
+            for (const auto& n : obj["witnesses"].as_array()) {
+                snap._configuration._witnesses.push_back(snapshot_member(n));
             }
         }
         return snap;
