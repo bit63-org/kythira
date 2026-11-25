@@ -131,8 +131,28 @@ struct raw_shard_read {
             out._missing = true;
             return out;
         }
-        const bool exhausted = r->_segment_exhausted;
+        bool exhausted = r->_segment_exhausted;
         take(*r);
+        if (!exhausted && !full() && fetch && !store.has_segment(d)) {
+            // The local copy stops short and is not the sealed segment: a
+            // short, unsealed one from before this replica went down, when
+            // the others sealed it and the replica caught up by snapshot,
+            // so the entries that would have filled it were never replayed
+            // here. Fetch the sealed segment in its place (an install
+            // replaces the copy) and read on from where the copy ended.
+            // Checked only once a page stops short, so ordinary paging
+            // through a sealed segment never hashes it.
+            try {
+                fetch(d);
+                if (auto again =
+                        store.read_segment(key, d._first_seq, out._next_counter, remaining())) {
+                    exhausted = again->_segment_exhausted;
+                    take(*again);
+                }
+            } catch (const std::exception&) {
+                // Still short: reported as missing below.
+            }
+        }
         if (!exhausted && !full()) {
             // A sealed segment that stops short of its descriptor: never
             // skip past what it should hold.
