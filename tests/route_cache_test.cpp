@@ -166,6 +166,41 @@ BOOST_AUTO_TEST_CASE(a_replica_move_is_picked_up_from_the_newer_conf_version) {
     BOOST_TEST(c.lookup("k")->_voters == (std::vector<node>{1, 2, 4}));
 }
 
+// A node that joined a group after the routes were fetched (a live
+// migration's target) has no address here: a route or a leader hint naming
+// it drops the row, so the next call fetches the routes again with its
+// address, instead of keeping a target no call can reach.
+BOOST_AUTO_TEST_CASE(a_joined_node_without_an_address_makes_the_next_call_refresh) {
+    fake_layer layer;
+    layer.nodes["seed:7000"].upsert(row(1, nullptr, nullptr, 1, {2, 3, 4}, 4, 1));
+    cache c({"seed:7000"}, layer.fetcher());
+    cache::routes_reply first;
+    first.routes = {row(1, nullptr, nullptr, 1, {1, 2, 3}, 1, 0)};
+    for (node n = 1; n <= 3; ++n) {
+        first.addresses.emplace_back(n, "data-" + std::to_string(n) + ":7000");
+    }
+    c.learn(first);
+    BOOST_REQUIRE(!c.address_of(4).has_value());
+
+    // Node 1 evacuated to node 4: the stale-epoch answer names node 4.
+    c.on_stale_epoch(row(1, nullptr, nullptr, 1, {2, 3, 4}, std::nullopt, 1));
+    BOOST_TEST(!c.lookup("k").has_value());
+    BOOST_TEST(c.ensure("k")->_voters == (std::vector<node>{2, 3, 4}));
+    BOOST_TEST((c.address_of(4) == std::optional<std::string>("data-4:7000")));
+    BOOST_TEST(c.write_targets("k").front() == 4U);
+
+    // A leader hint naming a node with no address does the same.
+    cache d({"seed:7000"}, layer.fetcher());
+    cache::routes_reply known;
+    known.routes = {row(1, nullptr, nullptr, 1, {2, 3, 4}, std::nullopt, 1)};
+    known.addresses = {{2, "data-2:7000"}, {3, "data-3:7000"}};
+    d.learn(known);
+    d.on_not_leader(1, 4);
+    BOOST_TEST(!d.lookup("k").has_value());
+    BOOST_TEST((d.ensure("k")->_leader_hint == std::optional<node>(4)));
+    BOOST_TEST(d.address_of(4).has_value());
+}
+
 BOOST_AUTO_TEST_CASE(an_unknown_group_drops_the_row_so_the_next_call_refreshes) {
     fake_layer layer;
     layer.nodes["seed:7000"].upsert(row(5, nullptr, nullptr, 9, {4, 5, 6}, 4));
