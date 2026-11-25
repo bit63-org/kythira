@@ -86,6 +86,8 @@
 #include <kythira/kinesis/kinesis_front_end.hpp>
 #include <kythira/kinesis/kinesis_lease_api.hpp>
 #include <kythira/kinesis/kinesis_leases.hpp>
+#include <kythira/kinesis/kinesis_admin_client.hpp>
+#include <kythira/kinesis/kinesis_migration.hpp>
 #include <kythira/kinesis/kinesis_peer_client.hpp>
 #include <kythira/kinesis/kinesis_stream_state_machine.hpp>
 
@@ -474,6 +476,14 @@ public:
     /// gateway.
     void set_front_end_server(front_end_server* server) { _fe_server = server; }
 
+    /// Serves the live migration admin calls under `k_admin_path_prefix`
+    /// (kinesis_migration.hpp): `h` gets the call once its signature over
+    /// `admin_signed_text` checks out, with the operation (the path after
+    /// the prefix) and the query. Set before the listener starts.
+    using admin_handler = std::function<https::response(const https::request&, std::string_view op,
+                                                        std::string_view query)>;
+    void set_admin_handler(admin_handler h) { _admin = std::move(h); }
+
     /// Called once when a drain begins, by `begin_drain` or the drain
     /// route: the composition root stops the listener accepting there.
     void set_drain_hook(std::function<void()> hook) { _drain_hook = std::move(hook); }
@@ -539,6 +549,7 @@ private:
     lease_authenticator _lease_auth;
     front_end_server* _fe_server = nullptr;
     std::function<void()> _drain_hook;
+    admin_handler _admin;
     std::atomic<bool> _draining{false};
     std::atomic<std::uint64_t> _in_flight{0};
     layers::role_set _roles{layers::role_set::all()};
@@ -683,6 +694,20 @@ private:
         return gateway_detail::reply(req, 202, "draining\n", "text/plain");
     }
 
+    /// A live migration admin call: signed over its method, target and
+    /// body, so a captured call cannot be replayed as a different one.
+    auto admin_route(const https::request& req, std::string_view op, std::string_view query)
+        -> https::response {
+        if (_secret.empty() || !_admin) {
+            return gateway_detail::reply(req, 404, "not found\n", "text/plain");
+        }
+        if (!signed_by_peer(req, admin_signed_text(std::string_view(req.method_string()),
+                                                   req.target(), req.body()))) {
+            return refuse(req, 403, "bad or stale forwarding signature");
+        }
+        return _admin(req, op, query);
+    }
+
     /// A client call to a node that runs no gateway: 404, in the API's own
     /// error shape, naming the node's roles so an operator sees at once
     /// that the load balancer points at the wrong layer.
@@ -719,6 +744,9 @@ private:
         }
         if (path == k_drain_path) {
             return drain_route(req);
+        }
+        if (path.starts_with(k_admin_path_prefix)) {
+            return admin_route(req, path.substr(k_admin_path_prefix.size()), query);
         }
         if (path == forward::k_path) {
             return propose(req);

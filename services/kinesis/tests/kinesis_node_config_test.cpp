@@ -13,10 +13,18 @@
 
 #include "config.hpp"
 
+#include <kythira/kinesis/kinesis_migration.hpp>
+
+#include <raft/shard_types.hpp>
+
+#include <filesystem>
+#include <fstream>
 #include <map>
 #include <optional>
 #include <string>
 #include <string_view>
+
+#include <unistd.h>
 
 namespace kn = kythira::kinesis_node;
 namespace sn = kythira::service_node;
@@ -749,4 +757,136 @@ BOOST_AUTO_TEST_CASE(the_internal_listener_is_its_own_port_when_set) {
 
     vars["KINESIS_INTERNAL_LISTEN"] = "no-port";
     BOOST_CHECK_THROW(kn::from_env(kn::composite_env(lookup(vars))), std::invalid_argument);
+}
+
+// kinesis-independent-layers task 13: KINESIS_VOTERS names the nodes that
+// formed the groups; one left out joins as an evacuation target.
+BOOST_AUTO_TEST_CASE(kinesis_voters_name_the_founding_nodes) {
+    const auto all = kn::from_env(kn::composite_env(lookup(node_vars())));
+    BOOST_TEST(all._voters.size() == 3U);
+    BOOST_TEST(kn::describe(all).find("voters=3\n") != std::string::npos);
+
+    auto vars = node_vars();
+    vars["KINESIS_VOTERS"] = "1,3";
+    const auto joining = kn::from_env(kn::composite_env(lookup(vars)));
+    BOOST_TEST(joining._voters.size() == 2U);
+    BOOST_TEST(kn::describe(joining).find("voters=2 (1,3) joining") != std::string::npos);
+
+    vars["KINESIS_VOTERS"] = "1,2";
+    BOOST_TEST(
+        kn::describe(kn::from_env(kn::composite_env(lookup(vars)))).find("voters=2 (1,2)\n") !=
+        std::string::npos);
+
+    vars["KINESIS_VOTERS"] = "1,9";
+    BOOST_CHECK_THROW(kn::from_env(kn::composite_env(lookup(vars))), std::invalid_argument);
+
+    vars["KINESIS_VOTERS"] = "1,2";
+    vars["KINESIS_DISCARD_REPLICAS"] = "true";
+    const auto discard = kn::from_env(kn::composite_env(lookup(vars)));
+    BOOST_TEST(discard._discard_replicas);
+    BOOST_TEST(kn::describe(discard).find(" discard_replicas") != std::string::npos);
+}
+
+namespace {
+
+auto id(const char* text) -> kythira::host_node_id {
+    return kythira::parse_host_node_id(text).value();
+}
+
+}  // namespace
+
+BOOST_AUTO_TEST_CASE(evacuation_requests_parse_and_round_trip) {
+    namespace k = kythira::kinesis;
+    std::string why;
+    const auto r = k::parse_evacuation_request(
+        R"({"node":"1","targets":["4",{"id":"5","raft":"http://kin-5:7100",)"
+        R"("gateway":"kin-5:4567"}],"replicas":3,"fan_out":false})",
+        why);
+    BOOST_TEST_REQUIRE(r.has_value(), why);
+    BOOST_TEST(kythira::host_node_id_text(r->_node) == "1");
+    BOOST_TEST_REQUIRE(r->_targets.size() == 2U);
+    BOOST_TEST(r->_targets[0]._raft.empty());
+    BOOST_TEST(r->_targets[1]._raft == "http://kin-5:7100");
+    BOOST_TEST(r->_targets[1]._gateway == "kin-5:4567");
+    BOOST_TEST(r->_replicas == 3U);
+    BOOST_TEST(!r->_fan_out);
+
+    const auto again = k::parse_evacuation_request(k::serialize(*r), why);
+    BOOST_TEST_REQUIRE(again.has_value(), why);
+    BOOST_TEST(again->_targets[1]._id == id("5"));
+    BOOST_TEST(again->_targets[1]._gateway == "kin-5:4567");
+    BOOST_TEST(again->_replicas == 3U);
+
+    // Refusals say what is wrong.
+    for (const auto* bad :
+         {R"({"targets":["4"]})", R"({"node":"1"})", R"({"node":"1","targets":["1"]})",
+          R"({"node":"1","targets":["4"],"replicas":0})",
+          R"({"node":"1","targets":["4"],"fan_out":"yes"})",
+          R"({"node":"1","targets":[{"raft":"x"}]})", "not json", "[]"}) {
+        BOOST_TEST_INFO(bad);
+        why.clear();
+        BOOST_TEST(!k::parse_evacuation_request(bad, why).has_value());
+        BOOST_TEST(!why.empty());
+    }
+}
+
+BOOST_AUTO_TEST_CASE(store_move_requests_parse) {
+    namespace k = kythira::kinesis;
+    using dest = k::store_move_request::destination;
+    std::string why;
+    const auto local = k::parse_store_move_request(R"({"to":"local"})", why);
+    BOOST_TEST_REQUIRE(local.has_value(), why);
+    BOOST_TEST((local->_to == dest::local));
+    const auto volume = k::parse_store_move_request(
+        R"({"to":"volume","segment_node":"11","max_fence_bytes":1048576})", why);
+    BOOST_TEST_REQUIRE(volume.has_value(), why);
+    BOOST_TEST((volume->_to == dest::volume));
+    BOOST_TEST(volume->_segment_node == "11");
+    BOOST_TEST(volume->_max_fence_bytes == 1048576U);
+    for (const auto* bad :
+         {R"({"to":"tape"})", R"({})", R"({"to":"local","segment_node":"11"})",
+          R"({"to":"volume","max_fence_bytes":0})", R"({"to":"volume","segment_node":4})"}) {
+        BOOST_TEST_INFO(bad);
+        BOOST_TEST(!k::parse_store_move_request(bad, why).has_value());
+    }
+}
+
+BOOST_AUTO_TEST_CASE(descriptors_round_trip_as_json) {
+    namespace k = kythira::kinesis;
+    using descriptor = kythira::shard_descriptor<std::uint64_t, std::string, kythira::host_node_id>;
+    descriptor d;
+    d._group_id = 7;
+    d._range._start = "k/";
+    d._epoch._version = 3;
+    d._epoch._conf_version = 5;
+    d._voters = {id("1"), id("2"), id("4")};
+    d._learners = {id("5")};
+    std::string why;
+    const auto back = k::parse_descriptor_json<descriptor>(k::descriptor_json(d), why);
+    BOOST_TEST_REQUIRE(back.has_value(), why);
+    BOOST_TEST(back->_group_id == 7U);
+    BOOST_TEST((back->_range._start == std::optional<std::string>{"k/"}));
+    BOOST_TEST(!back->_range._end.has_value());
+    BOOST_TEST(back->_epoch._version == 3U);
+    BOOST_TEST(back->_epoch._conf_version == 5U);
+    BOOST_TEST((back->_voters == d._voters));
+    BOOST_TEST((back->_learners == d._learners));
+    BOOST_TEST(!k::parse_descriptor_json<descriptor>(R"({"group":1,"voters":[]})", why));
+    BOOST_TEST(!k::parse_descriptor_json<descriptor>(R"({"group":"x","voters":["1"]})", why));
+}
+
+BOOST_AUTO_TEST_CASE(held_replicas_are_the_numbered_raft_directories) {
+    namespace k = kythira::kinesis;
+    const auto dir =
+        std::filesystem::temp_directory_path() / ("kinesis-held-" + std::to_string(::getpid()));
+    std::filesystem::remove_all(dir);
+    BOOST_TEST(k::held_replica_dirs(dir).empty());
+    std::filesystem::create_directories(dir / "raft" / "1");
+    std::filesystem::create_directories(dir / "raft" / "12");
+    std::filesystem::create_directories(dir / "raft" / "snapshots");
+    std::ofstream(k::released_marker(dir)) << "x";
+    BOOST_TEST(k::held_replica_dirs(dir).size() == 2U);
+    BOOST_TEST(k::released_marker(dir).parent_path() == dir / "raft");
+    BOOST_TEST(k::left_marker(dir).parent_path() == dir);
+    std::filesystem::remove_all(dir);
 }

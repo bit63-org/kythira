@@ -236,6 +236,11 @@ struct volume_assignment {
         }
         segment_node_info n;
         n._id = std::string(entry.substr(0, eq));
+        // `@...` ids are reserved: a record naming `@local` says the replica
+        // keeps its segments on its own disk.
+        if (n._id.front() == '@') {
+            throw std::invalid_argument("segment node id \"" + n._id + "\" may not start with '@'");
+        }
         auto rest = entry.substr(eq + 1);
         if (const auto at = rest.find('@'); at != std::string_view::npos) {
             n._placement_group = std::string(rest.substr(at + 1));

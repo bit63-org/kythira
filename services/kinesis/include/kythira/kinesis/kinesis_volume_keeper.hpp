@@ -175,6 +175,11 @@ private:
         // `current` follows each move, so two volumes leaving one lost node
         // in the same pass never land on the same segment node.
         for (auto& a : current) {
+            // A replica a store move took back to its own disk has no
+            // volume to lose.
+            if (a._segment_node == k_local_store) {
+                continue;
+            }
             const bool listed =
                 kythira::segment_node_of(_config._nodes, a._segment_node).has_value();
             if (listed && !lost.contains(a._segment_node)) {

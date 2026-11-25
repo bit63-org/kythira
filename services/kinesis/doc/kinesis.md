@@ -184,6 +184,34 @@ under Docker and rootless Podman.
   speaks HTTPS only, so the nodes need TLS; the container scenario puts a
   TLS front before plaintext nodes instead (`tests/kpl/kpl_produce.sh`).
   KCL deaggregates what KPL aggregates, through any node.
+- **Moving replicas off a node (evacuate).** Every call below is signed
+  with the forwarding secret; `kinesis_gateway_node --admin METHOD OP
+  [BODY]` makes one against the node it runs beside, with that node's
+  environment. `POST evacuate` with `{"node":"1","targets":[{"id":"4"}]}`
+  moves every replica node 1 holds to the targets, one membership change
+  per group at a time (the new node is added as a learner, caught up and
+  promoted before the old one is removed; a leader hands off first), while
+  clients keep writing. A target the cluster's settings do not list
+  carries `"raft"` and `"gateway"` addresses, and starts with
+  `KINESIS_VOTERS` naming the founding voters so that it joins rather than
+  forming groups of its own. `GET evacuate` reports every data node's view
+  and `"done"`; `POST evacuate/cancel` stops it. When done, `POST release`
+  on the evacuee lets it restart without the `data` role, deleting its
+  replicas; a node holding replicas otherwise refuses to start without
+  `data` (`KINESIS_DISCARD_REPLICAS=true` deletes them anyway). Moving
+  back is the same call the other way, and a released node that is a data
+  node again joins as a target.
+- **Moving a node's segments (store move).** `POST store-move` with
+  `{"to":"volume"}` (optionally `"segment_node"`) moves a data node's
+  record segments from its own disk to its volume on a segment node, and
+  `{"to":"local"}` brings them back, while the node keeps serving. Sealed
+  segments and the active prefix are copied first; the apply loop then
+  pauses while the remaining tail (at most `max_fence_bytes`, 4 MiB by
+  default) is appended, the copy is checked to match, and the node
+  switches; the pause is in `GET store-move`. The new assignment is saved
+  on the node and written to the catalog, and wins over `KINESIS_ROLES`
+  on the next start. A move whose tail keeps outrunning the copy is
+  refused and the old store keeps serving.
 
 ## Not supported
 

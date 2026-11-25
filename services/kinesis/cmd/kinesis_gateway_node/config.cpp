@@ -11,6 +11,7 @@
 #include <raft/net_bind.hpp>
 #include <raft/pkcs11_uri.hpp>
 
+#include <algorithm>
 #include <cstdlib>
 #include <fstream>
 #include <map>
@@ -232,6 +233,23 @@ void read_segment_layer(const reader& r, node_options& o) {
             "call a gateway hands a front end, which a front end accepts only from a gateway");
     }
     o._drain_timeout = r.ms("KINESIS_DRAIN_TIMEOUT_MS", "10000");
+    o._discard_replicas = r.flag("KINESIS_DISCARD_REPLICAS", "false");
+    if (r.set("KINESIS_VOTERS")) {
+        for (const auto& id : split_list(r.required("KINESIS_VOTERS"))) {
+            const auto v = to_peer_id("KINESIS_VOTERS", id);
+            if (!o._peers.empty() && !o._peers.contains(v)) {
+                fail("KINESIS_VOTERS: " + id + " is not in KYTHIRA_PEERS");
+            }
+            o._voters.push_back(v);
+        }
+        if (o._voters.empty()) {
+            fail("KINESIS_VOTERS is empty");
+        }
+    } else {
+        for (const auto& [id, url] : o._peers) {
+            o._voters.push_back(id);
+        }
+    }
     const auto self = kythira::host_node_id_text(o._node_id);
     if (is_segment_node(o._roles) && !kythira::segment_node_of(o._segment_nodes, self)) {
         fail("KINESIS_ROLES=" + text + ": a segment node must be listed in KINESIS_SEGMENT_NODES " +
@@ -827,7 +845,23 @@ auto describe(const node_options& o) -> std::string {
         << "roles=" << o._roles.to_string() << '\n'
         << "raft=" << o._bind_address << ':' << o._raft_port
         << (o._allow_plaintext_raft ? " (plaintext allowed)" : "") << '\n'
-        << "voters=" << (o._roles.has(kythira::layers::role::data) ? o._peers.size() : 0) << '\n'
+        << "voters=" << (o._roles.has(kythira::layers::role::data) ? o._voters.size() : 0);
+    if (o._roles.has(kythira::layers::role::data) && o._voters.size() != o._peers.size()) {
+        // KINESIS_VOTERS names fewer than the peers: list them, and say
+        // whether this node joins as an evacuation target.
+        out << " (";
+        for (std::size_t i = 0; i < o._voters.size(); ++i) {
+            out << (i == 0 ? "" : ",") << kythira::host_node_id_text(o._voters[i]);
+        }
+        out << ')';
+        if (std::ranges::find(o._voters, o._node_id) == o._voters.end()) {
+            out << " joining";
+        }
+    }
+    if (o._discard_replicas) {
+        out << " discard_replicas";
+    }
+    out << '\n'
         << "shards=" << (o._shard_cuts.size() + 1) << '\n'
         << "listen=" << o._listen_host << ':' << o._listen_port
         << (o._allow_plaintext ? " http" : " https") << '\n';
@@ -916,7 +950,8 @@ auto describe(const node_options& o) -> std::string {
 }
 
 auto usage() -> std::string {
-    return "usage: kinesis_gateway_node [--help | --self-test | --check-config]\n"
+    return "usage: kinesis_gateway_node [--help | --self-test | --check-config |\n"
+           "                            --admin METHOD OP [BODY]]\n"
            "\n"
            "The Kythira Kinesis Data Streams-compatible daemon. Configured from the\n"
            "environment; stopped by SIGINT or SIGTERM.\n"
@@ -924,6 +959,13 @@ auto usage() -> std::string {
            "  --help          print this text\n"
            "  --self-test     check the generated tables, then exit\n"
            "  --check-config  read the environment, print the settings, then exit\n"
+           "  --admin METHOD OP [BODY]\n"
+           "                  one live migration call to this node's gateway, signed\n"
+           "                  with KINESIS_FORWARD_SECRET: POST evacuate '{\"node\":\"1\",\n"
+           "                  \"targets\":[{\"id\":\"4\"}]}', GET evacuate, POST\n"
+           "                  evacuate/cancel, POST release, GET|POST store-move\n"
+           "                  ('{\"to\":\"volume\"}' or '{\"to\":\"local\"}'); the gateway\n"
+           "                  is on loopback unless KINESIS_ADMIN_TARGET=host:port\n"
            "\n"
            "Raft (as redis_gateway_node):\n"
            "  KYTHIRA_NODE_ID                  this node's id (required)\n"
@@ -977,6 +1019,11 @@ auto usage() -> std::string {
            "                                   their listeners\n"
            "  KINESIS_DRAIN_TIMEOUT_MS         how long a stopping gateway lets calls in\n"
            "                                   flight finish (10000)\n"
+           "  KINESIS_VOTERS                   ids that formed the groups (every KYTHIRA_PEERS\n"
+           "                                   id); a data node not listed joins as an\n"
+           "                                   evacuation target\n"
+           "  KINESIS_DISCARD_REPLICAS         start without data although Raft replicas are\n"
+           "                                   on disk, deleting them (false)\n"
            "  KINESIS_KMS                      key provider for encrypted streams: off, local,\n"
            "                                   aws, pkcs11 or kythira (off; kythira_node:\n"
            "                                   kythira when the KMS module runs)\n"

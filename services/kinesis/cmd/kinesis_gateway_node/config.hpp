@@ -137,6 +137,18 @@ struct node_options {
     /// flight finish after it stops accepting connections (Requirement
     /// 4.7).
     std::chrono::milliseconds _drain_timeout{10000};
+    /// `KINESIS_VOTERS`: the ids that voted in each group when the cluster
+    /// was first formed (kinesis-independent-layers task 13). Defaults to
+    /// every KYTHIRA_PEERS id. A data node not in it joins: it creates no
+    /// group at start and takes replicas only as the cluster adds it
+    /// (an evacuation's target), learning each group's descriptor from its
+    /// peers. Its size is the replication factor an evacuation keeps.
+    std::vector<kythira::host_node_id> _voters;
+    /// `KINESIS_DISCARD_REPLICAS`: let a node start without the `data` role
+    /// while its data directory still holds Raft replicas, deleting them.
+    /// Without it such a start is refused (Requirement 11.3) unless an
+    /// evacuation released the node.
+    bool _discard_replicas{false};
     /// `KINESIS_KMS`: the key provider encrypted streams use (task 14):
     /// `off` (StartStreamEncryption refused), `local` (data keys wrapped
     /// under `KINESIS_KMS_PASSPHRASE[_FILE]`, the same on every node) or
