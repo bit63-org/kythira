@@ -447,7 +447,30 @@ jobs:
         # (step 835 of 1925, #964), so g++ on arm64 compiles two at a time
         # and clang, which has not failed this way, three. x64 keeps
         # -j$(nproc).
-        run: cmake --build build -j${{ matrix.arch_label == 'arm64' && (startsWith(matrix.compiler, 'g++') && '2' || '3') || '$(nproc)' }}
+        #
+        # The sampler is the stdexec leg's (see its Build step): memory,
+        # swap, load and the largest live compiler, in the job log every
+        # 30 s. A runner the platform reclaims for running out of memory
+        # leaves no log at all, so it cannot explain that run; what it
+        # gives is the headroom on green runs, and which translation units
+        # were in flight when a surviving runner came close. That is how
+        # the Redis gateway tests were found to need the heavy_tu pool on
+        # 2026-11-26 (services/redis/tests/CMakeLists.txt).
+        run: |
+          set -euo pipefail
+          (
+            while sleep 30; do
+              mem=$(free -m | awk '/^Mem:/{m=$3" used, "$7" avail"} /^Swap:/{s=$3} END{print m", swap "s}')
+              # cc1plus is g++'s compiler proper; clang compiles in a
+              # clang-18 / clang++-18 process.
+              cc=$(ps -eo rss=,comm= | awk '$2 ~ /^(cc1plus|clang)/ {n++; if ($1 > m) m = $1} END {print n+0, int(m/1024)}')
+              echo "[sample] $(date -u +%H:%M:%S) MiB ${mem}; load $(cut -d' ' -f1 /proc/loadavg);" \
+                   "compilers ${cc% *}, largest ${cc#* } MiB"
+            done
+          ) &
+          sampler=$!
+          trap 'kill "$sampler" 2>/dev/null || true' EXIT
+          cmake --build build -j${{ matrix.arch_label == 'arm64' && (startsWith(matrix.compiler, 'g++') && '2' || '3') || '$(nproc)' }}
 
       # .kiro/specs/mold-linker/ Requirement 5.3: configure fails if mold is
       # missing, and this catches every other way of linking with ld.bfd
