@@ -800,6 +800,9 @@ auto try_issue_certificate(const std::vector<std::string>& public_ips,
     -> bool {
     auto leader_ip = find_leader_ip(public_ips, private_key_pem, timeout);
     if (!leader_ip.has_value()) {
+        // Says which half of an issuance check failed: no node named a
+        // leader at all, or a leader answered the request with an error.
+        std::cerr << "try_issue_certificate: no leader found within " << timeout.count() << "s\n";
         return false;
     }
 
@@ -821,7 +824,12 @@ auto try_issue_certificate(const std::vector<std::string>& public_ips,
                "' -H 'Content-Type: application/json' --data-binary @- "
                "http://localhost:8443/v1/certificates";
     auto out = ssh_execute(*leader_ip, private_key_pem, cmd, std::chrono::seconds(30));
-    return out == "200";
+    if (out != "200") {
+        std::cerr << "try_issue_certificate: leader " << *leader_ip << " answered '" << out
+                  << "'\n";
+        return false;
+    }
+    return true;
 }
 
 // Polls try_issue_certificate() repeatedly over `timeout` and returns true
@@ -898,6 +906,18 @@ void dump_cluster_diagnostic_state(const std::vector<std::string>& ips,
             std::cerr << "=== " << ip << ": could not fetch state: " << e.what() << "\n";
         }
     }
+}
+
+// Passes `ok` through, dumping the cluster's state first when it is false.
+// Every issuance check that can fail a case goes through this: on the
+// 2026-11-25 proving run, staggered_third_node_join_maintains_connectivity
+// failed on a check with no dump, and the run left nothing to diagnose.
+auto or_dump(bool ok, const std::vector<std::string>& ips, const std::string& private_key_pem)
+    -> bool {
+    if (!ok) {
+        dump_cluster_diagnostic_state(ips, private_key_pem);
+    }
+    return ok;
 }
 
 // Deletes the bootstrap credential's cert/key on `public_ip` — the
@@ -1018,7 +1038,8 @@ BOOST_FIXTURE_TEST_CASE(bootstrap_and_cutover_survives_bootstrap_credential_dele
     // this, so poll via repeated successful issuances, matching the local
     // test's approach.
     BOOST_REQUIRE_MESSAGE(
-        wait_issuance_capable(public_ips, private_key_pem, std::chrono::minutes(5)),
+        or_dump(wait_issuance_capable(public_ips, private_key_pem, std::chrono::minutes(5)),
+                public_ips, private_key_pem),
         "cluster never reached a stable, issuance-capable state");
 
     for (const auto& ip : public_ips) {
@@ -1026,7 +1047,8 @@ BOOST_FIXTURE_TEST_CASE(bootstrap_and_cutover_survives_bootstrap_credential_dele
     }
 
     BOOST_REQUIRE_MESSAGE(
-        try_issue_certificate(public_ips, private_key_pem, std::chrono::minutes(3)),
+        or_dump(try_issue_certificate(public_ips, private_key_pem, std::chrono::minutes(3)),
+                public_ips, private_key_pem),
         "certificate issuance failed after deleting the bootstrap credential post-cutover");
 
     for (const auto& p : cluster) {
@@ -1125,7 +1147,8 @@ BOOST_FIXTURE_TEST_CASE(staggered_third_node_join_maintains_connectivity,
 
     std::vector<std::string> first_two_ips{public_ips[0], public_ips[1]};
     BOOST_REQUIRE_MESSAGE(
-        try_issue_certificate(first_two_ips, private_key_pem, std::chrono::minutes(3)),
+        or_dump(try_issue_certificate(first_two_ips, private_key_pem, std::chrono::minutes(3)),
+                first_two_ips, private_key_pem),
         "certificate issuance failed with only 2 of 3 nodes up");
 
     // Now start the third, staggered node.
@@ -1139,12 +1162,14 @@ BOOST_FIXTURE_TEST_CASE(staggered_third_node_join_maintains_connectivity,
     // Connectivity must hold throughout the staggered window.
     for (int i = 0; i < 3; ++i) {
         BOOST_REQUIRE_MESSAGE(
-            try_issue_certificate(public_ips, private_key_pem, std::chrono::minutes(2)),
+            or_dump(try_issue_certificate(public_ips, private_key_pem, std::chrono::minutes(2)),
+                    public_ips, private_key_pem),
             "certificate issuance failed during staggered finalization window, attempt " << i);
     }
 
     BOOST_REQUIRE_MESSAGE(
-        wait_issuance_capable(public_ips, private_key_pem, std::chrono::minutes(5)),
+        or_dump(wait_issuance_capable(public_ips, private_key_pem, std::chrono::minutes(5)),
+                public_ips, private_key_pem),
         "cluster never reached a stable, issuance-capable state after staggered join");
 
     for (const auto& p : cluster) {
@@ -1233,7 +1258,8 @@ BOOST_FIXTURE_TEST_CASE(restarted_node_rejoins_without_bootstrap_credential,
     }
 
     BOOST_REQUIRE_MESSAGE(
-        wait_issuance_capable(public_ips, private_key_pem, std::chrono::minutes(5)),
+        or_dump(wait_issuance_capable(public_ips, private_key_pem, std::chrono::minutes(5)),
+                public_ips, private_key_pem),
         "cluster never reached a stable, issuance-capable state");
 
     // Target the third node (index 2) — confirm its persisted peer
@@ -1308,7 +1334,8 @@ BOOST_FIXTURE_TEST_CASE(restarted_node_rejoins_without_bootstrap_credential,
     BOOST_REQUIRE_MESSAGE(wait_healthy(target_ip, private_key_pem, std::chrono::minutes(3)),
                           "restarted node never became healthy again");
     BOOST_REQUIRE_MESSAGE(
-        try_issue_certificate(public_ips, private_key_pem, std::chrono::minutes(3)),
+        or_dump(try_issue_certificate(public_ips, private_key_pem, std::chrono::minutes(3)),
+                public_ips, private_key_pem),
         "certificate issuance failed after restarting the target node without the bootstrap "
         "credential");
 
@@ -1398,7 +1425,8 @@ BOOST_FIXTURE_TEST_CASE(network_isolation_during_cutover_recovers, rpc_tls_three
                               "node never became healthy");
     }
     BOOST_REQUIRE_MESSAGE(
-        wait_issuance_capable(public_ips, private_key_pem, std::chrono::minutes(5)),
+        or_dump(wait_issuance_capable(public_ips, private_key_pem, std::chrono::minutes(5)),
+                public_ips, private_key_pem),
         "cluster never reached a stable, issuance-capable state before isolation");
 
     // Isolate the third node's AZ (never the bootstrap node in azs[0], so
