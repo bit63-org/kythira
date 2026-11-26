@@ -170,6 +170,14 @@ struct cache_http_stats {
     std::atomic<std::uint64_t> _too_large{0};
     std::atomic<std::uint64_t> _insufficient_storage{0};
     std::atomic<std::uint64_t> _aborted_puts{0};
+    /// Why a `PUT` got 503, one counter per cause: no leader to take it
+    /// here (none known, or the relay to it failed before any answer), a
+    /// `put_chunk` proposal that failed or timed out, and a `commit` that
+    /// failed, timed out or did not bind. A client sees the same 503 for
+    /// all three and retries; these say which part of the path refused.
+    std::atomic<std::uint64_t> _put_no_leader{0};
+    std::atomic<std::uint64_t> _put_chunk_failures{0};
+    std::atomic<std::uint64_t> _put_commit_refused{0};
     /// Where a leader's `PUT` time goes (GitHub issue 942), summed over
     /// requests: waiting on the client for body bytes, waiting for a
     /// `put_chunk` proposal to apply before the next may go (one is in
@@ -1133,6 +1141,7 @@ auto cache_http_front_end<Host, Logger>::propose(const std::string& key,
     try {
         auto future = _host.submit_command(key, command, _config._command_timeout);
         if (!future.wait(_config._command_timeout)) {
+            _logger.log(log_level::warning, "cache http: proposal timed out", {{"key", key}});
             return std::nullopt;
         }
         return std::move(future).get();
@@ -1140,7 +1149,11 @@ auto cache_http_front_end<Host, Logger>::propose(const std::string& key,
         forward_to = e.leader_hint();
         return std::nullopt;
     } catch (const std::exception& e) {
-        _logger.log(log_level::debug, "cache http: proposal failed", {{"error", e.what()}});
+        // Warning, not debug: every caller answers the client 503 for it,
+        // and without the reason a refused write cannot be told apart from
+        // a lost leader (GitHub issue 942).
+        _logger.log(log_level::warning, "cache http: proposal failed",
+                    {{"key", key}, {"error", e.what()}});
         return std::nullopt;
     }
 }
@@ -1527,6 +1540,7 @@ auto cache_http_front_end<Host, Logger>::handle_put(connection& c, Stream& strea
                 return *r;
             }
         }
+        ++_stats._put_no_leader;
         return reply(c, stream, parser, http::status::service_unavailable);
     }
     if (_write_refusal) {
@@ -1578,9 +1592,15 @@ auto cache_http_front_end<Host, Logger>::handle_put(connection& c, Stream& strea
             if (f.wait(_config._command_timeout)) {
                 (void)std::move(f).get();
                 ok = true;
+            } else {
+                _logger.log(log_level::warning, "cache http: put_chunk timed out", {{"key", key}});
             }
         } catch (const std::exception& e) {
-            _logger.log(log_level::debug, "cache http: put_chunk failed", {{"error", e.what()}});
+            _logger.log(log_level::warning, "cache http: put_chunk failed",
+                        {{"key", key}, {"error", e.what()}});
+        }
+        if (!ok) {
+            ++_stats._put_chunk_failures;
         }
         add_since(_stats._put_chunk_wait_ns, waiting);
         return ok;
@@ -1664,6 +1684,12 @@ auto cache_http_front_end<Host, Logger>::handle_put(connection& c, Stream& strea
     if (!applied || applied->empty() || applied->front() != std::byte{1}) {
         // Not bound: leadership moved, or a chunk's grace ran out mid-upload
         // (design Component 2). The client retries or treats it as a miss.
+        // propose() has already logged a failed or timed-out proposal; an
+        // applied commit that did not bind is logged here.
+        ++_stats._put_commit_refused;
+        if (applied) {
+            _logger.log(log_level::warning, "cache http: commit did not bind", {{"key", key}});
+        }
         return reply(c, stream, parser, http::status::service_unavailable);
     }
     ++_stats._puts;
@@ -1806,6 +1832,9 @@ auto cache_http_front_end<Host, Logger>::handle_metrics(connection& c, Stream& s
     line("too_large", _stats._too_large);
     line("insufficient_storage", _stats._insufficient_storage);
     line("aborted_puts", _stats._aborted_puts);
+    line("put_no_leader", _stats._put_no_leader);
+    line("put_chunk_failures", _stats._put_chunk_failures);
+    line("put_commit_refused", _stats._put_commit_refused);
     line("put_chunks", _stats._put_chunks);
     line("put_body_ns", _stats._put_body_ns);
     line("put_chunk_wait_ns", _stats._put_chunk_wait_ns);
