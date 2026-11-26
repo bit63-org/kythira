@@ -51,7 +51,9 @@ concurrency:
 jobs:
   prune:
     name: Prune unreachable caches
-    runs-on: ${{ (github.event.pull_request.head.repo.fork && 'ubuntu-24.04') || vars.KYTHIRA_X64_RUNNER || 'bit63' }}
+    # API calls only, run after every closed pull request as well as
+    # nightly: not worth one of bit63's few slots (doc/ci_runner_pools.md).
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - name: Checkout

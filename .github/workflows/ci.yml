@@ -4116,6 +4116,8 @@ jobs:
         run: python3 scripts/tests/test_check_module_boundaries.py -v
       - name: clang-tidy shard planner passes its tests
         run: python3 scripts/tests/test_tidy_shard.py -v
+      - name: Background runner-pool picker passes its tests
+        run: python3 scripts/tests/test_pick_runner.py -v
       - name: Every services/ module uses only Kythira's public surface
         run: python3 scripts/check_module_boundaries.py
 
