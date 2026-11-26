@@ -76,6 +76,9 @@ is extended as the rest land.
     (one key), `TOUCH`, `OBJECT ENCODING`; replies from `apply()`
   - Size limit on resulting value; `COMMAND INFO`/`DOCS` key specs for
     every command so far
+  - Add counters and `SET NX` locks to task 20's workloads
+    (`redis_layer_paths_test`, `layer_paths_chaos_test`), checking exact
+    counter totals and that no lock is held twice
   - _Requirements: 1.3, 3.1-3.6, 3.8, 3.9_
 
 - [ ] 4. Expiry family
@@ -98,6 +101,8 @@ is extended as the rest land.
   - `RENAME`, `RENAMENX`, `COPY [REPLACE]`, `MSETNX`, multi-key
     `DEL`/`UNLINK`/`EXISTS`; tests on single-group, cross-group,
     no-transaction builds, and a split between routing and submission
+  - Add cross-shard `RENAME` to task 20's workloads, checking the key
+    moves whole and exactly once
   - _Requirements: 3.7, 6.1-6.6_
 
 - [ ] 7. Typed value model and hashes
@@ -106,6 +111,8 @@ is extended as the rest land.
     shared-handle reads for `HGETALL`
   - Every hash command; `HSCAN` waits for task 12 (registered then)
   - Determinism test across two replicas on random streams
+  - Add hashes to task 20's workloads, checking every field and the
+    key's type
   - _Requirements: 9.1-9.6, 10.1, 10.2_
 
 - [ ] 8. Sets
@@ -116,6 +123,7 @@ is extended as the rest land.
 - [ ] 9. Lists (non-blocking)
   - Every non-blocking list command; O(1) ends; `LMOVE`/`RPOPLPUSH`
     through the planner; blocking forms stay unknown
+  - Add lists to task 20's workloads, checking order and length
   - _Requirements: 12.1-12.3_
 
 - [ ] 10. Typed values on the engine store
@@ -139,6 +147,9 @@ is extended as the rest land.
   - `SCAN`, `HSCAN`, `SSCAN`, `KEYS` (admin, bounded), `RANDOMKEY`
   - Tests: iteration across splits, merges and leader changes returns
     every stable key exactly once; filtered keys never leak
+  - Add a long `SCAN` to task 20's workloads that spans layout steps,
+    checking every stable key appears exactly once and no step answers
+    `invalid cursor`
   - _Requirements: 7.1-7.8_
 
 - [ ] 13. Admin tools and introspection
@@ -215,7 +226,7 @@ is extended as the rest land.
   - Runbook for each split and merge, with checks and reversal
   - _Requirements: 21.1-21.6_
 
-- [ ] 20. Layer migration path tests
+- [x] 20. Layer migration path tests
   - In-process, each path in both directions under the mixed workload
     (counters, `SET NX` locks, hashes, lists, cross-shard `MSET` and
     `RENAME`, a long `SCAN`): gateway split/merge; front-end split/merge;
@@ -227,6 +238,39 @@ is extended as the rest land.
   - docker-chaos scenario of the full path both ways, killing one node per
     layer, on Docker and rootless Podman; co-located measurement row
   - _Requirements: 21.5, 24.1-24.4_
+  - Done with the commands that have shipped: `SET`, `SETEX`, cross-shard
+    `MSET` and `MULTI`/`EXEC`, checked for lost or torn writes, atomicity
+    and deadlines (`redis_layer_paths_test`, `layer_paths_chaos_test`,
+    the "Task 20" row in `doc/redis-layers.md`). Tasks 3, 6, 7, 9 and 12
+    each add their commands to both workloads as they ship.
+  - The paths found bugs, fixed here: a node that had left the data
+    layer answered `KYTHIRA.DATA ROUTES` with an empty table; an
+    evacuation off a node that was down never reported done, and never
+    started while any listed data node was silent; a node without
+    `data` passed another node's internal `KYTHIRA.EVACUATE` on to a data
+    node; STATUS took any answer at a peer's address for that peer's
+    view; and a joining node took its voter count from `KYTHIRA_PEERS`.
+  - Follow-up: a joining node that runs `gateway` and `front_end` serves
+    clients only once it holds the groups, because a node with `data`
+    attaches no remote half; the runbook keeps it out of rotation until
+    then. Attaching the remote half until its first replicas arrive
+    would let it serve at once.
+  - Follow-up (shared transport): `bounded_resolver` hands out a peer's
+    last-seen Raft address once its name stops resolving, and remembers
+    failed lookups. A dead container's address handed to a new one is
+    then dialled under the dead peer's name, and a peer that just
+    started can stay unresolvable for a moment. TLS hostname checks
+    refuse the wrong peer; plaintext does not. The evacuation controller
+    now checks the node id in each STATUS answer, and an operator runs
+    START again for a peer that missed it.
+  - Follow-up: with the CPU starved (three busy loops on four cores),
+    about one in five in-process runs saw writes crawl for over 90 s
+    after the gateway merge: plain SETs took 1-13 s each through the
+    restarted front ends, and MSET and MULTI answered "outcome unknown"
+    or "a shard did not prepare". With one busy loop, 8 of 8 runs
+    passed. Find what makes a front end restarted beside running data
+    nodes that slow under load (leader churn on the data groups is the
+    first suspect).
 
 - [ ] 21. Interoperability with ElastiCache and MemoryDB
   - CI (no spend): recorded ElastiCache (Valkey, Redis OSS) and MemoryDB
