@@ -95,6 +95,10 @@ struct node_options {
     /// Every voter's gateway `host:port`, for forwarding. Defaults to the
     /// peer's host with this node's own plaintext listen port.
     std::map<kythira::host_node_id, std::string> _peer_gateways;
+    /// The layer membership group's voters (`KYTHIRA_REDIS_MEMBERSHIP`;
+    /// redis-general-data-types task 18), each one of `_peers`. A node
+    /// listed here holds a replica of the group; empty runs no group.
+    std::vector<kythira::host_node_id> _membership_voters;
     /// Keys the initial shard map is cut at; empty means one shard covering
     /// the whole key space, from which the split policy takes over.
     std::vector<std::string> _shard_cuts;

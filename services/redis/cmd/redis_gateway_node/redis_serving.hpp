@@ -21,6 +21,7 @@
 /// (no id allocator is set), so those are all the ids it uses.
 
 #include "config.hpp"
+#include "redis_membership_group.hpp"
 #include "redis_serving_api.hpp"
 
 #include <raft/binary_file_persistence.hpp>
@@ -352,6 +353,15 @@ public:
             _voters.push_back(id);
         }
 
+        // A voter of the layer membership group (task 18) holds its replica
+        // on a host of its own, which takes the space's last group id.
+        _membership_voter =
+            std::find(_opt._membership_voters.begin(), _opt._membership_voters.end(),
+                      _opt._node_id) != _opt._membership_voters.end();
+        if (_membership_voter) {
+            const auto id = membership_group_id(space);
+            _membership = make_membership_group<Host>(_opt, node, id, node.mux().view(id, id));
+        }
         _host = std::make_unique<host_type>(make_config(node, space));
         _host_ptr.store(_host.get(), std::memory_order_release);
 
@@ -414,9 +424,21 @@ public:
             };
         }
 
+        auto gateway_cfg = *_gateway_cfg;
+        if (_membership) {
+            _membership->start();
+            auto* group = _membership.get();
+            gateway_cfg._membership_local = kythira::redis_gateway_config::membership_replica{
+                ._propose =
+                    [group](std::vector<std::byte> command) {
+                        return group->propose(std::move(command));
+                    },
+                ._read = [group] { return group->read(); },
+            };
+        }
         auto peer_gateways = _opt._peer_gateways;
         _gateway = std::make_unique<gateway_type>(
-            *_host, *_acl, _logger, _metrics, *_gateway_cfg,
+            *_host, *_acl, _logger, _metrics, gateway_cfg,
             [peer_gateways](const node_id_type& id) -> std::optional<std::string> {
                 auto it = peer_gateways.find(id);
                 if (it == peer_gateways.end()) {
@@ -489,6 +511,12 @@ public:
             _disk->_pinned = nullptr;  // it reads the host
         }
         _front_end.reset();
+        if (_gateway) {
+            _gateway->stop();  // its membership round reads the group
+        }
+        if (_membership) {
+            _membership->stop();
+        }
         if (_host) {
             _host->stop();
         }
@@ -511,7 +539,9 @@ private:
         config_type cfg{
             .node_id = _opt._node_id,
             .network_client = typename types::network_client_type{node.client()},
-            .network_server = node.server_for(space),
+            .network_server = _membership_voter
+                                  ? node.mux().view(space.first(), membership_group_id(space) - 1)
+                                  : node.server_for(space),
             .store_factory =
                 [this](const std::uint64_t& group) {
                     if constexpr (Storage::on_disk || Storage::engine) {
@@ -909,6 +939,9 @@ private:
         _driver = std::thread([this] {
             while (_driving.load(std::memory_order_acquire)) {
                 auto report = _host->tick();
+                if (_membership) {
+                    _membership->tick();
+                }
                 if (report._policy_ran) {
                     if (_disk || _engine_refresh) {
                         // Fresh figures for the write gate and the budget
@@ -975,6 +1008,10 @@ private:
     std::function<kythira::cache_node_report()> _engine_refresh;
     /// What the fetcher's callbacks read, cleared before the host goes.
     std::atomic<host_type*> _host_ptr{nullptr};
+    bool _membership_voter = false;
+    // Declared before the Redis host: destroyed after it, as the two share
+    // the node's listener.
+    std::unique_ptr<membership_group> _membership;
     std::unique_ptr<host_type> _host;
     std::unique_ptr<gateway_type> _gateway;
     std::unique_ptr<front_end_type> _front_end;

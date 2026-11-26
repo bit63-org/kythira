@@ -88,6 +88,8 @@ kythira_redis_test(redis_auth_limiter_unit_test redis_auth_limiter_unit_test.cpp
 kythira_redis_test(redis_data_wire_unit_test redis_data_wire_unit_test.cpp)
 # Task 17: the bytes of an authenticated call from a gateway to a front end.
 kythira_redis_test(redis_call_wire_unit_test redis_call_wire_unit_test.cpp)
+# Task 18: SCAN cursors, the member list on the wire, load, DNS discovery.
+kythira_redis_test(redis_layer_membership_unit_test redis_layer_membership_unit_test.cpp)
 # redis_gateway_node's own environment parsing (the plaintext-Raft opt-in).
 kythira_redis_test(redis_gateway_node_config_unit_test
                    redis_gateway_node_config_unit_test.cpp)

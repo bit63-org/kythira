@@ -8,6 +8,7 @@
 #
 # file                                       allowed core *_impl.hpp           why
 cmd/redis_gateway_node/redis_serving.hpp     multi_raft_impl.hpp               instantiates the multi-raft host
+cmd/redis_gateway_node/redis_membership_group_impl.hpp  multi_raft_impl.hpp  instantiates the membership group's host
 cmd/redis_gateway_node/standalone_node.hpp   beast_http_transport_impl.hpp     instantiates the Beast transport
 tests/cache_http_front_end_test.cpp          multi_raft_impl.hpp               stands up in-process hosts
 tests/cache_fsync_stall_test.cpp             multi_raft_impl.hpp               stands up in-process hosts

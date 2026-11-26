@@ -5,6 +5,20 @@ current list of outstanding work, see [TODO.md](TODO.md).
 
 ### What Changed (November 26, 2026)
 
+- **Redis gateways find their front ends in the layer membership group,
+  by DNS, or in configuration, and a member can be drained.**
+  `KYTHIRA_REDIS_MEMBERSHIP` names the group's voters, which hold it on a
+  Raft host of its own; every gateway and front end announces itself there
+  through `KYTHIRA.MEMBERS`, reports connections, commands per second and
+  CPU, and follows its drain state. `KYTHIRA.LAYERS LIST | DRAIN | SERVE`
+  lets an admin take a front end or a gateway out of service without
+  failing a command: gateways stop calling a draining front end, a draining
+  gateway stops accepting connections and closes its clients once their
+  commands finish, and each reports itself drained when nothing is in
+  flight. Without the group, `KYTHIRA_REDIS_FRONT_ENDS_DNS` takes every
+  address a name resolves to. Front ends publish the 14-bit index their
+  `SCAN` cursors will carry (`.kiro/specs/redis-general-data-types/`
+  task 18).
 - **A Redis gateway can run apart from the front end, and nodes of
   different layers prove who they are.** `KYTHIRA_REDIS_ROLES=gateway`
   with `KYTHIRA_REDIS_FRONT_ENDS` holds client connections, their protocol,

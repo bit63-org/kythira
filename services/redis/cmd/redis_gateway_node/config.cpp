@@ -609,13 +609,101 @@ auto from_env() -> node_options {
     g._data_nodes = host_ports("KYTHIRA_REDIS_DATA_NODES", get_opt("KYTHIRA_REDIS_DATA_NODES", ""));
     // A gateway without the front end (task 17) calls these front ends'
     // listeners, by name or literal, resolved when used.
-    g._front_ends = host_ports("KYTHIRA_REDIS_FRONT_ENDS", get_opt("KYTHIRA_REDIS_FRONT_ENDS", ""));
+    // Entries may name the front end: id=host:port.
+    {
+        std::vector<std::string> entries;
+        const auto text = get_opt("KYTHIRA_REDIS_FRONT_ENDS", "");
+        for (auto& item : host_ports("KYTHIRA_REDIS_FRONT_ENDS", text)) {
+            const auto eq = item.find('=');
+            if (eq != std::string::npos &&
+                (eq == 0 || !kythira::split_host_port(item.substr(eq + 1)))) {
+                throw std::invalid_argument(
+                    "redis_gateway_node: KYTHIRA_REDIS_FRONT_ENDS entries are host:port or "
+                    "id=host:port (got '" +
+                    item + "')");
+            }
+            entries.push_back(std::move(item));
+        }
+        g._front_ends = std::move(entries);
+    }
+    // Layer membership (task 18, Requirement 20): DNS discovery of front
+    // ends, or the layer membership group, whose voters are named by node
+    // id and reached on their gateway addresses.
+    g._front_ends_dns = get_opt("KYTHIRA_REDIS_FRONT_ENDS_DNS", "");
+    if (!g._front_ends_dns.empty() && !kythira::split_host_port(g._front_ends_dns)) {
+        throw std::invalid_argument(
+            "redis_gateway_node: KYTHIRA_REDIS_FRONT_ENDS_DNS must be one name:port (got '" +
+            g._front_ends_dns + "')");
+    }
+    g._discovery_interval =
+        std::chrono::milliseconds{to_u64("KYTHIRA_REDIS_DISCOVERY_INTERVAL_MS",
+                                         get_opt("KYTHIRA_REDIS_DISCOVERY_INTERVAL_MS", "5000"))};
+    g._membership_interval =
+        std::chrono::milliseconds{to_u64("KYTHIRA_REDIS_MEMBERSHIP_INTERVAL_MS",
+                                         get_opt("KYTHIRA_REDIS_MEMBERSHIP_INTERVAL_MS", "1000"))};
+    if (g._membership_interval.count() == 0 || g._discovery_interval.count() == 0) {
+        throw std::invalid_argument(
+            "redis_gateway_node: KYTHIRA_REDIS_MEMBERSHIP_INTERVAL_MS and "
+            "KYTHIRA_REDIS_DISCOVERY_INTERVAL_MS must be above 0");
+    }
+    o._membership_voters.clear();
+    if (const auto voters = get_opt("KYTHIRA_REDIS_MEMBERSHIP", ""); !voters.empty()) {
+        std::size_t start = 0;
+        while (start <= voters.size()) {
+            const auto comma = std::min(voters.find(',', start), voters.size());
+            const auto item = voters.substr(start, comma - start);
+            const auto id = to_peer_id("KYTHIRA_REDIS_MEMBERSHIP", item);
+            if (!o._peers.contains(id)) {
+                throw std::invalid_argument(
+                    "redis_gateway_node: KYTHIRA_REDIS_MEMBERSHIP names node " + item +
+                    ", which KYTHIRA_PEERS does not list");
+            }
+            if (std::find(o._membership_voters.begin(), o._membership_voters.end(), id) !=
+                o._membership_voters.end()) {
+                throw std::invalid_argument("redis_gateway_node: KYTHIRA_REDIS_MEMBERSHIP lists " +
+                                            item + " twice");
+            }
+            o._membership_voters.push_back(id);
+            start = comma + 1;
+        }
+        if (o._membership_voters.size() % 2 == 0) {
+            throw std::invalid_argument(
+                "redis_gateway_node: KYTHIRA_REDIS_MEMBERSHIP needs an odd number of voters "
+                "(1, 3 or 5)");
+        }
+        g._membership_voters.clear();
+        for (const auto& id : o._membership_voters) {
+            g._membership_voters.push_back(o._peer_gateways.at(id));
+        }
+    }
+    g._advertise_address = get_opt("KYTHIRA_REDIS_ADVERTISE", "");
+    if (!g._advertise_address.empty() && !kythira::split_host_port(g._advertise_address)) {
+        throw std::invalid_argument(
+            "redis_gateway_node: KYTHIRA_REDIS_ADVERTISE must be host:port (got '" +
+            g._advertise_address + "')");
+    }
+    g._placement_group = get_opt("KYTHIRA_REDIS_PLACEMENT_GROUP", "");
+    {
+        std::ostringstream id;
+        id << o._node_id;
+        g._member_id = id.str();
+        const auto index = get_opt("KYTHIRA_REDIS_FRONT_END_INDEX", "");
+        g._front_end_index =
+            index.empty()
+                ? kythira::redis_membership::default_front_end_index(id.str())
+                : static_cast<std::uint32_t>(to_u64("KYTHIRA_REDIS_FRONT_END_INDEX", index));
+        if (g._front_end_index > kythira::redis_membership::k_max_front_end_index) {
+            throw std::invalid_argument(
+                "redis_gateway_node: KYTHIRA_REDIS_FRONT_END_INDEX must be 1-16383");
+        }
+    }
     if (g._layer_roles.has(layers::role::gateway) && !g._layer_roles.has(layers::role::front_end) &&
-        g._front_ends.empty()) {
+        g._front_ends.empty() && g._front_ends_dns.empty() && g._membership_voters.empty()) {
         throw std::invalid_argument(
             "redis_gateway_node: KYTHIRA_REDIS_ROLES=" + g._layer_roles.to_string() +
-            ": a gateway without the front end needs KYTHIRA_REDIS_FRONT_ENDS, the front ends' "
-            "listener addresses");
+            ": a gateway without the front end needs KYTHIRA_REDIS_FRONT_ENDS, "
+            "KYTHIRA_REDIS_FRONT_ENDS_DNS or the layer membership group "
+            "(KYTHIRA_REDIS_MEMBERSHIP) to find the front ends");
     }
     if (g._layer_roles.has(layers::role::front_end) && !g._layer_roles.has(layers::role::data)) {
         if (g._data_nodes.empty()) {
@@ -793,6 +881,18 @@ auto usage() -> std::string {
            "data)\n"
            "  KYTHIRA_REDIS_FRONT_ENDS         host:port,... of front ends (a gateway without "
            "front_end)\n"
+           "  KYTHIRA_REDIS_FRONT_ENDS_DNS     name:port; every address is a front end "
+           "(re-resolved)\n"
+           "  KYTHIRA_REDIS_DISCOVERY_INTERVAL_MS  how often that name is resolved [5000]\n"
+           "  KYTHIRA_REDIS_MEMBERSHIP         node ids of the layer membership group's voters "
+           "(1, 3 or 5)\n"
+           "  KYTHIRA_REDIS_MEMBERSHIP_INTERVAL_MS  announce, report load, read the list "
+           "[1000]\n"
+           "  KYTHIRA_REDIS_ADVERTISE          host:port other layers reach this node on "
+           "[hostname:port]\n"
+           "  KYTHIRA_REDIS_PLACEMENT_GROUP    placement group reported to the group  [none]\n"
+           "  KYTHIRA_REDIS_FRONT_END_INDEX    1-16383, names this front end in SCAN cursors "
+           "[node id]\n"
            "  KYTHIRA_REDIS_CLUSTER            cluster named in layer identities  [KYTHIRA_CLUSTER "
            "or default]\n"
            "  KYTHIRA_NODE_INSECURE_PLAINTEXT  1: split layers without TLS identities  [unset]\n"

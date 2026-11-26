@@ -95,6 +95,10 @@ struct layer_member {
     /// Where it serves the internal API ("host:port", a name or a literal).
     std::string address;
     std::string placement_group;
+    /// A small number the member is known by where an id does not fit, such
+    /// as the front end that issued a Redis `SCAN` cursor (14 bits there).
+    /// 0 means none. Stored as given: the member chooses it.
+    std::uint32_t index = 0;
     drain_state drain = drain_state::serving;
     layer_load load;
     /// When it last announced itself and last reported load (ms since the
@@ -357,7 +361,8 @@ public:
         return out;
     }
 
-private:
+    // ---- one member's JSON, for a member list sent elsewhere ----------------
+
     [[nodiscard]] static auto load_to_json(const layer_load& l) -> boost::json::object {
         return {{"rps", l.requests_per_second},
                 {"streams", l.open_streams},
@@ -377,6 +382,7 @@ private:
                 {"roles", m.roles.to_string()},
                 {"address", m.address},
                 {"placement_group", m.placement_group},
+                {"index", m.index},
                 {"drain", static_cast<std::uint64_t>(m.drain)},
                 {"load", load_to_json(m.load)},
                 {"announced_at_ms", m.announced_at_ms},
@@ -388,6 +394,10 @@ private:
         m.roles = role_set::parse(std::string_view(o.at("roles").as_string()));
         m.address = std::string(o.at("address").as_string());
         m.placement_group = std::string(o.at("placement_group").as_string());
+        // Absent in commands and snapshots written before it existed.
+        if (const auto* index = o.if_contains("index")) {
+            m.index = index->to_number<std::uint32_t>();
+        }
         const auto drain = o.at("drain").to_number<std::uint64_t>();
         if (drain > 2) {
             throw std::invalid_argument("layer membership: bad drain state");
@@ -399,6 +409,7 @@ private:
         return m;
     }
 
+private:
     std::map<std::string, layer_member> _members;
     std::uint64_t _settings_version = 0;
 };

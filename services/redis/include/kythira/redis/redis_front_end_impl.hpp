@@ -291,10 +291,12 @@ auto redis_front_end<Host, Logger, Metrics>::layer_refusal() const -> std::optio
         }
     }
     if (roles.has(layers::role::gateway) && !roles.has(layers::role::front_end) &&
-        _config._front_ends.empty()) {
+        _config._front_ends.empty() && _config._front_ends_dns.empty() &&
+        _config._membership_voters.empty() && !_config._membership_local) {
         return named +
                "a gateway without the front end needs the front ends to call "
-               "(KYTHIRA_REDIS_FRONT_ENDS)";
+               "(KYTHIRA_REDIS_FRONT_ENDS, KYTHIRA_REDIS_FRONT_ENDS_DNS or the layer membership "
+               "group, KYTHIRA_REDIS_MEMBERSHIP)";
     }
     if (redis_roles_colocated(roles)) {
         return std::nullopt;
@@ -1469,6 +1471,10 @@ auto redis_front_end<Host, Logger, Metrics>::handle_info(session& s) -> std::str
         << "redis_mode:" << server_mode() << "\r\n"
         << "uptime_in_seconds:" << uptime.count() << "\r\n"
         << "kythira_roles:" << _config._layer_roles.to_string() << "\r\n"
+        << "kythira_membership:" << membership_mode_name() << "\r\n"
+        << "kythira_member_drain:" << layers::to_string(_member_drain.load()) << "\r\n"
+        << "kythira_front_end_index:" << _config._front_end_index << "\r\n"
+        << "kythira_front_end_calls_served:" << _stats._front_end_calls_served.load() << "\r\n"
         << "\r\n# Clients\r\n"
         << "connected_clients:" << _stats._connections_current.load() << "\r\n"
         << "maxclients:" << _config._max_clients << "\r\n"
@@ -2685,6 +2691,9 @@ auto redis_front_end<Host, Logger, Metrics>::peer_role_refusal(session& s, std::
     // forwards need `front_end` or `data`. A session the internal secret
     // authenticated has the roles the secret implies.
     const auto roles = s._peer_roles.value_or(layers::role_set{layers::role::data});
+    if (upper == "KYTHIRA.MEMBERS") {
+        return std::nullopt;  // every member announces itself (task 18)
+    }
     const auto needed = upper == "KYTHIRA.CALL"
                             ? layers::role_set{layers::role::gateway}
                             : layers::role_set{layers::role::front_end, layers::role::data};
@@ -2748,7 +2757,17 @@ auto redis_front_end<Host, Logger, Metrics>::handle_call(session& s, const resp_
     const auto upper = resp_to_upper(inner._argv[0]);
 
     redis_call_wire::call_answer answer;
-    answer.reply = execute_command(c, upper, inner);
+    // A draining front end counts its calls, so it reports itself drained
+    // only once none is running (task 18).
+    ++_stats._calls_in_flight;
+    ++_stats._front_end_calls_served;
+    try {
+        answer.reply = execute_command(c, upper, inner);
+    } catch (...) {
+        --_stats._calls_in_flight;
+        throw;
+    }
+    --_stats._calls_in_flight;
     answer.queued = c._queued.size() > queued_before;
     answer.state.user = state->user;
     answer.state.resp_version = static_cast<std::uint8_t>(c._writer.version());

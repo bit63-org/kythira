@@ -770,7 +770,8 @@ public:
         cfg._worker_threads = 4;
         cfg._command_timeout = std::chrono::milliseconds{3000};
         cfg._layer_roles = {kythira::layers::role::gateway};
-        if (cfg._front_ends.empty()) {
+        if (cfg._front_ends.empty() && cfg._front_ends_dns.empty() &&
+            cfg._membership_voters.empty() && !cfg._membership_local) {
             for (node_id_t n = 1; n <= k_node_count; ++n) {
                 cfg._front_ends.push_back("127.0.0.1:" +
                                           std::to_string(cfg._forward_tls ? tls_port(n) : port(n)));
@@ -3364,4 +3365,209 @@ BOOST_AUTO_TEST_CASE(certificates_rotate_without_a_restart, *boost::unit_test::t
     BOOST_REQUIRE_EQUAL(follower.auth("farm", "farm-secret"), "+OK\r\n");
     BOOST_CHECK_EQUAL(follower.call({"SET", "sccache/rot/3", "v"}), "+OK\r\n");
     BOOST_CHECK_EQUAL(gw.stats()._front_end_lost.load(), 0u);
+}
+
+// ── task 18: layer membership ────────────────────────────────────────────────
+
+namespace {
+
+/// One replica of the layer membership group, shared by the nodes that are
+/// its voters in these cases. The group's Raft replication is
+/// layer_membership_test's; here it is what the gateways do with the list.
+class shared_membership {
+public:
+    auto replica() -> redis_gateway_config::membership_replica {
+        return {
+            ._propose =
+                [this](std::vector<std::byte> command) -> std::optional<std::vector<std::byte>> {
+                std::lock_guard lock(_mu);
+                return std::vector<std::byte>{_core.apply_command(command) ? std::byte{1}
+                                                                           : std::byte{0}};
+            },
+            ._read = [this] { return members(); },
+        };
+    }
+    auto members() -> std::vector<kythira::layers::layer_member> {
+        std::lock_guard lock(_mu);
+        return _core.members();
+    }
+    auto find(const std::string& id) -> std::optional<kythira::layers::layer_member> {
+        std::lock_guard lock(_mu);
+        return _core.find(id);
+    }
+
+private:
+    std::mutex _mu;
+    kythira::layers::layer_membership_core _core;
+};
+
+template<typename Pred> auto eventually(Pred pred, std::chrono::milliseconds budget) -> bool {
+    const auto deadline = std::chrono::steady_clock::now() + budget;
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (pred()) {
+            return true;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds{20});
+    }
+    return pred();
+}
+
+/// The value of `field` in an INFO reply.
+auto info_field(const std::string& info, const std::string& field) -> std::string {
+    const auto at = info.find("\r\n" + field + ":");
+    if (at == std::string::npos) {
+        return {};
+    }
+    const auto start = at + 2 + field.size() + 1;
+    return info.substr(start, info.find("\r\n", start) - start);
+}
+
+auto calls_served(cluster& c, node_id_t id) -> std::uint64_t {
+    return c.gateway(id).stats()._front_end_calls_served.load();
+}
+
+auto connect_refused(std::uint16_t port) -> bool {
+    boost::asio::io_context io;
+    boost::asio::ip::tcp::socket sock(io);
+    boost::system::error_code ec;
+    (void)sock.connect({boost::asio::ip::make_address("127.0.0.1"), port}, ec);
+    return static_cast<bool>(ec);
+}
+
+}  // namespace
+
+BOOST_AUTO_TEST_CASE(a_gateway_finds_its_front_ends_in_the_layer_membership_group,
+                     *boost::unit_test::timeout(180)) {
+    // Requirement 20.1: the co-located nodes hold the group (one shared
+    // replica here) and announce themselves; the gateway apart reaches it
+    // through node 1's KYTHIRA.MEMBERS and calls whoever is serving.
+    shared_membership group;
+    redis_gateway_config base;
+    base._insecure_plaintext = true;
+    base._membership_local = group.replica();
+    base._membership_interval = std::chrono::milliseconds{100};
+    cluster c(base);
+    BOOST_REQUIRE(c.await_all_leaders(std::chrono::seconds{20}));
+    BOOST_REQUIRE(
+        eventually([&] { return group.members().size() == 3U; }, std::chrono::seconds{10}));
+    for (node_id_t n = 1; n <= k_node_count; ++n) {
+        const auto m = group.find(std::to_string(n));
+        BOOST_REQUIRE(m.has_value());
+        BOOST_CHECK_EQUAL(m->address, "127.0.0.1:" + std::to_string(c.port(n)));
+        BOOST_CHECK_EQUAL(m->roles.to_string(), "gateway,front_end,data");
+        BOOST_CHECK_EQUAL(m->index, 0u);  // no index configured
+    }
+
+    auto cfg = insecure_gateway_config();
+    cfg._membership_voters = {"127.0.0.1:" + std::to_string(c.port(1))};
+    cfg._membership_interval = std::chrono::milliseconds{100};
+    cfg._member_id = "gw-apart";
+    cfg._drain_timeout = std::chrono::milliseconds{2000};
+    auto& gw = c.add_gateway(cfg);
+    BOOST_REQUIRE(
+        eventually([&] { return group.find("gw-apart").has_value(); }, std::chrono::seconds{10}));
+    BOOST_CHECK_EQUAL(group.find("gw-apart")->roles.to_string(), "gateway");
+
+    resp_client ops(gw.port());
+    BOOST_REQUIRE_EQUAL(ops.auth("ops", "ops-secret"), "+OK\r\n");
+    // The list as the gateway read it on its last round. (INFO here would
+    // be a front end's: the gateway sends it on like any command.)
+    std::string list;
+    BOOST_CHECK(eventually(
+        [&] {
+            list = ops.call({"KYTHIRA.LAYERS", "LIST"});
+            return list.rfind("*4\r\n", 0) == 0;
+        },
+        std::chrono::seconds{5}));
+    BOOST_CHECK(list.find("gw-apart 127.0.0.1:" + std::to_string(gw.port()) + " roles=gateway") !=
+                std::string::npos);
+    resp_client farm(gw.port());
+    BOOST_REQUIRE_EQUAL(farm.auth("farm", "farm-secret"), "+OK\r\n");
+    BOOST_CHECK(farm.call({"KYTHIRA.LAYERS"}).rfind("-NOPERM", 0) == 0);
+    BOOST_CHECK(farm.call({"KYTHIRA.MEMBERS", "LIST"}).rfind("-NOPERM", 0) == 0);
+    BOOST_CHECK_EQUAL(farm.call({"SET", "sccache/mg/1", "v"}), "+OK\r\n");
+    BOOST_CHECK_EQUAL(farm.call({"GET", "sccache/mg/1"}), "$1\r\nv\r\n");
+
+    // Requirement 20.3: a drained front end gets no new calls. Node 1 holds
+    // data, so it keeps its listener and only stops being chosen.
+    BOOST_CHECK_EQUAL(ops.call({"KYTHIRA.LAYERS", "DRAIN", "nobody"}),
+                      "-ERR no member 'nobody' in the layer membership group\r\n");
+    BOOST_REQUIRE_EQUAL(ops.call({"KYTHIRA.LAYERS", "DRAIN", "1"}), "+OK\r\n");
+    BOOST_REQUIRE(
+        eventually([&] { return group.find("1")->drain == kythira::layers::drain_state::drained; },
+                   std::chrono::seconds{10}));
+    resp_client node1(c.port(1));
+    BOOST_REQUIRE_EQUAL(node1.auth("ops", "ops-secret"), "+OK\r\n");
+    BOOST_CHECK_EQUAL(info_field(node1.call({"INFO"}), "kythira_member_drain"), "drained");
+    const auto served_by_1 = calls_served(c, 1);
+    const auto served_by_others = calls_served(c, 2) + calls_served(c, 3);
+    for (int i = 0; i < 30; ++i) {
+        resp_client k(gw.port());
+        BOOST_REQUIRE_EQUAL(k.auth("farm", "farm-secret"), "+OK\r\n");
+        BOOST_CHECK_EQUAL(k.call({"SET", "sccache/mg/d/" + std::to_string(i), "v"}), "+OK\r\n");
+    }
+    BOOST_CHECK_EQUAL(calls_served(c, 1), served_by_1);
+    BOOST_CHECK_GE(calls_served(c, 2) + calls_served(c, 3), served_by_others + 30);
+
+    // Back to serving: it takes calls again.
+    BOOST_REQUIRE_EQUAL(ops.call({"KYTHIRA.LAYERS", "SERVE", "1"}), "+OK\r\n");
+    BOOST_REQUIRE(eventually(
+        [&] {
+            resp_client k(gw.port());
+            (void)k.auth("farm", "farm-secret");
+            (void)k.call({"PING"});
+            return calls_served(c, 1) > served_by_1;
+        },
+        std::chrono::seconds{10}));
+    BOOST_CHECK_EQUAL(gw.stats()._front_end_lost.load(), 0u);
+
+    // A gateway apart that drains stops taking connections, closes its
+    // clients once their commands are done, and reports itself drained.
+    BOOST_REQUIRE_EQUAL(ops.call({"KYTHIRA.LAYERS", "DRAIN", "gw-apart"}), "+OK\r\n");
+    BOOST_REQUIRE(eventually(
+        [&] { return group.find("gw-apart")->drain == kythira::layers::drain_state::drained; },
+        std::chrono::seconds{10}));
+    BOOST_CHECK(connect_refused(gw.port()));
+    BOOST_CHECK_GT(gw.stats()._membership_announces.load(), 0u);
+    BOOST_CHECK_GT(gw.stats()._membership_reports.load(), 0u);
+}
+
+BOOST_AUTO_TEST_CASE(a_gateway_finds_its_front_ends_by_dns, *boost::unit_test::timeout(120)) {
+    // Requirement 20.2: without the group, a name whose every address is a
+    // front end, re-resolved on an interval.
+    redis_gateway_config base;
+    base._insecure_plaintext = true;
+    cluster c(base);
+    BOOST_REQUIRE(c.await_all_leaders(std::chrono::seconds{20}));
+    auto cfg = insecure_gateway_config();
+    cfg._front_ends_dns = "localhost:" + std::to_string(c.port(2));
+    cfg._discovery_interval = std::chrono::milliseconds{200};
+    auto& gw = c.add_gateway(cfg);
+    resp_client ops(gw.port());
+    BOOST_REQUIRE_EQUAL(ops.auth("ops", "ops-secret"), "+OK\r\n");
+    BOOST_CHECK(
+        ops.call({"KYTHIRA.LAYERS", "LIST"}).find("127.0.0.1:" + std::to_string(c.port(2))) !=
+        std::string::npos);
+    // Drain needs the group.
+    BOOST_CHECK(
+        ops.call({"KYTHIRA.LAYERS", "DRAIN", "x"}).rfind("-ERR draining a member needs", 0) == 0);
+    const auto before = calls_served(c, 2);
+    for (int i = 0; i < 5; ++i) {
+        resp_client k(gw.port());
+        BOOST_REQUIRE_EQUAL(k.auth("farm", "farm-secret"), "+OK\r\n");
+        BOOST_CHECK_EQUAL(k.call({"SET", "sccache/dns/" + std::to_string(i), "v"}), "+OK\r\n");
+    }
+    BOOST_CHECK_GE(calls_served(c, 2), before + 5);
+}
+
+BOOST_AUTO_TEST_CASE(only_a_replica_of_the_group_answers_members_calls,
+                     *boost::unit_test::timeout(120)) {
+    redis_gateway_config base;
+    base._insecure_plaintext = true;
+    cluster c(base);
+    BOOST_REQUIRE(c.await_all_leaders(std::chrono::seconds{20}));
+    // A node that holds no replica points the caller elsewhere.
+    resp_client internal(c.port(1));
+    BOOST_REQUIRE_EQUAL(internal.auth("kythira-internal", "internal-secret"), "+OK\r\n");
+    BOOST_CHECK(internal.call({"KYTHIRA.MEMBERS", "LIST"}).rfind("-TRYAGAIN", 0) == 0);
 }
