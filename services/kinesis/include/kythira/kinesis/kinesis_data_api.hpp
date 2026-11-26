@@ -1295,6 +1295,30 @@ template<typename Host, typename RaftCluster, typename Local>
     -> data_api_deps {
     using node_type = typename Host::node_id_type;
     const auto text = [](const node_type& n) { return host_node_id_text(n); };
+    // A row as this node knows it now. The routing map keeps the replica
+    // set a group was created with: membership changes (a replica
+    // evacuated to a node that joined) move only the Raft configuration.
+    // A front end routed by the map would never try a joined leader and
+    // keep trying a replica that left, so every row this node holds a
+    // replica of takes its voters and learners from that replica. A joint
+    // configuration is in transit: the map's set stays until it lands.
+    // The leader hint stays this node when it leads, as before: a
+    // follower's last-known leader may be stale, and a not-leader answer
+    // names the leader anyway.
+    const auto current = [&host](auto row) {
+        auto* n = host.group_node(row._group_id);
+        if (n == nullptr) {
+            return row;
+        }
+        if (const auto m = n->current_membership(); !m.joint && !m.voters.empty()) {
+            row._voters = m.voters;
+            row._learners = m.learners;
+        }
+        if (n->is_leader()) {
+            row._leader_hint = host.node_id();
+        }
+        return row;
+    };
     const auto to_route = [text](const auto& d) {
         data_route out;
         out._group_id = static_cast<std::uint64_t>(d._group_id);
@@ -1338,7 +1362,8 @@ template<typename Host, typename RaftCluster, typename Local>
         }
         return out;
     };
-    deps._check = [&host, to_route](const std::string& key, const std::optional<route_ref>& ref) {
+    deps._check = [&host, to_route, current](const std::string& key,
+                                             const std::optional<route_ref>& ref) {
         route_verdict v;
         const auto d = host.resolve(key);
         if (!d) {
@@ -1349,21 +1374,18 @@ template<typename Host, typename RaftCluster, typename Local>
                     ref->_epoch._version < d->_epoch._version ||
                     ref->_epoch._conf_version < d->_epoch._conf_version)) {
             v._kind = route_check_kind::stale;
-            v._route = to_route(*d);
+            v._route = to_route(current(*d));
         }
         return v;
     };
-    deps._routes = [&host, to_route, text,
+    deps._routes = [&host, to_route, text, current,
                     address_of = std::move(address_of)](const shard_range<std::string>& range) {
         data_route_cache::routes_reply reply;
         const auto map = host.shard_map_snapshot();
-        const auto rows = routes_answer(map, range, [&host](const auto& group) {
-            std::optional<node_type> leader;
-            if (auto* n = host.group_node(group); n != nullptr && n->is_leader()) {
-                leader = host.node_id();
-            }
-            return leader;
-        });
+        std::vector<typename std::remove_cvref_t<decltype(map)>::descriptor_type> rows;
+        for (const auto& row : routes_answer(map, range)) {
+            rows.push_back(current(row));
+        }
         std::vector<node_type> named;
         for (const auto& row : rows) {
             reply.routes.push_back(to_route(row));
