@@ -93,6 +93,14 @@ struct gateway_env {
         "KYTHIRA_CLUSTER",
         "KYTHIRA_NODE_INSECURE_PLAINTEXT",
         "KYTHIRA_REDIS_DRAIN_TIMEOUT_MS",
+        "KYTHIRA_REDIS_FRONT_ENDS_DNS",
+        "KYTHIRA_REDIS_DISCOVERY_INTERVAL_MS",
+        "KYTHIRA_REDIS_MEMBERSHIP",
+        "KYTHIRA_REDIS_MEMBERSHIP_INTERVAL_MS",
+        "KYTHIRA_REDIS_ADVERTISE",
+        "KYTHIRA_REDIS_PLACEMENT_GROUP",
+        "KYTHIRA_REDIS_FRONT_END_INDEX",
+        "KYTHIRA_REDIS_PEER_GATEWAYS",
     };
     gateway_env(const gateway_env&) = delete;
     auto operator=(const gateway_env&) -> gateway_env& = delete;
@@ -666,6 +674,89 @@ BOOST_AUTO_TEST_CASE(layer_identity_settings) {
         // Insecure plaintext lets the secret cross plaintext links too.
         BOOST_TEST(o._gateway._allow_plaintext_forwarding);
         BOOST_TEST(o._gateway._drain_timeout.count() == 2500);
+    }
+}
+
+// ── layer membership (task 18) ────────────────────────────────────────────
+
+BOOST_AUTO_TEST_CASE(layer_membership_settings) {
+    {
+        const gateway_env env;
+        ::setenv("KYTHIRA_RAFT_BIND", "127.0.0.1", 1);
+        const auto o = from_env();
+        BOOST_TEST(o._membership_voters.empty());
+        BOOST_TEST(o._gateway._membership_voters.empty());
+        BOOST_TEST(o._gateway._front_ends_dns.empty());
+        BOOST_TEST(o._gateway._membership_interval.count() == 1000);
+        BOOST_TEST(o._gateway._discovery_interval.count() == 5000);
+        BOOST_TEST(o._gateway._member_id == "1");
+        BOOST_TEST(o._gateway._front_end_index == 1U);  // the node id
+        BOOST_TEST(o._gateway._advertise_address.empty());
+    }
+    {
+        // Voters by node id, reached on their gateway addresses.
+        const gateway_env env;
+        ::setenv("KYTHIRA_RAFT_BIND", "127.0.0.1", 1);
+        ::setenv("KYTHIRA_PEERS",
+                 "1=http://127.0.0.1:7000,2=http://10.0.0.2:7000,3=http://10.0.0.3:7000", 1);
+        ::setenv("KYTHIRA_REDIS_PEER_GATEWAYS", "1=127.0.0.1:6379,2=gw-2:6379,3=gw-3:6379", 1);
+        ::setenv("KYTHIRA_REDIS_MEMBERSHIP", "1,2,3", 1);
+        ::setenv("KYTHIRA_REDIS_MEMBERSHIP_INTERVAL_MS", "250", 1);
+        ::setenv("KYTHIRA_REDIS_ADVERTISE", "fe-1.internal:6379", 1);
+        ::setenv("KYTHIRA_REDIS_PLACEMENT_GROUP", "zone-b", 1);
+        ::setenv("KYTHIRA_REDIS_FRONT_END_INDEX", "77", 1);
+        const auto o = from_env();
+        BOOST_TEST(o._membership_voters.size() == 3U);
+        const std::vector<std::string> want{"127.0.0.1:6379", "gw-2:6379", "gw-3:6379"};
+        BOOST_TEST(o._gateway._membership_voters == want, boost::test_tools::per_element());
+        BOOST_TEST(o._gateway._membership_interval.count() == 250);
+        BOOST_TEST(o._gateway._advertise_address == "fe-1.internal:6379");
+        BOOST_TEST(o._gateway._placement_group == "zone-b");
+        BOOST_TEST(o._gateway._front_end_index == 77U);
+        // An even voter count has no majority to spare.
+        ::setenv("KYTHIRA_REDIS_MEMBERSHIP", "1,2", 1);
+        BOOST_CHECK_THROW((void)from_env(), std::invalid_argument);
+        ::setenv("KYTHIRA_REDIS_MEMBERSHIP", "1,1,2", 1);
+        BOOST_CHECK_THROW((void)from_env(), std::invalid_argument);
+        ::setenv("KYTHIRA_REDIS_MEMBERSHIP", "9", 1);  // not a peer
+        BOOST_CHECK_THROW((void)from_env(), std::invalid_argument);
+        ::setenv("KYTHIRA_REDIS_MEMBERSHIP", "1", 1);
+        ::setenv("KYTHIRA_REDIS_FRONT_END_INDEX", "16384", 1);
+        BOOST_CHECK_THROW((void)from_env(), std::invalid_argument);
+        ::setenv("KYTHIRA_REDIS_FRONT_END_INDEX", "1", 1);
+        ::setenv("KYTHIRA_REDIS_ADVERTISE", "no-port", 1);
+        BOOST_CHECK_THROW((void)from_env(), std::invalid_argument);
+        ::setenv("KYTHIRA_REDIS_ADVERTISE", "fe-1:6379", 1);
+        ::setenv("KYTHIRA_REDIS_MEMBERSHIP_INTERVAL_MS", "0", 1);
+        BOOST_CHECK_THROW((void)from_env(), std::invalid_argument);
+    }
+    {
+        // A gateway without the front end finds front ends by any one of
+        // configuration, DNS or the group; with none it is refused.
+        const gateway_env env;
+        ::setenv("KYTHIRA_RAFT_BIND", "127.0.0.1", 1);
+        ::setenv("KYTHIRA_REDIS_ROLES", "gateway", 1);
+        ::setenv("KYTHIRA_NODE_INSECURE_PLAINTEXT", "1", 1);
+        BOOST_CHECK_THROW((void)from_env(), std::invalid_argument);
+        ::setenv("KYTHIRA_REDIS_FRONT_ENDS_DNS", "front-ends.cache:6379", 1);
+        ::setenv("KYTHIRA_REDIS_DISCOVERY_INTERVAL_MS", "2000", 1);
+        auto o = from_env();
+        BOOST_TEST(o._gateway._front_ends_dns == "front-ends.cache:6379");
+        BOOST_TEST(o._gateway._discovery_interval.count() == 2000);
+        ::setenv("KYTHIRA_REDIS_FRONT_ENDS_DNS", "no-port", 1);
+        BOOST_CHECK_THROW((void)from_env(), std::invalid_argument);
+        ::unsetenv("KYTHIRA_REDIS_FRONT_ENDS_DNS");
+        ::setenv("KYTHIRA_REDIS_MEMBERSHIP", "1", 1);
+        o = from_env();
+        BOOST_TEST(o._gateway._membership_voters.size() == 1U);
+        ::unsetenv("KYTHIRA_REDIS_MEMBERSHIP");
+        // Named front ends.
+        ::setenv("KYTHIRA_REDIS_FRONT_ENDS", "fe-a=10.0.0.5:6379,10.0.0.6:6379", 1);
+        o = from_env();
+        const std::vector<std::string> want{"fe-a=10.0.0.5:6379", "10.0.0.6:6379"};
+        BOOST_TEST(o._gateway._front_ends == want, boost::test_tools::per_element());
+        ::setenv("KYTHIRA_REDIS_FRONT_ENDS", "=10.0.0.5:6379", 1);
+        BOOST_CHECK_THROW((void)from_env(), std::invalid_argument);
     }
 }
 

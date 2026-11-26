@@ -195,6 +195,13 @@ is extended as the rest land.
     commands per second and CPU through `quorum_manager`; drain before
     decommission
   - _Requirements: 20.1-20.3_
+  - Status: membership is in (`redis_layer_membership.hpp`, the gateway's
+    membership round, `cmd/redis_gateway_node/redis_membership_group.hpp`):
+    the group on `KYTHIRA_REDIS_MEMBERSHIP` voters with other members
+    reaching it through `KYTHIRA.MEMBERS`, DNS and configuration fallback,
+    load reports, drain through `KYTHIRA.LAYERS`, and front-end indexes in
+    the group with the cursor layout. The capacity loop through
+    `quorum_manager` on the group's leader is next.
 
 - [ ] 19. Migration operations and runbook
   - `KYTHIRA.EVACUATE`, refuse to start without `data` while holding

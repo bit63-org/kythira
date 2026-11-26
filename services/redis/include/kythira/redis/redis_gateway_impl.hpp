@@ -12,6 +12,7 @@
 
 #include <openssl/ssl.h>
 #include <openssl/x509.h>
+#include <unistd.h>
 
 #include <algorithm>
 #include <array>
@@ -747,6 +748,8 @@ auto redis_gateway<Host, Logger, Metrics>::start() -> void {
         throw;
     }
 
+    // Before the first connection: commands read the front-end directory.
+    start_membership();
     for (const auto& acceptor : _acceptors) {
         accept_loop(acceptor, false);
     }
@@ -763,6 +766,7 @@ auto redis_gateway<Host, Logger, Metrics>::stop() -> void {
     if (!_running.exchange(false)) {
         return;
     }
+    stop_membership();
     if constexpr (k_transactional) {
         if (_config._transactions) {
             _data.host().set_txn_forwarder({});
@@ -1003,6 +1007,9 @@ auto redis_gateway<Host, Logger, Metrics>::execute(session& s, const resp_comman
         if (upper == "KYTHIRA.CALL") {
             return finish(this->handle_call(s, cmd));
         }
+        if (upper == "KYTHIRA.MEMBERS") {
+            return finish(handle_members(s, cmd));
+        }
         if (this->remote_front_ends()) {
             return finish(s._writer.error("ERR this node runs no front end (KYTHIRA_REDIS_ROLES=" +
                                           _config._layer_roles.to_string() + ")"));
@@ -1019,6 +1026,13 @@ auto redis_gateway<Host, Logger, Metrics>::execute(session& s, const resp_comman
         return finish(s._writer.error("ERR this node runs no gateway (KYTHIRA_REDIS_ROLES=" +
                                       _config._layer_roles.to_string() +
                                       "); connect to a gateway"));
+    }
+    if (upper == "KYTHIRA.LAYERS") {
+        return finish(handle_layers(s, cmd));
+    }
+    if (upper == "KYTHIRA.MEMBERS") {
+        audit(s, upper, "internal command from a client");
+        return finish(s._writer.error("NOPERM KYTHIRA.MEMBERS is internal to the layers"));
     }
     if (this->remote_front_ends()) {
         return finish(call_front_end(s, upper, cmd));
@@ -1427,11 +1441,12 @@ auto redis_gateway<Host, Logger, Metrics>::mark_front_end_down(const std::string
 template<typename Host, typename Logger, typename Metrics>
 auto redis_gateway<Host, Logger, Metrics>::pick_front_end(const session& s)
     -> std::optional<std::string> {
+    const auto candidates = front_end_candidates();
     std::vector<std::string> live;
     {
         std::lock_guard<std::mutex> lock(_front_end_mutex);
         const auto now = std::chrono::steady_clock::now();
-        for (const auto& fe : _config._front_ends) {
+        for (const auto& fe : candidates) {
             auto it = _front_end_down.find(fe);
             if (it == _front_end_down.end() || it->second <= now) {
                 live.push_back(fe);
@@ -1440,7 +1455,7 @@ auto redis_gateway<Host, Logger, Metrics>::pick_front_end(const session& s)
     }
     if (live.empty()) {
         // Every front end failed lately: try them anyway rather than refuse.
-        live = _config._front_ends;
+        live = candidates;
     }
     if (live.empty()) {
         return std::nullopt;
@@ -1489,8 +1504,8 @@ auto redis_gateway<Host, Logger, Metrics>::call_front_end(session& s, std::strin
     argv.push_back(redis_call_wire::encode_state(state));
     argv.insert(argv.end(), cmd._argv.begin(), cmd._argv.end());
 
-    for (std::size_t attempt = 0; attempt < std::max<std::size_t>(1, _config._front_ends.size());
-         ++attempt) {
+    const auto attempts = std::max<std::size_t>(1, front_end_candidates().size());
+    for (std::size_t attempt = 0; attempt < attempts; ++attempt) {
         auto fe = pick_front_end(s);
         if (!fe) {
             break;
@@ -1558,6 +1573,448 @@ auto redis_gateway<Host, Logger, Metrics>::call_front_end(session& s, std::strin
         return std::move(answer->reply);
     }
     return s._writer.error("TRYAGAIN no front end reachable, retry");
+}
+
+// ---- layer membership (task 18, Requirement 20) -------------------------------
+
+namespace redis_gateway_detail {
+
+/// Milliseconds since the epoch: what members stamp their reports with.
+inline auto epoch_ms() -> std::int64_t {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+               std::chrono::system_clock::now().time_since_epoch())
+        .count();
+}
+
+/// `KYTHIRA_REDIS_FRONT_ENDS` entries (`host:port` or `id=host:port`) as
+/// members of a configuration directory.
+inline auto configured_front_ends(const std::vector<std::string>& entries)
+    -> std::vector<layers::layer_member> {
+    std::vector<layers::layer_member> out;
+    for (const auto& e : entries) {
+        layers::layer_member m;
+        const auto eq = e.find('=');
+        m.id = eq == std::string::npos ? e : e.substr(0, eq);
+        m.address = eq == std::string::npos ? e : e.substr(eq + 1);
+        m.roles = layers::role_set{layers::role::front_end};
+        out.push_back(std::move(m));
+    }
+    return out;
+}
+
+/// How long a member may stay silent before it is not called: three
+/// rounds, and room for the members' clocks to disagree.
+inline auto member_stale_after(std::chrono::milliseconds interval) -> std::int64_t {
+    return 3 * interval.count() + 2000;
+}
+
+}  // namespace redis_gateway_detail
+
+template<typename Host, typename Logger, typename Metrics>
+auto redis_gateway<Host, Logger, Metrics>::start_membership() -> void {
+    using mode = typename front_end::membership_mode;
+    if (!_config._front_ends.empty()) {
+        _configured_front_ends = std::make_shared<layers::static_member_directory>(
+            redis_gateway_detail::configured_front_ends(_config._front_ends));
+    }
+    _listeners_closed = false;
+    _idle_since.reset();
+    this->_member_drain = layers::drain_state::serving;
+    bool thread = false;
+    if (!_config._membership_voters.empty() || _config._membership_local) {
+        _group = std::make_unique<layers::replicated_layer_membership>(
+            [this](std::vector<std::byte> command) {
+                return propose_membership(std::move(command));
+            },
+            [this] {
+                std::lock_guard<std::mutex> lock(_members_mutex);
+                return _members_cache;
+            });
+        // Not owned: the group outlives every use of the alias.
+        _directory =
+            std::shared_ptr<layers::member_directory>(std::shared_ptr<void>{}, _group.get());
+        this->_membership_mode = mode::group;
+        thread = true;
+    } else if (!_config._front_ends_dns.empty()) {
+        auto found = std::make_shared<layers::static_member_directory>(
+            redis_membership::discovered_front_ends(
+                redis_membership::resolve_all(_config._front_ends_dns)));
+        _directory = found;
+        _next_discovery = std::chrono::steady_clock::now() + _config._discovery_interval;
+        this->_membership_mode = mode::dns;
+        thread = true;
+    } else {
+        _directory = _configured_front_ends;
+        this->_membership_mode = mode::config;
+    }
+    if (!thread) {
+        return;
+    }
+    {
+        std::lock_guard<std::mutex> lock(_membership_wake_mutex);
+        _membership_stopping = false;
+    }
+    _membership_thread = std::thread([this] { membership_loop(); });
+}
+
+template<typename Host, typename Logger, typename Metrics>
+auto redis_gateway<Host, Logger, Metrics>::stop_membership() -> void {
+    {
+        std::lock_guard<std::mutex> lock(_membership_wake_mutex);
+        _membership_stopping = true;
+    }
+    _membership_wake.notify_all();
+    if (_membership_thread.joinable() &&
+        _membership_thread.get_id() != std::this_thread::get_id()) {
+        _membership_thread.join();
+    }
+}
+
+template<typename Host, typename Logger, typename Metrics>
+auto redis_gateway<Host, Logger, Metrics>::membership_loop() -> void {
+    for (;;) {
+        try {
+            membership_tick();
+        } catch (const std::exception& e) {
+            ++_stats._membership_failures;
+            _logger.log(log_level::warning, "redis gateway: layer membership round failed",
+                        {{"error", e.what()}});
+        }
+        std::unique_lock<std::mutex> lock(_membership_wake_mutex);
+        const auto interval =
+            this->_membership_mode.load() == front_end::membership_mode::dns
+                ? std::min(_config._discovery_interval, std::chrono::milliseconds{1000})
+                : _config._membership_interval;
+        if (_membership_wake.wait_for(lock, std::max(interval, std::chrono::milliseconds{1}),
+                                      [this] { return _membership_stopping; })) {
+            return;
+        }
+    }
+}
+
+template<typename Host, typename Logger, typename Metrics>
+auto redis_gateway<Host, Logger, Metrics>::membership_tick() -> void {
+    const auto now = std::chrono::steady_clock::now();
+    if (!_config._front_ends_dns.empty() && !_group && now >= _next_discovery) {
+        _next_discovery = now + _config._discovery_interval;
+        auto found = redis_membership::resolve_all(_config._front_ends_dns);
+        // A name that stops resolving keeps the last list: a DNS outage
+        // must not empty the layer.
+        if (!found.empty()) {
+            static_cast<layers::static_member_directory&>(*_directory)
+                .replace(redis_membership::discovered_front_ends(found));
+        }
+    }
+    if (!_group) {
+        return;
+    }
+    auto members = fetch_members();
+    if (!members) {
+        ++_stats._membership_failures;
+        return;
+    }
+    {
+        std::lock_guard<std::mutex> lock(_members_mutex);
+        _members_cache = *members;
+    }
+    // Data-only nodes are not members of the stateless layers: they leave
+    // through evacuation (task 19), not a drain.
+    const auto roles = _config._layer_roles;
+    if (!roles.has(layers::role::gateway) && !roles.has(layers::role::front_end)) {
+        return;
+    }
+    const auto self = self_member();
+    const auto it = std::find_if(members->begin(), members->end(),
+                                 [&](const auto& m) { return m.id == self.id; });
+    if (it == members->end() || it->address != self.address || it->roles != self.roles ||
+        it->index != self.index || it->placement_group != self.placement_group) {
+        // New, changed, or forgotten by a group that lost its state: the
+        // group keeps a re-announcing member's drain state.
+        if (_group->announce(self)) {
+            ++_stats._membership_announces;
+        } else {
+            ++_stats._membership_failures;
+        }
+    }
+    redis_membership::load_meter::counters c;
+    c.connections = _stats._connections_current.load();
+    c.commands = _stats._commands.load();
+    c.bytes_out = _stats._bytes_out.load();
+    c.cpu_seconds = redis_membership::process_cpu_seconds();
+    if (_group->report_load(self.id, _load_meter.sample(c, now),
+                            redis_gateway_detail::epoch_ms())) {
+        ++_stats._membership_reports;
+    } else {
+        ++_stats._membership_failures;
+    }
+    if (it != members->end()) {
+        follow_drain(it->drain);
+    }
+}
+
+template<typename Host, typename Logger, typename Metrics>
+auto redis_gateway<Host, Logger, Metrics>::fetch_members()
+    -> std::optional<std::vector<layers::layer_member>> {
+    if (_config._membership_local) {
+        return _config._membership_local->_read();
+    }
+    for (const auto& voter : _config._membership_voters) {
+        auto r = this->exchange({"KYTHIRA.MEMBERS", "LIST"}, voter);
+        if (r._kind != front_end::exchange_result::kind::answered) {
+            continue;
+        }
+        if (const auto payload = redis_gateway_detail::bulk_payload(r._reply)) {
+            if (auto members = redis_membership::decode_members(*payload)) {
+                return members;
+            }
+        }
+    }
+    return std::nullopt;
+}
+
+template<typename Host, typename Logger, typename Metrics>
+auto redis_gateway<Host, Logger, Metrics>::propose_membership(std::vector<std::byte> command)
+    -> std::optional<std::vector<std::byte>> {
+    if (_config._membership_local) {
+        if (auto answer = _config._membership_local->_propose(command)) {
+            return answer;
+        }
+    }
+    // Any voter takes it; one that cannot commit (not the leader) says so,
+    // and the next is asked. A lost answer may still have committed, which
+    // every membership command tolerates: announce and drain are
+    // idempotent, and an older load report is refused.
+    const std::string bytes(reinterpret_cast<const char*>(command.data()), command.size());
+    for (const auto& voter : _config._membership_voters) {
+        auto r = this->exchange({"KYTHIRA.MEMBERS", "PROPOSE", bytes}, voter);
+        if (r._kind != front_end::exchange_result::kind::answered) {
+            continue;
+        }
+        const auto payload = redis_gateway_detail::bulk_payload(r._reply);
+        if (payload && payload->size() == 1) {
+            return std::vector<std::byte>{static_cast<std::byte>(payload->front())};
+        }
+    }
+    return std::nullopt;
+}
+
+template<typename Host, typename Logger, typename Metrics>
+auto redis_gateway<Host, Logger, Metrics>::self_member() const -> layers::layer_member {
+    layers::layer_member m;
+    if (!_config._member_id.empty()) {
+        m.id = _config._member_id;
+    } else {
+        std::ostringstream id;
+        id << const_cast<redis_gateway*>(this)->_data.host().node_id();
+        m.id = id.str();
+    }
+    m.roles = _config._layer_roles;
+    if (!_config._advertise_address.empty()) {
+        m.address = _config._advertise_address;
+    } else {
+        // The listener's own address when it names one, else this host's
+        // name; the TLS listener when there is one.
+        const auto& spec = _tls_port != 0 ? _config._tls_listen : _config._listen;
+        auto host = spec.empty() ? std::string{} : redis_gateway_detail::parse_listen(spec).first;
+        if (host.empty() || host == "0.0.0.0" || host == "::" || host == "[::]") {
+            char name[256] = {};
+            host = ::gethostname(name, sizeof(name) - 1) == 0 ? std::string(name) : "localhost";
+        }
+        m.address = host + ":" + std::to_string(_tls_port != 0 ? _tls_port : _port);
+    }
+    m.placement_group = _config._placement_group;
+    m.index = _config._layer_roles.has(layers::role::front_end) ? _config._front_end_index : 0;
+    m.announced_at_ms = redis_gateway_detail::epoch_ms();
+    m.reported_at_ms = m.announced_at_ms;
+    return m;
+}
+
+template<typename Host, typename Logger, typename Metrics>
+auto redis_gateway<Host, Logger, Metrics>::nothing_in_flight() -> bool {
+    if (_stats._calls_in_flight.load() != 0) {
+        return false;
+    }
+    std::vector<std::shared_ptr<connection>> live;
+    {
+        std::lock_guard<std::mutex> lock(_connections_mutex);
+        for (auto& [ptr, weak] : _connections) {
+            if (auto c = weak.lock()) {
+                live.push_back(std::move(c));
+            }
+        }
+    }
+    return std::all_of(live.begin(), live.end(), [](const auto& c) { return c->idle(); });
+}
+
+template<typename Host, typename Logger, typename Metrics>
+auto redis_gateway<Host, Logger, Metrics>::follow_drain(layers::drain_state state) -> void {
+    const auto now = std::chrono::steady_clock::now();
+    const auto previous = this->_member_drain.exchange(state);
+    if (state == layers::drain_state::serving) {
+        _idle_since.reset();
+        if (previous != layers::drain_state::serving && _listeners_closed) {
+            _logger.log(log_level::warning,
+                        "redis gateway: returned to serving after a drain closed the listeners; "
+                        "restart the node to take client connections again");
+        }
+        return;
+    }
+    if (state == layers::drain_state::drained) {
+        return;
+    }
+    // Draining (Requirement 20.3): gateways stop sending this node calls as
+    // soon as they see it, so a front end only waits for the calls it has.
+    // A gateway also stops taking connections and closes its clients' once
+    // their commands are done. A node with replicas keeps its listener: the
+    // data layer still calls it, and it leaves that layer by evacuation.
+    if (previous != layers::drain_state::draining) {
+        _logger.log(log_level::info, "redis gateway: draining (layer membership group)");
+        _drain_started = now;
+    }
+    const auto roles = _config._layer_roles;
+    const bool closes = roles.has(layers::role::gateway) && !roles.has(layers::role::data);
+    if (closes && !_listeners_closed) {
+        boost::system::error_code ec;
+        for (const auto& acceptor : _acceptors) {
+            (void)acceptor->close(ec);
+        }
+        for (const auto& acceptor : _tls_acceptors) {
+            (void)acceptor->close(ec);
+        }
+        _listeners_closed = true;
+    }
+    const bool timed_out = closes && now - _drain_started >= _config._drain_timeout;
+    if (!nothing_in_flight() && !timed_out) {
+        _idle_since.reset();
+        return;
+    }
+    if (!_idle_since) {
+        _idle_since = now;
+    }
+    // Idle across two rounds, so a gateway that read the list just before
+    // this node began draining has sent what it was going to.
+    if (!timed_out && now - *_idle_since < 2 * _config._membership_interval) {
+        return;
+    }
+    if (closes) {
+        std::vector<std::shared_ptr<connection>> live;
+        {
+            std::lock_guard<std::mutex> lock(_connections_mutex);
+            for (auto& [ptr, weak] : _connections) {
+                if (auto c = weak.lock()) {
+                    live.push_back(std::move(c));
+                }
+            }
+        }
+        for (auto& c : live) {
+            c->close();
+        }
+    }
+    if (_group->set_drain(self_member().id, layers::drain_state::drained)) {
+        this->_member_drain = layers::drain_state::drained;
+        _logger.log(log_level::info, "redis gateway: drained; the node may be stopped");
+    } else {
+        ++_stats._membership_failures;
+    }
+}
+
+template<typename Host, typename Logger, typename Metrics>
+auto redis_gateway<Host, Logger, Metrics>::handle_members(session& s, const resp_command& cmd)
+    -> std::string {
+    if (!_config._membership_local) {
+        return s._writer.error("TRYAGAIN this node holds no replica of the layer membership group");
+    }
+    const auto sub = cmd._argv.size() >= 2 ? resp_to_upper(cmd._argv[1]) : std::string{};
+    if (sub == "LIST" && cmd._argv.size() == 2) {
+        return s._writer.bulk(redis_membership::encode_members(_config._membership_local->_read()));
+    }
+    if (sub == "PROPOSE" && cmd._argv.size() == 3) {
+        const auto& text = cmd._argv[2];
+        std::vector<std::byte> command(text.size());
+        std::transform(text.begin(), text.end(), command.begin(),
+                       [](char c) { return static_cast<std::byte>(c); });
+        const auto answer = _config._membership_local->_propose(std::move(command));
+        if (!answer || answer->size() != 1) {
+            return s._writer.error(
+                "TRYAGAIN the layer membership group could not commit here; ask another voter");
+        }
+        return s._writer.bulk(std::string(1, static_cast<char>(answer->front())));
+    }
+    return s._writer.error("ERR syntax: KYTHIRA.MEMBERS LIST | PROPOSE <command>");
+}
+
+template<typename Host, typename Logger, typename Metrics>
+auto redis_gateway<Host, Logger, Metrics>::handle_layers(session& s, const resp_command& cmd)
+    -> std::string {
+    if (s._identity->_role != redis_role::admin) {
+        audit(s, "KYTHIRA.LAYERS", "not an admin");
+        return s._writer.error("NOPERM KYTHIRA.LAYERS needs an admin user");
+    }
+    const auto sub = cmd._argv.size() >= 2 ? resp_to_upper(cmd._argv[1]) : std::string{"LIST"};
+    if (sub == "LIST" && cmd._argv.size() <= 2) {
+        std::vector<layers::layer_member> members;
+        if (_group) {
+            std::lock_guard<std::mutex> lock(_members_mutex);
+            members = _members_cache;
+        } else if (_directory) {
+            members = _directory->members();
+        }
+        std::vector<std::string> lines;
+        lines.reserve(members.size());
+        for (const auto& m : members) {
+            std::ostringstream line;
+            line << m.id << " " << m.address << " roles=" << m.roles.to_string()
+                 << " drain=" << layers::to_string(m.drain) << " index=" << m.index
+                 << " group=" << m.placement_group << " connections=" << m.load.open_streams
+                 << " commands_per_sec=" << m.load.requests_per_second << " cpu=" << m.load.cpu;
+            lines.push_back(s._writer.bulk(line.str()));
+        }
+        return s._writer.array(lines);
+    }
+    if ((sub == "DRAIN" || sub == "SERVE") && cmd._argv.size() == 3) {
+        if (!_group) {
+            return s._writer.error(
+                "ERR draining a member needs the layer membership group "
+                "(KYTHIRA_REDIS_MEMBERSHIP)");
+        }
+        const auto& id = cmd._argv[2];
+        {
+            std::lock_guard<std::mutex> lock(_members_mutex);
+            if (std::none_of(_members_cache.begin(), _members_cache.end(),
+                             [&](const auto& m) { return m.id == id; })) {
+                return s._writer.error("ERR no member '" + id + "' in the layer membership group");
+            }
+        }
+        audit(s, "KYTHIRA.LAYERS", sub + " " + id);
+        if (!_group->set_drain(id, sub == "DRAIN" ? layers::drain_state::draining
+                                                  : layers::drain_state::serving)) {
+            return s._writer.error("TRYAGAIN the layer membership group did not commit, retry");
+        }
+        _membership_wake.notify_all();
+        return s._writer.simple_string("OK");
+    }
+    return s._writer.error("ERR syntax: KYTHIRA.LAYERS [LIST | DRAIN <id> | SERVE <id>]");
+}
+
+template<typename Host, typename Logger, typename Metrics>
+auto redis_gateway<Host, Logger, Metrics>::front_end_candidates() -> std::vector<std::string> {
+    std::vector<std::string> out;
+    if (_directory) {
+        const auto now_ms = redis_gateway_detail::epoch_ms();
+        for (const auto& m : _directory->live_members(
+                 layers::role_set{layers::role::front_end}, now_ms,
+                 redis_gateway_detail::member_stale_after(_config._membership_interval))) {
+            out.push_back(m.address);
+        }
+    }
+    // A group (or a DNS name) that names no front end yet: the configured
+    // ones still serve (Requirement 20.2).
+    if (out.empty() && _configured_front_ends && _directory != _configured_front_ends) {
+        for (const auto& m : _configured_front_ends->members()) {
+            out.push_back(m.address);
+        }
+    }
+    return out;
 }
 
 }  // namespace kythira

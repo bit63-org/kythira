@@ -25,6 +25,7 @@ set(_REDIS_GATEWAY_SOURCES
     run_cbor_file.cpp
     run_cbor_node.cpp
     run_json.cpp
+    membership_group_standalone.cpp
 )
 
 # IAM authentication (.kiro/specs/iam-compatible-auth/ task 21): the
@@ -131,6 +132,7 @@ if(KYTHIRA_BUILD_BOOST_BEAST_TRANSPORT AND KYTHIRA_FUTURE_BACKEND_AVAILABLE
         redis_module_registrar.cpp
         redis_module_memory.cpp
         redis_module_file.cpp
+        membership_group_node.cpp
     )
     _kythira_redis_gateway_settings(kythira_redis_module PUBLIC)
     _kythira_redis_gateway_kconfig(kythira_redis_module PUBLIC)

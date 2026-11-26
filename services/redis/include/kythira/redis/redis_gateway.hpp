@@ -33,6 +33,7 @@
 #include <kythira/redis/redis_gateway_value_access.hpp>
 #include <kythira/redis/redis_kv_state_machine.hpp>
 #include <kythira/redis/redis_server_identity.hpp>
+#include <kythira/redis/redis_layer_membership.hpp>
 #include <kythira/redis/redis_layer_roles.hpp>
 #include <kythira/redis/resp_protocol.hpp>
 #include <raft/credential_verifier.hpp>
@@ -50,6 +51,7 @@
 #include <atomic>
 #include <cctype>
 #include <chrono>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <deque>
@@ -230,6 +232,47 @@ struct redis_gateway_config {
     /// (Requirement 19.5); 0 checks on every new connection.
     std::chrono::milliseconds _tls_reload_interval{1000};
 
+    // ---- layer membership (task 18, Requirement 20) ------------------------
+    /// Front ends found by DNS (`KYTHIRA_REDIS_FRONT_ENDS_DNS`, one
+    /// `name:port`): every address the name resolves to is a front end,
+    /// re-resolved every `_discovery_interval`. Used instead of
+    /// `_front_ends` when set.
+    std::string _front_ends_dns;
+    std::chrono::milliseconds _discovery_interval{5000};
+    /// The layer membership group's voters (`KYTHIRA_REDIS_MEMBERSHIP`, the
+    /// `host:port` each one's gateway listens on). With voters, or with
+    /// `_membership_local`, this node announces itself to the group,
+    /// reports its load, follows its drain state, and a gateway without
+    /// `front_end` calls the group's serving front ends (falling back to
+    /// `_front_ends` while the group names none).
+    std::vector<std::string> _membership_voters;
+    /// Set on a node that holds a replica of the group: proposes a
+    /// membership command and returns the state machine's one-byte answer,
+    /// or nullopt when it could not commit here (not the leader, no
+    /// quorum); and reads this replica's member list. This node then
+    /// answers `KYTHIRA.MEMBERS` for the others.
+    struct membership_replica {
+        std::function<std::optional<std::vector<std::byte>>(std::vector<std::byte>)> _propose;
+        std::function<std::vector<layers::layer_member>()> _read;
+    };
+    std::optional<membership_replica> _membership_local;
+    /// How often a member refreshes the list, re-announces when the group
+    /// lost it, and reports its load. Members silent for three intervals
+    /// are not called.
+    std::chrono::milliseconds _membership_interval{1000};
+    /// This node in the group: its id (default: the Raft node id), the
+    /// address other layers reach it on (`KYTHIRA_REDIS_ADVERTISE`;
+    /// default: the host name and the TLS port, else the plaintext one) and
+    /// its placement group (`KYTHIRA_REDIS_PLACEMENT_GROUP`).
+    std::string _member_id;
+    std::string _advertise_address;
+    std::string _placement_group;
+    /// The 14-bit number in the `SCAN` cursors this front end issues
+    /// (`KYTHIRA_REDIS_FRONT_END_INDEX`, 1-16383; default: the node id when
+    /// it is such a number), published in the group so a cursor can find
+    /// its issuer.
+    std::uint32_t _front_end_index = 0;
+
     resp_parser_limits _parser_limits{};
 
     /// Multi-key commands as cross-shard transactions
@@ -308,6 +351,14 @@ struct redis_gateway_stats {
     std::atomic<std::uint64_t> _front_end_calls{0};
     std::atomic<std::uint64_t> _front_end_repins{0};
     std::atomic<std::uint64_t> _front_end_lost{0};
+    /// Layer membership (task 18): announcements and load reports the group
+    /// committed, and refreshes or proposals that failed.
+    std::atomic<std::uint64_t> _membership_announces{0};
+    std::atomic<std::uint64_t> _membership_reports{0};
+    std::atomic<std::uint64_t> _membership_failures{0};
+    /// `KYTHIRA.CALL`s this front end is running now, and has run.
+    std::atomic<std::uint64_t> _calls_in_flight{0};
+    std::atomic<std::uint64_t> _front_end_calls_served{0};
     std::atomic<std::uint64_t> _connections_accepted{0};
     std::atomic<std::uint64_t> _connections_rejected{0};
     std::atomic<std::uint64_t> _connections_current{0};
@@ -566,6 +617,18 @@ protected:
     [[nodiscard]] auto server_mode() const noexcept -> const char* {
         return _config._cluster_compat_mode ? "cluster" : "standalone";
     }
+    /// `INFO`'s `kythira_membership`: where front ends come from.
+    [[nodiscard]] auto membership_mode_name() const noexcept -> const char* {
+        switch (_membership_mode.load()) {
+            case membership_mode::dns:
+                return "dns";
+            case membership_mode::group:
+                return "group";
+            case membership_mode::config:
+                break;
+        }
+        return "config";
+    }
     auto handle_command(session& s, const resp_command& cmd) -> std::string;
     auto handle_dbsize(session& s) -> std::string;
 
@@ -781,6 +844,16 @@ protected:
     mutable std::mutex _tls_mutex;
     tls_files _forward_tls_files;
     std::optional<layers::identity> _own_identity;
+
+    /// Where the gateway finds front ends, and this node's drain state in
+    /// the group (task 18), for `INFO`.
+    enum class membership_mode : std::uint8_t {
+        config,
+        dns,
+        group
+    };
+    std::atomic<membership_mode> _membership_mode{membership_mode::config};
+    std::atomic<layers::drain_state> _member_drain{layers::drain_state::serving};
 };
 
 /// The gateway layer over an in-process front end (see `redis_front_end`).
@@ -892,6 +965,50 @@ private:
     std::mutex _front_end_mutex;
     std::unordered_map<std::string, std::chrono::steady_clock::time_point> _front_end_down;
     std::atomic<std::uint64_t> _next_conn_id{1};
+
+    // ---- layer membership (task 18) -----------------------------------------
+    /// Chooses where front ends come from (group, DNS, configuration) and
+    /// starts the thread that keeps the list, announces this node, reports
+    /// its load and follows its drain state.
+    auto start_membership() -> void;
+    auto stop_membership() -> void;
+    auto membership_loop() -> void;
+    /// One round of `membership_loop`.
+    auto membership_tick() -> void;
+    /// The group's member list: this node's replica, or a voter's answer to
+    /// `KYTHIRA.MEMBERS LIST`.
+    auto fetch_members() -> std::optional<std::vector<layers::layer_member>>;
+    /// A membership command, through this node's replica or a voter.
+    auto propose_membership(std::vector<std::byte> command)
+        -> std::optional<std::vector<std::byte>>;
+    [[nodiscard]] auto self_member() const -> layers::layer_member;
+    /// Acts on this node's drain state as the group has it.
+    auto follow_drain(layers::drain_state state) -> void;
+    /// Whether this node has no work in flight: no client command running
+    /// and no `KYTHIRA.CALL`.
+    [[nodiscard]] auto nothing_in_flight() -> bool;
+    /// `KYTHIRA.MEMBERS PROPOSE|LIST` from another member (internal).
+    auto handle_members(session& s, const resp_command& cmd) -> std::string;
+    /// `KYTHIRA.LAYERS [LIST | DRAIN <id> | SERVE <id>]` from an admin.
+    auto handle_layers(session& s, const resp_command& cmd) -> std::string;
+    /// The addresses of the front ends calls may go to now.
+    auto front_end_candidates() -> std::vector<std::string>;
+
+    std::shared_ptr<layers::member_directory> _directory;
+    std::unique_ptr<layers::replicated_layer_membership> _group;
+    std::shared_ptr<layers::static_member_directory> _configured_front_ends;
+    std::mutex _members_mutex;
+    std::vector<layers::layer_member> _members_cache;
+    std::thread _membership_thread;
+    std::mutex _membership_wake_mutex;
+    std::condition_variable _membership_wake;
+    bool _membership_stopping = false;
+    // Touched by the membership thread only.
+    redis_membership::load_meter _load_meter;
+    std::chrono::steady_clock::time_point _next_discovery{};
+    std::optional<std::chrono::steady_clock::time_point> _idle_since;
+    std::chrono::steady_clock::time_point _drain_started{};
+    bool _listeners_closed = false;
 
     /// The listener's TLS context, rebuilt when its files change.
     auto server_tls_context() -> std::shared_ptr<boost::asio::ssl::context>;

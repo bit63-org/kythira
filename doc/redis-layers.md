@@ -207,6 +207,75 @@ The replies are the co-located bytes. The differential replay runs the
 recorded streams through three layers apart (a gateway over two front ends
 without data over data nodes) with no difference.
 
+## Layer membership
+
+A gateway apart finds its front ends in one of three places
+(Requirement 20):
+
+| Source | Setting | What it gives |
+|---|---|---|
+| configuration | `KYTHIRA_REDIS_FRONT_ENDS` (`host:port` or `id=host:port`) | a fixed list |
+| DNS discovery | `KYTHIRA_REDIS_FRONT_ENDS_DNS` (`name:port`) | every address the name resolves to, re-resolved every `KYTHIRA_REDIS_DISCOVERY_INTERVAL_MS` (5 s). A name that stops resolving keeps the last list |
+| the layer membership group | `KYTHIRA_REDIS_MEMBERSHIP` (voter node ids) | every serving front end that reported in the last three rounds, falling back to `KYTHIRA_REDIS_FRONT_ENDS` while the group names none |
+
+The group is the one the independent-layers specs share
+(`include/raft/layer_membership.hpp`): one Raft group with a small fixed
+voter set, holding each member's id, roles, address, placement group,
+front-end index, drain state and load. Its voters are 1, 3 or 5 nodes of
+`KYTHIRA_PEERS`. Each holds a replica on a second Raft host beside the Redis
+one, on the same listener, with the last group id of the module's range. The
+log is in memory: the group holds no data, and members re-announce
+themselves to a group that lost its list. Every other node reaches the group
+through a voter's gateway listener with the internal command
+`KYTHIRA.MEMBERS LIST | PROPOSE <command>`, which any layer role may send.
+A voter that cannot commit (it is not the leader) answers `-TRYAGAIN`, and
+the caller asks the next. So the stateless layers grow without the group
+growing. The call authenticates like any internal call: with a layer
+identity over mutual TLS, or with `KYTHIRA_REDIS_INTERNAL_SECRET`. The
+secret's user exists only in a node with an ACL file, so a node run with
+`KYTHIRA_REDIS_ALLOW_ANONYMOUS` and no ACL file refuses it, and the members
+other than the group's leader never appear.
+
+Every node with `gateway` or `front_end` is a member. Every
+`KYTHIRA_REDIS_MEMBERSHIP_INTERVAL_MS` (1 s) it reads the list, announces
+itself when the list lacks it or has it wrong, and reports its load: open
+connections, commands per second, bytes sent per second, and its share of
+the machine's CPUs. Its address is `KYTHIRA_REDIS_ADVERTISE`, else its
+listener's address when that names one, else the host name with the TLS port
+(the plaintext port without TLS). Data-only nodes are not members; they
+leave the data layer by evacuation.
+
+A member follows the drain state the group holds for it:
+
+- **draining**: gateways stop choosing it for new calls at their next
+  round, and connections pinned to it move at their next command, which is
+  safe because a front end keeps nothing between calls. A node without
+  `data` that runs a gateway also stops accepting connections. Once nothing
+  has been in flight for two rounds (or `KYTHIRA_REDIS_DRAIN_TIMEOUT_MS` has
+  passed for a gateway's clients), it closes its client connections and
+  sets itself **drained**. It may then be stopped.
+- **serving** again: a front end takes calls again at the gateways' next
+  round. A gateway whose listeners closed needs a restart.
+
+An admin drives it from any gateway:
+
+```
+KYTHIRA.LAYERS LIST            one line per member: id, address, roles, drain, index, load
+KYTHIRA.LAYERS DRAIN <id>      needs the group
+KYTHIRA.LAYERS SERVE <id>
+```
+
+`INFO` reports `kythira_membership:` (`config`, `dns` or `group`),
+`kythira_member_drain:`, `kythira_front_end_index:` and
+`kythira_front_end_calls_served:` for the node that answers it.
+
+Each front end takes a 14-bit index (`KYTHIRA_REDIS_FRONT_END_INDEX`, 1 to
+16383; by default its node id when that is such a number) and publishes it
+in the group. A `SCAN` cursor is `(front-end index : 14) | (cursor id :
+50)` (`redis_layer_membership.hpp`), so a cursor presented to another front
+end names the one that issued it, and the group gives its address. The
+cursor walk itself lands with `SCAN` (phase 1 task 12).
+
 ## Layer identities
 
 Calls between nodes that are not both co-located carry layer identities over
@@ -228,6 +297,7 @@ needs no `AUTH`. Each internal command checks the caller's roles:
 |---|---|
 | `KYTHIRA.CALL` | `gateway` |
 | `KYTHIRA.DATA`, `KYTHIRA.TXN` | `front_end` or `data` |
+| `KYTHIRA.MEMBERS` | any role |
 | a whole command a co-located peer forwards | `front_end` or `data` |
 
 The internal user and secret (`KYTHIRA_REDIS_INTERNAL_USER`) stay valid
