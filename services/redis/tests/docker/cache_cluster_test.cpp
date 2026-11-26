@@ -920,6 +920,14 @@ BOOST_AUTO_TEST_CASE(a_flipped_chunk_byte_is_a_miss_or_an_abort_then_repaired,
 BOOST_AUTO_TEST_CASE(a_node_replaced_with_an_empty_volume_fetches_and_serves,
                      *boost::unit_test::timeout(600)) {
     constexpr std::size_t node = 2;  // cache-3
+    // Start from empty volumes. The new node fetches every key the cluster
+    // holds, and the scenarios before this one leave about 2.4 GB per node
+    // (write_throughput_matrix alone), which a slow podman runner could not
+    // fetch within the deadline below. With a fresh cluster it fetches only
+    // this test's objects.
+    os::checked_exec(os::real_exec, compose_cmd({"down", "-v", "--remove-orphans"}));
+    os::checked_exec(os::real_exec, compose_cmd({"up", "-d"}));
+    BOOST_REQUIRE(wait_cluster_ready(90s));
     const auto salt = next_salt();
     std::map<std::string, std::string> objects;
     // More than compose.yml's 64 MiB snapshot threshold, so the leader has
