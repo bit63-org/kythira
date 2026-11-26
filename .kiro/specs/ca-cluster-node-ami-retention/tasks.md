@@ -1,11 +1,14 @@
 # Implementation Plan — `ca_cluster_node` AMI retention
 
-## Status: Tasks 1-6 done (2026-11-20); task 7 waits on Clark
+## Status: Done (7/7, 2026-11-26)
 
-Clark gave the go to build it on 2026-11-20. The IAM change still needs his
-re-provisioning step (dispatch `reprovision-aws-ci-role.yml` on `main`), and
-the first live run (task 7) is a real-cloud `ami-build` run that needs his
-go in his own words.
+Clark gave the go to build it on 2026-11-20 and re-applied the CI role
+policy on 2026-11-26. Task 7 ran that day: the dry run (run 45728117310)
+planned keep 4 / remove 8 per architecture; with
+`REAL_CLOUD_TESTS_AWS_AMI_PRUNE_ENABLED=true`, run 45756783128 removed
+exactly those 16 AMIs and their 16 snapshots, with no failed call. (It
+also kept the previous run's chaos-node image as younger-than-7-days,
+since that run's own build had become one of the newest two.)
 
 Decisions made while building:
 
@@ -59,7 +62,7 @@ Decisions made while building:
     variable; keep the manual recipe as the fallback.
   - _Requirements: 5.3_
 
-- [ ] 7. First live run (needs Clark's go in his own words)
+- [x] 7. First live run (needs Clark's go in his own words)
   - One `ami-build` dispatch with pruning still in dry-run; read the plan;
     then set `REAL_CLOUD_TESTS_AWS_AMI_PRUNE_ENABLED=true` and confirm the
     next run removes exactly what the plan said.
