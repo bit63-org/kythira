@@ -140,6 +140,23 @@ struct node_options {
     std::vector<kythira::host_node_id> _membership_voters;
     /// The capacity loop a voter runs while it leads the group.
     capacity_options _capacity;
+    /// A data node that founds no group (`KYTHIRA_REDIS_JOIN`; task 19): it
+    /// takes replicas only when a group adds it (`KYTHIRA.EVACUATE ... TO`
+    /// it), learning each group from a peer. Also implied by the marker a
+    /// start without `data` leaves after discarding its replicas.
+    bool _join{false};
+    /// Start without `data` even though the data directory still holds Raft
+    /// replicas, deleting them (`KYTHIRA_REDIS_DISCARD_REPLICAS`). Without
+    /// it such a start refuses, unless `KYTHIRA.EVACUATE RELEASE` marked the
+    /// node released.
+    bool _discard_replicas{false};
+    /// The voters a group keeps through an evacuation that names none
+    /// (`KYTHIRA_REDIS_REPLICAS`); 0 keeps as many as the node founded
+    /// groups with (`KYTHIRA_PEERS`).
+    std::size_t _replicas{0};
+    /// Where the replicas are held on disk: `KYTHIRA_CACHE_DATA_DIR`,
+    /// read for the check even on an in-memory store.
+    std::filesystem::path _replica_dir;
     /// Keys the initial shard map is cut at; empty means one shard covering
     /// the whole key space, from which the split policy takes over.
     std::vector<std::string> _shard_cuts;
@@ -163,6 +180,24 @@ struct node_options {
     // ── the disk-backed cache ────────────────────────────────────────────────
     cache_options _cache;
 };
+
+/// The marker `KYTHIRA.EVACUATE RELEASE` leaves in the data directory.
+[[nodiscard]] auto released_marker(const std::filesystem::path& data_dir) -> std::filesystem::path;
+/// The marker a start without `data` leaves after deleting its replicas:
+/// the node left the groups it founded, so it joins when it is a data node
+/// again.
+[[nodiscard]] auto left_marker(const std::filesystem::path& data_dir) -> std::filesystem::path;
+/// The Raft group directories under `<data_dir>/raft`.
+[[nodiscard]] auto held_replica_dirs(const std::filesystem::path& data_dir)
+    -> std::vector<std::filesystem::path>;
+
+/// Task 19 (Requirement 21.3): what a start does with the replicas in the
+/// data directory. Without `data`, replicas held on disk refuse the start
+/// unless the node was released or `_discard_replicas` is set; then they
+/// are deleted and the left marker written. Returns whether a data node
+/// joins (founds no group).
+/// @throws std::runtime_error for a start that would drop replicas.
+auto settle_held_replicas(const node_options& o) -> bool;
 
 /// Read every variable in design Component 9's table, plus the Raft ones.
 /// @throws std::invalid_argument naming the variable that is missing or malformed.

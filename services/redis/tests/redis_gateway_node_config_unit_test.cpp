@@ -18,12 +18,18 @@
 
 #include <raft/build_version.hpp>
 
+#include <cstdint>
 #include <cstdlib>
+#include <filesystem>
+#include <fstream>
+#include <initializer_list>
 #include <limits>
 #include <map>
 #include <optional>
 #include <stdexcept>
 #include <string>
+
+#include <unistd.h>
 
 namespace {
 
@@ -102,6 +108,10 @@ struct gateway_env {
         "KYTHIRA_REDIS_FRONT_END_INDEX",
         "KYTHIRA_REDIS_PEER_GATEWAYS",
         "KYTHIRA_REDIS_CAPACITY_LAYER",
+        "KYTHIRA_REDIS_JOIN",
+        "KYTHIRA_REDIS_DISCARD_REPLICAS",
+        "KYTHIRA_REDIS_REPLICAS",
+        "KYTHIRA_REDIS_CURSOR_DRAIN_MS",
         "KYTHIRA_REDIS_CAPACITY_PROVIDER",
         "KYTHIRA_REDIS_CAPACITY_DRY_RUN",
         "KYTHIRA_REDIS_CAPACITY_SCALE_IN",
@@ -936,4 +946,143 @@ BOOST_AUTO_TEST_CASE(kythira_node_never_fills_in_the_role_set) {
     BOOST_TEST(!env("KYTHIRA_REDIS_ROLES").has_value());
     vars["KYTHIRA_REDIS_ROLES"] = "gateway";
     BOOST_CHECK_THROW(composite(vars), std::invalid_argument);
+}
+
+// ── moving replicas between data nodes (task 19) ────────────────────────────
+
+BOOST_AUTO_TEST_CASE(join_replicas_and_the_cursor_bound_parse) {
+    {
+        const gateway_env env;
+        ::setenv("KYTHIRA_RAFT_BIND", "127.0.0.1", 1);
+        const auto o = from_env();
+        BOOST_TEST(!o._join);
+        BOOST_TEST(!o._discard_replicas);
+        BOOST_TEST(o._replicas == 0U);
+        BOOST_TEST(o._gateway._cursor_drain_bound.count() == 60000);
+    }
+    {
+        const gateway_env env;
+        ::setenv("KYTHIRA_RAFT_BIND", "127.0.0.1", 1);
+        ::setenv("KYTHIRA_REDIS_JOIN", "true", 1);
+        ::setenv("KYTHIRA_REDIS_DISCARD_REPLICAS", "true", 1);
+        ::setenv("KYTHIRA_REDIS_REPLICAS", "5", 1);
+        ::setenv("KYTHIRA_REDIS_CURSOR_DRAIN_MS", "1500", 1);
+        const auto o = from_env();
+        BOOST_TEST(o._join);
+        BOOST_TEST(o._discard_replicas);
+        BOOST_TEST(o._replicas == 5U);
+        BOOST_TEST(o._gateway._cursor_drain_bound.count() == 1500);
+    }
+    {
+        const gateway_env env;
+        ::setenv("KYTHIRA_RAFT_BIND", "127.0.0.1", 1);
+        ::setenv("KYTHIRA_REDIS_REPLICAS", "65", 1);
+        BOOST_CHECK_THROW((void)from_env(), std::invalid_argument);
+    }
+    // Joining means waiting for a group to add this node's replicas, which
+    // only a data node holds.
+    const auto refusal = start_with("front_end", {{"KYTHIRA_NODE_INSECURE_PLAINTEXT", "1"},
+                                                  {"KYTHIRA_REDIS_DATA_NODES", "d-1:6379"},
+                                                  {"KYTHIRA_REDIS_JOIN", "true"}});
+    BOOST_TEST(refusal.find("KYTHIRA_REDIS_JOIN") != std::string::npos);
+}
+
+namespace {
+// A scratch data directory holding replicas of `groups`, removed on exit.
+struct replica_dir {
+    std::filesystem::path _dir;
+    explicit replica_dir(std::initializer_list<int> groups) {
+        _dir = std::filesystem::temp_directory_path() /
+               ("kythira-settle-" + std::to_string(::getpid()) + "-" +
+                std::to_string(reinterpret_cast<std::uintptr_t>(this)));
+        std::filesystem::remove_all(_dir);
+        std::filesystem::create_directories(_dir / "raft");
+        for (const int g : groups) {
+            std::filesystem::create_directories(_dir / "raft" / std::to_string(g));
+            std::ofstream(_dir / "raft" / std::to_string(g) / "log") << "entries\n";
+        }
+        // Not a replica: the node's own bookkeeping beside them.
+        std::filesystem::create_directories(_dir / "raft" / "meta");
+    }
+    ~replica_dir() {
+        std::error_code ec;
+        std::filesystem::remove_all(_dir, ec);
+    }
+    replica_dir(const replica_dir&) = delete;
+    auto operator=(const replica_dir&) -> replica_dir& = delete;
+};
+
+auto options_for(const char* roles, const std::filesystem::path& dir)
+    -> kythira::redis_node::node_options {
+    kythira::redis_node::node_options o;
+    o._gateway._layer_roles = kythira::parse_redis_roles(roles);
+    o._replica_dir = dir;
+    return o;
+}
+}  // namespace
+
+BOOST_AUTO_TEST_CASE(held_replicas_are_the_numbered_raft_directories) {
+    const replica_dir d{2, 10, 1};
+    const auto held = kythira::redis_node::held_replica_dirs(d._dir);
+    BOOST_TEST_REQUIRE(held.size() == 3U);
+    BOOST_TEST(held[0].filename() == "1");
+    BOOST_TEST(held[1].filename() == "10");
+    BOOST_TEST(held[2].filename() == "2");
+    BOOST_TEST(kythira::redis_node::held_replica_dirs({}).empty());
+    BOOST_TEST(kythira::redis_node::held_replica_dirs(d._dir / "absent").empty());
+}
+
+BOOST_AUTO_TEST_CASE(a_data_node_joins_when_asked_or_after_it_left) {
+    using kythira::redis_node::settle_held_replicas;
+    const replica_dir d{1};
+    auto o = options_for("front_end,data", d._dir);
+    BOOST_TEST(!settle_held_replicas(o));  // founds, as before
+    o._join = true;
+    BOOST_TEST(settle_held_replicas(o));
+    o._join = false;
+    std::ofstream(kythira::redis_node::left_marker(d._dir)) << "left\n";
+    // A node that gave its replicas away founds nothing on its return: the
+    // groups it founded live on elsewhere and add it back.
+    BOOST_TEST(settle_held_replicas(o));
+    // Holding the data role never deletes what the node holds.
+    BOOST_TEST(kythira::redis_node::held_replica_dirs(d._dir).size() == 1U);
+}
+
+BOOST_AUTO_TEST_CASE(dropping_the_data_role_with_replicas_is_refused_until_released) {
+    using kythira::redis_node::settle_held_replicas;
+    const replica_dir d{1, 2};
+    const auto o = options_for("gateway,front_end", d._dir);
+    try {
+        (void)settle_held_replicas(o);
+        BOOST_FAIL("a node dropped the data role while it still held replicas");
+    } catch (const std::runtime_error& e) {
+        const std::string why = e.what();
+        BOOST_TEST(why.find("2 group(s)") != std::string::npos);
+        BOOST_TEST(why.find("KYTHIRA.EVACUATE") != std::string::npos);
+        BOOST_TEST(why.find("KYTHIRA_REDIS_DISCARD_REPLICAS") != std::string::npos);
+    }
+    BOOST_TEST(kythira::redis_node::held_replica_dirs(d._dir).size() == 2U);
+
+    // KYTHIRA.EVACUATE RELEASE wrote the marker: the replicas are copies
+    // the groups no longer count, so they go.
+    std::ofstream(kythira::redis_node::released_marker(d._dir)) << "\n";
+    BOOST_TEST(!settle_held_replicas(o));
+    BOOST_TEST(kythira::redis_node::held_replica_dirs(d._dir).empty());
+    BOOST_TEST(!std::filesystem::exists(kythira::redis_node::released_marker(d._dir)));
+    BOOST_TEST(std::filesystem::exists(kythira::redis_node::left_marker(d._dir)));
+    BOOST_TEST(std::filesystem::exists(d._dir / "raft" / "meta"));
+    // Nothing held: the next start has nothing to settle.
+    BOOST_TEST(!settle_held_replicas(o));
+}
+
+BOOST_AUTO_TEST_CASE(dropping_the_data_role_can_discard_replicas_on_request) {
+    using kythira::redis_node::settle_held_replicas;
+    const replica_dir d{3};
+    auto o = options_for("gateway", d._dir);
+    o._discard_replicas = true;
+    BOOST_TEST(!settle_held_replicas(o));
+    BOOST_TEST(kythira::redis_node::held_replica_dirs(d._dir).empty());
+    BOOST_TEST(std::filesystem::exists(kythira::redis_node::left_marker(d._dir)));
+    // A memory store keeps no directory and so never holds anything here.
+    BOOST_TEST(!settle_held_replicas(options_for("gateway", {})));
 }
