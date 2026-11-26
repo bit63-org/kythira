@@ -16,6 +16,7 @@
 #include <cstring>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <optional>
 #include <string_view>
 #include <limits>
@@ -346,6 +347,66 @@ void read_cache_options(node_options& o) {
 }
 
 }  // namespace
+
+auto released_marker(const std::filesystem::path& data_dir) -> std::filesystem::path {
+    return data_dir / "raft" / "EVACUATED";
+}
+
+auto left_marker(const std::filesystem::path& data_dir) -> std::filesystem::path {
+    return data_dir / "redis-left-groups";
+}
+
+auto held_replica_dirs(const std::filesystem::path& data_dir)
+    -> std::vector<std::filesystem::path> {
+    std::vector<std::filesystem::path> out;
+    std::error_code ec;
+    const auto raft = data_dir / "raft";
+    if (data_dir.empty() || !std::filesystem::is_directory(raft, ec)) {
+        return out;
+    }
+    for (const auto& e : std::filesystem::directory_iterator(raft, ec)) {
+        const auto name = e.path().filename().string();
+        if (e.is_directory(ec) && !name.empty() &&
+            name.find_first_not_of("0123456789") == std::string::npos) {
+            out.push_back(e.path());
+        }
+    }
+    std::sort(out.begin(), out.end());
+    return out;
+}
+
+auto settle_held_replicas(const node_options& o) -> bool {
+    const auto& dir = o._replica_dir;
+    std::error_code ec;
+    if (o._gateway._layer_roles.has(layers::role::data)) {
+        return o._join || (!dir.empty() && std::filesystem::exists(left_marker(dir), ec));
+    }
+    const auto held = held_replica_dirs(dir);
+    if (held.empty()) {
+        return false;
+    }
+    const bool released = std::filesystem::exists(released_marker(dir), ec);
+    if (!released && !o._discard_replicas) {
+        throw std::runtime_error(
+            "redis_gateway_node: KYTHIRA_REDIS_ROLES=" + o._gateway._layer_roles.to_string() +
+            " drops the data role, but " + (dir / "raft").string() + " still holds replicas of " +
+            std::to_string(held.size()) +
+            " group(s). Move them first (KYTHIRA.EVACUATE START <this node>, then "
+            "KYTHIRA.EVACUATE RELEASE on it), or set KYTHIRA_REDIS_DISCARD_REPLICAS=true to "
+            "delete them");
+    }
+    for (const auto& p : held) {
+        std::filesystem::remove_all(p, ec);
+        if (ec) {
+            throw std::runtime_error("redis_gateway_node: could not delete " + p.string() + ": " +
+                                     ec.message());
+        }
+    }
+    std::filesystem::remove(released_marker(dir), ec);
+    std::ofstream(left_marker(dir), std::ios::trunc)
+        << (released ? "released by an evacuation" : "replicas discarded") << "\n";
+    return false;
+}
 
 auto is_loopback_address(const std::string& address) -> bool {
     // Same resolver the Raft listener binds with, so "localhost" counts and
@@ -859,6 +920,26 @@ auto from_env() -> node_options {
             g._layer_cluster + "/<node id>?roles=" + g._layer_roles.to_string() +
             ", or KYTHIRA_NODE_INSECURE_PLAINTEXT=1 on an isolated network");
     }
+    // Task 19: joining, discarding replicas, the voters an evacuation keeps.
+    o._join = to_bool("KYTHIRA_REDIS_JOIN", get_opt("KYTHIRA_REDIS_JOIN", "false"));
+    o._discard_replicas = to_bool("KYTHIRA_REDIS_DISCARD_REPLICAS",
+                                  get_opt("KYTHIRA_REDIS_DISCARD_REPLICAS", "false"));
+    o._replicas = static_cast<std::size_t>(
+        to_u64("KYTHIRA_REDIS_REPLICAS", get_opt("KYTHIRA_REDIS_REPLICAS", "0")));
+    if (o._replicas > 64) {
+        throw std::invalid_argument(
+            "redis_gateway_node: KYTHIRA_REDIS_REPLICAS must be at most 64");
+    }
+    o._replica_dir = !o._cache._data_dir.empty()
+                         ? o._cache._data_dir
+                         : std::filesystem::path(get_opt("KYTHIRA_CACHE_DATA_DIR", ""));
+    g._cursor_drain_bound = std::chrono::milliseconds{
+        to_u64("KYTHIRA_REDIS_CURSOR_DRAIN_MS", get_opt("KYTHIRA_REDIS_CURSOR_DRAIN_MS", "60000"))};
+    if (o._join && !g._layer_roles.has(layers::role::data)) {
+        throw std::invalid_argument(
+            "redis_gateway_node: KYTHIRA_REDIS_JOIN=true needs the data role "
+            "(KYTHIRA_REDIS_ROLES)");
+    }
     if (g._transactions && o._cache._persistence == cache_persistence::file) {
         // The disk-backed cache's state machine is not wrapped for
         // transactions (its chunk-referencing snapshots are untested under
@@ -1044,6 +1125,14 @@ auto usage() -> std::string {
            "  KYTHIRA_NODE_INSECURE_PLAINTEXT  1: split layers without TLS identities  [unset]\n"
            "  KYTHIRA_REDIS_DRAIN_TIMEOUT_MS   SIGTERM: finish in-flight commands for up to "
            "[10000]\n"
+           "  KYTHIRA_REDIS_CURSOR_DRAIN_MS    a drained front end serves open SCAN cursors "
+           "for up to [60000]\n"
+           "  KYTHIRA_REDIS_JOIN               a data node that founds no group; groups add it "
+           "[false]\n"
+           "  KYTHIRA_REDIS_DISCARD_REPLICAS   start without data, deleting replicas on disk "
+           "[false]\n"
+           "  KYTHIRA_REDIS_REPLICAS           voters a group keeps through KYTHIRA.EVACUATE "
+           "[founders]\n"
            "  KYTHIRA_REDIS_LISTEN             plaintext RESP listener                "
            "[0.0.0.0:6379]\n"
            "  KYTHIRA_REDIS_TLS_LISTEN         TLS listener (needs _TLS_CERT and _TLS_KEY)\n"

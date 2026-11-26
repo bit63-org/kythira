@@ -208,7 +208,7 @@ is extended as the rest land.
     decommissioning it. Other providers (ASG, MIG, VMSS and the rest) are
     not wired to the Redis settings yet.
 
-- [ ] 19. Migration operations and runbook
+- [x] 19. Migration operations and runbook
   - `KYTHIRA.EVACUATE`, refuse to start without `data` while holding
     replicas, front-end drain waiting for cursors up to a bound, adding
     `data` as learner then promote

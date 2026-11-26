@@ -121,6 +121,10 @@ The Redis front end:
 | `KYTHIRA_REDIS_CLUSTER` | `KYTHIRA_CLUSTER`, else `default` | The cluster named in layer identities, `kythira://redis/<cluster>/<node id>?roles=...`. A peer certificate naming another cluster carries no identity |
 | `KYTHIRA_NODE_INSECURE_PLAINTEXT` | unset | `1` lets a node that is not co-located run without layer identities: the internal secret then stands in for every role, over plaintext. For tests and isolated networks |
 | `KYTHIRA_REDIS_DRAIN_TIMEOUT_MS` | `10000` | On shutdown, how long commands already received may finish before the connections close |
+| `KYTHIRA_REDIS_CURSOR_DRAIN_MS` | `60000` | How long a draining front end waits for its open `SCAN` cursors before it reports itself drained |
+| `KYTHIRA_REDIS_JOIN` | `false` | A data node that founds no group: the groups add it through `KYTHIRA.EVACUATE`. A node that left the data layer joins without it. See [redis-layers.md](redis-layers.md#adding-data-to-a-node) |
+| `KYTHIRA_REDIS_REPLICAS` | founding voters | The voters per group an evacuation keeps (1 to 64) |
+| `KYTHIRA_REDIS_DISCARD_REPLICAS` | `false` | Lets a node that still holds replicas start without `data`, deleting them. Without it, such a node refuses to start until `KYTHIRA.EVACUATE RELEASE` |
 | `KYTHIRA_REDIS_LISTEN` | `0.0.0.0:6379` | Plaintext RESP listener. The daemon warns at every start that secrets and values cross this unencrypted; set it empty to run TLS-only |
 | `KYTHIRA_REDIS_TLS_LISTEN` | none | TLS listener; needs `_TLS_CERT` and `_TLS_KEY` |
 | `KYTHIRA_REDIS_TLS_CERT` / `_TLS_KEY` / `_TLS_CA` | none | PEM server certificate, key and (for client certificates) the CA to verify them against |

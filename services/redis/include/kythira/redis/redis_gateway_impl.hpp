@@ -1000,6 +1000,9 @@ auto redis_gateway<Host, Logger, Metrics>::execute(session& s, const resp_comman
     if (upper == "CLIENT") {
         return finish(handle_client(s, cmd));
     }
+    if (upper == "KYTHIRA.EVACUATE" && (s._internal || !this->serves_no_clients())) {
+        return finish(handle_evacuate(s, cmd));
+    }
     if (s._internal) {
         if (auto refused = this->peer_role_refusal(s, upper)) {
             return finish(std::move(*refused));
@@ -1884,7 +1887,12 @@ auto redis_gateway<Host, Logger, Metrics>::follow_drain(layers::drain_state stat
         _listeners_closed = true;
     }
     const bool timed_out = closes && now - _drain_started >= _config._drain_timeout;
-    if (!nothing_in_flight() && !timed_out) {
+    // A front end's open SCAN cursors keep it serving their continuations
+    // until they are done or the bound has passed (Requirement 21.5).
+    const bool cursors_wait = roles.has(layers::role::front_end) && _config._cursors_open &&
+                              _config._cursors_open() > 0 &&
+                              now - _drain_started < _config._cursor_drain_bound;
+    if ((!nothing_in_flight() || cursors_wait) && !timed_out) {
         _idle_since.reset();
         return;
     }
@@ -1994,6 +2002,56 @@ auto redis_gateway<Host, Logger, Metrics>::handle_layers(session& s, const resp_
         return s._writer.simple_string("OK");
     }
     return s._writer.error("ERR syntax: KYTHIRA.LAYERS [LIST | DRAIN <id> | SERVE <id>]");
+}
+
+template<typename Host, typename Logger, typename Metrics>
+auto redis_gateway<Host, Logger, Metrics>::handle_evacuate(session& s, const resp_command& cmd)
+    -> std::string {
+    if (!s._internal && s._identity->_role != redis_role::admin) {
+        audit(s, "KYTHIRA.EVACUATE", "not an admin");
+        return s._writer.error("NOPERM KYTHIRA.EVACUATE needs an admin user");
+    }
+    const std::vector<std::string> args(cmd._argv.begin() + 1, cmd._argv.end());
+    if (!s._internal) {
+        std::string words;
+        for (const auto& a : args) {
+            words += (words.empty() ? "" : " ") + a;
+        }
+        audit(s, "KYTHIRA.EVACUATE", words);
+    }
+    if (_config._evacuate) {
+        const auto a = _config._evacuate(args, s._internal);
+        switch (a._kind) {
+            case redis_admin_answer::kind::error:
+                return s._writer.error(a._lines.empty() ? std::string{"ERR failed"}
+                                                        : a._lines.front());
+            case redis_admin_answer::kind::ok:
+                return s._writer.simple_string("OK");
+            case redis_admin_answer::kind::bulk:
+                return s._writer.bulk(a._lines.empty() ? std::string{} : a._lines.front());
+            case redis_admin_answer::kind::lines: {
+                std::vector<std::string> lines;
+                lines.reserve(a._lines.size());
+                for (const auto& l : a._lines) {
+                    lines.push_back(s._writer.bulk(l));
+                }
+                return s._writer.array(lines);
+            }
+        }
+    }
+    // No data here: the next layer down takes it, the first that answers.
+    // The reply passes through as it came; every form it can take (an
+    // error, +OK, a bulk string, an array of bulk strings) reads the same
+    // in RESP2 and RESP3.
+    const auto next = this->remote_front_ends() ? front_end_candidates() : _config._data_nodes;
+    for (const auto& endpoint : next) {
+        auto r = this->exchange(cmd._argv, endpoint);
+        if (r._kind == front_end::exchange_result::kind::answered) {
+            return std::move(r._reply);
+        }
+    }
+    return s._writer.error(next.empty() ? "ERR this node holds no data and knows no node that does"
+                                        : "TRYAGAIN no node of the next layer answered");
 }
 
 template<typename Host, typename Logger, typename Metrics>

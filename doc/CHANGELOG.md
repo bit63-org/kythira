@@ -5,6 +5,20 @@ current list of outstanding work, see [TODO.md](TODO.md).
 
 ### What Changed (November 26, 2026)
 
+- **A Redis data node's replicas move to other data nodes, and back.**
+  `KYTHIRA.EVACUATE START <node>` (admin) fans out to every data node,
+  and each moves the groups it leads off the evacuee with the shared
+  replica evacuator: add a target as a learner, catch up, promote, hand
+  leadership away, remove. `STATUS` merges every node's view, `CANCEL`
+  stops the job everywhere, and `RELEASE` marks the evacuee's copies
+  stale once every group has moved. A node that holds replicas refuses to
+  start without `data` until it is released, or until
+  `KYTHIRA_REDIS_DISCARD_REPLICAS=true`; a node started with
+  `KYTHIRA_REDIS_JOIN=true`, or one that left the data layer, founds no
+  group and picks up the groups it is added to from a peer's descriptor.
+  A draining front end waits up to `KYTHIRA_REDIS_CURSOR_DRAIN_MS` for
+  open `SCAN` cursors. `doc/redis-layers.md` gains the split and merge
+  runbook (`.kiro/specs/redis-general-data-types/` task 19).
 - **The Redis gateway and front-end layers scale themselves.**
   `KYTHIRA_REDIS_CAPACITY_LAYER` makes the layer membership group's leader
   run the elastic capacity controller over one stateless layer, on the

@@ -38,6 +38,7 @@
 #include <raft/multi_raft_impl.hpp>
 #include <raft/multi_raft_transport_handles.hpp>
 #include <raft/persistence.hpp>
+#include <kythira/redis/redis_evacuation.hpp>
 #include <kythira/redis/redis_gateway_impl.hpp>
 #include <kythira/redis/redis_kv_mvcc_state_machine.hpp>
 #include <kythira/redis/redis_kv_state_machine.hpp>
@@ -299,6 +300,14 @@ public:
                  const kythira::redis_gateway_config& gateway_cfg, Host& node,
                  const service_node::group_space& space)
         : _opt(opt), _acl(&acl), _gateway_cfg(&gateway_cfg), _logger{opt._log_level} {
+        // Task 19: replicas a node without data still holds refuse the start
+        // (or are discarded), and a data node may join instead of founding.
+        _join = settle_held_replicas(_opt);
+        _addresses = std::make_shared<peer_addresses>();
+        for (const auto& [id, gw] : _opt._peer_gateways) {
+            _addresses->_gateways[id] = gw;
+        }
+        _node = &node;
         if constexpr (Storage::on_disk) {
             std::filesystem::create_directories(_opt._cache._data_dir / "raft");
             _disk = std::make_unique<disk_type>(_opt._cache, node_text(_opt._node_id));
@@ -372,6 +381,14 @@ public:
         if (!_gateway_cfg->_layer_roles.has(kythira::layers::role::data)) {
             return;
         }
+        // A joining data node (task 19) founds nothing: each group it takes
+        // adds it, and it learns the group from a peer (lookup_descriptor).
+        if (_join) {
+            _logger.log(kythira::log_level::info,
+                        "redis: joining; this node founds no group and takes replicas only when "
+                        "a group adds it (KYTHIRA.EVACUATE ... TO it)");
+            return;
+        }
         // Initial tiling: cuts sorted and deduplicated, one shard per range.
         auto cuts = _opt._shard_cuts;
         std::sort(cuts.begin(), cuts.end());
@@ -442,16 +459,29 @@ public:
                 ._read = [group] { return group->read(); },
             };
         }
-        auto peer_gateways = _opt._peer_gateways;
+        const bool data = gateway_cfg._layer_roles.has(kythira::layers::role::data);
+        if (data) {
+            gateway_cfg._evacuate = [this](const std::vector<std::string>& args, bool internal) {
+                auto* e = _evacuation_ptr.load(std::memory_order_acquire);
+                if (e == nullptr) {
+                    return kythira::redis_admin_answer::error("TRYAGAIN the node is starting");
+                }
+                return e->handle(args, internal);
+            };
+        }
         _gateway = std::make_unique<gateway_type>(
             *_host, *_acl, _logger, _metrics, gateway_cfg,
-            [peer_gateways](const node_id_type& id) -> std::optional<std::string> {
-                auto it = peer_gateways.find(id);
-                if (it == peer_gateways.end()) {
+            [addresses = _addresses](const node_id_type& id) -> std::optional<std::string> {
+                const std::scoped_lock lock(addresses->_mu);
+                auto it = addresses->_gateways.find(id);
+                if (it == addresses->_gateways.end()) {
                     return std::nullopt;
                 }
                 return it->second;
             });
+        if (data) {
+            make_evacuation();
+        }
         if constexpr (Storage::on_disk) {
             build_front_end();
         }
@@ -517,6 +547,10 @@ public:
             _disk->_pinned = nullptr;  // it reads the host
         }
         _front_end.reset();
+        _evacuation_ptr.store(nullptr, std::memory_order_release);
+        if (_evacuation) {
+            _evacuation->stop();  // it calls peers through the gateway
+        }
         if (_gateway) {
             _gateway->stop();  // its membership round reads the group
         }
@@ -530,6 +564,7 @@ public:
             _host->stop();
         }
         _host_ptr.store(nullptr, std::memory_order_release);
+        _evacuation.reset();
         _host.reset();
         _gateway.reset();
         _started = false;
@@ -634,6 +669,14 @@ private:
         cfg.executor_stripes = _opt._executor_stripes;
         cfg.policy_interval = _opt._policy_interval;
         cfg.partitioner = kythira::make_partitioner<std::string>(kythira::redis_kv_partitioner{});
+        // A group adding this node as a learner (an evacuation's target, task
+        // 19) is created from the descriptor a peer holds, which lists this
+        // node once the change has started.
+        cfg.lookup_descriptor =
+            [this](const std::uint64_t& group) -> std::optional<descriptor_type> {
+            auto* e = _evacuation_ptr.load(std::memory_order_acquire);
+            return e == nullptr ? std::nullopt : e->lookup_descriptor(group);
+        };
 #if defined(KYTHIRA_REDIS_GATEWAY_SNAPSHOT_ISOLATION)
         // The timestamp oracle's group, on every node, with an id no shard's
         // tiling can reach (shards count up from 1). Only the in-memory
@@ -646,6 +689,62 @@ private:
         (void)space;
 #endif
         return cfg;
+    }
+
+    /// The `KYTHIRA.EVACUATE` job (task 19), over this node's host, calling
+    /// the other data nodes through the gateway's forward link.
+    void make_evacuation() {
+        typename evacuation_type::hooks h;
+        h._call = [this](const std::string& endpoint, const std::vector<std::string>& argv) {
+            return _gateway ? _gateway->data_call(endpoint, argv) : std::nullopt;
+        };
+        h._peers = [this] {
+            std::vector<std::pair<node_id_type, std::string>> out;
+            const std::scoped_lock lock(_addresses->_mu);
+            for (const auto& [id, gw] : _addresses->_gateways) {
+                if (id != _opt._node_id) {
+                    out.emplace_back(id, gw);
+                }
+            }
+            return out;
+        };
+        h._learn = [this](const node_id_type& id,
+                          const kythira::redis_evacuation::target_address& a) {
+            if (!a._gateway.empty()) {
+                const std::scoped_lock lock(_addresses->_mu);
+                _addresses->_gateways[id] = a._gateway;
+            }
+            if (!a._raft.empty()) {
+                if constexpr (requires { _node->client().add_peer(id, a._raft); }) {
+                    _node->client().add_peer(id, a._raft);
+                }
+            }
+            _logger.log(kythira::log_level::info, "redis evacuation: learned a target",
+                        {{"node", node_text(id)}, {"raft", a._raft}, {"gateway", a._gateway}});
+        };
+        h._release = [this] {
+            if (_opt._replica_dir.empty()) {
+                return false;
+            }
+            std::error_code ec;
+            std::filesystem::create_directories(_opt._replica_dir / "raft", ec);
+            std::ofstream(released_marker(_opt._replica_dir), std::ios::trunc)
+                << "released by an evacuation\n";
+            return true;
+        };
+        h._unrelease = [this] {
+            std::error_code ec;
+            if (!_opt._replica_dir.empty() &&
+                std::filesystem::remove(released_marker(_opt._replica_dir), ec)) {
+                _logger.log(kythira::log_level::info,
+                            "redis evacuation: an evacuation targets this node; release withdrawn");
+            }
+        };
+        h._log = [this](const std::string& line) { _logger.log(kythira::log_level::info, line); };
+        const auto replicas =
+            _opt._replicas != 0 ? _opt._replicas : std::max<std::size_t>(_voters.size(), 1);
+        _evacuation = std::make_unique<evacuation_type>(*_host, replicas, std::move(h));
+        _evacuation_ptr.store(_evacuation.get(), std::memory_order_release);
     }
 
     [[nodiscard]] static auto voter_names(const std::vector<node_id_type>& v)
@@ -1025,6 +1124,19 @@ private:
     std::unique_ptr<host_type> _host;
     std::unique_ptr<gateway_type> _gateway;
     std::unique_ptr<front_end_type> _front_end;
+    /// Task 19: whether this data node joined rather than founded, the
+    /// evacuation job, and every data node's gateway (the settings' plus
+    /// the targets an evacuation named), which the gateway's resolver reads.
+    bool _join = false;
+    struct peer_addresses {
+        std::mutex _mu;
+        std::map<node_id_type, std::string> _gateways;
+    };
+    using evacuation_type = kythira::redis_evacuation::controller<host_type>;
+    std::shared_ptr<peer_addresses> _addresses;
+    std::unique_ptr<evacuation_type> _evacuation;
+    std::atomic<evacuation_type*> _evacuation_ptr{nullptr};
+    Host* _node = nullptr;
 
     std::atomic<bool> _driving{false};
     std::thread _driver;
