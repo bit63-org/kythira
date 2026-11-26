@@ -4,7 +4,9 @@
 package kythira.kpl;
 
 import com.amazonaws.services.kinesis.producer.KinesisProducer;
+import com.amazonaws.services.kinesis.producer.Attempt;
 import com.amazonaws.services.kinesis.producer.KinesisProducerConfiguration;
+import com.amazonaws.services.kinesis.producer.UserRecordFailedException;
 import com.amazonaws.services.kinesis.producer.UserRecordResult;
 import java.net.URI;
 import java.nio.ByteBuffer;
@@ -13,6 +15,7 @@ import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 
@@ -32,6 +35,16 @@ import java.util.concurrent.TimeUnit;
  */
 public final class KplProducer {
     private KplProducer() {}
+
+    /** Each attempt's error, so a failed run says why (throttled, timed out, a 5xx). */
+    static String attempts(UserRecordResult r) {
+        StringBuilder out = new StringBuilder();
+        for (Attempt a : r.getAttempts()) {
+            out.append(" [").append(a.isSuccessful() ? "ok" : a.getErrorCode() + ": " + a.getErrorMessage())
+                    .append(" after ").append(a.getDuration()).append(" ms]");
+        }
+        return out.toString();
+    }
 
     public static void main(String[] args) throws Exception {
         if (args.length < 4) {
@@ -65,11 +78,19 @@ public final class KplProducer {
             // predict, and builds a stream's pipeline (STS, then ListShards)
             // on that stream's first record. So one record first, then a
             // pause for the shard map, then the batch.
-            UserRecordResult warm = producer.addUserRecord(stream, "pk-warmup",
-                    ByteBuffer.wrap((tag + "-warmup").getBytes(StandardCharsets.UTF_8)))
-                    .get(120, TimeUnit.SECONDS);
+            UserRecordResult warm;
+            try {
+                warm = producer.addUserRecord(stream, "pk-warmup",
+                        ByteBuffer.wrap((tag + "-warmup").getBytes(StandardCharsets.UTF_8)))
+                        .get(120, TimeUnit.SECONDS);
+            } catch (ExecutionException e) {
+                if (e.getCause() instanceof UserRecordFailedException f) {
+                    throw new IllegalStateException("the first record failed:" + attempts(f.getResult()), e);
+                }
+                throw e;
+            }
             if (!warm.isSuccessful()) {
-                throw new IllegalStateException("the first record failed: " + warm.getAttempts());
+                throw new IllegalStateException("the first record failed:" + attempts(warm));
             }
             Thread.sleep(2000);
             List<Future<UserRecordResult>> results = new ArrayList<>();
