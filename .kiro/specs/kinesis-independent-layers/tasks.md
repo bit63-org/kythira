@@ -336,7 +336,7 @@ every role (7, 8, 10).
       guard and capacity probe keep following the store the node started
       with.
 
-- [ ] 14. Migration path tests
+- [x] 14. Migration path tests
   - One in-process test per path, each run in both directions and each
     under a producer and a GetRecords/EFO consumer, checking no lost or
     duplicated acknowledged record, per-shard order and sequence numbers,
@@ -369,7 +369,16 @@ every role (7, 8, 10).
     hand-played Raft group whose replicas move as a learner (sealed
     segments copied under traffic, then a fence for the snapshot and the
     active prefix); `tests/kinesis_cluster_handle.hpp` lets the compiled
-    layouts run over it. Left: the docker-chaos scenario
+    layouts run over it. The docker-chaos path is
+    `kpl_and_kcl_run_through_the_migration_path_both_ways` in
+    `kinesis_node_scenario_test` (the `migration` compose profile adds
+    kin-4, a joining data-only node, and three segment nodes): KPL writes
+    and two KCL 2.x workers read while the gateway, front-end, data and
+    segment layers split off one at a time (evacuate, release, store
+    move) and come back, with one node of each layer killed on the way;
+    every KPL record is processed and no shard has two owners past the
+    failover time. It runs under Docker and rootless Podman in the Kinesis
+    module workflow
   - _Requirements: 11.1, 11.6, 11.7, 13.1-13.3, 15.4, 15.7_
 
 - [ ] 15. Compose layout, differential and measurement

@@ -96,6 +96,16 @@
 // nodes to commit to it, and writes JSON records through an S3 Tables channel
 // while every node is killed in turn: pyiceberg reads every record back as a
 // row, and no batch was committed twice or overlaps another in its shard.
+//
+// The migration case (kinesis-independent-layers task 14, Requirements
+// 11.1-11.7) goes the whole way from every role on kin-1..kin-3 to the
+// four-way split and back under a KPL producer and two KCL 2.x workers (the
+// `migration` profile): the gateway apart (kin-gw killed), the front end
+// apart (kin-fe killed), kin-1's replicas evacuated to kin-4, a data-only
+// node that joins, and kin-1 restarted without data (kin-2 killed), kin-3's
+// segments moved in place to a segment node's volume (that segment node
+// killed), then each step undone. Every KPL record is processed, and no
+// shard by two workers at once past the failover time.
 
 #define BOOST_TEST_MODULE kinesis_node_scenario_test
 #include <boost/test/results_collector.hpp>
@@ -106,6 +116,7 @@
 #include <boost/json.hpp>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
@@ -162,15 +173,21 @@ const std::string k_front_end_endpoint = "http://kin-fe:4567";
 /// kin-gw: the gateway without a front end.
 const std::string k_gateway_endpoint = "http://kin-gw:4567";
 
-/// The AWS CLI v2 against node `target`.
-os::CmdResult aws_cli(int target, std::initializer_list<std::string> args,
-                      const char* key_id = k_client_id, const char* secret = k_client_secret) {
+/// The AWS CLI v2 against the endpoint `url`.
+os::CmdResult aws_cli_at(const std::string& url, std::initializer_list<std::string> args,
+                         const char* key_id = k_client_id, const char* secret = k_client_secret) {
     auto cmd = compose_cmd({"--profile", "clients", "run", "--rm", "-T", "-e",
                             std::string("AWS_ACCESS_KEY_ID=") + key_id, "-e",
                             std::string("AWS_SECRET_ACCESS_KEY=") + secret, "aws-cli",
-                            "--endpoint-url", endpoint(target), "--output", "json", "kinesis"});
+                            "--endpoint-url", url, "--output", "json", "kinesis"});
     cmd.insert(cmd.end(), args);
     return os::real_exec(cmd);
+}
+
+/// The AWS CLI v2 against node `target`.
+os::CmdResult aws_cli(int target, std::initializer_list<std::string> args,
+                      const char* key_id = k_client_id, const char* secret = k_client_secret) {
+    return aws_cli_at(endpoint(target), args, key_id, secret);
 }
 
 /// kinesis_e2e.py in the boto3 client.
@@ -265,9 +282,49 @@ std::string stream_status(int n, const std::string& stream) {
     return j ? text_at(*j, {"StreamDescriptionSummary", "StreamStatus"}) : std::string{};
 }
 
+/// `compose logs` output without the lines a node repeats many times a
+/// second while a peer catches up or is down (Raft retries, lag warnings,
+/// replica creation races), which otherwise fill the tail and push out the
+/// lines a failure needs. Each dropped kind is counted at the end.
+std::string without_repeats(const std::string& out) {
+    static const std::array<std::string_view, 4> k_noise = {
+        "Retry attempt", "Follower is lagging significantly", "Lazy replica creation failed",
+        "No snapshot available"};
+    std::array<std::size_t, k_noise.size()> dropped{};
+    std::string kept;
+    std::istringstream in(out);
+    for (std::string line; std::getline(in, line);) {
+        const auto* hit = std::ranges::find_if(
+            k_noise, [&](std::string_view n) { return line.find(n) != std::string::npos; });
+        if (hit != k_noise.end()) {
+            ++dropped[static_cast<std::size_t>(hit - k_noise.begin())];
+            continue;
+        }
+        kept += line;
+        kept += '\n';
+    }
+    for (std::size_t i = 0; i < k_noise.size(); ++i) {
+        if (dropped[i] != 0) {
+            kept += "(" + std::to_string(dropped[i]) + " lines with \"" + std::string(k_noise[i]) +
+                    "\" left out)\n";
+        }
+    }
+    return kept;
+}
+
 void dump_logs() {
-    auto r = os::real_exec(compose_cmd({"logs", "--no-color", "--tail", "200"}));
-    std::cerr << "---- compose logs ----\n" << r.out << "\n----------------------\n";
+    auto r = os::real_exec(compose_cmd({"logs", "--no-color", "--tail", "1500"}));
+    std::cerr << "---- compose logs ----\n"
+              << without_repeats(r.out) << "\n----------------------\n";
+    // Services in profiles are left out above; the migration case's nodes
+    // and workers are what its failures need.
+    auto m = os::real_exec(
+        compose_cmd({"--profile", "migration", "logs", "--no-color", "--tail", "1500", "kin-4",
+                     "kin-seg-1", "kin-seg-2", "kin-seg-3", "kcl-mig-1", "kcl-mig-2"}));
+    if (m.code == 0 && !m.out.empty()) {
+        std::cerr << "---- migration logs ----\n"
+                  << without_repeats(m.out) << "\n------------------------\n";
+    }
 }
 
 struct stack_fixture {
@@ -282,11 +339,11 @@ struct stack_fixture {
         }
     }
     ~stack_fixture() {
-        os::try_exec(
-            os::real_exec,
-            compose_cmd({"--profile", "clients", "--profile", "kcl", "--profile", "kcl-efo",
-                         "--profile", "s3", "--profile", "tables", "--profile", "leases",
-                         "--profile", "aws-leases", "down", "-v", "--remove-orphans"}));
+        os::try_exec(os::real_exec,
+                     compose_cmd({"--profile", "clients", "--profile", "kcl", "--profile",
+                                  "kcl-efo", "--profile", "s3", "--profile", "tables", "--profile",
+                                  "leases", "--profile", "aws-leases", "--profile", "migration",
+                                  "down", "-v", "--remove-orphans"}));
     }
     stack_fixture(const stack_fixture&) = delete;
     stack_fixture& operator=(const stack_fixture&) = delete;
@@ -1350,4 +1407,340 @@ BOOST_AUTO_TEST_CASE(tables_channel_commits_every_record_once_through_node_kills
     BOOST_TEST(c.code == 0, "tables-check failed:\n" << c.out);
     BOOST_TEST(c.out.find("\"delivered\": " + count) != std::string::npos, c.out);
     BOOST_TEST_MESSAGE("tables case: " << c.out);
+}
+
+// ---- migration (kinesis-independent-layers task 14) -------------------------
+
+namespace {
+
+/// One live-migration admin call through `node`'s own binary, with its
+/// environment (`kinesis_gateway_node --admin`): the answer's body, or
+/// nullopt on a non-2xx answer or none.
+std::optional<boost::json::object> admin(const std::string& node, const std::string& method,
+                                         const std::string& op, const std::string& body = {}) {
+    std::vector<std::string> args = {"exec",    "-T",   node, "/usr/local/bin/kinesis_gateway_node",
+                                     "--admin", method, op};
+    if (!body.empty()) {
+        args.push_back(body);
+    }
+    auto r = os::real_exec(compose_cmd(args));
+    if (r.code != 0) {
+        BOOST_TEST_MESSAGE(node << " --admin " << method << " " << op << ": " << r.out);
+        return std::nullopt;
+    }
+    return last_json(r.out);
+}
+
+/// KPL, aggregating, writes `count` records tagged `tag` to `stream`
+/// through `target` (host:port), run again whole if any record fails: a
+/// retry can write a record twice, never lose one. Runs on a producer
+/// thread too, so it reports on stderr rather than through Boost.Test.
+bool kpl_produce(const std::string& target, const std::string& stream, const std::string& tag,
+                 int count) {
+    for (int attempt = 0; attempt < 4; ++attempt) {
+        auto r = os::real_exec(compose_cmd({"--profile", "clients", "run", "--rm", "-T", "kpl",
+                                            target, stream, std::to_string(count), tag}));
+        if (r.code == 0) {
+            return true;
+        }
+        std::cerr << "KPL " << tag << " through " << target << " failed (attempt " << attempt + 1
+                  << "):\n"
+                  << r.out << "\n";
+        std::this_thread::sleep_for(5s);
+    }
+    return false;
+}
+
+/// What every endpoint answers when a KPL run gave up: one PutRecord
+/// through each front door and the data nodes still up, and the
+/// evacuation's view, so a failure says where writes stop.
+void diagnose_writes(const std::string& stream) {
+    for (const auto* url : {"http://kin-gw:4567", "http://kin-fe:4567", "http://kin-1:4567",
+                            "http://kin-2:4567", "http://kin-3:4567"}) {
+        auto r = aws_cli_at(
+            url, {"put-record", "--stream-name", stream, "--partition-key", "pk-diagnose", "--data",
+                  "ZGlhZ25vc2U=", "--cli-binary-format", "base64"});
+        std::cerr << "diagnose: put-record through " << url << " exit " << r.code << ":\n"
+                  << r.out << "\n";
+    }
+    for (const auto* node : {"kin-2", "kin-3", "kin-4"}) {
+        auto r =
+            os::real_exec(compose_cmd({"exec", "-T", node, "/usr/local/bin/kinesis_gateway_node",
+                                       "--admin", "GET", "evacuate"}));
+        std::cerr << "diagnose: " << node << " GET evacuate exit " << r.code << ":\n"
+                  << r.out << "\n";
+    }
+}
+
+/// Each data node's view of the evacuation (`GET evacuate`), for a
+/// failure message: which groups each still has in flight and where.
+std::string evacuation_views() {
+    std::string out;
+    for (const auto* node : {"kin-1", "kin-2", "kin-3", "kin-4"}) {
+        auto r =
+            os::real_exec(compose_cmd({"exec", "-T", node, "/usr/local/bin/kinesis_gateway_node",
+                                       "--admin", "GET", "evacuate"}));
+        out += std::string("\n  ") + node + ": " + r.out;
+    }
+    return out;
+}
+
+std::string segment_node_service(const std::string& id) {
+    // 21..23 are kin-seg-1..kin-seg-3 (compose.yml).
+    return "kin-seg-" + std::to_string(std::stoi(id) - 20);
+}
+
+}  // namespace
+
+// Task 14: the whole migration path both ways in containers, under a KPL
+// producer and two KCL 2.x workers, killing one node of each layer along the
+// way. From every role on kin-1..kin-3:
+//
+//   1. gateway apart: KPL writes through kin-gw; kin-gw is killed and KPL
+//      writes through kin-fe until it is back;
+//   2. front end apart: kin-fe is killed while KPL writes through kin-gw,
+//      which hands its calls to kin-1 meanwhile;
+//   3. data apart: kin-1's replicas are evacuated to kin-4, a data-only node
+//      that joins, while KPL writes; kin-1 is released and restarts as a
+//      front end without data; kin-2 is killed while KPL writes;
+//   4. segments apart: kin-3's segments move in place to its volume on a
+//      segment node while KPL writes, and that segment node is killed while
+//      KPL writes;
+//
+// then back: kin-3's segments move home, kin-1 restarts as a data node and
+// kin-4's replicas are evacuated to it, kin-4 is released and stopped, and
+// KPL writes through kin-1 again. One KCL worker reads through kin-2 and one
+// through kin-gw: every KPL record is processed, and no shard is processed
+// by two workers at once for longer than the failover time.
+BOOST_AUTO_TEST_CASE(kpl_and_kcl_run_through_the_migration_path_both_ways) {
+    const logs_on_failure logs;
+    const std::string stream = "mig";
+    const std::string gateway = "kin-gw:4567";
+    const std::string front_end = "kin-fe:4567";
+
+    // The segment nodes first, then the founding nodes recreated with the
+    // segment layer set (their segments stay on their own disks until a
+    // store move: they keep the segments role).
+    os::checked_exec(os::real_exec, compose_cmd({"--profile", "migration", "up", "-d", "kin-seg-1",
+                                                 "kin-seg-2", "kin-seg-3"}));
+    ::setenv("KINESIS_SCENARIO_SEGMENT_NODES",
+             "21=kin-seg-1:4567,22=kin-seg-2:4567,23=kin-seg-3:4567", 1);
+    os::checked_exec(os::real_exec, compose_cmd({"up", "-d", "--force-recreate", "--no-deps",
+                                                 "kin-1", "kin-2", "kin-3"}));
+    for (int n : {1, 2, 3}) {
+        BOOST_REQUIRE_MESSAGE(
+            eventually([&] { return aws_cli(n, {"list-streams"}).code == 0; }, 180s),
+            service(n) << " never answered ListStreams with the segment layer set");
+    }
+    {
+        auto r = boto3({"create", "--endpoint", endpoint(2), "--stream", stream, "--shards", "4"},
+                       k_admin_id, k_admin_secret);
+        BOOST_REQUIRE_MESSAGE(r.code == 0, "boto3 create failed:\n" << r.out);
+    }
+
+    std::set<std::string> expected;
+    const auto produce = [&](const std::string& target, const std::string& tag, int count) {
+        const bool ok = kpl_produce(target, stream, tag, count);
+        if (!ok) {
+            diagnose_writes(stream);
+        }
+        BOOST_REQUIRE_MESSAGE(ok, "KPL never wrote " << tag << " through " << target);
+        for (int i = 0; i < count; ++i) {
+            expected.insert(tag + "-" + std::to_string(i));
+        }
+    };
+    // KPL in the background while a migration step runs.
+    const auto produce_during = [&](const std::string& target, const std::string& tag, int count,
+                                    const std::function<void()>& step) {
+        bool ok = false;
+        std::thread producer([&] { ok = kpl_produce(target, stream, tag, count); });
+        // A failed requirement in the step throws: join on the way out.
+        struct joiner {
+            std::thread& _t;
+            ~joiner() {
+                if (_t.joinable()) {
+                    _t.join();
+                }
+            }
+        } join_on_exit{producer};
+        step();
+        producer.join();
+        if (!ok) {
+            diagnose_writes(stream);
+        }
+        BOOST_REQUIRE_MESSAGE(ok, "KPL never wrote " << tag << " through " << target);
+        for (int i = 0; i < count; ++i) {
+            expected.insert(tag + "-" + std::to_string(i));
+        }
+    };
+    const auto events = [] {
+        return kcl_events(
+            {"--profile", "migration", "logs", "--no-color", "kcl-mig-1", "kcl-mig-2"});
+    };
+    const auto all_seen = [&] {
+        const auto seen = kcl_records(events());
+        return std::includes(seen.begin(), seen.end(), expected.begin(), expected.end());
+    };
+    const auto answers = [](const std::string& url, const std::string& what) {
+        BOOST_REQUIRE_MESSAGE(
+            eventually([&] { return aws_cli_at(url, {"list-streams"}).code == 0; }, 180s),
+            what << " never answered ListStreams");
+    };
+    // Kills `svc` and starts it again after `down` whatever `meanwhile` is
+    // doing: a node that stays down until KPL has used up its retries
+    // tests a longer outage than the step means to (and a data node whose
+    // segment node is down stops applying until it is back).
+    const auto kill_and_start = [](const std::string& svc, std::chrono::seconds down,
+                                   const std::function<void()>& meanwhile) {
+        os::checked_exec(os::real_exec, compose_cmd({"kill", svc}));
+        int started = -1;
+        std::thread restarter([&] {
+            std::this_thread::sleep_for(down);
+            started = os::real_exec(compose_cmd({"start", svc})).code;
+        });
+        struct joiner {
+            std::thread& _t;
+            ~joiner() {
+                if (_t.joinable()) {
+                    _t.join();
+                }
+            }
+        } join_on_exit{restarter};
+        meanwhile();
+        restarter.join();
+        BOOST_REQUIRE_MESSAGE(started == 0, svc << " did not start again");
+    };
+    const auto evacuate = [&](const std::string& body) {
+        BOOST_REQUIRE_MESSAGE(admin("kin-2", "POST", "evacuate", body).has_value(),
+                              "evacuate " << body << " was refused");
+        BOOST_REQUIRE_MESSAGE(eventually(
+                                  [&] {
+                                      const auto st = admin("kin-2", "GET", "evacuate");
+                                      const auto* done = st ? st->if_contains("done") : nullptr;
+                                      return done != nullptr && done->is_bool() && done->as_bool();
+                                  },
+                                  300s),
+                              "evacuate " << body << " never finished: " << evacuation_views());
+    };
+    // Starts a store move on kin-3 and waits for it; the answer's report.
+    const auto store_move = [&](const std::string& body) {
+        BOOST_REQUIRE_MESSAGE(admin("kin-3", "POST", "store-move", body).has_value(),
+                              "store-move " << body << " was refused");
+        boost::json::object report;
+        BOOST_REQUIRE_MESSAGE(eventually(
+                                  [&] {
+                                      const auto st = admin("kin-3", "GET", "store-move");
+                                      if (!st || text_at(*st, {"state"}) == "running") {
+                                          return false;
+                                      }
+                                      report = *st;
+                                      return true;
+                                  },
+                                  300s),
+                              "store-move " << body << " never finished");
+        BOOST_REQUIRE_MESSAGE(text_at(report, {"state"}) == "done",
+                              "store-move " << body << ": " << boost::json::serialize(report));
+        BOOST_TEST_MESSAGE("store-move " << body << ": " << boost::json::serialize(report));
+        return report;
+    };
+
+    // Co-located: the workers start, KPL writes through a co-located node.
+    os::checked_exec(os::real_exec,
+                     compose_cmd({"--profile", "migration", "up", "-d", "kcl-mig-1", "kcl-mig-2"}));
+    produce(service(2) + ":4567", "m0", 200);
+    BOOST_REQUIRE_MESSAGE(eventually(all_seen, 240s),
+                          "the KCL workers never processed the first KPL records");
+
+    // 1. The gateway layer: KPL through kin-gw, then kin-gw killed while KPL
+    //    writes through the front end behind it.
+    BOOST_TEST_CONTEXT("gateway apart") {
+        produce(gateway, "m1", 200);
+        kill_and_start("kin-gw", 20s, [&] { produce(front_end, "m2", 200); });
+        answers("http://" + gateway, "kin-gw after its restart");
+    }
+
+    // 2. The front-end layer: kin-fe killed while KPL writes through kin-gw,
+    //    which hands its calls to kin-1 meanwhile.
+    BOOST_TEST_CONTEXT("front end apart") {
+        kill_and_start("kin-fe", 20s, [&] { produce(gateway, "m3", 200); });
+        answers("http://" + front_end, "kin-fe after its restart");
+    }
+
+    // 3. The data layer: kin-1's replicas to kin-4 while KPL writes, kin-1
+    //    released and restarted without data, then kin-2 killed while KPL
+    //    writes (the replicas left are on kin-2, kin-3 and kin-4).
+    BOOST_TEST_CONTEXT("data apart") {
+        os::checked_exec(os::real_exec,
+                         compose_cmd({"--profile", "migration", "up", "-d", "--no-deps", "kin-4"}));
+        BOOST_REQUIRE_MESSAGE(
+            eventually([&] { return admin("kin-4", "GET", "evacuate").has_value(); }, 120s),
+            "kin-4 never answered an admin call");
+        produce_during(gateway, "m4", 400, [&] {
+            evacuate(R"({"node":"1","targets":[{"id":"4","raft":"http://kin-4:7100",)"
+                     R"("gateway":"kin-4:4567"}]})");
+        });
+        BOOST_REQUIRE_MESSAGE(admin("kin-1", "POST", "release").has_value(),
+                              "kin-1 was not released");
+        ::setenv("KINESIS_SCENARIO_KIN1_ROLES", "gateway,front_end", 1);
+        ::setenv("KINESIS_SCENARIO_KIN1_DATA_NODES", "kin-2:4567,kin-3:4567,kin-4:4567", 1);
+        os::checked_exec(os::real_exec,
+                         compose_cmd({"up", "-d", "--force-recreate", "--no-deps", "kin-1"}));
+        answers(endpoint(1), "kin-1 as a front end without data");
+        kill_and_start(service(2), std::chrono::seconds(k_failover_ms / 1000 + 5),
+                       [&] { produce(gateway, "m5", 200); });
+        answers(endpoint(2), "kin-2 after its restart");
+    }
+
+    // 4. The segment layer: kin-3's segments to its volume while KPL
+    //    writes, then the segment node holding it killed while KPL writes.
+    BOOST_TEST_CONTEXT("segments apart") {
+        boost::json::object moved;
+        produce_during(gateway, "m6", 400, [&] { moved = store_move(R"({"to":"volume"})"); });
+        const auto holder = text_at(moved, {"to"});
+        BOOST_REQUIRE_MESSAGE(
+            !holder.empty(), "store-move named no segment node: " << boost::json::serialize(moved));
+        // Back well inside the minute after which the catalog would move the
+        // volume elsewhere.
+        kill_and_start(segment_node_service(holder), 25s, [&] { produce(gateway, "m7", 200); });
+        answers(endpoint(3), "kin-3 after its segment node restarted");
+    }
+
+    // And back, the same way in reverse.
+    BOOST_TEST_CONTEXT("segments home") {
+        produce_during(gateway, "m8", 400, [&] { (void)store_move(R"({"to":"local"})"); });
+    }
+    BOOST_TEST_CONTEXT("data home") {
+        ::setenv("KINESIS_SCENARIO_KIN1_ROLES", "gateway,front_end,data,segments", 1);
+        ::setenv("KINESIS_SCENARIO_KIN1_DATA_NODES", "", 1);
+        os::checked_exec(os::real_exec,
+                         compose_cmd({"up", "-d", "--force-recreate", "--no-deps", "kin-1"}));
+        BOOST_REQUIRE_MESSAGE(
+            eventually([&] { return admin("kin-1", "GET", "evacuate").has_value(); }, 120s),
+            "kin-1 never answered an admin call as a data node");
+        produce_during(gateway, "m9", 400,
+                       [&] { evacuate(R"({"node":"4","targets":[{"id":"1"}]})"); });
+        BOOST_REQUIRE_MESSAGE(admin("kin-4", "POST", "release").has_value(),
+                              "kin-4 was not released");
+        os::checked_exec(os::real_exec, compose_cmd({"--profile", "migration", "stop", "kin-4"}));
+        answers(endpoint(1), "kin-1 back as a data node");
+    }
+    BOOST_TEST_CONTEXT("co-located again") {
+        produce(service(1) + ":4567", "m10", 200);
+    }
+
+    BOOST_TEST(eventually(all_seen, 300s), "the KCL workers never processed every KPL record");
+    const auto evs = events();
+    const auto seen = kcl_records(evs);
+    std::vector<std::string> missing;
+    std::set_difference(expected.begin(), expected.end(), seen.begin(), seen.end(),
+                        std::back_inserter(missing));
+    BOOST_TEST(missing.empty(), missing.size() << " of " << expected.size()
+                                               << " KPL records never processed, first "
+                                               << (missing.empty() ? "" : missing.front()));
+    for (const auto& b : double_ownership(evs)) {
+        BOOST_ERROR("shard processed by two workers past the failover time: " << b);
+    }
+    BOOST_TEST_MESSAGE("migration case: " << expected.size() << " KPL records, " << seen.size()
+                                          << " distinct records processed");
+    os::real_exec(compose_cmd({"--profile", "migration", "stop", "kcl-mig-1", "kcl-mig-2"}));
 }

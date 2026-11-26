@@ -27,7 +27,8 @@
 # scenario runs each with `compose --profile clients run --rm`. The KCL
 # workers are in the `kcl` profile, the S3 mock in `s3`, the Iceberg REST
 # catalog in `tables` and the DynamoDB
-# lease stores with their workers in `leases`, for the same reason. Each node
+# lease stores with their workers in `leases`, and the migration case's
+# extra nodes and workers in `migration`, for the same reason. Each node
 # keeps its Raft state and segments in its own named volume, so
 # `stop`/`start` resumes it and `down -v` is a clean slate.
 
@@ -82,6 +83,10 @@ x-env: &env
   # REST catalog below, unsigned, only when the scenario sets these.
   KINESIS_CHANNEL_ICEBERG_URI: "${KINESIS_SCENARIO_ICEBERG_URI:-}"
   KINESIS_CHANNEL_ICEBERG_SIGV4: "${KINESIS_SCENARIO_ICEBERG_SIGV4:-true}"
+  # The segment layer (kinesis-independent-layers task 10), empty unless
+  # the migration case sets it and recreates the nodes: the three segment
+  # nodes below, which the case moves kin-3's segments onto and back.
+  KINESIS_SEGMENT_NODES: "${KINESIS_SCENARIO_SEGMENT_NODES:-}"
   AWS_ACCESS_KEY_ID: scenario-s3-key
   AWS_SECRET_ACCESS_KEY: scenario-s3-secret
   AWS_EC2_METADATA_DISABLED: "true"
@@ -92,6 +97,11 @@ services:
     environment:
       <<: *env
       KYTHIRA_NODE_ID: "1"
+      # The migration case evacuates kin-1's replicas and restarts it as a
+      # front end without data over the data nodes left, then brings it
+      # back as a data node (kinesis-independent-layers task 14).
+      KINESIS_ROLES: "${KINESIS_SCENARIO_KIN1_ROLES:-gateway,front_end,data,segments}"
+      KINESIS_DATA_NODES: "${KINESIS_SCENARIO_KIN1_DATA_NODES:-}"
     volumes:
       - ./keys.txt:/etc/kinesis/keys:ro
       - kin-1-data:/var/lib/kinesis
@@ -125,6 +135,7 @@ services:
       KYTHIRA_NODE_ID: "11"
       KINESIS_ROLES: gateway,front_end
       KINESIS_DATA_NODES: "kin-1:4567,kin-2:4567,kin-3:4567"
+      KINESIS_SEGMENT_NODES: ""
     volumes:
       - ./keys.txt:/etc/kinesis/keys:ro
 
@@ -139,8 +150,69 @@ services:
       KYTHIRA_NODE_ID: "12"
       KINESIS_ROLES: gateway
       KINESIS_FRONT_ENDS: "kin-fe:4567,kin-1:4567"
+      KINESIS_SEGMENT_NODES: ""
     volumes:
       - ./keys.txt:/etc/kinesis/keys:ro
+
+  # The migration case (kinesis-independent-layers task 14), in the
+  # `migration` profile. kin-4 is a data-only node (it serves its peers and
+  # no clients) that joins the cluster: KINESIS_VOTERS names the founding
+  # voters, so it forms no groups of its own and takes replicas only as an
+  # evacuation adds it. The founding nodes learn its addresses from the
+  # evacuation call, so their KYTHIRA_PEERS stay as they are. It keeps its
+  # segments on its own disk: the segment layer would need a segment node
+  # per KYTHIRA_PEERS entry.
+  kin-4:
+    <<: *node
+    profiles: ["migration"]
+    environment:
+      <<: *env
+      KYTHIRA_NODE_ID: "4"
+      KYTHIRA_PEERS: "1=http://kin-1:7100,2=http://kin-2:7100,3=http://kin-3:7100,4=http://kin-4:7100"
+      KINESIS_VOTERS: "1,2,3"
+      KINESIS_ROLES: data,segments
+      KINESIS_SEGMENT_NODES: ""
+    volumes:
+      - ./keys.txt:/etc/kinesis/keys:ro
+      - kin-4-data:/var/lib/kinesis
+
+  # Segment nodes (task 10): volumes for the data nodes' record segments,
+  # one node per founding voter as the placement requires, reached by
+  # service name and signed with the forwarding secret. Each keeps its
+  # volumes in a named volume, so a kill and start resumes them.
+  kin-seg-1: &segment_node
+    <<: *node
+    profiles: ["migration"]
+    environment:
+      <<: *env
+      KYTHIRA_NODE_ID: "21"
+      KINESIS_ROLES: segments
+      KINESIS_SEGMENT_NODES: "21=kin-seg-1:4567,22=kin-seg-2:4567,23=kin-seg-3:4567"
+    volumes:
+      - ./keys.txt:/etc/kinesis/keys:ro
+      - kin-seg-1-data:/var/lib/kinesis
+
+  kin-seg-2:
+    <<: *segment_node
+    environment:
+      <<: *env
+      KYTHIRA_NODE_ID: "22"
+      KINESIS_ROLES: segments
+      KINESIS_SEGMENT_NODES: "21=kin-seg-1:4567,22=kin-seg-2:4567,23=kin-seg-3:4567"
+    volumes:
+      - ./keys.txt:/etc/kinesis/keys:ro
+      - kin-seg-2-data:/var/lib/kinesis
+
+  kin-seg-3:
+    <<: *segment_node
+    environment:
+      <<: *env
+      KYTHIRA_NODE_ID: "23"
+      KINESIS_ROLES: segments
+      KINESIS_SEGMENT_NODES: "21=kin-seg-1:4567,22=kin-seg-2:4567,23=kin-seg-3:4567"
+    volumes:
+      - ./keys.txt:/etc/kinesis/keys:ro
+      - kin-seg-3-data:/var/lib/kinesis
 
   # The in-memory S3 mock (cmd/chaos_s3_mock, staged into the node image)
   # that the tiering case tiers to, in the `s3` profile: S3 on :9000 and
@@ -332,6 +404,20 @@ services:
     profiles: ["kpl"]
     command: ["http://kin-3:4567", "kpl", "kpl-app", "kpl-worker"]
 
+  # The migration case's KCL 2.x workers, one application on the stream the
+  # case moves: one through kin-2, a co-located node that is never moved,
+  # and one through kin-gw, the gateway in front of the split layers. KPL
+  # writes through whichever endpoint the step leaves standing.
+  kcl-mig-1:
+    <<: *kcl
+    profiles: ["migration"]
+    command: ["http://kin-2:4567", "mig", "mig-app", "mig-worker-1"]
+
+  kcl-mig-2:
+    <<: *kcl
+    profiles: ["migration"]
+    command: ["http://kin-gw:4567", "mig", "mig-app", "mig-worker-2"]
+
   # Task 17's Flink case: a Flink 1.20 job on an in-process mini cluster,
   # the AWS connector's source reading flink-in and its sink writing every
   # record to flink-out. In the `flink` profile.
@@ -382,3 +468,7 @@ volumes:
   kin-1-data:
   kin-2-data:
   kin-3-data:
+  kin-4-data:
+  kin-seg-1-data:
+  kin-seg-2-data:
+  kin-seg-3-data:
