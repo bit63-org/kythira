@@ -2039,8 +2039,15 @@ auto redis_gateway<Host, Logger, Metrics>::handle_evacuate(session& s, const res
             }
         }
     }
-    // No data here: the next layer down takes it, the first that answers.
-    // The reply passes through as it came; every form it can take (an
+    // No data here. Another node's controller asking for this node's own
+    // part (START/STATUS/CANCEL ... LOCAL) gets that answer, not a data
+    // node's: forwarding it would restart a data node's job, or report its
+    // view twice.
+    if (s._internal) {
+        return s._writer.error(std::string{k_evacuate_no_data});
+    }
+    // An admin's command: the next layer down takes it, the first that
+    // answers. The reply passes through as it came; every form it can take (an
     // error, +OK, a bulk string, an array of bulk strings) reads the same
     // in RESP2 and RESP3.
     const auto next = this->remote_front_ends() ? front_end_candidates() : _config._data_nodes;
