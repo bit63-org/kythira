@@ -722,3 +722,118 @@ BOOST_AUTO_TEST_CASE(the_hybrid_answers_locally_what_it_holds) {
     BOOST_TEST(d2._proposals_here.load() > 0U);
     BOOST_TEST(d2._served.load() > 0U);
 }
+
+namespace {
+
+// A data node's host as data_api_deps_over sees it: a routing map that
+// still holds the replica set a group was created with, and the Raft
+// replica's configuration, which moved.
+struct membership_stub {
+    std::vector<kythira::host_node_id> voters;
+    std::vector<kythira::host_node_id> learners;
+    bool joint = false;
+};
+
+struct replica_stub {
+    membership_stub _membership;
+    bool _leader = false;
+    [[nodiscard]] auto current_membership() const -> membership_stub { return _membership; }
+    [[nodiscard]] auto is_leader() const -> bool { return _leader; }
+};
+
+struct host_stub {
+    using node_id_type = kythira::host_node_id;
+    using map_type = kythira::shard_map<std::uint64_t, std::string, node_id_type>;
+    map_type _map;
+    std::map<std::uint64_t, replica_stub> _replicas;
+    node_id_type _self = kythira::host_node_id_from_number(2);
+
+    [[nodiscard]] auto shard_map_snapshot() const -> map_type { return _map; }
+    [[nodiscard]] auto group_node(std::uint64_t group) -> replica_stub* {
+        const auto it = _replicas.find(group);
+        return it == _replicas.end() ? nullptr : &it->second;
+    }
+    [[nodiscard]] auto node_id() const -> node_id_type { return _self; }
+    [[nodiscard]] auto resolve(const std::string& key) const
+        -> std::optional<map_type::descriptor_type> {
+        return _map.lookup(key);
+    }
+};
+
+struct cluster_stub {
+    enum class here_kind : std::uint8_t {
+        committed,
+        not_leader,
+        no_replica,
+        failed
+    };
+    struct here_result {
+        here_kind _kind = here_kind::failed;
+        std::optional<kin::apply_result> _result;
+        std::optional<kythira::host_node_id> _leader;
+    };
+    auto propose_here(const std::string& /*key*/, const std::vector<std::byte>& /*command*/,
+                      kin::admission /*mode*/) -> here_result {
+        return {};
+    }
+};
+
+auto id(std::uint64_t n) -> kythira::host_node_id {
+    return kythira::host_node_id_from_number(n);
+}
+
+}  // namespace
+
+// A replica evacuated from node 1 to node 4, which joined and now leads:
+// the routing map still says {1, 2, 3}. A data node's routes answer and its
+// stale-route answer give the Raft configuration, with the joined node's
+// address, so a front end tries node 4 and never node 1.
+BOOST_AUTO_TEST_CASE(routes_name_the_replicas_a_group_has_now_not_the_ones_it_was_made_with) {
+    host_stub host;
+    host._map = host_stub::map_type::single_shard(7, {id(1), id(2), id(3)});
+    host._replicas[7] =
+        replica_stub{._membership = {.voters = {id(2), id(3), id(4)}}, ._leader = false};
+    cluster_stub cluster;
+    kin::remote_data_access local({}, [](const std::string&, std::string_view, std::string) {
+        return std::optional<std::pair<unsigned, std::string>>{};
+    });
+    const auto deps = kin::data_api_deps_over(
+        host, cluster, local, [](const kythira::host_node_id& n) -> std::optional<std::string> {
+            return "kin-" + kythira::host_node_id_text(n) + ":4567";
+        });
+
+    const auto reply = deps._routes({});
+    BOOST_REQUIRE(reply.routes.size() == 1U);
+    const auto& row = reply.routes.front();
+    BOOST_TEST((row._voters == std::vector<std::string>{"2", "3", "4"}));
+    // A follower names no leader (a not-leader answer hints it); a leader
+    // names itself.
+    BOOST_TEST(!row._leader_hint.has_value());
+    const auto named_4 = std::ranges::find_if(
+        reply.addresses, [](const auto& a) { return a.first == "4" && a.second == "kin-4:4567"; });
+    BOOST_TEST((named_4 != reply.addresses.end()));
+    BOOST_TEST(
+        (std::ranges::none_of(reply.addresses, [](const auto& a) { return a.first == "1"; })));
+
+    // A caller behind on the epoch gets the same membership back.
+    const auto verdict =
+        deps._check("k", kin::route_ref{._group = 7, ._epoch = kythira::shard_epoch{}});
+    BOOST_TEST((verdict._kind == kythira::route_check_kind::current));
+    const auto wrong_group = deps._check("k", kin::route_ref{._group = 8, ._epoch = {}});
+    BOOST_REQUIRE((wrong_group._kind == kythira::route_check_kind::stale));
+    BOOST_TEST((wrong_group._route->_voters == std::vector<std::string>{"2", "3", "4"}));
+
+    host._replicas[7]._leader = true;
+    BOOST_TEST((deps._routes({}).routes.front()._leader_hint == std::optional<std::string>("2")));
+    host._replicas[7]._leader = false;
+
+    // While the change is in transit (a joint configuration) the map's set
+    // stays; a group with no replica here keeps the map's row.
+    host._replicas[7]._membership.joint = true;
+    BOOST_TEST(
+        (deps._routes({}).routes.front()._voters == std::vector<std::string>{"1", "2", "3"}));
+    host._replicas.clear();
+    const auto bare = deps._routes({}).routes.front();
+    BOOST_TEST((bare._voters == std::vector<std::string>{"1", "2", "3"}));
+    BOOST_TEST(!bare._leader_hint.has_value());
+}
