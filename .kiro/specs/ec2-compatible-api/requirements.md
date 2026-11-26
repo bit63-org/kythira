@@ -65,9 +65,9 @@ side only (quorum management and peer discovery against real AWS).
 - Antikythera's own wire formats, hull, helm and the oars. They are
   specified in antikythera; this module consumes its `src/proto/` codecs
   and test vectors.
-- Security groups, Elastic IPs, internet and NAT gateways, more than one
-  subnet per VPC, Spot, Auto Scaling, load balancers, placement groups
-  and dedicated hosts. They are refused (Requirement 14) until antikythera
+- Security groups, Elastic IPs, internet and NAT gateways, routes to
+  anything but a network interface, Spot, Auto Scaling, load balancers,
+  placement groups and dedicated hosts. They are refused (Requirement 14) until antikythera
   backs them.
 - Prices. Usage is metered and exported (Requirement 12); prices are
   billing configuration.
@@ -84,8 +84,8 @@ added to the layers. In addition:
 - **Envelope**: a signed mailbox slot image addressed to one server's
   hull (controller-interface Requirement 1).
 - **Frame**: a signed, versioned, per-server snapshot sent on the link
-  other than an envelope: `MapUpdate`, `GroupPolicy`, `TunnelPeers`,
-  `ReplicaConfig`; and the unsigned `VolumeOp`, `VolumeKey`,
+  other than an envelope: `MapUpdate`, `VpcConfig`, `GroupPolicy`,
+  `TunnelPeers`, `ReplicaConfig`; and the unsigned `VolumeOp`, `VolumeKey`,
   `lease_grant` and `role_certificate` records.
 - **Outbox**: a server's committed, ordered list of envelopes and frames
   not yet acknowledged by that server's reports.
@@ -171,12 +171,17 @@ added to the layers. In addition:
 
 #### Acceptance Criteria
 
-1. Instance, volume, snapshot, image, VPC, subnet and network-interface
-   IDs SHALL be allocated by the data layer, unique across the region and
-   never reused, in EC2's shapes (`i-`, `vol-`, `snap-`, `ami-`, `vpc-`,
-   `subnet-`, `eni-` followed by 17 lower-case hex digits), each a
-   reversible encoding of the 64-bit identifier antikythera carries
-   (controller-interface Requirement 4.1).
+1. Instance, volume, snapshot, image, VPC, subnet, route-table and
+   network-interface IDs, and the IDs of route-table and CIDR-block
+   associations, SHALL be allocated by the data layer, unique across the
+   region and never reused, in EC2's shapes (`i-`, `vol-`, `snap-`,
+   `ami-`, `vpc-`, `subnet-`, `rtb-`, `eni-`, `rtbassoc-`,
+   `vpc-cidr-assoc-`, `subnet-cidr-assoc-` followed by 17 lower-case hex
+   digits), each a reversible encoding of the 64-bit identifier
+   antikythera carries (controller-interface Requirement 4.1). The
+   rendering SHALL be antikythera's `proto::ec2_id` and `parse_ec2_id`
+   (`src/proto/ec2_id.hpp`), so a subnet ID reads the same in the API and
+   in the instance metadata service.
 2. VNIs SHALL be allocated per VPC from the 24-bit space, never reused;
    MAC addresses SHALL be allocated from a configured locally
    administered range and never reused (controller-interface
@@ -238,8 +243,8 @@ link.
 
 #### Acceptance Criteria
 
-1. Envelopes, `MapUpdate`, `GroupPolicy`, `TunnelPeers` and
-   `ReplicaConfig` frames SHALL be signed with Ed25519 over exactly the
+1. Envelopes, `MapUpdate`, `VpcConfig`, `GroupPolicy`, `TunnelPeers`
+   and `ReplicaConfig` frames SHALL be signed with Ed25519 over exactly the
    bytes antikythera verifies, by a key held in Kythira KMS
    (`ECC_NIST_EDWARDS25519`, `Sign` with `ED25519_SHA_512`) or in the
    virtual HSM, never in the EC2 module's memory or state.
@@ -407,36 +412,84 @@ and errors (controller-interface Requirement 9).
    `ModifyEbsDefaultKmsKeyId` and `GetEbsDefaultKmsKeyId` SHALL be served;
    encryption cannot be turned off, so the default always reads `true`.
 
-### Requirement 11: VPCs, subnets and network interfaces
+### Requirement 11: VPCs, subnets, route tables and network interfaces
+
+**User Story:** As a Kythira user, I want EC2's VPC model: address
+blocks, subnets cut from them, route tables that join the subnets or
+send traffic through an appliance, and interfaces placed in a subnet
+(antikythera vpc-subnets-routing Requirements 1, 2, 4 and 7).
 
 #### Acceptance Criteria
 
 1. `CreateVpc` and `DeleteVpc` SHALL allocate and release a VNI and send
    `CREATE_NETWORK` and `DELETE_NETWORK` where needed; `DeleteVpc` SHALL
-   be refused with `DependencyViolation` while the VPC has subnets or
-   interfaces.
-2. Each VPC SHALL have at most one subnet in the first release
-   (`CreateSubnet` for a second one: `UnsupportedOperation`), covering a
-   CIDR within the VPC's, with private IPv4 (and IPv6 where the VPC has a
-   block) addresses allocated by the controller.
-3. Each account SHALL get a default VPC and subnet on first use
+   be refused with `DependencyViolation` while the VPC has subnets,
+   interfaces or route tables other than its main one.
+2. A VPC SHALL have a primary IPv4 CIDR block from /16 to /28, up to
+   four secondary IPv4 blocks (`AssociateVpcCidrBlock`,
+   `DisassociateVpcCidrBlock`), none overlapping, and at most one IPv6
+   /56 from the region's pool. A block SHALL NOT be disassociated while
+   a subnet uses it, refused with EC2's error for a block in use.
+3. A VPC SHALL have at most 200 subnets. A subnet's IPv4 prefix, from
+   /16 to /28, SHALL lie inside one of the VPC's IPv4 blocks, and its
+   optional IPv6 /64 (`AssociateSubnetCidrBlock`,
+   `DisassociateSubnetCidrBlock`) inside the VPC's /56; no two subnets
+   of a VPC SHALL overlap in either family. `DeleteSubnet` SHALL be
+   refused with `DependencyViolation` while the subnet holds an
+   interface, and `ModifySubnetAttribute` SHALL accept the attributes
+   antikythera backs (`AssignIpv6AddressOnCreation`) and refuse the rest
+   with `UnsupportedOperation`.
+4. In every subnet the controller SHALL reserve the network address,
+   the next three (the gateway at base + 1, the DNS resolver at
+   base + 2, and base + 3) and the IPv4 broadcast address, and SHALL
+   allocate interface addresses from the subnet's prefixes outside them.
+5. Each account SHALL get a default VPC and subnet on first use
    (`CreateDefaultVpc` also), so `RunInstances` without a subnet works as
    on EC2.
-4. `CreateNetworkInterface`, `DeleteNetworkInterface`,
+6. A VPC SHALL have one main route table, created with it, and at most
+   200 tables in all (`CreateRouteTable`, `DeleteRouteTable`,
+   `DescribeRouteTables`). A subnet SHALL be associated with at most one
+   table (`AssociateRouteTable`, `DisassociateRouteTable`, and
+   `ReplaceRouteTableAssociation`, which also moves the main
+   association) and uses the main table without one. `DeleteRouteTable`
+   SHALL be refused with `DependencyViolation` for the main table or a
+   table with associations.
+7. Every table SHALL hold one `local` route per VPC CIDR block, added
+   and removed with the block, which `CreateRoute`, `ReplaceRoute` and
+   `DeleteRoute` SHALL NOT change. Those calls SHALL accept routes whose
+   target is a network interface in the VPC (`NetworkInterfaceId`, or
+   `InstanceId` for an instance with one interface), at most 1,000 per
+   table and 4,096 across the VPC's tables (the `VpcConfig` frame's
+   bound; beyond either, `RouteLimitExceeded`), with any destination
+   prefix: a default route, or a prefix
+   inside a VPC block longer than its `local` route (middlebox routing).
+   A route with exactly a `local` route's prefix SHALL be refused.
+8. `DescribeRouteTables` SHALL report a network-interface route as
+   `blackhole` while its target interface is detached or deleted, and
+   `active` otherwise; the route stays until it is deleted.
+9. `CreateNetworkInterface`, `DeleteNetworkInterface`,
    `AttachNetworkInterface`, `DetachNetworkInterface` and
-   `DescribeNetworkInterfaces` SHALL allocate NIC IDs, MACs and addresses,
-   send `ATTACH_DEVICE` and `DETACH_DEVICE`, and send the VPC's new
-   `MapUpdate` to every server hosting a NIC in it.
-5. `MapUpdate` versions SHALL be committed per VPC, and a VPC SHALL be
-   reported converged only when every member server has reported
-   `map_applied` for the newest version (controller-interface
-   Requirement 5.3).
-6. `TunnelPeers` frames SHALL be sent to every VTEP whose peer set or
-   peer keys change, choosing WireGuard for every pair until both ends
-   advertise another mode (controller-interface Requirement 8).
-7. `DescribeVpcs`, `DescribeSubnets`, `DescribeAvailabilityZones` (one
-   zone) and `DescribeRegions` (one region) SHALL be served from
-   controller state.
+   `DescribeNetworkInterfaces` SHALL allocate NIC IDs, MACs and addresses
+   in the interface's subnet, send `ATTACH_DEVICE` and `DETACH_DEVICE`,
+   and send the VPC's new `MapUpdate` (version 4, naming each NIC's
+   subnet) to every server hosting a NIC in it.
+10. The VPC's blocks, subnets, route tables, routes and associations
+    SHALL be sent as one signed `VpcConfig` version 2 frame, with its own
+    committed version, to every server hosting a NIC in the VPC whenever
+    any of them changes, so each change takes effect atomically on each
+    server. A new subnet's configuration SHALL be sent before the first
+    `MapUpdate` that places a NIC in it (antikythera fails closed in the
+    other order, vpc-subnets-routing Requirement 2.6).
+11. `MapUpdate` versions SHALL be committed per VPC, and a VPC SHALL be
+    reported converged only when every member server has reported
+    `map_applied` for the newest version (controller-interface
+    Requirement 5.3).
+12. `TunnelPeers` frames SHALL be sent to every VTEP whose peer set or
+    peer keys change, choosing WireGuard for every pair until both ends
+    advertise another mode (controller-interface Requirement 8).
+13. `DescribeVpcs`, `DescribeSubnets`, `DescribeRouteTables`,
+    `DescribeAvailabilityZones` (one zone) and `DescribeRegions` (one
+    region) SHALL be served from controller state.
 
 ### Requirement 12: Multicast policy, admission and metering
 
@@ -446,8 +499,9 @@ and keep it from being abused (controller-interface Requirement 7).
 
 #### Acceptance Criteria
 
-1. The controller SHALL record a per-subnet multicast setting (per VPC
-   until subnets beyond one exist) with its limits, bounded by
+1. The controller SHALL record a per-subnet multicast setting (applied
+   to the whole VPC until antikythera's `GroupPolicy` version 2 carries
+   one entry per subnet, vpc-subnets-routing task 12) with its limits, bounded by
    region-wide defaults and maxima, and SHALL expose it through tags with
    the reserved prefix `kythira:multicast:` on the subnet, validated on
    `CreateTags` and refused with `InvalidParameterValue` out of bounds.
@@ -490,8 +544,10 @@ and keep it from being abused (controller-interface Requirement 7).
 1. Features with no backing yet SHALL be refused with
    `UnsupportedOperation`, never silently accepted: security groups
    (`CreateSecurityGroup`, and `SecurityGroupIds` on launch or on an
-   interface), more than one subnet per VPC, Elastic IPs, internet, NAT
-   and transit gateways, Spot, placement groups, dedicated hosts,
+   interface), routes to targets other than a network interface
+   (`GatewayId`, `NatGatewayId`, `VpcPeeringConnectionId`,
+   `TransitGatewayId`, `VpcEndpointId`, `EgressOnlyInternetGatewayId` and
+   the rest), Elastic IPs, internet, NAT and transit gateways, Spot, placement groups, dedicated hosts,
    `RebootInstances` until hull has a reset command, and the EBS
    features of controller-interface Requirement 9.10.
 2. Read-only calls for refused features (`DescribeSecurityGroups`,
