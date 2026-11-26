@@ -194,6 +194,32 @@ target_link_libraries(redis_differential_replay_test PRIVATE OpenSSL::SSL OpenSS
 set_tests_properties(redis_differential_replay_test PROPERTIES
     LABELS "multi-raft;redis;txn" TIMEOUT 600)
 
+# The gateway's in-process cluster tests compile in the `heavy_tu` pool
+# (top-level CMakeLists.txt), as cache_http_front_end_test above does.
+# Each instantiates the whole gateway stack (redis_gateway_impl.hpp over
+# the multi_raft test fabric), and the stdexec leg's memory sampler
+# measured redis_gateway_integration_test and its disk-store and
+# engine-store twins at 10-12 GiB of compiler RSS apiece under g++-13
+# (run 45764030791, 2026-11-26), beside the pooled redis_gateway_node
+# TUs at up to 15 GiB. Unpooled, they compile at neighbouring Ninja
+# steps and so overlap each other on a 16 GiB GitHub-hosted runner
+# whenever the compiler cache misses, which any change to the gateway
+# headers causes. On 2026-11-26 the gateway refactors (main's data
+# access object, and PRs #885, #975 and #976 on top of it) did exactly
+# that, and five hosted runners -- x64 g++-13 and g++-14 Build & Test,
+# and the stdexec full suite -- were shut down ("the hosted runner lost
+# communication with the server") 50-60 minutes into Build.
+foreach(_redis_gateway_heavy_test IN ITEMS
+        redis_gateway_integration_test
+        redis_gateway_disk_store_integration_test
+        redis_gateway_engine_store_integration_test
+        redis_gateway_txn_test
+        redis_gateway_snapshot_test
+        redis_differential_replay_test)
+    set_target_properties(${_redis_gateway_heavy_test} PROPERTIES
+        JOB_POOL_COMPILE heavy_tu)
+endforeach()
+
 # The transaction rows of the multi-Raft bench (.kiro/specs/multi-raft-
 # transactions/ Requirement 13.6), one translation unit per wrapper tier.
 # They run over the Redis KV state machines, so they live here and join
