@@ -103,6 +103,21 @@ The Redis front end:
 | `KYTHIRA_REDIS_ADVERTISE` | the listener's address, else host name and port | The `host:port` other layers reach this node on, as announced to the group |
 | `KYTHIRA_REDIS_PLACEMENT_GROUP` | none | The placement group announced to the group |
 | `KYTHIRA_REDIS_FRONT_END_INDEX` | the node id, when 1-16383 | The number that names this front end in the `SCAN` cursors it issues |
+| `KYTHIRA_REDIS_CAPACITY_LAYER` | none | `gateway` or `front_end`: the membership group's leader scales that layer through the capacity controller. Needs `KYTHIRA_REDIS_MEMBERSHIP`. See [redis-layers.md](redis-layers.md#scaling-a-stateless-layer) |
+| `KYTHIRA_REDIS_CAPACITY_DRY_RUN` | `true` | Decide and log, but add and remove nothing |
+| `KYTHIRA_REDIS_CAPACITY_SCALE_IN` | `true` | Remove members too, not only add them |
+| `KYTHIRA_REDIS_CAPACITY_MIN_MEMBERS` / `_MAX_MEMBERS` | `2` / three times the first size seen | The layer's bounds |
+| `KYTHIRA_REDIS_CAPACITY_REQUESTS_HIGH` / `_LOW` | `2000` / `600` | Commands per second per member; `0` turns the signal off |
+| `KYTHIRA_REDIS_CAPACITY_CONNECTIONS_HIGH` / `_LOW` | `0` / `0` (off) | Open connections per member |
+| `KYTHIRA_REDIS_CAPACITY_OVERLOAD_CPU` | `0.85` | The CPU share at which a member counts as overloaded; `0` turns the signal off |
+| `KYTHIRA_REDIS_CAPACITY_SUSTAINED_MS` / `_SCALE_IN_SUSTAINED_MS` / `_COOLDOWN_MS` | `120000` / `900000` / `300000` | How long a signal must hold before a member is added or removed, and the gap between decisions |
+| `KYTHIRA_REDIS_CAPACITY_DRAIN_DEADLINE_MS` | `600000` | How long a drain may take before it is abandoned |
+| `KYTHIRA_REDIS_CAPACITY_INTERVAL_MS` | `5000` | How often the loop runs |
+| `KYTHIRA_REDIS_CAPACITY_PROVIDER` | `docker` | The quorum manager. Only `docker` so far |
+| `KYTHIRA_REDIS_CAPACITY_DOCKER_URL` | `unix:///var/run/docker.sock` | The Docker (or Podman) API |
+| `KYTHIRA_REDIS_CAPACITY_DOCKER_IMAGE` / `_NETWORK` / `_CLUSTER` | none | The new members' image, network and cluster label. Required with the loop |
+| `KYTHIRA_REDIS_CAPACITY_NODE_PORT` | this node's Raft port | The new members' Raft port |
+| `KYTHIRA_REDIS_CAPACITY_JOIN_ENV` | none | `KEY=VALUE;...` every new member gets after its `KYTHIRA_NODE_ID` |
 | `KYTHIRA_REDIS_CLUSTER` | `KYTHIRA_CLUSTER`, else `default` | The cluster named in layer identities, `kythira://redis/<cluster>/<node id>?roles=...`. A peer certificate naming another cluster carries no identity |
 | `KYTHIRA_NODE_INSECURE_PLAINTEXT` | unset | `1` lets a node that is not co-located run without layer identities: the internal secret then stands in for every role, over plaintext. For tests and isolated networks |
 | `KYTHIRA_REDIS_DRAIN_TIMEOUT_MS` | `10000` | On shutdown, how long commands already received may finish before the connections close |

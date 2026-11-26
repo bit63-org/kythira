@@ -5,6 +5,23 @@ current list of outstanding work, see [TODO.md](TODO.md).
 
 ### What Changed (November 26, 2026)
 
+- **The Redis gateway and front-end layers scale themselves.**
+  `KYTHIRA_REDIS_CAPACITY_LAYER` makes the layer membership group's leader
+  run the elastic capacity controller over one stateless layer, on the
+  commands per second, open connections and CPU its members report. It
+  adds a member through the Docker quorum manager, and drains a member
+  through the group before decommissioning it. It runs in dry run until
+  `KYTHIRA_REDIS_CAPACITY_DRY_RUN=false`. The shared pieces gained what a
+  stateless layer needs:
+  - `layer_capacity_policy` takes the controller's node id type and a
+    connections signal;
+  - `node_report` carries `_open_streams`;
+  - the controller's `admit_on_join` admits a machine that will never hold
+    a replica.
+
+  A node without `data` may be missing from `KYTHIRA_PEERS`, so every
+  member the loop adds can share one join environment
+  (`.kiro/specs/redis-general-data-types/` task 18).
 - **Redis gateways find their front ends in the layer membership group,
   by DNS, or in configuration, and a member can be drained.**
   `KYTHIRA_REDIS_MEMBERSHIP` names the group's voters, which hold it on a

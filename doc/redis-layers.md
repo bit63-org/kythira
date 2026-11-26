@@ -276,6 +276,62 @@ in the group. A `SCAN` cursor is `(front-end index : 14) | (cursor id :
 end names the one that issued it, and the group gives its address. The
 cursor walk itself lands with `SCAN` (phase 1 task 12).
 
+### Scaling a stateless layer
+
+With `KYTHIRA_REDIS_CAPACITY_LAYER=gateway` or `front_end`, the group's
+leader runs the shared elastic capacity controller over that layer. Every
+voter builds the loop, and only the one that leads the group acts. Its lease
+is the group's Raft leadership, fenced by the term, so two voters never
+provision at once. Each `KYTHIRA_REDIS_CAPACITY_INTERVAL_MS` (5 s) it hands
+the controller one report per member of the layer that is serving and has
+reported recently, then lets the controller decide.
+
+The policy is the shared `layer_capacity_policy`, with three signals:
+
+- commands per second per member (`_REQUESTS_HIGH` / `_LOW`, 2000 / 600);
+- open connections per member (`_CONNECTIONS_HIGH` / `_LOW`, off by
+  default);
+- the share of members whose CPU share has reached `_OVERLOAD_CPU` (0.85).
+
+Any one signal that stays above its high mark for `_SUSTAINED_MS` (2 min)
+adds one member. Every signal must stay at or below its low mark for
+`_SCALE_IN_SUSTAINED_MS` (15 min) before one goes. Between decisions there
+is a `_COOLDOWN_MS` (5 min), and the layer stays within `_MIN_MEMBERS` (2)
+and `_MAX_MEMBERS`.
+
+Removing a member drains it first:
+
+1. The controller marks it draining in the group.
+2. Gateways stop choosing it, and it closes its clients as described above.
+3. It sets itself drained.
+4. Only then does the quorum manager remove the machine, or once
+   `_DRAIN_DEADLINE_MS` passes, the drain is abandoned and the member serves
+   again.
+
+A member an operator drained is out of service, and the loop does not count
+it.
+
+A new member is admitted once it reports to the group. It never holds a
+Raft replica, so it does not wait for one (the controller's
+`admit_on_join`).
+
+The provider is `docker` for now, configured by `_DOCKER_URL`,
+`_DOCKER_IMAGE`, `_DOCKER_NETWORK` and `_DOCKER_CLUSTER`. Each new container
+gets `KYTHIRA_NODE_ID` from the provider and the
+`KYTHIRA_REDIS_CAPACITY_JOIN_ENV` entries (`KEY=VALUE;...`): its roles, the
+voters, the peer list and secrets. A node without `data` may be missing from
+`KYTHIRA_PEERS`, since the voters never dial it, so one fixed join
+environment fits every member the loop adds.
+
+`KYTHIRA_REDIS_CAPACITY_DRY_RUN` is on by default. In a dry run the loop
+decides and logs, but calls no provider; turn it off once the decisions
+look right.
+
+The ledger is in memory, like the group's log. A new leader reconciles from
+what the provider labelled. A member that leaves the group without the
+controller removing it stays in the controller's view as a stale machine
+until it is decommissioned.
+
 ## Layer identities
 
 Calls between nodes that are not both co-located carry layer identities over

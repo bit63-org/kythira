@@ -316,3 +316,57 @@ BOOST_AUTO_TEST_CASE(a_member_is_drained_through_the_group_and_returned_on_cance
 }
 
 BOOST_AUTO_TEST_SUITE_END()
+
+BOOST_AUTO_TEST_SUITE(node_ids_and_connections)
+
+BOOST_AUTO_TEST_CASE(open_connections_alone_can_add_a_member) {
+    auto cfg = enabled_config();
+    cfg.requests_per_member._enabled = false;
+    cfg.overloaded._enabled = false;
+    cfg.connections_per_member = {._high = 500.0, ._low = 100.0};
+    layer_capacity_policy<> p(cfg);
+    BOOST_TEST(p.validate());
+    auto a = front_end("fe-1", 10.0);
+    auto b = front_end("fe-2", 10.0);
+    a.load.open_streams = 900;
+    b.load.open_streams = 700;
+    std::int64_t now = 0;
+    const auto d = run(p, {a, b}, now, 5, cfg);
+    BOOST_TEST(d.is_scale_out());
+}
+
+BOOST_AUTO_TEST_CASE(a_numeric_cluster_leaves_out_members_it_cannot_name) {
+    const auto cfg = enabled_config();
+    std::vector<layer_member> members{front_end("7", 10.0), front_end("fe-x", 10.0)};
+    members[0].load.open_streams = 42;
+    const auto s = layer_capacity_snapshot<std::uint64_t, std::string, std::uint64_t>(
+        members, role_set{role::front_end}, 0, stale_ms, cfg);
+    BOOST_REQUIRE_EQUAL(s._nodes.size(), 1U);
+    BOOST_TEST(s._nodes[0]._report._node_id == 7U);
+    BOOST_TEST(s._nodes[0]._report._open_streams == 42U);
+    BOOST_TEST(!kythira::layers::layer_node_report<std::uint64_t>(members[1], cfg).has_value());
+
+    layer_capacity_policy<std::uint64_t, std::string, std::uint64_t> p(cfg);
+    BOOST_TEST(p.evaluate(s).is_hold());
+}
+
+BOOST_AUTO_TEST_CASE(numeric_drain_hooks_name_the_member_by_its_text_id) {
+    drain_hooks::membership_sm sm;
+    std::uint64_t index = 0;
+    kythira::layers::replicated_layer_membership group(
+        [&](std::vector<std::byte> b) -> std::optional<std::vector<std::byte>> {
+            return sm.apply(b, ++index);
+        },
+        [&] { return sm.members(); });
+    const std::int64_t now = 10'000;
+    BOOST_REQUIRE(group.announce(front_end("12", 0.0, "zone-a", 0.1, now)));
+    auto hooks =
+        kythira::layers::layer_drain_hooks<std::uint64_t>(group, [&] { return now; }, stale_ms);
+    hooks.begin(12U);
+    BOOST_TEST((sm.members()[0].drain == drain_state::draining));
+    BOOST_TEST(hooks.holds_work(12U));
+    hooks.cancel(12U);
+    BOOST_TEST((sm.members()[0].drain == drain_state::serving));
+}
+
+BOOST_AUTO_TEST_SUITE_END()

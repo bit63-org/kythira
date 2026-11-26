@@ -134,6 +134,16 @@ public:
         }
     }
 
+    auto leading() -> bool override {
+        auto* node = _host->group_node(_id);
+        return node != nullptr && node->is_leader();
+    }
+
+    auto term() -> std::uint64_t override {
+        auto* node = _host->group_node(_id);
+        return node == nullptr ? 0 : static_cast<std::uint64_t>(node->get_current_term());
+    }
+
     auto propose(std::vector<std::byte> command) -> std::optional<std::vector<std::byte>> override {
         try {
             auto* node = _host->group_node(_id);

@@ -192,6 +192,10 @@ struct node_report {
     /// know that it is. TiKV's `is_busy`.
     bool _overloaded{false};
 
+    /// @brief Open client connections or streams. A data node leaves it 0;
+    ///        a stateless layer member (gateway, front end) scales on it.
+    std::uint64_t _open_streams{0};
+
     std::vector<PlacementGroupId> _labels{};
     std::chrono::milliseconds _uptime{};
 

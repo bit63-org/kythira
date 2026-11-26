@@ -90,6 +90,11 @@ kythira_redis_test(redis_data_wire_unit_test redis_data_wire_unit_test.cpp)
 kythira_redis_test(redis_call_wire_unit_test redis_call_wire_unit_test.cpp)
 # Task 18: SCAN cursors, the member list on the wire, load, DNS discovery.
 kythira_redis_test(redis_layer_membership_unit_test redis_layer_membership_unit_test.cpp)
+# task 18: the capacity loop on the membership group's leader, against the
+# scripted quorum manager.
+kythira_redis_test(redis_layer_capacity_unit_test redis_layer_capacity_unit_test.cpp)
+target_include_directories(redis_layer_capacity_unit_test PRIVATE
+                           "${CMAKE_CURRENT_SOURCE_DIR}/../cmd/redis_gateway_node")
 # redis_gateway_node's own environment parsing (the plaintext-Raft opt-in).
 kythira_redis_test(redis_gateway_node_config_unit_test
                    redis_gateway_node_config_unit_test.cpp)
