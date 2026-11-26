@@ -158,6 +158,72 @@ lease unless it lasts more than about three seconds. Leases and reports
 ride the control traffic class (controller-interface Requirement 2.4) on
 helm's side; fleet nodes put lease traffic ahead of outbox bulk.
 
+### Restores and conversions
+
+oar-blk's hydration and copier run on the servers; the controller only
+decides when a volume is ready and drives the copy as a workflow.
+
+**Hydration.** A volume restored from an image (the root of
+`RunInstances`) or re-keyed from a source is attachable as soon as its
+replica set is in sync; oar-blk fills it behind the guest. Every
+`replica_status` entry carries `total_bytes` and `hydrated_bytes`, and
+the volume group's leader keeps the newest pair per replica in memory,
+as it keeps the other report fields. When every in-sync replica at the
+current epoch reports `hydrated_bytes == total_bytes`, the leader commits
+`hydrated` on the volume record; it is never cleared, so a replica
+rebuilt later, or a report from a lagging replica, cannot make a
+finished volume look unfinished. The volume's EC2 state reads from it:
+a fast-restored volume stays `creating` until `hydrated`; any other is
+`available` or `in-use` with `DescribeVolumeStatus` `warning` and
+`InitializationStatusDetails` (`Progress` from the least-hydrated in-sync
+replica, `EstimatedTimeToCompleteInSeconds` from the remaining bytes and
+`VolumeInitializationRate`) until then. A new leader starts with no
+pairs and keeps reporting the volume as initializing until fresh reports
+arrive, so a leader change can delay `hydrated` by one report interval
+but never sets it early.
+
+**Conversion.** An admin call, `convert-volume` (an instance ID, a local
+or network volume ID, an optional MiB/s), runs a `convert_volume`
+workflow in the volume's group. The instance must be `stopped`, so both
+volumes are detached, as `CONVERT_VOLUME` requires. Its steps:
+
+1. Create the target. To network: place a new replica set with a new
+   lineage (its KMS key and wrapped data key as `CreateVolume` makes
+   them), size and block size from the local volume, wait for every
+   member's `replica_status`, then publish a ReplicaConfig with a
+   read-write utility attachment for the local volume's server and send
+   that server the attachment's `VolumeKey`. To local: send
+   `CREATE_VOLUME` to a server placement picks for the instance (it
+   reserves the instance's cores there, since the server becomes its
+   pin), sized
+   from the network volume, and publish a ReplicaConfig adding a
+   read-only utility attachment of the network volume for that server
+   with its `VolumeKey`.
+2. Wait for `hydrated` if the network volume is the source; a copy of an
+   unhydrated source fails with `not_hydrated`, so the workflow does not
+   send one.
+3. Send `CONVERT_VOLUME` with both IDs, the instance as `owner_vm`, the
+   direction and the rate. Its outcome only says the copy was accepted.
+4. Follow `conversion_progress` reports matched on the volume pair:
+   commit `done_bytes` for the admin describe call, and finish on
+   `completed` or `failed`.
+5. On `completed`: replace the instance's block-device mapping entry
+   (an `ephemeralN` local volume becomes an `Ebs` network volume with
+   `DeleteOnTermination = true`, and the reverse), which moves or adds
+   the instance's server pin (Requirement 7.4); retire the utility
+   attachment; delete the old volume (`DELETE_VOLUME` for a local one,
+   the network delete otherwise). On `failed`: retire the utility
+   attachment and delete the target; the instance keeps its old volume.
+
+Cancelling (an admin `cancel-conversion`, the server lost, or no report
+for the server's silence window) publishes a ReplicaConfig without the
+utility attachment, which stops the copy on the server, then runs the
+`failed` branch. Step 5's record switch and deletes are committed
+together before any delete is sent, so a leader change between them
+re-sends the deletes, never the copy. While the workflow runs the
+volume group refuses attach, delete, a second conversion and
+`StartInstances` for the instance with `IncorrectInstanceState`.
+
 ### Planned fleet moves do not look like failures
 
 The volume master and the instance status checks both use server silence
@@ -328,3 +394,7 @@ billed as zero.
 4. The metadata record type on the link (Requirement 13.2) is a change to
    antikythera's controller-interface spec; it is drafted there as part of
    task 14 here.
+5. Should a compute-server drain convert its stopped instances' local
+   volumes to network volumes automatically, so they can start
+   elsewhere? Task 13a builds only the admin call; a drain policy would
+   call the same workflow.

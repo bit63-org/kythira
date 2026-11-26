@@ -354,6 +354,27 @@ and errors (controller-interface Requirement 9).
    from snapshot ID to manifest.
 7. Volume operations with no backing SHALL be refused as
    controller-interface Requirement 9.10 lists.
+8. A volume restored with oar-blk hydration (a root volume from an image
+   at `RunInstances`, or a volume whose source is re-keyed) SHALL be
+   attachable at once. The controller SHALL record each replica's
+   `total_bytes` and `hydrated_bytes` from `replica_status`, SHALL treat
+   the volume as hydrated only when every in-sync replica at the current
+   epoch reports the two equal, and SHALL commit that once, never
+   clearing it. Until then a fast-restored volume SHALL stay `creating`,
+   any other SHALL report `DescribeVolumeStatus` `warning` with
+   `InitializationStatusDetails` `Progress` from the least-hydrated
+   in-sync replica (controller-interface design "Network volumes in
+   EC2").
+9. A stopped instance's local volume SHALL be convertible into a network
+   volume, and a network volume into a local one, through an admin call
+   (EC2 has no action for it), as a volume workflow
+   (block-volume-service Requirement 8.6, controller-interface design
+   `CONVERT_VOLUME`): the controller SHALL create the target and the
+   utility attachment, SHALL wait for a restored network source to be
+   hydrated (9.8), SHALL send `CONVERT_VOLUME` and follow
+   `conversion_progress` to `completed` or `failed`, and SHALL then
+   switch the instance's records to the new volume and delete the old
+   one, or delete the target, retiring the utility attachment either way.
 
 ### Requirement 10: Keys and encryption
 

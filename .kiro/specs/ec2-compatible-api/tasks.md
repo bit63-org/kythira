@@ -144,6 +144,28 @@ is one PR unless noted.
     features
   - _Requirements: 5.6, 7.1-7.8, 9.2, 14.1, 14.2_
 
+- [ ] 13a. Hydration and local ↔ network conversion
+  - Per-replica `total_bytes` / `hydrated_bytes` from `replica_status`
+    in leader memory, the committed `hydrated` flag, `creating` for
+    fast-restored volumes, `warning` with `InitializationStatusDetails`
+    otherwise; a root volume restored from an image boots before
+    hydration finishes
+  - The `convert_volume` workflow of design "Restores and conversions"
+    in both directions: target creation with a new lineage and the
+    utility attachment, the hydration wait, `CONVERT_VOLUME`,
+    `conversion_progress` to `completed` or `failed`, the record switch
+    and deletes, cancellation; admin calls `convert-volume`,
+    `describe-conversions` and `cancel-conversion`
+  - Property tests on the simulated backend (fake helms that answer
+    `CONVERT_VOLUME` and stream `conversion_progress`): leader changes
+    and dropped or duplicated reports at every step, `failed` with each
+    `ConversionFailure`, server loss mid-copy; each run ends with exactly
+    one of the two volumes, no utility attachment, and `hydrated` never
+    set before every in-sync replica reported it
+  - Snapshot-sourced hydration (`CreateVolume` with `SnapshotId`) follows
+    task 12; this task needs only image restores and re-keyed sources
+  - _Requirements: 7.4, 9.8, 9.9_
+
 - [ ] 14. Instance metadata and key pairs
   - Draft the metadata record type in antikythera's controller-interface
     spec first; per-instance records keyed by NIC ID, the signed identity
