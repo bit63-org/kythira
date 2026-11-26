@@ -582,6 +582,10 @@ auto redis_gateway<Host, Logger, Metrics>::start() -> void {
                                  _config._redis_compat_version +
                                  "' is not a plain major.minor.patch (e.g. 7.0.0)");
     }
+    if (auto why = this->layer_refusal()) {
+        _running = false;
+        throw std::runtime_error(*why);
+    }
     if (_config._transactions) {
         // Requirement 11.1: refused unless the build wrapped the KV state
         // machine; Requirement 10.2: a level the build cannot give is an
@@ -937,6 +941,14 @@ auto redis_gateway<Host, Logger, Metrics>::execute(session& s, const resp_comman
 
     if (upper == "CLIENT") {
         return finish(handle_client(s, cmd));
+    }
+    if (this->data_only() && !s._internal && upper != "PING") {
+        // A data node serves the other nodes' front ends and the commands
+        // they forward, never clients (task 16): its gateway is only the
+        // internal listener.
+        return finish(
+            s._writer.error("ERR this node runs only the data layer (KYTHIRA_REDIS_ROLES=" +
+                            _config._layer_roles.to_string() + "); connect to a gateway"));
     }
     return finish(this->execute_command(s, upper, cmd));
 }

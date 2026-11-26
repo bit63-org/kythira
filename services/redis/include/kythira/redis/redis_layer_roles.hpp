@@ -52,33 +52,27 @@ inline constexpr layers::role_set k_redis_all_roles{layers::role::gateway, layer
 /// The layer work lands one task at a time (tasks.md 15-20), and a role set
 /// that needs a piece not built yet must stop the node at start, naming
 /// what is missing (Requirement 16.3), rather than start a node that cannot
-/// answer. Today only the co-located set serves:
+/// answer. Three sets serve:
 ///
-/// - a `gateway` without `front_end` sends authenticated calls to remote
-///   front ends, and a `front_end` without `gateway` accepts them (task 17);
-/// - a front end without `data` needs the data-layer API and remote data
-///   access (task 16);
-/// - `data` alone needs the data-layer API on the internal listener
-///   (task 16), so that other nodes' front ends can reach it.
+/// - all three, co-located (the default);
+/// - `gateway,front_end`: a front end without the data layer, reaching the
+///   data nodes over `KYTHIRA.DATA` (task 16; it also needs
+///   `KYTHIRA_REDIS_DATA_NODES`);
+/// - `data`: a data node, whose listener serves only other nodes' front
+///   ends (task 16).
+///
+/// A `gateway` without `front_end`, or a `front_end` without `gateway`,
+/// needs authenticated calls between the two (task 17).
 [[nodiscard]] inline auto redis_roles_unservable(layers::role_set roles)
     -> std::optional<std::string> {
-    if (roles == k_redis_all_roles) {
+    const layers::role_set front_end_only{layers::role::gateway, layers::role::front_end};
+    const layers::role_set data_only{layers::role::data};
+    if (roles == k_redis_all_roles || roles == front_end_only || roles == data_only) {
         return std::nullopt;
     }
-    const auto named = "KYTHIRA_REDIS_ROLES=" + roles.to_string() + ": ";
-    if (roles.has(layers::role::gateway) != roles.has(layers::role::front_end)) {
-        return named +
-               "a gateway apart from its front end needs authenticated calls between the two, "
-               "which this build does not have yet (redis-general-data-types task 17)";
-    }
-    if (!roles.has(layers::role::data)) {
-        return named +
-               "a front end without the data layer needs the data-layer API and remote data "
-               "access, which this build does not have yet (redis-general-data-types task 16)";
-    }
-    return named +
-           "a data node apart from a front end needs the data-layer API on the internal "
-           "listener, which this build does not have yet (redis-general-data-types task 16)";
+    return "KYTHIRA_REDIS_ROLES=" + roles.to_string() +
+           ": a gateway apart from its front end needs authenticated calls between the two, "
+           "which this build does not have yet (redis-general-data-types task 17)";
 }
 
 }  // namespace kythira

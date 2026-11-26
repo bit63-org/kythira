@@ -37,6 +37,7 @@
 #include <boost/json.hpp>
 
 #include <filesystem>
+#include <functional>
 #include <fstream>
 #include <map>
 #include <sstream>
@@ -183,17 +184,7 @@ public:
             h->start();
         }
         for (auto& host : _hosts) {
-            redis_gateway_config cfg;
-            cfg._listen = "127.0.0.1:0";
-            cfg._internal_secret = "internal-secret";
-            cfg._io_threads = 1;
-            cfg._worker_threads = 4;
-            cfg._command_timeout = std::chrono::milliseconds{5000};
-            cfg._allow_plaintext_forwarding = true;
-            cfg._transactions = true;
-            // As services/redis/docker/differential/kythira.env sets them.
-            cfg._txn_isolation = kythira::txn_isolation::snapshot;
-            cfg._immutable_values = false;
+            auto cfg = gateway_config();
             auto resolver = [this](const node_id_t& to) -> std::optional<std::string> {
                 if (to < 1 || to > _gateways.size() || !_gateways[to - 1]) {
                     return std::nullopt;
@@ -219,6 +210,12 @@ public:
 
     ~cluster() {
         _running = false;
+        for (auto& g : _front_ends) {
+            g->stop();
+        }
+        for (auto& h : _front_end_hosts) {
+            h->stop();
+        }
         for (auto& t : _drivers) {
             t.join();
         }
@@ -259,7 +256,41 @@ public:
         return false;
     }
 
+    /// A node without the data layer (task 16): its host is in no group;
+    /// it reaches the shards over KYTHIRA.DATA, their leaders over
+    /// KYTHIRA.TXN, and the oracle by asking the data nodes in turn.
+    auto add_front_end() -> gateway_type& {
+        const auto id = static_cast<node_id_t>(k_node_count + 1 + _front_end_hosts.size());
+        _front_end_hosts.push_back(std::make_unique<host_type>(make_config(id)));
+        _front_end_hosts.back()->start();
+        auto cfg = gateway_config();
+        cfg._layer_roles = {kythira::layers::role::gateway, kythira::layers::role::front_end};
+        for (node_id_t n = 1; n <= k_node_count; ++n) {
+            cfg._data_nodes.push_back("127.0.0.1:" + std::to_string(port(n)));
+        }
+        _front_ends.push_back(std::make_unique<gateway_type>(
+            *_front_end_hosts.back(), _acl, _logger, _metrics, cfg,
+            [](const node_id_t&) -> std::optional<std::string> { return std::nullopt; }));
+        _front_ends.back()->start();
+        return *_front_ends.back();
+    }
+
 private:
+    static auto gateway_config() -> redis_gateway_config {
+        redis_gateway_config cfg;
+        cfg._listen = "127.0.0.1:0";
+        cfg._internal_secret = "internal-secret";
+        cfg._io_threads = 1;
+        cfg._worker_threads = 4;
+        cfg._command_timeout = std::chrono::milliseconds{5000};
+        cfg._allow_plaintext_forwarding = true;
+        cfg._transactions = true;
+        // As services/redis/docker/differential/kythira.env sets them.
+        cfg._txn_isolation = kythira::txn_isolation::snapshot;
+        cfg._immutable_values = false;
+        return cfg;
+    }
+
     auto make_config(node_id_t id) -> config_type {
         config_type cfg{
             .node_id = id,
@@ -284,6 +315,8 @@ private:
     kythira::noop_metrics _metrics;
     std::vector<std::unique_ptr<host_type>> _hosts;
     std::vector<std::unique_ptr<gateway_type>> _gateways;
+    std::vector<std::unique_ptr<host_type>> _front_end_hosts;
+    std::vector<std::unique_ptr<gateway_type>> _front_ends;
     std::vector<std::thread> _drivers;
     std::atomic<bool> _running{false};
 };
@@ -341,12 +374,13 @@ auto load_recordings() -> std::map<std::uint64_t, std::map<std::string, diff::re
 
 }  // namespace
 
-BOOST_AUTO_TEST_CASE(recorded_streams_replay_against_the_gateway, *boost::unit_test::timeout(600)) {
+namespace {
+
+/// Every recorded stream, in RESP2 and RESP3, against the gateway on the
+/// port `port_for(seed, protocol)` names; every reply classified.
+void replay(const std::function<std::uint16_t(std::uint64_t, int)>& port_for) {
     const auto recordings = load_recordings();
     BOOST_REQUIRE(!recordings.empty());
-
-    cluster c;
-    BOOST_REQUIRE(c.await_all_leaders(std::chrono::seconds{20}));
 
     std::vector<diff::difference_row> rows;
     std::size_t compared = 0;
@@ -356,8 +390,7 @@ BOOST_AUTO_TEST_CASE(recorded_streams_replay_against_the_gateway, *boost::unit_t
         const auto& valkey = servers.at("valkey");
         BOOST_REQUIRE_EQUAL(redis.entries.size(), valkey.entries.size());
         for (const int protocol : {2, 3}) {
-            const node_id_t node = 1 + ((seed + protocol) % k_node_count);
-            resp_client client(c.port(node));
+            resp_client client(port_for(seed, protocol));
             const auto hello = diff::parse_one(
                 client.call_raw({"HELLO", std::to_string(protocol), "AUTH", "ops", "ops-secret"}));
             BOOST_REQUIRE(hello.kind != diff::reply_kind::error);
@@ -405,4 +438,25 @@ BOOST_AUTO_TEST_CASE(recorded_streams_replay_against_the_gateway, *boost::unit_t
     BOOST_TEST_MESSAGE(compared << " replies compared, " << differs << " differ\n" << table);
     BOOST_TEST(differs == 0U, "Kythira differs from both references " << differs << " times:\n"
                                                                       << table);
+}
+
+}  // namespace
+
+BOOST_AUTO_TEST_CASE(recorded_streams_replay_against_the_gateway, *boost::unit_test::timeout(600)) {
+    cluster c;
+    BOOST_REQUIRE(c.await_all_leaders(std::chrono::seconds{20}));
+    replay([&c](std::uint64_t seed, int protocol) {
+        return c.port(static_cast<node_id_t>(1 + ((seed + protocol) % k_node_count)));
+    });
+}
+
+// The same streams through a front end that holds no replica
+// (.kiro/specs/redis-general-data-types/ task 16, Requirement 18.6): the
+// split layout answers with the bytes the co-located one does.
+BOOST_AUTO_TEST_CASE(recorded_streams_replay_through_a_front_end_without_data,
+                     *boost::unit_test::timeout(600)) {
+    cluster c;
+    BOOST_REQUIRE(c.await_all_leaders(std::chrono::seconds{20}));
+    auto& fe = c.add_front_end();
+    replay([&fe](std::uint64_t, int) { return fe.port(); });
 }

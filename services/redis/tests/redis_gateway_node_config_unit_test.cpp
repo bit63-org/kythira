@@ -87,6 +87,7 @@ struct gateway_env {
         "KYTHIRA_REDIS_TXN_MAX_RETRIES",
         "KYTHIRA_REDIS_COMPAT_VERSION",
         "KYTHIRA_REDIS_ROLES",
+        "KYTHIRA_REDIS_DATA_NODES",
     };
     gateway_env(const gateway_env&) = delete;
     auto operator=(const gateway_env&) -> gateway_env& = delete;
@@ -578,26 +579,80 @@ BOOST_AUTO_TEST_CASE(a_role_set_this_build_cannot_serve_stops_the_node_naming_th
     // Requirement 16.3: stop at start, naming what is missing, before any
     // other variable is checked (so the message is the roles', not
     // KYTHIRA_PEERS').
-    const std::map<std::string, std::string> want{
-        {"gateway", "task 17"},           {"front_end", "task 17"},
-        {"gateway,data", "task 17"},      {"front_end,data", "task 17"},
-        {"gateway,front_end", "task 16"}, {"data", "task 16"},
-    };
-    for (const auto& [roles, task] : want) {
+    for (const std::string roles : {"gateway", "front_end", "gateway,data", "front_end,data"}) {
         const auto why = refusal(roles.c_str());
         BOOST_TEST_INFO("KYTHIRA_REDIS_ROLES=" << roles << ": " << why);
         BOOST_TEST(why.find("KYTHIRA_REDIS_ROLES=" + roles) != std::string::npos);
-        BOOST_TEST(why.find(task) != std::string::npos);
+        BOOST_TEST(why.find("task 17") != std::string::npos);
     }
     {
         const gateway_env env;
-        ::setenv("KYTHIRA_REDIS_ROLES", "data", 1);
+        ::setenv("KYTHIRA_REDIS_ROLES", "front_end", 1);
         ::unsetenv("KYTHIRA_NODE_ID");
         try {
             (void)from_env();
-            BOOST_FAIL("a data-only node started");
+            BOOST_FAIL("a front end without a gateway started");
         } catch (const std::invalid_argument& e) {
             BOOST_TEST(std::string(e.what()).find("KYTHIRA_REDIS_ROLES") != std::string::npos);
+        }
+    }
+}
+
+// ── front ends without data and data nodes (task 16) ───────────────────────
+
+BOOST_AUTO_TEST_CASE(a_data_node_serves_alone) {
+    const gateway_env env;
+    ::setenv("KYTHIRA_RAFT_BIND", "127.0.0.1", 1);
+    ::setenv("KYTHIRA_REDIS_ROLES", "data", 1);
+    const auto o = from_env();
+    BOOST_TEST(o._gateway._layer_roles.to_string() == "data");
+}
+
+BOOST_AUTO_TEST_CASE(a_front_end_without_data_needs_the_data_nodes) {
+    {
+        const gateway_env env;
+        ::setenv("KYTHIRA_RAFT_BIND", "127.0.0.1", 1);
+        ::setenv("KYTHIRA_REDIS_ROLES", "gateway,front_end", 1);
+        try {
+            (void)from_env();
+            BOOST_FAIL("a front end without data started with no data nodes");
+        } catch (const std::invalid_argument& e) {
+            BOOST_TEST(std::string(e.what()).find("KYTHIRA_REDIS_DATA_NODES") != std::string::npos);
+        }
+    }
+    {
+        const gateway_env env;
+        ::setenv("KYTHIRA_RAFT_BIND", "127.0.0.1", 1);
+        ::setenv("KYTHIRA_REDIS_ROLES", "front_end,gateway", 1);
+        ::setenv("KYTHIRA_REDIS_DATA_NODES", "data-1:6379,[::1]:6380,10.0.0.7:6379", 1);
+        const auto o = from_env();
+        BOOST_TEST(o._gateway._layer_roles.to_string() == "gateway,front_end");
+        const std::vector<std::string> want{"data-1:6379", "[::1]:6380", "10.0.0.7:6379"};
+        BOOST_TEST(o._gateway._data_nodes == want, boost::test_tools::per_element());
+    }
+    for (const char* bad : {"data-1", "data-1:6379,", ",data-1:6379", "data-1:port"}) {
+        const gateway_env env;
+        ::setenv("KYTHIRA_RAFT_BIND", "127.0.0.1", 1);
+        ::setenv("KYTHIRA_REDIS_ROLES", "gateway,front_end", 1);
+        ::setenv("KYTHIRA_REDIS_DATA_NODES", bad, 1);
+        BOOST_TEST_INFO("KYTHIRA_REDIS_DATA_NODES=" << bad);
+        BOOST_CHECK_THROW((void)from_env(), std::invalid_argument);
+    }
+    {
+        // The disk-backed store keeps a value's chunks on the data nodes.
+        const gateway_env env;
+        ::setenv("KYTHIRA_RAFT_BIND", "127.0.0.1", 1);
+        ::setenv("KYTHIRA_REDIS_ROLES", "gateway,front_end", 1);
+        ::setenv("KYTHIRA_REDIS_DATA_NODES", "data-1:6379", 1);
+        ::setenv("KYTHIRA_CACHE_PERSISTENCE", "file", 1);
+        ::setenv("KYTHIRA_CACHE_DATA_DIR", "/tmp/kythira-fe-without-data", 1);
+        ::setenv("KYTHIRA_CACHE_MAX_DISK_BYTES", "1000000000", 1);
+        try {
+            (void)from_env();
+            BOOST_FAIL("a front end without data started on the disk-backed store");
+        } catch (const std::invalid_argument& e) {
+            BOOST_TEST(std::string(e.what()).find("KYTHIRA_CACHE_PERSISTENCE") !=
+                       std::string::npos);
         }
     }
 }
