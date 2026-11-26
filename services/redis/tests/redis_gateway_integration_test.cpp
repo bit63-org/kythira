@@ -33,6 +33,7 @@
 #include "multi_raft_test_fabric.hpp"
 #include "redis_golden_bytes.hpp"
 #include "scratch_dir.hpp"
+#include "test_ports.hpp"
 
 #include <raft/bounded_resolver.hpp>
 #include <raft/console_logger.hpp>
@@ -41,6 +42,7 @@
 #include <raft/metrics.hpp>
 #include <raft/multi_raft_impl.hpp>
 #include <raft/persistence.hpp>
+#include <kythira/redis/redis_call_wire.hpp>
 #include <kythira/redis/redis_gateway_impl.hpp>
 #include <kythira/redis/redis_kv_state_machine.hpp>
 #include <kythira/redis/redis_remote_data_access.hpp>
@@ -289,8 +291,11 @@ auto make_key() -> pkey_ptr {
 /// A certificate for `cn` signed by `issuer` (self-signed when null). A CA
 /// gets the CA basic constraint; a leaf gets server and client key usage and
 /// `san` (an OpenSSL subjectAltName value, e.g. "IP:127.0.0.1") if non-empty.
+/// `uris` adds URI SANs (layer identities, whose role lists hold commas the
+/// OpenSSL value syntax would split); with them `san` may only be
+/// "IP:127.0.0.1" or empty.
 auto make_cert(const std::string& cn, EVP_PKEY* key, X509* issuer, EVP_PKEY* issuer_key, bool ca,
-               const std::string& san) -> x509_ptr {
+               const std::string& san, const std::vector<std::string>& uris = {}) -> x509_ptr {
     static std::atomic<long> serial{1};
     x509_ptr cert(X509_new(), &X509_free);
     X509_set_version(cert.get(), 2);
@@ -319,7 +324,25 @@ auto make_cert(const std::string& cn, EVP_PKEY* key, X509* issuer, EVP_PKEY* iss
     } else {
         add(NID_basic_constraints, "critical,CA:FALSE");
         add(NID_ext_key_usage, "serverAuth,clientAuth");
-        if (!san.empty()) {
+        if (!uris.empty()) {
+            GENERAL_NAMES* names = sk_GENERAL_NAME_new_null();
+            if (san == "IP:127.0.0.1") {
+                GENERAL_NAME* ip = GENERAL_NAME_new();
+                GENERAL_NAME_set0_value(ip, GEN_IPADD, a2i_IPADDRESS("127.0.0.1"));
+                sk_GENERAL_NAME_push(names, ip);
+            } else if (!san.empty()) {
+                throw std::runtime_error("make_cert: uris go with IP:127.0.0.1 only");
+            }
+            for (const auto& uri : uris) {
+                GENERAL_NAME* g = GENERAL_NAME_new();
+                ASN1_IA5STRING* text = ASN1_IA5STRING_new();
+                ASN1_STRING_set(text, uri.data(), static_cast<int>(uri.size()));
+                GENERAL_NAME_set0_value(g, GEN_URI, text);
+                sk_GENERAL_NAME_push(names, g);
+            }
+            X509_add1_ext_i2d(cert.get(), NID_subject_alt_name, names, 0, X509V3_ADD_DEFAULT);
+            GENERAL_NAMES_free(names);
+        } else if (!san.empty()) {
             add(NID_subject_alt_name, san);
         }
     }
@@ -335,14 +358,15 @@ auto make_cert(const std::string& cn, EVP_PKEY* key, X509* issuer, EVP_PKEY* iss
 /// client certificates `farm`, `gone` and `stranger`.
 class test_pki {
 public:
-    test_pki() {
+    test_pki() : _ca_key(make_key()), _ca(nullptr, &X509_free) {
         static std::atomic<int> counter{0};
         _dir =
             std::filesystem::temp_directory_path() /
             ("kythira-redis-tls-" + std::to_string(::getpid()) + "-" + std::to_string(counter++));
         std::filesystem::create_directories(_dir);
-        auto ca_key = make_key();
-        auto ca = make_cert("kythira test CA", ca_key.get(), nullptr, nullptr, true, "");
+        _ca = make_cert("kythira test CA", _ca_key.get(), nullptr, nullptr, true, "");
+        auto& ca = _ca;
+        auto& ca_key = _ca_key;
         write("ca", ca.get(), ca_key.get());
         auto rogue_key = make_key();
         auto rogue = make_cert("rogue CA", rogue_key.get(), nullptr, nullptr, true, "");
@@ -372,6 +396,18 @@ public:
         return (_dir / (name + ".key")).string();
     }
 
+    /// A leaf for 127.0.0.1 carrying the layer identity
+    /// `kythira://redis/<cluster>/<node>?roles=<roles>` (task 17), written
+    /// as `file` (overwriting it: a rotation).
+    auto layer_leaf(const std::string& file, const std::string& node, const std::string& roles,
+                    const std::string& cluster = "test") -> void {
+        auto key = make_key();
+        auto cert = make_cert("kythira-redis-" + node, key.get(), _ca.get(), _ca_key.get(), false,
+                              "IP:127.0.0.1",
+                              {"kythira://redis/" + cluster + "/" + node + "?roles=" + roles});
+        write(file, cert.get(), key.get());
+    }
+
 private:
     auto write(const std::string& name, X509* cert, EVP_PKEY* key) -> void {
         BIO* c = BIO_new_file(this->cert(name).c_str(), "w");
@@ -386,6 +422,8 @@ private:
     }
 
     std::filesystem::path _dir;
+    pkey_ptr _ca_key;
+    x509_ptr _ca;
 };
 
 /// Gateways with an mTLS listener presenting `leaf`, forwarding over TLS.
@@ -493,6 +531,14 @@ public:
 
     auto auth(const std::string& user, const std::string& secret) -> std::string {
         return call({"AUTH", user, secret});
+    }
+
+    /// The serial number of the certificate the TLS server presented.
+    auto peer_serial() -> long {
+        X509* cert = SSL_get1_peer_certificate(_tls->native_handle());
+        const long serial = cert != nullptr ? ASN1_INTEGER_get(X509_get_serialNumber(cert)) : -1;
+        X509_free(cert);
+        return serial;
     }
 
 private:
@@ -695,10 +741,39 @@ public:
         cfg._worker_threads = 4;
         cfg._command_timeout = std::chrono::milliseconds{3000};
         cfg._allow_plaintext_forwarding = true;
+        // No layer identities in these cases: the secret stands in.
+        cfg._insecure_plaintext = true;
         cfg._layer_roles = {kythira::layers::role::gateway, kythira::layers::role::front_end};
         if (cfg._data_nodes.empty()) {
             for (node_id_t n = 1; n <= k_node_count; ++n) {
                 cfg._data_nodes.push_back("127.0.0.1:" + std::to_string(port(n)));
+            }
+        }
+        _front_ends.push_back(std::make_unique<gateway_type>(
+            *_front_end_hosts.back(), _acl, _logger, _metrics, cfg,
+            [](const node_id_t&) -> std::optional<std::string> { return std::nullopt; }));
+        _front_ends.back()->start();
+        return *_front_ends.back();
+    }
+
+    /// A gateway without the front end (task 17): its host is in no group,
+    /// and every command goes to one of the cluster nodes' front ends as
+    /// `KYTHIRA.CALL`. By default it calls all three, on their TLS
+    /// listeners when `cfg._forward_tls` is set; the case brings the
+    /// credentials (a layer identity, or insecure plaintext and the secret).
+    auto add_gateway(redis_gateway_config cfg) -> gateway_type& {
+        const auto id = static_cast<node_id_t>(k_node_count + 1 + _front_end_hosts.size());
+        _front_end_hosts.push_back(std::make_unique<host_type>(make_config(id)));
+        _front_end_hosts.back()->start();
+        cfg._listen = "127.0.0.1:0";
+        cfg._io_threads = 1;
+        cfg._worker_threads = 4;
+        cfg._command_timeout = std::chrono::milliseconds{3000};
+        cfg._layer_roles = {kythira::layers::role::gateway};
+        if (cfg._front_ends.empty()) {
+            for (node_id_t n = 1; n <= k_node_count; ++n) {
+                cfg._front_ends.push_back("127.0.0.1:" +
+                                          std::to_string(cfg._forward_tls ? tls_port(n) : port(n)));
             }
         }
         _front_ends.push_back(std::make_unique<gateway_type>(
@@ -2713,6 +2788,7 @@ BOOST_AUTO_TEST_CASE(data_only_nodes_serve_front_ends_and_refuse_clients,
                      *boost::unit_test::timeout(180)) {
     redis_gateway_config data_only;
     data_only._layer_roles = {kythira::layers::role::data};
+    data_only._insecure_plaintext = true;
     cluster c(data_only);
     BOOST_REQUIRE(c.await_all_leaders(std::chrono::seconds{20}));
 
@@ -2720,8 +2796,7 @@ BOOST_AUTO_TEST_CASE(data_only_nodes_serve_front_ends_and_refuse_clients,
     resp_client direct(c.port(1));
     BOOST_REQUIRE_EQUAL(direct.auth("farm", "farm-secret"), "+OK\r\n");
     BOOST_CHECK_EQUAL(direct.call({"PING"}), "+PONG\r\n");
-    BOOST_CHECK(
-        direct.call({"GET", "sccache/x"}).rfind("-ERR this node runs only the data layer", 0) == 0);
+    BOOST_CHECK(direct.call({"GET", "sccache/x"}).rfind("-ERR this node runs no gateway", 0) == 0);
 
     // Every read consistency through a front end.
     for (auto consistency : {redis_read_consistency::leader, redis_read_consistency::any_replica,
@@ -2818,17 +2893,475 @@ BOOST_AUTO_TEST_CASE(front_end_without_data_refuses_to_start_without_a_way_to_re
     };
     redis_gateway_config none;
     none._internal_secret = "s";
-    none._allow_plaintext_forwarding = true;
+    none._insecure_plaintext = true;
     BOOST_CHECK(attempt(none).find("KYTHIRA_REDIS_DATA_NODES") != std::string::npos);
     redis_gateway_config no_secret;
     no_secret._data_nodes = {"127.0.0.1:1"};
-    no_secret._allow_plaintext_forwarding = true;
+    no_secret._insecure_plaintext = true;
+#if defined(KYTHIRA_GATEWAY_TEST_DISK_STORE)
+    // The disk-backed store is refused before anything else is checked.
+    BOOST_CHECK(attempt(no_secret).find("disk-backed store") != std::string::npos);
+#else
     BOOST_CHECK(attempt(no_secret).find("internal secret") != std::string::npos);
+    // Without insecure plaintext a node apart needs layer identities
+    // (Requirement 19.4).
+    redis_gateway_config no_identity = no_secret;
+    no_identity._internal_secret = "s";
+    no_identity._insecure_plaintext = false;
+    no_identity._allow_plaintext_forwarding = true;
+    BOOST_CHECK(attempt(no_identity).find("mutual TLS") != std::string::npos);
     redis_gateway_config ok = no_secret;
     ok._internal_secret = "s";
-#if defined(KYTHIRA_GATEWAY_TEST_DISK_STORE)
-    BOOST_CHECK(attempt(ok).find("disk-backed store") != std::string::npos);
-#else
     BOOST_CHECK_EQUAL(attempt(ok), "");
 #endif
+}
+
+// ── task 17: a gateway apart from its front ends, and layer identities ──────
+
+namespace {
+
+/// Co-located nodes carrying a layer identity with every role, so nodes
+/// apart can call them and they accept those calls by identity.
+auto layer_tls_config(test_pki& pki) -> redis_gateway_config {
+    pki.layer_leaf("colo", "colo", "gateway,front_end,data");
+    auto cfg = tls_config(pki, "colo");
+    cfg._layer_cluster = "test";
+    return cfg;
+}
+
+/// A gateway-only node's credentials: a client certificate naming the
+/// `gateway` role, and the CA the front ends' listeners chain to.
+auto gateway_apart_config(test_pki& pki) -> redis_gateway_config {
+    pki.layer_leaf("gw", "gw1", "gateway");
+    redis_gateway_config cfg;
+    cfg._forward_tls = true;
+    cfg._forward_tls_cert_path = pki.cert("gw");
+    cfg._forward_tls_key_path = pki.key("gw");
+    cfg._tls_ca_path = pki.cert("ca");
+    cfg._layer_cluster = "test";
+    return cfg;
+}
+
+/// A gateway-only node that reaches its front ends with the internal secret
+/// over plaintext loopback (insecure plaintext).
+auto insecure_gateway_config(std::vector<std::string> front_ends = {}) -> redis_gateway_config {
+    redis_gateway_config cfg;
+    cfg._insecure_plaintext = true;
+    cfg._internal_secret = "internal-secret";
+    cfg._front_ends = std::move(front_ends);
+    return cfg;
+}
+
+/// The answer bytes inside a `KYTHIRA.CALL` reply.
+auto call_answer_of(const std::string& reply)
+    -> std::optional<kythira::redis_call_wire::call_answer> {
+    if (reply.empty() || reply.front() != '$') {
+        return std::nullopt;
+    }
+    const auto eol = reply.find("\r\n");
+    return kythira::redis_call_wire::decode_answer(
+        std::string_view(reply).substr(eol + 2, reply.size() - eol - 4));
+}
+
+/// A stand-in front end for the cases about what a gateway does when its
+/// front end misbehaves. It answers AUTH with +OK, and each `KYTHIRA.CALL`
+/// after `delay` either with `reply` inside a well-formed answer or, when
+/// `reply` is empty, by closing the connection without a word.
+class fake_front_end {
+public:
+    fake_front_end(std::chrono::milliseconds delay, std::string reply)
+        : _delay(delay), _reply(std::move(reply)), _acceptor(_io) {
+        boost::asio::ip::tcp::endpoint ep(boost::asio::ip::make_address("127.0.0.1"), 0);
+        _acceptor.open(ep.protocol());
+        _acceptor.set_option(boost::asio::ip::tcp::acceptor::reuse_address(true));
+        _acceptor.bind(ep);
+        _acceptor.listen();
+        _acceptor.non_blocking(true);
+        _port = _acceptor.local_endpoint().port();
+        _accepting = std::thread([this] { accept_loop(); });
+    }
+    ~fake_front_end() {
+        _stop = true;
+        if (_accepting.joinable()) {
+            _accepting.join();
+        }
+        for (auto& t : _serving) {
+            if (t.joinable()) {
+                t.join();
+            }
+        }
+    }
+    fake_front_end(const fake_front_end&) = delete;
+    auto operator=(const fake_front_end&) -> fake_front_end& = delete;
+
+    [[nodiscard]] auto endpoint() const -> std::string {
+        return "127.0.0.1:" + std::to_string(_port);
+    }
+    [[nodiscard]] auto calls() const -> int { return _calls.load(); }
+
+private:
+    auto accept_loop() -> void {
+        while (!_stop) {
+            boost::system::error_code ec;
+            boost::asio::ip::tcp::socket s(_io);
+            (void)_acceptor.accept(s, ec);
+            if (ec) {
+                std::this_thread::sleep_for(std::chrono::milliseconds{5});
+                continue;
+            }
+            _serving.emplace_back([this, sock = std::move(s)]() mutable { serve(sock); });
+        }
+    }
+
+    auto serve(boost::asio::ip::tcp::socket& sock) -> void {
+        kythira::resp_parser parser;
+        std::array<char, 4096> chunk{};
+        while (!_stop) {
+            boost::system::error_code ec;
+            const auto n = sock.read_some(boost::asio::buffer(chunk), ec);
+            if (ec) {
+                return;
+            }
+            parser.feed(
+                std::span<const std::byte>(reinterpret_cast<const std::byte*>(chunk.data()), n));
+            while (auto cmd = parser.next()) {
+                const auto upper = kythira::resp_to_upper(cmd->_argv[0]);
+                if (upper == "AUTH") {
+                    boost::asio::write(sock, boost::asio::buffer(std::string("+OK\r\n")), ec);
+                    continue;
+                }
+                ++_calls;
+                std::this_thread::sleep_for(_delay);
+                if (_reply.empty() || upper != "KYTHIRA.CALL") {
+                    (void)sock.close(ec);
+                    return;
+                }
+                auto state = kythira::redis_call_wire::decode_state(cmd->_argv.at(1));
+                kythira::redis_call_wire::call_answer answer{
+                    state.value_or(kythira::redis_call_wire::call_state{}), false, _reply};
+                boost::asio::write(
+                    sock,
+                    boost::asio::buffer(bulk(kythira::redis_call_wire::encode_answer(answer))), ec);
+            }
+        }
+    }
+
+    std::chrono::milliseconds _delay;
+    std::string _reply;
+    boost::asio::io_context _io;
+    boost::asio::ip::tcp::acceptor _acceptor;
+    std::uint16_t _port = 0;
+    std::atomic<bool> _stop{false};
+    std::atomic<int> _calls{0};
+    std::thread _accepting;
+    std::vector<std::thread> _serving;
+};
+
+/// One host in no group, for gateways that only start or refuse to.
+struct lone_host {
+    lone_host()
+        : fabric{2}, host([this] {
+              config_type hc{
+                  .node_id = 1,
+                  .network_client = fabric_client{fabric, 1},
+                  .network_server = fabric_server{fabric, 1},
+                  .store_factory =
+                      [](const group_id_type&) { return host_types::persistence_engine_type{}; },
+              };
+              hc.partitioner = kythira::make_partitioner<key_type>(kythira::redis_kv_partitioner{});
+              with_state_machines(hc);
+              return hc;
+          }()) {
+        acl.reload(acl_text());
+    }
+    /// "" when a gateway with `cfg` starts, else why it refused.
+    auto attempt(redis_gateway_config cfg) -> std::string {
+        cfg._listen = "127.0.0.1:0";
+        gateway_type gw(host, acl, logger, metrics, std::move(cfg), {});
+        try {
+            gw.start();
+        } catch (const std::exception& e) {
+            return e.what();
+        }
+        gw.stop();
+        return {};
+    }
+
+    redis_acl acl;
+    kythira::console_logger logger{kythira::log_level::error};
+    kythira::noop_metrics metrics;
+    message_fabric fabric;
+    host_type host;
+};
+
+}  // namespace
+
+BOOST_AUTO_TEST_CASE(a_gateway_apart_serves_clients_through_the_front_ends,
+                     *boost::unit_test::timeout(180)) {
+    test_pki pki;
+    cluster c(layer_tls_config(pki), false);
+    BOOST_REQUIRE(c.await_all_leaders(std::chrono::seconds{20}));
+    auto& gw = c.add_gateway(gateway_apart_config(pki));
+
+    resp_client remote(gw.port());
+    BOOST_REQUIRE_EQUAL(remote.auth("farm", "farm-secret"), "+OK\r\n");
+    resp_client local(c.port(c.leader_of(k_sccache_group)));
+    BOOST_REQUIRE_EQUAL(local.auth("farm", "farm-secret"), "+OK\r\n");
+    // The same bytes as a co-located node, on both shards.
+    check_same_replies(remote, local, "sccache/gw");
+    check_same_replies(remote, local, "a/gw");
+    // The ACL decides on the front end, for the gateway's user.
+    resp_client reader(gw.port());
+    BOOST_REQUIRE_EQUAL(reader.auth("reader", "reader-secret"), "+OK\r\n");
+    resp_client local_reader(c.port(1));
+    BOOST_REQUIRE_EQUAL(local_reader.auth("reader", "reader-secret"), "+OK\r\n");
+    const auto refused = reader.call({"SET", "sccache/gw/ro", "v"});
+    BOOST_CHECK(refused.rfind("-NOPERM", 0) == 0);
+    BOOST_CHECK_EQUAL(refused, local_reader.call({"SET", "sccache/gw/ro", "v"}));
+    // The protocol is connection state the gateway holds.
+    resp_client r3(gw.port());
+    BOOST_CHECK(r3.call({"HELLO", "3", "AUTH", "farm", "farm-secret"}).front() == '%');
+    BOOST_CHECK_EQUAL(r3.call({"GET", "sccache/gw/none"}), "_\r\n");
+    BOOST_CHECK_EQUAL(gw.stats()._front_end_lost.load(), 0u);
+    BOOST_CHECK_GT(gw.stats()._front_end_calls.load(), 0u);
+
+    // A front end goes away: the connections pinned to it move to another
+    // before their next command, and nothing is ambiguous because nothing
+    // was in flight.
+    c.kill(1);
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{20};
+    std::string reply;
+    for (int i = 0; std::chrono::steady_clock::now() < deadline; ++i) {
+        reply = remote.call({"SET", "sccache/gw/after/" + std::to_string(i), "v"});
+        if (reply == "+OK\r\n") {
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds{100});
+    }
+    BOOST_REQUIRE_EQUAL(reply, "+OK\r\n");
+    for (int i = 0; i < 10; ++i) {
+        resp_client k(gw.port());
+        BOOST_REQUIRE_EQUAL(k.auth("farm", "farm-secret"), "+OK\r\n");
+        BOOST_CHECK_EQUAL(k.call({"PING"}), "+PONG\r\n");
+    }
+    BOOST_CHECK_EQUAL(gw.stats()._front_end_lost.load(), 0u);
+}
+
+BOOST_AUTO_TEST_CASE(a_gateway_apart_never_replays_a_call_its_front_end_may_have_run,
+                     *boost::unit_test::timeout(120)) {
+    fake_front_end lost(std::chrono::milliseconds{0}, "");
+    redis_gateway_config base;
+    base._insecure_plaintext = true;
+    cluster c(base);
+    BOOST_REQUIRE(c.await_all_leaders(std::chrono::seconds{20}));
+
+    // The front end read the call and vanished: it may have run it.
+    auto& gw = c.add_gateway(insecure_gateway_config({lost.endpoint()}));
+    resp_client k(gw.port());
+    BOOST_REQUIRE_EQUAL(k.auth("farm", "farm-secret"), "+OK\r\n");
+    BOOST_CHECK_EQUAL(k.call({"SET", "sccache/amb", "v"}),
+                      "-ERR outcome unknown, front end lost; it may have applied\r\n");
+    BOOST_CHECK_EQUAL(lost.calls(), 1);
+    BOOST_CHECK_EQUAL(gw.stats()._front_end_lost.load(), 1u);
+
+    // A front end that cannot be reached never got the call: the next one
+    // runs it, for every connection.
+    const auto closed = "127.0.0.1:" + std::to_string(kythira::testing::free_port());
+    auto& gw2 =
+        c.add_gateway(insecure_gateway_config({closed, "127.0.0.1:" + std::to_string(c.port(1))}));
+    for (int i = 0; i < 20; ++i) {
+        resp_client one(gw2.port());
+        BOOST_REQUIRE_EQUAL(one.auth("farm", "farm-secret"), "+OK\r\n");
+        BOOST_CHECK_EQUAL(one.call({"PING"}), "+PONG\r\n");
+    }
+    BOOST_CHECK_EQUAL(gw2.stats()._front_end_lost.load(), 0u);
+}
+
+BOOST_AUTO_TEST_CASE(a_draining_gateway_finishes_what_it_received,
+                     *boost::unit_test::timeout(120)) {
+    fake_front_end slow(std::chrono::milliseconds{400}, "+OK\r\n");
+    fake_front_end stuck(std::chrono::milliseconds{2000}, "+OK\r\n");
+    redis_gateway_config base;
+    base._insecure_plaintext = true;
+    cluster c(base);
+
+    auto cfg = insecure_gateway_config({slow.endpoint()});
+    cfg._drain_timeout = std::chrono::milliseconds{5000};
+    auto& gw = c.add_gateway(cfg);
+    const auto port = gw.port();
+    resp_client k(port);
+    BOOST_REQUIRE_EQUAL(k.auth("farm", "farm-secret"), "+OK\r\n");
+    k.send_raw(resp_client::encode({"SET", "sccache/drain", "v"}));
+    std::this_thread::sleep_for(std::chrono::milliseconds{100});
+    std::thread drainer([&] { gw.drain(); });
+    // In flight when the drain began: it finishes and is answered.
+    BOOST_CHECK_EQUAL(k.read_reply(), "+OK\r\n");
+    drainer.join();
+    BOOST_CHECK(!gw.is_running());
+    BOOST_CHECK(k.wait_closed());
+    BOOST_CHECK_THROW(resp_client late(port), std::exception);
+
+    // The bound: a command that outlives it does not hold the drain.
+    auto bounded = insecure_gateway_config({stuck.endpoint()});
+    bounded._drain_timeout = std::chrono::milliseconds{200};
+    auto& gw2 = c.add_gateway(bounded);
+    resp_client k2(gw2.port());
+    BOOST_REQUIRE_EQUAL(k2.auth("farm", "farm-secret"), "+OK\r\n");
+    k2.send_raw(resp_client::encode({"SET", "sccache/drain2", "v"}));
+    std::this_thread::sleep_for(std::chrono::milliseconds{100});
+    gw2.drain();
+    BOOST_CHECK(!gw2.is_running());
+    BOOST_CHECK(k2.wait_closed());
+}
+
+BOOST_AUTO_TEST_CASE(internal_commands_check_the_callers_layer_roles,
+                     *boost::unit_test::timeout(120)) {
+    test_pki pki;
+    cluster c(layer_tls_config(pki), false);
+    BOOST_REQUIRE(c.await_all_leaders(std::chrono::seconds{20}));
+    pki.layer_leaf("as-data", "d1", "data");
+    pki.layer_leaf("as-gateway", "g1", "gateway");
+    pki.layer_leaf("elsewhere", "g2", "gateway", "another-cluster");
+    using kythira::redis_call_wire::call_state;
+    using kythira::redis_call_wire::encode_state;
+    const auto farm = encode_state(call_state{.user = "farm"});
+    const auto n = c.leader_of(k_sccache_group);
+
+    // A data node's identity may use the data-layer API, never call a
+    // front end (Requirement 19.2).
+    resp_client data(c.tls_port(n), client_tls(pki, "as-data"));
+    BOOST_CHECK(
+        data.call({"KYTHIRA.CALL", farm, "PING"})
+            .rfind("-NOPERM a caller with the layer roles data may not send KYTHIRA.CALL", 0) == 0);
+    BOOST_CHECK(data.call({"KYTHIRA.DATA", "ROUTE", "sccache/x"}).front() == '$');
+
+    // A gateway's may call, as the connection's user, and nothing else.
+    resp_client gw(c.tls_port(n), client_tls(pki, "as-gateway"));
+    auto answer = call_answer_of(gw.call({"KYTHIRA.CALL", farm, "SET", "sccache/roles", "v"}));
+    BOOST_REQUIRE(answer.has_value());
+    BOOST_CHECK_EQUAL(answer->reply, "+OK\r\n");
+    auto denied =
+        call_answer_of(gw.call({"KYTHIRA.CALL", encode_state(call_state{.user = "reader"}), "SET",
+                                "sccache/roles2", "v"}));
+    BOOST_REQUIRE(denied.has_value());
+    BOOST_CHECK(denied->reply.rfind("-NOPERM", 0) == 0);
+    BOOST_CHECK(gw.call({"KYTHIRA.DATA", "ROUTE", "sccache/x"})
+                    .rfind("-NOPERM a caller with the layer roles gateway", 0) == 0);
+    BOOST_CHECK(gw.call({"KYTHIRA.CALL", encode_state(call_state{.user = "nobody"}), "PING"})
+                    .rfind("-NOAUTH", 0) == 0);
+    BOOST_CHECK(
+        gw.call({"KYTHIRA.CALL", "junk", "PING"}).rfind("-ERR malformed connection state", 0) == 0);
+    // The internal secret is no way around it (Requirement 19.3).
+    BOOST_CHECK(gw.auth("kythira-internal", "internal-secret")
+                    .rfind("-NOPERM the caller's layer identity names roles=gateway", 0) == 0);
+    BOOST_CHECK(gw.call({"KYTHIRA.DATA", "ROUTE", "sccache/x"}).rfind("-NOPERM", 0) == 0);
+
+    // Another cluster's identity is no identity here.
+    resp_client stranger(c.tls_port(n), client_tls(pki, "elsewhere"));
+    BOOST_CHECK(stranger.call({"KYTHIRA.CALL", farm, "PING"}).rfind("-NOAUTH", 0) == 0);
+
+    // The secret alone implies the data role: no authenticated calls.
+    resp_client secret(c.port(n));
+    BOOST_REQUIRE_EQUAL(secret.auth("kythira-internal", "internal-secret"), "+OK\r\n");
+    BOOST_CHECK(secret.call({"KYTHIRA.CALL", farm, "PING"})
+                    .rfind("-NOPERM a caller with the layer roles data", 0) == 0);
+    BOOST_CHECK(secret.call({"KYTHIRA.DATA", "ROUTE", "sccache/x"}).front() == '$');
+
+    // A client may not call at all.
+    resp_client client(c.port(n));
+    BOOST_REQUIRE_EQUAL(client.auth("farm", "farm-secret"), "+OK\r\n");
+    BOOST_CHECK(
+        client.call({"KYTHIRA.CALL", farm, "PING"}).rfind("-NOPERM KYTHIRA.CALL is internal", 0) ==
+        0);
+}
+
+BOOST_AUTO_TEST_CASE(nodes_apart_need_layer_identities_and_refuse_the_secret,
+                     *boost::unit_test::timeout(60)) {
+    test_pki pki;
+    lone_host h;
+    const kythira::layers::role_set gateway_only{kythira::layers::role::gateway};
+
+    // A gateway without the front end needs front ends, then a way to
+    // reach them: an identity naming its roles (Requirement 19.4).
+    redis_gateway_config gw;
+    gw._layer_roles = gateway_only;
+    BOOST_CHECK(h.attempt(gw).find("KYTHIRA_REDIS_FRONT_ENDS") != std::string::npos);
+    gw._front_ends = {"127.0.0.1:1"};
+    BOOST_CHECK(h.attempt(gw).find("mutual TLS") != std::string::npos);
+    gw._forward_tls = true;
+    gw._tls_ca_path = pki.cert("ca");
+    gw._forward_tls_cert_path = pki.cert("farm");
+    gw._forward_tls_key_path = pki.key("farm");
+    gw._layer_cluster = "test";
+    BOOST_CHECK(h.attempt(gw).find("carries no layer identity") != std::string::npos);
+    pki.layer_leaf("wrong-roles", "g1", "front_end");
+    gw._forward_tls_cert_path = pki.cert("wrong-roles");
+    gw._forward_tls_key_path = pki.key("wrong-roles");
+    BOOST_CHECK(h.attempt(gw).find("names other roles") != std::string::npos);
+    pki.layer_leaf("gw", "g1", "gateway");
+    gw._forward_tls_cert_path = pki.cert("gw");
+    gw._forward_tls_key_path = pki.key("gw");
+    BOOST_CHECK_EQUAL(h.attempt(gw), "");
+    // ... or insecure plaintext, with the secret standing in.
+    redis_gateway_config insecure;
+    insecure._layer_roles = gateway_only;
+    insecure._front_ends = {"127.0.0.1:1"};
+    insecure._insecure_plaintext = true;
+    BOOST_CHECK(h.attempt(insecure).find("internal secret") != std::string::npos);
+    insecure._internal_secret = "s";
+    BOOST_CHECK_EQUAL(h.attempt(insecure), "");
+
+    // A front end with data and no gateway is called on its TLS listener.
+    pki.layer_leaf("fe", "f1", "front_end,data");
+    redis_gateway_config fe;
+    fe._layer_roles = {kythira::layers::role::front_end, kythira::layers::role::data};
+    fe._forward_tls = true;
+    fe._tls_cert_path = pki.cert("fe");
+    fe._tls_key_path = pki.key("fe");
+    fe._tls_ca_path = pki.cert("ca");
+    fe._layer_cluster = "test";
+    BOOST_CHECK(h.attempt(fe).find("TLS listener") != std::string::npos);
+    fe._tls_listen = "127.0.0.1:0";
+    fe._internal_secret = "internal-secret";
+    fe._listen = "127.0.0.1:0";
+    gateway_type node(h.host, h.acl, h.logger, h.metrics, fe, {});
+    node.start();
+    // It is not co-located, so the secret is refused (Requirement 19.3),
+    // and it serves no clients.
+    resp_client k(node.port());
+    BOOST_CHECK(k.auth("kythira-internal", "internal-secret")
+                    .rfind("-NOPERM this node is not co-located", 0) == 0);
+    BOOST_REQUIRE_EQUAL(k.auth("farm", "farm-secret"), "+OK\r\n");
+    BOOST_CHECK(k.call({"GET", "sccache/x"}).rfind("-ERR this node runs no gateway", 0) == 0);
+    node.stop();
+}
+
+BOOST_AUTO_TEST_CASE(certificates_rotate_without_a_restart, *boost::unit_test::timeout(120)) {
+    test_pki pki;
+    auto cfg = layer_tls_config(pki);
+    cfg._tls_reload_interval = std::chrono::milliseconds{0};
+    cluster c(cfg, false);
+    BOOST_REQUIRE(c.await_all_leaders(std::chrono::seconds{20}));
+    auto gcfg = gateway_apart_config(pki);
+    gcfg._tls_reload_interval = std::chrono::milliseconds{0};
+    auto& gw = c.add_gateway(gcfg);
+    resp_client through(gw.port());
+    BOOST_REQUIRE_EQUAL(through.auth("farm", "farm-secret"), "+OK\r\n");
+    BOOST_CHECK_EQUAL(through.call({"SET", "sccache/rot/1", "v"}), "+OK\r\n");
+
+    resp_client before(c.tls_port(1), client_tls(pki, "farm"));
+    const auto old_serial = before.peer_serial();
+    // Every node's certificate, and the gateway's, are reissued in place.
+    pki.layer_leaf("colo", "colo", "gateway,front_end,data");
+    pki.layer_leaf("gw", "gw1", "gateway");
+    resp_client after(c.tls_port(1), client_tls(pki, "farm"));
+    BOOST_CHECK_NE(after.peer_serial(), old_serial);
+    // Open connections keep working; new ones use the new certificates.
+    BOOST_CHECK_EQUAL(before.call({"PING"}), "+PONG\r\n");
+    BOOST_CHECK_EQUAL(after.call({"PING"}), "+PONG\r\n");
+    BOOST_CHECK_EQUAL(through.call({"SET", "sccache/rot/2", "v"}), "+OK\r\n");
+    resp_client follower(c.port(c.a_follower_of(k_sccache_group)));
+    BOOST_REQUIRE_EQUAL(follower.auth("farm", "farm-secret"), "+OK\r\n");
+    BOOST_CHECK_EQUAL(follower.call({"SET", "sccache/rot/3", "v"}), "+OK\r\n");
+    BOOST_CHECK_EQUAL(gw.stats()._front_end_lost.load(), 0u);
 }

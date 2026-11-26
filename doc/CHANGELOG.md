@@ -5,6 +5,23 @@ current list of outstanding work, see [TODO.md](TODO.md).
 
 ### What Changed (November 26, 2026)
 
+- **A Redis gateway can run apart from the front end, and nodes of
+  different layers prove who they are.** `KYTHIRA_REDIS_ROLES=gateway`
+  with `KYTHIRA_REDIS_FRONT_ENDS` holds client connections, their protocol,
+  `MULTI` queue, isolation and `WATCH` token, and sends each command to a
+  front end as `KYTHIRA.CALL`. Each connection is pinned to one front end
+  and moves when it fails. A command the old front end may have run
+  answers `-ERR outcome unknown, front end lost; it may have applied` and
+  is never replayed. On SIGTERM the gateway drains for up to
+  `KYTHIRA_REDIS_DRAIN_TIMEOUT_MS`. Any role set now serves. Nodes that
+  are not co-located present layer identities
+  (`kythira://redis/<cluster>/<node>?roles=...`) over mutual TLS, every
+  internal command checks the caller's roles, the internal secret works
+  only between co-located nodes, and certificates rotate without a
+  restart. `KYTHIRA_NODE_INSECURE_PLAINTEXT=1` runs split layers without
+  TLS on an isolated network. The recorded Redis and Valkey streams replay
+  unchanged through a gateway over front ends without data over data nodes
+  (`.kiro/specs/redis-general-data-types/` task 17).
 - **A Redis node can serve clients without holding any data, and a data
   node can serve only other nodes.** `KYTHIRA_REDIS_ROLES=gateway,front_end`
   with `KYTHIRA_REDIS_DATA_NODES` runs a front end whose host joins no Raft

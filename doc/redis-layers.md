@@ -11,16 +11,24 @@ and 24, design Component 9):
 | `data` | the multi-Raft host and the Redis state machines, sweeps and evictions |
 
 A node picks its layers with `KYTHIRA_REDIS_ROLES` (see
-[redis-gateway.md](redis-gateway.md)). This build serves three sets:
+[redis-gateway.md](redis-gateway.md)). Every non-empty set serves:
 
 | Roles | The node |
 |---|---|
 | `gateway,front_end,data` (default) | co-located: the node as it has always been |
 | `gateway,front_end` | a front end without data: serves clients, holds no replica, and reaches the data layer over the data-layer API (below) |
+| `gateway` | a gateway apart: holds client connections and sends each command to a front end as an authenticated call (below) |
+| `front_end`, `front_end,data` | a front end without a gateway: serves gateways' calls, never clients |
 | `data` | a data node: holds replicas and serves the data-layer API to front ends; refuses clients |
+| `gateway,data` | a gateway apart that also holds replicas |
 
-The later tasks add gateways apart from front ends, layer membership, and the
-split and merge procedures. This page gains the runbook with task 19.
+A set without `data` needs `KYTHIRA_REDIS_DATA_NODES` when it has
+`front_end`; a `gateway` without `front_end` needs
+`KYTHIRA_REDIS_FRONT_ENDS`. Any node that is not co-located talks to the
+other layers with a layer identity over mutual TLS (below).
+
+The later tasks add layer membership and the split and merge procedures. This
+page gains the runbook with task 19.
 
 ## How the code is layered
 
@@ -34,8 +42,8 @@ The layers are separate classes in `services/redis/include/kythira/redis/`:
   TLS, connection state and the connection commands (`AUTH`, `HELLO`,
   `CLIENT`, `QUIT`, `RESET`). Its `execute()` does the credential checks
   and then calls `execute_command()`. On a co-located node that call stays
-  in-process, with no hop or copy. A gateway without `front_end` will send
-  the command to a remote front end instead (task 17).
+  in-process, with no hop or copy. A gateway without `front_end` sends the
+  command to a remote front end instead (`call_front_end()`).
 
 New command handlers are `redis_front_end` members.
 
@@ -52,9 +60,9 @@ with `data` has.
 ## The data-layer API
 
 A node with `data` serves the data-layer API to other nodes as internal RESP
-commands on the forward link, beside `KYTHIRA.TXN`. Only a connection that
-authenticated as the internal identity may send them. A client that sends
-one gets `NOPERM`, whatever its role.
+commands on the forward link, beside `KYTHIRA.TXN`. Only another node may
+send them, and only with the `front_end` or `data` role (see "Layer
+identities" below). A client that sends one gets `NOPERM`, whatever its role.
 
 | Command | Answers with |
 |---|---|
@@ -128,8 +136,9 @@ through a front end without data as well as through co-located gateways.
 The front end needs:
 
 - `KYTHIRA_REDIS_DATA_NODES`, the data nodes' gateway addresses;
-- the internal secret, and forwarding TLS (or plaintext forwarding allowed),
-  because the data-layer API rides the forward link;
+- a layer identity and forwarding TLS (or `KYTHIRA_NODE_INSECURE_PLAINTEXT=1`
+  and the internal secret), because the data-layer API rides the forward
+  link;
 - the in-memory or engine store. The disk-backed store keeps a value's
   chunks on its data nodes, which a read answer cannot carry, so the node
   refuses to start with it.
@@ -143,11 +152,102 @@ eviction sees the reads its own clients make, not the front end's.
 
 A node with `KYTHIRA_REDIS_ROLES=data` runs the multi-Raft host, the state
 machines and the data layer's own jobs (sweeps, evictions). Its gateway's
-listener is the internal listener: a connection authenticated as the internal
-identity gets the data-layer API, `KYTHIRA.TXN` and the commands co-located
-nodes forward, and any other connection gets `PING` and an error naming the
-node's roles for everything else. A co-located node and a data node can share
-a cluster, which is how a layout moves from one to the other (task 19).
+listener is the internal listener: another node's connection gets the
+data-layer API, `KYTHIRA.TXN` and the commands co-located nodes forward, and
+any other connection gets `PING` and an error naming the node's roles for
+everything else. A co-located node and a data node can share a cluster, which
+is how a layout moves from one to the other (task 19).
+
+## Gateways apart from front ends
+
+A node with `KYTHIRA_REDIS_ROLES=gateway` terminates RESP, TLS and `AUTH`
+and holds each connection's state: protocol, user, isolation, the `MULTI`
+queue and the `WATCH` token. It has no front end. Every other command goes
+to a front end in `KYTHIRA_REDIS_FRONT_ENDS` as an authenticated call:
+
+```
+KYTHIRA.CALL <state> <command> <arg>...
+```
+
+`<state>` is the connection as the gateway holds it, and the answer is one
+bulk string with the state as the front end left it and the reply bytes in
+the client's protocol (`redis_call_wire.hpp`). The front end looks the
+user up in its own ACL, so it decides the role and key scopes. It keeps
+nothing between calls. While queuing inside `MULTI` the front end checks
+each command and says whether it queued it, and the queue stays on the
+gateway. The queue travels whole, once, with `EXEC`.
+
+Each connection is pinned to one front end, chosen by rendezvous hashing of
+its number over the front ends that have not failed lately. Only the
+connections of a front end that leaves move. When a call cannot reach its
+front end (refused, or no answer to the connect), nothing left the gateway,
+so the next front end runs it and the connection is re-pinned. When the
+request left and the answer did not come back, the front end may have run
+it. The gateway answers
+
+```
+-ERR outcome unknown, front end lost; it may have applied
+```
+
+and never replays the call (Requirement 17.2). The connection moves at its
+next command, and a `MULTI` in progress fails at `EXEC`. A pooled link is
+checked for a peer close before it carries a call, so a front end that
+restarted while the link was idle does not cause that error.
+
+A gateway drains on shutdown (SIGTERM, `KYTHIRA_REDIS_DRAIN_TIMEOUT_MS`,
+10 s by default; Requirement 17.4). It stops accepting connections, lets the
+commands it already received finish and their replies leave, then closes the
+connections. A command that outlives the bound is cut off with its
+connection.
+
+`INFO` through a gateway apart is the front end's. The gateway's own counters
+(`front_end_calls`, `front_end_repins`, `front_end_lost`) are in its stats.
+
+The replies are the co-located bytes. The differential replay runs the
+recorded streams through three layers apart (a gateway over two front ends
+without data over data nodes) with no difference.
+
+## Layer identities
+
+Calls between nodes that are not both co-located carry layer identities over
+mutual TLS (Requirement 19). A node's identity is a URI SAN in its forwarding
+client certificate (`KYTHIRA_REDIS_FORWARD_TLS_CERT`, or the listener's
+certificate):
+
+```
+kythira://redis/<cluster>/<node id>?roles=gateway,front_end
+```
+
+`<cluster>` is `KYTHIRA_REDIS_CLUSTER` (default `KYTHIRA_CLUSTER`, then
+`default`). A certificate naming another cluster carries no identity. The
+receiving node reads the identity from the verified client certificate in the
+TLS handshake. The connection is then internal, with that node's roles, and
+needs no `AUTH`. Each internal command checks the caller's roles:
+
+| Command | Caller needs |
+|---|---|
+| `KYTHIRA.CALL` | `gateway` |
+| `KYTHIRA.DATA`, `KYTHIRA.TXN` | `front_end` or `data` |
+| a whole command a co-located peer forwards | `front_end` or `data` |
+
+The internal user and secret (`KYTHIRA_REDIS_INTERNAL_USER`) stay valid
+between co-located nodes and imply the `data` role only, so they can never
+make an authenticated call. A node that is not co-located refuses the secret,
+and so does any node whose caller presented an identity that is not
+co-located (Requirement 19.3).
+
+A node that is not co-located refuses to start without layer TLS: forwarding
+TLS, a client certificate whose identity names exactly its roles, and (when
+it has `front_end` or `data`) a TLS listener with a CA to verify callers
+against (Requirement 19.4). `KYTHIRA_NODE_INSECURE_PLAINTEXT=1` lifts that
+for tests and isolated networks. The nodes then authenticate each other with
+the internal secret, which stands in for every role, over plaintext.
+
+Certificates rotate without a restart (Requirement 19.5). The listener's and
+the forwarding certificate, key and CA files are checked at most once a
+second, on a new connection. A change rebuilds the TLS context for new
+connections, and open connections finish on the old one. A half-written pair
+fails to load and is tried again at the next check.
 
 ## Co-located baseline
 

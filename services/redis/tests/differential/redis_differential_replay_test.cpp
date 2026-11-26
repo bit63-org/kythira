@@ -275,6 +275,23 @@ public:
         return *_front_ends.back();
     }
 
+    /// A gateway without the front end (task 17) over `front_ends`.
+    auto add_gateway(const std::vector<std::uint16_t>& front_ends) -> gateway_type& {
+        const auto id = static_cast<node_id_t>(k_node_count + 1 + _front_end_hosts.size());
+        _front_end_hosts.push_back(std::make_unique<host_type>(make_config(id)));
+        _front_end_hosts.back()->start();
+        auto cfg = gateway_config();
+        cfg._layer_roles = {kythira::layers::role::gateway};
+        for (auto p : front_ends) {
+            cfg._front_ends.push_back("127.0.0.1:" + std::to_string(p));
+        }
+        _front_ends.push_back(std::make_unique<gateway_type>(
+            *_front_end_hosts.back(), _acl, _logger, _metrics, cfg,
+            [](const node_id_t&) -> std::optional<std::string> { return std::nullopt; }));
+        _front_ends.back()->start();
+        return *_front_ends.back();
+    }
+
 private:
     static auto gateway_config() -> redis_gateway_config {
         redis_gateway_config cfg;
@@ -284,6 +301,8 @@ private:
         cfg._worker_threads = 4;
         cfg._command_timeout = std::chrono::milliseconds{5000};
         cfg._allow_plaintext_forwarding = true;
+        // Split layouts here use the secret, not layer identities.
+        cfg._insecure_plaintext = true;
         cfg._transactions = true;
         // As services/redis/docker/differential/kythira.env sets them.
         cfg._txn_isolation = kythira::txn_isolation::snapshot;
@@ -459,4 +478,18 @@ BOOST_AUTO_TEST_CASE(recorded_streams_replay_through_a_front_end_without_data,
     BOOST_REQUIRE(c.await_all_leaders(std::chrono::seconds{20}));
     auto& fe = c.add_front_end();
     replay([&fe](std::uint64_t, int) { return fe.port(); });
+}
+
+// Three layers apart (task 17): gateways over front ends without data over
+// data nodes. The gateway holds the connection state and calls a front end
+// per command; the bytes are still the co-located ones.
+BOOST_AUTO_TEST_CASE(recorded_streams_replay_through_three_layers_apart,
+                     *boost::unit_test::timeout(600)) {
+    cluster c;
+    BOOST_REQUIRE(c.await_all_leaders(std::chrono::seconds{20}));
+    auto& fe1 = c.add_front_end();
+    auto& fe2 = c.add_front_end();
+    auto& gw = c.add_gateway({fe1.port(), fe2.port()});
+    replay([&gw](std::uint64_t, int) { return gw.port(); });
+    BOOST_CHECK_EQUAL(gw.stats()._front_end_lost.load(), 0u);
 }

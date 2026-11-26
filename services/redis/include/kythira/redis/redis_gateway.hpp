@@ -25,6 +25,7 @@
 
 #include <kythira/redis/redis_acl.hpp>
 #include <kythira/redis/redis_auth_limiter.hpp>
+#include <kythira/redis/redis_call_wire.hpp>
 #include <kythira/redis/redis_forward_link.hpp>
 #include <kythira/redis/redis_kv_commands.hpp>
 #include <kythira/redis/redis_data_access.hpp>
@@ -36,6 +37,7 @@
 #include <kythira/redis/resp_protocol.hpp>
 #include <raft/credential_verifier.hpp>
 #include <raft/future_default.hpp>
+#include <raft/layer_identity_uri.hpp>
 #include <raft/raft_timestamp_oracle.hpp>
 #include <raft/shard_exceptions.hpp>
 #include <raft/txn_coordinator.hpp>
@@ -201,6 +203,32 @@ struct redis_gateway_config {
     /// internal secret and TLS (or plaintext forwarding allowed). Ignored by
     /// a node with `data`; required, non-empty, by one without.
     std::vector<std::string> _data_nodes;
+    /// Front ends a gateway without the `front_end` role sends commands to
+    /// (`KYTHIRA_REDIS_FRONT_ENDS`, `host:port` each, names resolved when
+    /// used; task 17), as authenticated calls (`KYTHIRA.CALL`,
+    /// redis_call_wire.hpp) over the forward link. Each connection is
+    /// pinned to one, chosen by affinity, and moves to another when it
+    /// fails. Ignored by a node with `front_end`; required by one without
+    /// that has `gateway`.
+    std::vector<std::string> _front_ends;
+    /// The cluster named in layer identities,
+    /// `kythira://redis/<cluster>/<node>?roles=...`
+    /// (`KYTHIRA_REDIS_CLUSTER`; Requirement 19.1). A peer certificate
+    /// naming another cluster carries no identity here.
+    std::string _layer_cluster = "default";
+    /// `KYTHIRA_NODE_INSECURE_PLAINTEXT=1`: a node that is not co-located
+    /// may run without layer identities, and the internal secret then
+    /// stands in for every role (Requirement 19.4). Also allows plaintext
+    /// forwarding. For tests and isolated networks only.
+    bool _insecure_plaintext = false;
+    /// How long `drain()` lets commands already received finish before it
+    /// closes the connections (`KYTHIRA_REDIS_DRAIN_TIMEOUT_MS`;
+    /// Requirement 17.4).
+    std::chrono::milliseconds _drain_timeout{10000};
+    /// How often the TLS certificate, key and CA files are checked for a
+    /// change. A change is picked up for new connections without a restart
+    /// (Requirement 19.5); 0 checks on every new connection.
+    std::chrono::milliseconds _tls_reload_interval{1000};
 
     resp_parser_limits _parser_limits{};
 
@@ -274,6 +302,12 @@ struct redis_gateway_stats {
     std::atomic<std::uint64_t> _authz_denials{0};
     std::atomic<std::uint64_t> _forwards{0};
     std::atomic<std::uint64_t> _forward_failures{0};
+    /// A gateway without `front_end` (task 17): calls sent, connections
+    /// moved to another front end, and calls whose front end was lost
+    /// after the request left (answered with the ambiguity error).
+    std::atomic<std::uint64_t> _front_end_calls{0};
+    std::atomic<std::uint64_t> _front_end_repins{0};
+    std::atomic<std::uint64_t> _front_end_lost{0};
     std::atomic<std::uint64_t> _connections_accepted{0};
     std::atomic<std::uint64_t> _connections_rejected{0};
     std::atomic<std::uint64_t> _connections_current{0};
@@ -464,6 +498,15 @@ protected:
         /// `EXEC`, `DISCARD` and `UNWATCH` clear them.
         std::set<std::string> _watched;
         std::uint64_t _watch_ts{0};
+        /// The roles of the node on the other end of an internal session:
+        /// from its layer identity (mutual TLS), or implied by the
+        /// internal secret. Unset on a client session.
+        std::optional<layers::role_set> _peer_roles;
+        /// A gateway without `front_end`: the connection's number, which
+        /// its front-end affinity hashes, and the front end it is pinned
+        /// to (empty until the first call).
+        std::uint64_t _conn_id = 0;
+        std::string _pinned;
     };
 
     /// The coordinator's view of the shards (`txn_participant_client`):
@@ -550,11 +593,56 @@ protected:
     /// Why this front end cannot serve with its layer roles and store, or
     /// `nullopt`; checked at `start()`.
     [[nodiscard]] auto layer_refusal() const -> std::optional<std::string>;
-    /// Whether this node runs the data layer only: client sessions are
-    /// refused, internal ones served.
-    [[nodiscard]] auto data_only() const noexcept -> bool {
-        return !_config._layer_roles.has(layers::role::front_end);
+    /// Whether this node runs no gateway: client sessions are refused,
+    /// internal ones served.
+    [[nodiscard]] auto serves_no_clients() const noexcept -> bool {
+        return !_config._layer_roles.has(layers::role::gateway);
     }
+    /// Whether commands go to remote front ends (a gateway without
+    /// `front_end`, task 17).
+    [[nodiscard]] auto remote_front_ends() const noexcept -> bool {
+        return _config._layer_roles.has(layers::role::gateway) &&
+               !_config._layer_roles.has(layers::role::front_end);
+    }
+    /// Whether calls between this node and others need layer identities:
+    /// it is not co-located, or it holds a layer identity of its own.
+    [[nodiscard]] auto layer_tls_required() const noexcept -> bool {
+        return !redis_roles_colocated(_config._layer_roles) && !_config._insecure_plaintext;
+    }
+    /// Whether the forward link can reach other nodes at all: something to
+    /// authenticate with (the internal secret, or a layer identity) over
+    /// TLS, or plaintext explicitly allowed.
+    [[nodiscard]] auto can_call_peers() const -> bool;
+    /// `KYTHIRA.CALL <state> <command> <arg>...` from a gateway: runs the
+    /// command as the connection the state describes and answers with
+    /// what the call wire says (redis_call_wire.hpp).
+    auto handle_call(session& s, const resp_command& cmd) -> std::string;
+    /// The roles an internal session's caller has, checked against what
+    /// `upper` needs (Requirement 19.2); the refusal, or nullopt.
+    auto peer_role_refusal(session& s, std::string_view upper) -> std::optional<std::string>;
+    /// This node's layer identity: the URI SAN of its forwarding client
+    /// certificate naming this cluster, if it has one.
+    [[nodiscard]] auto own_identity() const -> std::optional<layers::identity>;
+    /// The client TLS context for the forward link, rebuilt when its files
+    /// change (Requirement 19.5); null when forwarding is plaintext.
+    auto forward_tls_context() -> std::shared_ptr<boost::asio::ssl::context>;
+
+    /// One request/reply on the forward link, telling apart a request that
+    /// never left from one whose answer was lost (Requirement 17.2).
+    struct exchange_result {
+        enum class kind : std::uint8_t {
+            not_sent,
+            lost,
+            answered
+        };
+        kind _kind = kind::not_sent;
+        std::string _reply;
+        std::string _error;
+    };
+    /// `budget` bounds the whole exchange; zero means the command timeout.
+    auto exchange(const std::vector<std::string>& argv, const std::string& endpoint,
+                  std::chrono::milliseconds budget = std::chrono::milliseconds{0})
+        -> exchange_result;
     /// `routes` with the addresses of every node they name.
     auto data_routes_payload(std::vector<typename Host::descriptor_type> routes)
         -> redis_data_wire::routes_payload<group_id_type, node_id_type>;
@@ -681,6 +769,18 @@ protected:
 
     std::mutex _forward_mutex;
     std::unordered_map<std::string, std::shared_ptr<forward_pool>> _forward_pools;
+
+    /// Certificate rotation (Requirement 19.5): what the TLS files looked
+    /// like when a context was built, and when they were last looked at.
+    struct tls_files {
+        std::vector<std::pair<std::string, std::string>> _stamps;
+        std::chrono::steady_clock::time_point _checked{};
+    };
+    [[nodiscard]] static auto stamp_files(const std::vector<std::string>& paths)
+        -> std::vector<std::pair<std::string, std::string>>;
+    mutable std::mutex _tls_mutex;
+    tls_files _forward_tls_files;
+    std::optional<layers::identity> _own_identity;
 };
 
 /// The gateway layer over an in-process front end (see `redis_front_end`).
@@ -715,6 +815,12 @@ public:
     [[nodiscard]] auto port() const noexcept -> std::uint16_t { return _port; }
     [[nodiscard]] auto tls_port() const noexcept -> std::uint16_t { return _tls_port; }
 
+    /// Requirement 17.4: stop accepting connections, let the commands
+    /// already received finish (up to `_drain_timeout`), then stop. A
+    /// gateway can then be removed without failing a command that was not
+    /// in flight. Idempotent, like stop().
+    auto drain() -> void;
+
     /// Tests only: execute one command as if it arrived on an authenticated
     /// connection, without a socket. Returns the encoded reply.
     auto execute_for_test(const resp_command& cmd, const std::optional<redis_identity>& identity,
@@ -734,6 +840,7 @@ private:
     using front_end::_running;
     using front_end::_started_at;
     using front_end::_stats;
+    using front_end::_tls_mutex;
     using front_end::audit;
     using front_end::authorize;
     using front_end::build_forward_ssl_context;
@@ -766,6 +873,29 @@ private:
         -> std::string;
     auto handle_hello(session& s, const resp_command& cmd) -> std::string;
     auto handle_client(session& s, const resp_command& cmd) -> std::string;
+    /// The internal user's AUTH: only between co-located nodes, unless the
+    /// node runs insecure plaintext (Requirement 19.3).
+    auto internal_auth_refusal(const session& s) -> std::optional<std::string>;
+    /// A verified peer certificate's layer identity: the session becomes
+    /// internal with that identity's roles.
+    auto accept_layer_identity(session& s, X509* cert) -> bool;
+
+    // ---- remote front ends (task 17) ----------------------------------------
+    /// Send the command to the connection's front end as `KYTHIRA.CALL`,
+    /// re-pinning while the request has not left, and answering the
+    /// ambiguity error when it may have run (Requirement 17.2).
+    auto call_front_end(session& s, std::string_view upper, const resp_command& cmd) -> std::string;
+    /// The front end for a connection: rendezvous hashing of its number
+    /// over the front ends not recently failed.
+    auto pick_front_end(const session& s) -> std::optional<std::string>;
+    auto mark_front_end_down(const std::string& endpoint) -> void;
+    std::mutex _front_end_mutex;
+    std::unordered_map<std::string, std::chrono::steady_clock::time_point> _front_end_down;
+    std::atomic<std::uint64_t> _next_conn_id{1};
+
+    /// The listener's TLS context, rebuilt when its files change.
+    auto server_tls_context() -> std::shared_ptr<boost::asio::ssl::context>;
+    typename front_end::tls_files _server_tls_files;
 
     // ---- networking ------------------------------------------------------------
     auto accept_loop(std::shared_ptr<boost::asio::ip::tcp::acceptor> acceptor, bool tls) -> void;

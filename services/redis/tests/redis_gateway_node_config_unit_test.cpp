@@ -88,6 +88,11 @@ struct gateway_env {
         "KYTHIRA_REDIS_COMPAT_VERSION",
         "KYTHIRA_REDIS_ROLES",
         "KYTHIRA_REDIS_DATA_NODES",
+        "KYTHIRA_REDIS_FRONT_ENDS",
+        "KYTHIRA_REDIS_CLUSTER",
+        "KYTHIRA_CLUSTER",
+        "KYTHIRA_NODE_INSECURE_PLAINTEXT",
+        "KYTHIRA_REDIS_DRAIN_TIMEOUT_MS",
     };
     gateway_env(const gateway_env&) = delete;
     auto operator=(const gateway_env&) -> gateway_env& = delete;
@@ -575,26 +580,92 @@ BOOST_AUTO_TEST_CASE(a_malformed_role_set_names_the_variable_and_the_fault) {
     BOOST_TEST(refusal("segments").find("no segments layer") != std::string::npos);
 }
 
-BOOST_AUTO_TEST_CASE(a_role_set_this_build_cannot_serve_stops_the_node_naming_the_task) {
-    // Requirement 16.3: stop at start, naming what is missing, before any
-    // other variable is checked (so the message is the roles', not
-    // KYTHIRA_PEERS').
-    for (const std::string roles : {"gateway", "front_end", "gateway,data", "front_end,data"}) {
-        const auto why = refusal(roles.c_str());
-        BOOST_TEST_INFO("KYTHIRA_REDIS_ROLES=" << roles << ": " << why);
-        BOOST_TEST(why.find("KYTHIRA_REDIS_ROLES=" + roles) != std::string::npos);
-        BOOST_TEST(why.find("task 17") != std::string::npos);
+// ── every role set serves (tasks 16, 17) ────────────────────────────────────
+
+namespace {
+// from_env() for KYTHIRA_REDIS_ROLES=roles with `extra` set, or why not.
+auto start_with(const std::string& roles, const std::map<std::string, std::string>& extra)
+    -> std::string {
+    const gateway_env env;
+    ::setenv("KYTHIRA_RAFT_BIND", "127.0.0.1", 1);
+    ::setenv("KYTHIRA_REDIS_ROLES", roles.c_str(), 1);
+    for (const auto& [k, v] : extra) {
+        ::setenv(k.c_str(), v.c_str(), 1);
+    }
+    try {
+        (void)from_env();
+    } catch (const std::invalid_argument& e) {
+        return e.what();
+    }
+    return {};
+}
+}  // namespace
+
+BOOST_AUTO_TEST_CASE(every_role_set_serves_with_what_it_needs) {
+    const std::map<std::string, std::string> insecure{{"KYTHIRA_NODE_INSECURE_PLAINTEXT", "1"}};
+    auto with = [&](std::map<std::string, std::string> more) {
+        more.insert(insecure.begin(), insecure.end());
+        return more;
+    };
+    const std::map<std::string, std::string> data_nodes{{"KYTHIRA_REDIS_DATA_NODES", "d-1:6379"}};
+    const std::map<std::string, std::string> front_ends{{"KYTHIRA_REDIS_FRONT_ENDS", "fe-1:6380"}};
+    for (const std::string roles : {"data", "front_end,data", "gateway,data"}) {
+        BOOST_TEST_INFO("KYTHIRA_REDIS_ROLES=" << roles);
+        BOOST_TEST(start_with(roles, with(front_ends)) == "");
+    }
+    BOOST_TEST(start_with("front_end", with(data_nodes)) == "");
+    BOOST_TEST(start_with("gateway,front_end", with(data_nodes)) == "");
+    // A gateway without the front end needs the front ends to call.
+    const auto no_front_ends = start_with("gateway", insecure);
+    BOOST_TEST(no_front_ends.find("KYTHIRA_REDIS_FRONT_ENDS") != std::string::npos);
+    BOOST_TEST(start_with("gateway", with(front_ends)) == "");
+    for (const char* bad : {"fe-1", "fe-1:6380,", "fe-1:port"}) {
+        BOOST_TEST_INFO("KYTHIRA_REDIS_FRONT_ENDS=" << bad);
+        BOOST_TEST(start_with("gateway", with({{"KYTHIRA_REDIS_FRONT_ENDS", bad}}))
+                       .find("KYTHIRA_REDIS_FRONT_ENDS") != std::string::npos);
+    }
+    // Without insecure plaintext a node apart needs layer TLS (19.4); a
+    // co-located node does not.
+    const auto plain = start_with("gateway", front_ends);
+    BOOST_TEST(plain.find("mutual TLS") != std::string::npos);
+    BOOST_TEST(plain.find("kythira://redis/default/") != std::string::npos);
+    BOOST_TEST(start_with("gateway,front_end,data", {}) == "");
+}
+
+BOOST_AUTO_TEST_CASE(layer_identity_settings) {
+    {
+        const gateway_env env;
+        ::setenv("KYTHIRA_RAFT_BIND", "127.0.0.1", 1);
+        const auto o = from_env();
+        BOOST_TEST(o._gateway._layer_cluster == "default");
+        BOOST_TEST(!o._gateway._insecure_plaintext);
+        BOOST_TEST(o._gateway._drain_timeout.count() == 10000);
+        BOOST_TEST(o._gateway._front_ends.empty());
     }
     {
         const gateway_env env;
-        ::setenv("KYTHIRA_REDIS_ROLES", "front_end", 1);
-        ::unsetenv("KYTHIRA_NODE_ID");
-        try {
-            (void)from_env();
-            BOOST_FAIL("a front end without a gateway started");
-        } catch (const std::invalid_argument& e) {
-            BOOST_TEST(std::string(e.what()).find("KYTHIRA_REDIS_ROLES") != std::string::npos);
-        }
+        ::setenv("KYTHIRA_RAFT_BIND", "127.0.0.1", 1);
+        ::setenv("KYTHIRA_CLUSTER", "qt", 1);
+        BOOST_TEST(from_env()._gateway._layer_cluster == "qt");
+        ::setenv("KYTHIRA_REDIS_CLUSTER", "cache-a", 1);
+        BOOST_TEST(from_env()._gateway._layer_cluster == "cache-a");
+        ::setenv("KYTHIRA_REDIS_CLUSTER", "a/b", 1);
+        BOOST_CHECK_THROW((void)from_env(), std::invalid_argument);
+    }
+    {
+        const gateway_env env;
+        ::setenv("KYTHIRA_RAFT_BIND", "127.0.0.1", 1);
+        ::setenv("KYTHIRA_REDIS_ROLES", "gateway", 1);
+        ::setenv("KYTHIRA_REDIS_FRONT_ENDS", "fe-1:6380,[::1]:6381,10.0.0.9:6380", 1);
+        ::setenv("KYTHIRA_NODE_INSECURE_PLAINTEXT", "1", 1);
+        ::setenv("KYTHIRA_REDIS_DRAIN_TIMEOUT_MS", "2500", 1);
+        const auto o = from_env();
+        const std::vector<std::string> want{"fe-1:6380", "[::1]:6381", "10.0.0.9:6380"};
+        BOOST_TEST(o._gateway._front_ends == want, boost::test_tools::per_element());
+        BOOST_TEST(o._gateway._insecure_plaintext);
+        // Insecure plaintext lets the secret cross plaintext links too.
+        BOOST_TEST(o._gateway._allow_plaintext_forwarding);
+        BOOST_TEST(o._gateway._drain_timeout.count() == 2500);
     }
 }
 
@@ -604,6 +675,7 @@ BOOST_AUTO_TEST_CASE(a_data_node_serves_alone) {
     const gateway_env env;
     ::setenv("KYTHIRA_RAFT_BIND", "127.0.0.1", 1);
     ::setenv("KYTHIRA_REDIS_ROLES", "data", 1);
+    ::setenv("KYTHIRA_NODE_INSECURE_PLAINTEXT", "1", 1);
     const auto o = from_env();
     BOOST_TEST(o._gateway._layer_roles.to_string() == "data");
 }
@@ -613,6 +685,7 @@ BOOST_AUTO_TEST_CASE(a_front_end_without_data_needs_the_data_nodes) {
         const gateway_env env;
         ::setenv("KYTHIRA_RAFT_BIND", "127.0.0.1", 1);
         ::setenv("KYTHIRA_REDIS_ROLES", "gateway,front_end", 1);
+        ::setenv("KYTHIRA_NODE_INSECURE_PLAINTEXT", "1", 1);
         try {
             (void)from_env();
             BOOST_FAIL("a front end without data started with no data nodes");
@@ -624,6 +697,7 @@ BOOST_AUTO_TEST_CASE(a_front_end_without_data_needs_the_data_nodes) {
         const gateway_env env;
         ::setenv("KYTHIRA_RAFT_BIND", "127.0.0.1", 1);
         ::setenv("KYTHIRA_REDIS_ROLES", "front_end,gateway", 1);
+        ::setenv("KYTHIRA_NODE_INSECURE_PLAINTEXT", "1", 1);
         ::setenv("KYTHIRA_REDIS_DATA_NODES", "data-1:6379,[::1]:6380,10.0.0.7:6379", 1);
         const auto o = from_env();
         BOOST_TEST(o._gateway._layer_roles.to_string() == "gateway,front_end");
@@ -634,6 +708,7 @@ BOOST_AUTO_TEST_CASE(a_front_end_without_data_needs_the_data_nodes) {
         const gateway_env env;
         ::setenv("KYTHIRA_RAFT_BIND", "127.0.0.1", 1);
         ::setenv("KYTHIRA_REDIS_ROLES", "gateway,front_end", 1);
+        ::setenv("KYTHIRA_NODE_INSECURE_PLAINTEXT", "1", 1);
         ::setenv("KYTHIRA_REDIS_DATA_NODES", bad, 1);
         BOOST_TEST_INFO("KYTHIRA_REDIS_DATA_NODES=" << bad);
         BOOST_CHECK_THROW((void)from_env(), std::invalid_argument);
@@ -643,6 +718,7 @@ BOOST_AUTO_TEST_CASE(a_front_end_without_data_needs_the_data_nodes) {
         const gateway_env env;
         ::setenv("KYTHIRA_RAFT_BIND", "127.0.0.1", 1);
         ::setenv("KYTHIRA_REDIS_ROLES", "gateway,front_end", 1);
+        ::setenv("KYTHIRA_NODE_INSECURE_PLAINTEXT", "1", 1);
         ::setenv("KYTHIRA_REDIS_DATA_NODES", "data-1:6379", 1);
         ::setenv("KYTHIRA_CACHE_PERSISTENCE", "file", 1);
         ::setenv("KYTHIRA_CACHE_DATA_DIR", "/tmp/kythira-fe-without-data", 1);

@@ -31,6 +31,7 @@
 #include <openssl/x509v3.h>
 
 #include <algorithm>
+#include <cerrno>
 #include <chrono>
 #include <cstddef>
 #include <cstring>
@@ -163,6 +164,22 @@ public:
     /// False once any operation failed or timed out: the stream may be
     /// mid-reply, so the link must not go back into a pool.
     [[nodiscard]] auto healthy() const noexcept -> bool { return _healthy; }
+
+    /// Whether an idle link has been closed by its peer, or holds bytes
+    /// nobody asked for (a TLS close_notify, or a stray reply): either way
+    /// it must not carry another request. Looks without blocking or
+    /// consuming anything.
+    [[nodiscard]] auto looks_closed() -> bool {
+        if (!_healthy) {
+            return true;
+        }
+        char probe = 0;
+        const auto n = ::recv(lowest().native_handle(), &probe, 1, MSG_PEEK | MSG_DONTWAIT);
+        if (n < 0) {
+            return errno != EAGAIN && errno != EWOULDBLOCK;
+        }
+        return true;
+    }
 
 private:
     auto lowest() -> tcp::socket& { return _tls ? _tls->next_layer() : *_plain; }

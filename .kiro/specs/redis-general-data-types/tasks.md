@@ -178,11 +178,14 @@ is extended as the rest land.
     beside `READ`; nothing on main pages yet
   - _Requirements: 18.1-18.6_
 
-- [ ] 17. Gateway apart from the front end, and layer identities
+- [x] 17. Gateway apart from the front end, and layer identities
   - `KYTHIRA.CALL` authenticated calls, connection pinning and re-pinning,
     `MULTI` batches and watch tokens, drain; layer identities and role
     checks on every internal command; internal user only between
     co-located nodes; refuse non-co-located roles without TLS; rotation
+  - Revocation lists for layer certificates are not checked yet; the
+    Kinesis `route_guard` has the hook, and the RESP link can take it when
+    a CRL source lands
   - _Requirements: 17.1-17.4, 19.1-19.5_
 
 - [ ] 18. Layer membership group and scaling

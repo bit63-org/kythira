@@ -465,7 +465,9 @@ public:
             _front_end->stop();
         }
         if (_gateway) {
-            _gateway->stop();
+            // Requirement 17.4: commands already received finish (up to
+            // KYTHIRA_REDIS_DRAIN_TIMEOUT_MS) before the connections close.
+            _gateway->drain();
         }
     }
 
