@@ -148,6 +148,42 @@ jobs:
         with:
           persist-credentials: false
 
+      # A 24 GiB swapfile on the GitHub-hosted x64 runners, the TSan and
+      # stdexec legs' fix applied here (see "Add swap headroom and report
+      # resources" in the tsan job for the measurements behind it). These
+      # runners have 4 vCPUs, 16 GiB of RAM, 3 GiB of swap and about 90 GB
+      # of idle disk, and this leg compiles at -j$(nproc).
+      #
+      # The heavy_tu pool lets only one memory-heavy translation unit
+      # compile at a time, but one is now enough to fill the runner: the
+      # Redis gateway's serving and in-process cluster TUs measured 10-15
+      # GiB of g++-13 RSS on 2026-11-26, before the independent-layers PRs
+      # grew the headers they instantiate, and three unpooled neighbours
+      # compile beside it. When the sum passes RAM plus 3 GiB the kernel's
+      # OOM killer takes compilers, sccache or the runner agent itself, and
+      # the platform shuts the runner down with no log. After #979 pooled
+      # the gateway tests this still happened, five minutes into Build on
+      # #976's g++-14 leg (run 45840742444).
+      #
+      # Swap turns that peak into a slower stretch of build instead of a
+      # lost runner, without lowering -j: the cold g++-13 leg already runs
+      # close to its 180-minute budget. Self-hosted runners size their own
+      # memory, and the arm64 legs compile at -j2/-j3 instead (see Build).
+      - name: Add swap headroom
+        if: runner.environment == 'github-hosted' && matrix.arch_label == 'x64'
+        run: |
+          free -h
+          sudo swapoff -a || true
+          sudo rm -f /mnt/swapfile /swapfile || true
+          sudo fallocate -l 24G /mnt/swapfile
+          sudo chmod 600 /mnt/swapfile
+          sudo mkswap /mnt/swapfile
+          sudo swapon /mnt/swapfile
+          # Prefer swapping over killing: the default of 60 is tuned for
+          # interactive latency, which is not what a batch compile wants.
+          sudo sysctl vm.swappiness=80
+          free -h; df -h /
+
       # ── System dependencies ───────────────────────────────────────────────
       # Retries the whole update+install cycle: the ubuntu-24.04-arm runner
       # image has been observed losing outbound HTTP(S) route to
@@ -446,11 +482,11 @@ jobs:
         # for g++: on 2026-11-24 it lost its runner the same way at -j3
         # (step 835 of 1925, #964), so g++ on arm64 compiles two at a time
         # and clang, which has not failed this way, three. x64 keeps
-        # -j$(nproc).
+        # -j$(nproc), with the swap headroom added above on hosted runners.
         #
-        # The sampler is the stdexec leg's (see its Build step): memory,
-        # swap, load and the largest live compiler, in the job log every
-        # 30 s. A runner the platform reclaims for running out of memory
+        # The sampler (scripts/sample-build-memory.sh, shared with the
+        # stdexec leg) prints memory, swap, load, and the largest live
+        # compiler with its translation unit, in the job log every 30 s. A runner the platform reclaims for running out of memory
         # leaves no log at all, so it cannot explain that run; what it
         # gives is the headroom on green runs, and which translation units
         # were in flight when a surviving runner came close. That is how
@@ -458,16 +494,7 @@ jobs:
         # 2026-11-26 (services/redis/tests/CMakeLists.txt).
         run: |
           set -euo pipefail
-          (
-            while sleep 30; do
-              mem=$(free -m | awk '/^Mem:/{m=$3" used, "$7" avail"} /^Swap:/{s=$3} END{print m", swap "s}')
-              # cc1plus is g++'s compiler proper; clang compiles in a
-              # clang-18 / clang++-18 process.
-              cc=$(ps -eo rss=,comm= | awk '$2 ~ /^(cc1plus|clang)/ {n++; if ($1 > m) m = $1} END {print n+0, int(m/1024)}')
-              echo "[sample] $(date -u +%H:%M:%S) MiB ${mem}; load $(cut -d' ' -f1 /proc/loadavg);" \
-                   "compilers ${cc% *}, largest ${cc#* } MiB"
-            done
-          ) &
+          scripts/sample-build-memory.sh 30 &
           sampler=$!
           trap 'kill "$sampler" 2>/dev/null || true' EXIT
           cmake --build build -j${{ matrix.arch_label == 'arm64' && (startsWith(matrix.compiler, 'g++') && '2' || '3') || '$(nproc)' }}
@@ -3767,14 +3794,7 @@ jobs:
           RUNNER_KIND: ${{ runner.environment }}
         run: |
           set -euo pipefail
-          (
-            while sleep 30; do
-              mem=$(free -m | awk '/^Mem:/{m=$3" used, "$7" avail"} /^Swap:/{s=$3} END{print m", swap "s}')
-              top=$(ps -C cc1plus -o rss= --sort=-rss 2>/dev/null | awk 'NR==1{print int($1/1024)}' || true)
-              echo "[sample] $(date -u +%H:%M:%S) MiB ${mem}; load $(cut -d' ' -f1 /proc/loadavg);" \
-                   "cc1plus $(pgrep -c cc1plus || true), largest ${top:-0} MiB"
-            done
-          ) &
+          scripts/sample-build-memory.sh 30 &
           sampler=$!
           trap 'kill "$sampler" 2>/dev/null || true' EXIT
           jobs=3
