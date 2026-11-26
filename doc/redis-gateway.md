@@ -95,8 +95,12 @@ The Redis front end:
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `KYTHIRA_REDIS_ROLES` | `gateway,front_end,data` | The layers this node runs (`.kiro/specs/redis-general-data-types/` Requirement 16), reported as `INFO`'s `kythira_roles:` and kythira_node's `kythira_redis_role{role=...}`. Three sets serve: all three; `gateway,front_end`, a front end without data that needs `KYTHIRA_REDIS_DATA_NODES`; and `data`, a data node whose listener serves only other nodes' front ends. Any other set stops the node at start, naming the task that adds it. See [redis-layers.md](redis-layers.md). In kythira_node it is the Redis module's own, never another module's |
+| `KYTHIRA_REDIS_ROLES` | `gateway,front_end,data` | The layers this node runs (`.kiro/specs/redis-general-data-types/` Requirement 16), reported as `INFO`'s `kythira_roles:` and kythira_node's `kythira_redis_role{role=...}`. Any non-empty subset serves: without `data` a `front_end` needs `KYTHIRA_REDIS_DATA_NODES`, a `gateway` without `front_end` needs `KYTHIRA_REDIS_FRONT_ENDS`, and a node without `gateway` serves only other nodes. A set that is not all three needs layer identities over TLS, or `KYTHIRA_NODE_INSECURE_PLAINTEXT=1`. See [redis-layers.md](redis-layers.md). In kythira_node it is the Redis module's own, never another module's |
 | `KYTHIRA_REDIS_DATA_NODES` | none | For a node without `data`: the data nodes' gateway addresses, comma-separated `host:port` (names or literals, resolved when used). Required on such a node, ignored on any other |
+| `KYTHIRA_REDIS_FRONT_ENDS` | none | For a `gateway` without `front_end`: the front ends' listener addresses (their TLS listeners under layer TLS), comma-separated `host:port`, resolved when used. Required on such a node, ignored on any other |
+| `KYTHIRA_REDIS_CLUSTER` | `KYTHIRA_CLUSTER`, else `default` | The cluster named in layer identities, `kythira://redis/<cluster>/<node id>?roles=...`. A peer certificate naming another cluster carries no identity |
+| `KYTHIRA_NODE_INSECURE_PLAINTEXT` | unset | `1` lets a node that is not co-located run without layer identities: the internal secret then stands in for every role, over plaintext. For tests and isolated networks |
+| `KYTHIRA_REDIS_DRAIN_TIMEOUT_MS` | `10000` | On shutdown, how long commands already received may finish before the connections close |
 | `KYTHIRA_REDIS_LISTEN` | `0.0.0.0:6379` | Plaintext RESP listener. The daemon warns at every start that secrets and values cross this unencrypted; set it empty to run TLS-only |
 | `KYTHIRA_REDIS_TLS_LISTEN` | none | TLS listener; needs `_TLS_CERT` and `_TLS_KEY` |
 | `KYTHIRA_REDIS_TLS_CERT` / `_TLS_KEY` / `_TLS_CA` | none | PEM server certificate, key and (for client certificates) the CA to verify them against |

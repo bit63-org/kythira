@@ -18,6 +18,9 @@
 #include <charconv>
 #include <cstring>
 #include <exception>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <map>
 #include <set>
 #include <span>
@@ -252,30 +255,170 @@ redis_front_end<Host, Logger, Metrics>::redis_front_end(Host& host, redis_acl& a
     }
 }
 
+namespace redis_gateway_detail {
+
+/// The layer identity in a PEM certificate file for `cluster`, if any.
+inline auto identity_in_file(const std::string& path, std::string_view cluster)
+    -> std::optional<layers::identity> {
+    if (path.empty()) {
+        return std::nullopt;
+    }
+    std::ifstream in(path, std::ios::binary);
+    if (!in) {
+        return std::nullopt;
+    }
+    std::string pem((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    return layers::identity_in_pem(pem, "redis", cluster);
+}
+
+}  // namespace redis_gateway_detail
+
 template<typename Host, typename Logger, typename Metrics>
 auto redis_front_end<Host, Logger, Metrics>::layer_refusal() const -> std::optional<std::string> {
     const auto& roles = _config._layer_roles;
-    if (roles.has(layers::role::data)) {
+    const auto named = "redis gateway: KYTHIRA_REDIS_ROLES=" + roles.to_string() + ": ";
+    if (roles.has(layers::role::front_end) && !roles.has(layers::role::data)) {
+        if (_config._data_nodes.empty()) {
+            return named +
+                   "a front end without the data layer needs the data nodes to reach "
+                   "(KYTHIRA_REDIS_DATA_NODES)";
+        }
+        if constexpr (!decltype(_data)::k_remote_reads) {
+            return named +
+                   "the disk-backed store keeps a value's chunks on its data nodes, so a front "
+                   "end without the data layer cannot read them; run the in-memory or engine "
+                   "store";
+        }
+    }
+    if (roles.has(layers::role::gateway) && !roles.has(layers::role::front_end) &&
+        _config._front_ends.empty()) {
+        return named +
+               "a gateway without the front end needs the front ends to call "
+               "(KYTHIRA_REDIS_FRONT_ENDS)";
+    }
+    if (redis_roles_colocated(roles)) {
         return std::nullopt;
     }
-    const auto named = "redis gateway: KYTHIRA_REDIS_ROLES=" + roles.to_string() + ": ";
-    if (_config._data_nodes.empty()) {
-        return named +
-               "a front end without the data layer needs the data nodes to reach "
-               "(KYTHIRA_REDIS_DATA_NODES)";
+    if (_config._insecure_plaintext) {
+        if (_config._internal_secret.empty()) {
+            return named +
+                   "with KYTHIRA_NODE_INSECURE_PLAINTEXT=1 the nodes authenticate each other with "
+                   "the internal secret, which is not set";
+        }
+        return std::nullopt;
     }
-    if (_config._internal_secret.empty() ||
-        (!_config._forward_tls && !_config._allow_plaintext_forwarding)) {
+    // Requirement 19.4: calls between nodes of different role sets carry
+    // layer identities over mutual TLS.
+    const std::string insecure =
+        "; or set KYTHIRA_NODE_INSECURE_PLAINTEXT=1 on an isolated network";
+    if (!_config._forward_tls) {
         return named +
-               "a front end without the data layer reaches it over the forward link, which needs "
-               "the internal secret and forwarding TLS (or plaintext forwarding allowed)";
+               "a node that is not co-located calls the other layers over mutual TLS with layer "
+               "identities, and forwarding TLS is off" +
+               insecure;
     }
-    if constexpr (!decltype(_data)::k_remote_reads) {
+    if ((roles.has(layers::role::front_end) || roles.has(layers::role::data)) &&
+        (_config._tls_listen.empty() || _config._tls_ca_path.empty())) {
         return named +
-               "the disk-backed store keeps a value's chunks on its data nodes, so a front end "
-               "without the data layer cannot read them; run the in-memory or engine store";
+               "other layers call this node on its TLS listener, which needs a CA to verify "
+               "their certificates against (KYTHIRA_REDIS_TLS_LISTEN, KYTHIRA_REDIS_TLS_CA)" +
+               insecure;
+    }
+    const bool own_cert =
+        !_config._forward_tls_cert_path.empty() || !_config._forward_tls_key_path.empty();
+    const auto id = redis_gateway_detail::identity_in_file(
+        own_cert ? _config._forward_tls_cert_path : _config._tls_cert_path, _config._layer_cluster);
+    if (!id) {
+        return named + "the forwarding client certificate carries no layer identity: it needs " +
+               "the URI SAN kythira://redis/" + _config._layer_cluster +
+               "/<node id>?roles=" + roles.to_string() + insecure;
+    }
+    if (id->roles != roles) {
+        return named + "the layer identity " + id->to_uri() + " names other roles than the node " +
+               "runs";
     }
     return std::nullopt;
+}
+
+template<typename Host, typename Logger, typename Metrics>
+auto redis_front_end<Host, Logger, Metrics>::can_call_peers() const -> bool {
+    if (!_config._forward_tls && !_config._allow_plaintext_forwarding &&
+        !_config._insecure_plaintext) {
+        return false;
+    }
+    std::lock_guard<std::mutex> lock(_tls_mutex);
+    return !_config._internal_secret.empty() || (_config._forward_tls && _own_identity);
+}
+
+template<typename Host, typename Logger, typename Metrics>
+auto redis_front_end<Host, Logger, Metrics>::own_identity() const
+    -> std::optional<layers::identity> {
+    std::lock_guard<std::mutex> lock(_tls_mutex);
+    return _own_identity;
+}
+
+template<typename Host, typename Logger, typename Metrics>
+auto redis_front_end<Host, Logger, Metrics>::stamp_files(const std::vector<std::string>& paths)
+    -> std::vector<std::pair<std::string, std::string>> {
+    std::vector<std::pair<std::string, std::string>> out;
+    for (const auto& p : paths) {
+        if (p.empty()) {
+            continue;
+        }
+        std::error_code ec;
+        const auto when = std::filesystem::last_write_time(p, ec);
+        const auto size = ec ? 0 : std::filesystem::file_size(p, ec);
+        out.emplace_back(
+            p, ec ? std::string("missing")
+                  : std::to_string(when.time_since_epoch().count()) + "/" + std::to_string(size));
+    }
+    return out;
+}
+
+template<typename Host, typename Logger, typename Metrics>
+auto redis_front_end<Host, Logger, Metrics>::forward_tls_context()
+    -> std::shared_ptr<boost::asio::ssl::context> {
+    std::unique_lock<std::mutex> lock(_tls_mutex);
+    if (!_forward_ssl_ctx) {
+        return nullptr;
+    }
+    const auto now = std::chrono::steady_clock::now();
+    if (now - _forward_tls_files._checked < _config._tls_reload_interval) {
+        return _forward_ssl_ctx;
+    }
+    _forward_tls_files._checked = now;
+    const bool own_cert =
+        !_config._forward_tls_cert_path.empty() || !_config._forward_tls_key_path.empty();
+    const auto& cert = own_cert ? _config._forward_tls_cert_path : _config._tls_cert_path;
+    const auto& key = own_cert ? _config._forward_tls_key_path : _config._tls_key_path;
+    const auto& ca =
+        _config._forward_tls_ca_path.empty() ? _config._tls_ca_path : _config._forward_tls_ca_path;
+    auto stamps = stamp_files({cert, key, ca});
+    if (stamps == _forward_tls_files._stamps) {
+        return _forward_ssl_ctx;
+    }
+    // Requirement 19.5: new connections use the new files; connections
+    // already open finish on the old ones, so the idle pool is dropped.
+    try {
+        auto rebuilt = std::make_shared<boost::asio::ssl::context>(build_forward_ssl_context());
+        _forward_ssl_ctx = std::move(rebuilt);
+        _forward_tls_files._stamps = std::move(stamps);
+        _own_identity = redis_gateway_detail::identity_in_file(cert, _config._layer_cluster);
+    } catch (const std::exception& e) {
+        // A half-written pair (certificate before key) fails here; the old
+        // context stays until the next check sees both.
+        _logger.log(log_level::warning, "redis gateway: forwarding certificate reload failed",
+                    {{"error", e.what()}});
+        return _forward_ssl_ctx;
+    }
+    auto ctx = _forward_ssl_ctx;
+    lock.unlock();
+    {
+        std::lock_guard<std::mutex> pools(_forward_mutex);
+        _forward_pools.clear();
+    }
+    _logger.log(log_level::info, "redis gateway: forwarding certificate reloaded", {});
+    return ctx;
 }
 
 template<typename Host, typename Logger, typename Metrics>
@@ -607,9 +750,15 @@ auto redis_front_end<Host, Logger, Metrics>::forward_socket(
     }
     {
         std::lock_guard<std::mutex> lock(pool->_mutex);
-        if (!pool->_idle.empty()) {
+        while (!pool->_idle.empty()) {
             auto sock = std::move(pool->_idle.back());
             pool->_idle.pop_back();
+            // A peer that restarted closed this socket while it sat idle;
+            // a request written to it would be lost, and an authenticated
+            // call could not tell that from one that ran.
+            if (sock->looks_closed()) {
+                continue;
+            }
             sock->set_deadline(deadline);
             return sock;
         }
@@ -617,12 +766,23 @@ auto redis_front_end<Host, Logger, Metrics>::forward_socket(
     auto [host, port] = redis_gateway_detail::parse_listen(endpoint);
     // TLS whenever it is configured; forward() never gets here without TLS
     // unless plaintext forwarding was explicitly allowed (Requirement 12.5).
-    auto sock = std::make_unique<redis_forward_link>(_forward_ssl_ctx);
+    auto sock = std::make_unique<redis_forward_link>(forward_tls_context());
     sock->set_deadline(deadline);
     sock->connect(host, port);
 
-    // Authenticate as the internal identity; the peer never forwards a
+    // Between co-located nodes the internal secret authenticates the link
+    // (or under insecure plaintext). Any other node presents its layer
+    // identity in the TLS handshake and sends no secret, which the peer
+    // would refuse (Requirement 19.3). Either way the peer never forwards a
     // command that arrives on this connection (one hop, Requirement 9.4).
+    if (_config._internal_secret.empty() ||
+        (!redis_roles_colocated(_config._layer_roles) && !_config._insecure_plaintext)) {
+        if (!sock->is_tls() || !own_identity()) {
+            throw std::runtime_error("no way to authenticate to peer " + endpoint +
+                                     ": no internal secret and no layer identity");
+        }
+        return sock;
+    }
     resp_writer w;
     auto auth =
         w.array({w.bulk("AUTH"), w.bulk(_config._internal_user), w.bulk(_config._internal_secret)});
@@ -687,8 +847,7 @@ auto redis_front_end<Host, Logger, Metrics>::forward_argv(const std::vector<std:
                                                           const node_id_type& to,
                                                           std::string_view what)
     -> std::optional<std::string> {
-    if (!_running.load() || _config._internal_secret.empty() ||
-        (!_config._forward_tls && !_config._allow_plaintext_forwarding)) {
+    if (!_running.load() || !can_call_peers()) {
         return std::nullopt;
     }
     auto endpoint = forward_endpoint(to);
@@ -702,8 +861,7 @@ template<typename Host, typename Logger, typename Metrics>
 auto redis_front_end<Host, Logger, Metrics>::data_call(const std::string& endpoint,
                                                        const std::vector<std::string>& argv)
     -> std::optional<std::string> {
-    if (!_running.load() || _config._internal_secret.empty() ||
-        (!_config._forward_tls && !_config._allow_plaintext_forwarding)) {
+    if (!_running.load() || !can_call_peers()) {
         return std::nullopt;
     }
     return forward_to_endpoint(argv, endpoint, "KYTHIRA.DATA");
@@ -715,13 +873,31 @@ auto redis_front_end<Host, Logger, Metrics>::forward_to_endpoint(
     -> std::optional<std::string> {
     ++_stats._forwards;
     emit("redis.forwards", what);
+    auto r = exchange(argv, endpoint);
+    if (r._kind == exchange_result::kind::answered) {
+        return std::move(r._reply);
+    }
+    ++_stats._forward_failures;
+    _logger.log(log_level::warning, "redis gateway: forward failed",
+                {{"endpoint", endpoint}, {"error", r._error}});
+    return std::nullopt;
+}
+
+template<typename Host, typename Logger, typename Metrics>
+auto redis_front_end<Host, Logger, Metrics>::exchange(const std::vector<std::string>& argv,
+                                                      const std::string& endpoint,
+                                                      std::chrono::milliseconds budget_ms)
+    -> exchange_result {
+    exchange_result out;
+    bool sent = false;
     try {
         // One budget for the whole exchange, connect and AUTH included, so a
         // peer that stalls surfaces as the retry error, never a hang
         // (Requirement 13.4). A zero timeout meant "none" for the old
         // socket options; keep that meaning with a day-long budget.
-        const auto budget = _config._command_timeout.count() > 0
-                                ? std::chrono::steady_clock::duration{_config._command_timeout}
+        const auto timeout = budget_ms.count() > 0 ? budget_ms : _config._command_timeout;
+        const auto budget = timeout.count() > 0
+                                ? std::chrono::steady_clock::duration{timeout}
                                 : std::chrono::steady_clock::duration{std::chrono::hours{24}};
         auto sock = forward_socket(endpoint, std::chrono::steady_clock::now() + budget);
         resp_writer w;
@@ -731,6 +907,11 @@ auto redis_front_end<Host, Logger, Metrics>::forward_to_endpoint(
             parts.push_back(w.bulk(a));
         }
         auto wire = w.array(parts);
+        // From here the peer may have the request: a failure is no longer
+        // "never sent". A write that fails part way leaves the peer a
+        // truncated command, which it never runs, but the write call cannot
+        // say how much arrived, so it counts as sent too.
+        sent = true;
         sock->write(boost::asio::buffer(wire));
         std::string buf;
         std::array<char, 16 * 1024> chunk{};
@@ -748,13 +929,13 @@ auto redis_front_end<Host, Logger, Metrics>::forward_to_endpoint(
         }
         return_forward_socket(endpoint, std::move(sock));
         buf.resize(len);
-        return buf;
+        out._kind = exchange_result::kind::answered;
+        out._reply = std::move(buf);
     } catch (const std::exception& e) {
-        ++_stats._forward_failures;
-        _logger.log(log_level::warning, "redis gateway: forward failed",
-                    {{"endpoint", endpoint}, {"error", e.what()}});
-        return std::nullopt;
+        out._kind = sent ? exchange_result::kind::lost : exchange_result::kind::not_sent;
+        out._error = e.what();
     }
+    return out;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2493,6 +2674,94 @@ auto redis_front_end<Host, Logger, Metrics>::handle_internal_txn(session& s,
 /// 18.3): the caller makes every hop. Each answer is a bulk string in
 /// redis_data_wire.hpp's encoding; a RESP error means the call itself was
 /// malformed.
+template<typename Host, typename Logger, typename Metrics>
+auto redis_front_end<Host, Logger, Metrics>::peer_role_refusal(session& s, std::string_view upper)
+    -> std::optional<std::string> {
+    if (!s._internal) {
+        return std::nullopt;
+    }
+    // Requirement 19.2: authenticated calls need `gateway`; the data-layer
+    // API, transaction messages and whole commands a co-located peer
+    // forwards need `front_end` or `data`. A session the internal secret
+    // authenticated has the roles the secret implies.
+    const auto roles = s._peer_roles.value_or(layers::role_set{layers::role::data});
+    const auto needed = upper == "KYTHIRA.CALL"
+                            ? layers::role_set{layers::role::gateway}
+                            : layers::role_set{layers::role::front_end, layers::role::data};
+    if (roles.intersects(needed)) {
+        return std::nullopt;
+    }
+    audit(s, upper, "caller's layer roles " + roles.to_string() + " lack " + needed.to_string());
+    return s._writer.error("NOPERM a caller with the layer roles " + roles.to_string() +
+                           " may not send " + std::string(upper) + " (it needs " +
+                           needed.to_string() + ")");
+}
+
+/// `KYTHIRA.CALL <state> <command> <arg>...` (task 17): the gateway holds
+/// the connection, the front end runs one command as that connection and
+/// keeps nothing, so the next call can go to any front end.
+template<typename Host, typename Logger, typename Metrics>
+auto redis_front_end<Host, Logger, Metrics>::handle_call(session& s, const resp_command& cmd)
+    -> std::string {
+    if (!s._internal) {
+        audit(s, "KYTHIRA.CALL", "internal command from a client");
+        return s._writer.error("NOPERM KYTHIRA.CALL is internal to the gateways");
+    }
+    if (!_config._layer_roles.has(layers::role::front_end)) {
+        return s._writer.error("ERR this node runs no front end (KYTHIRA_REDIS_ROLES=" +
+                               _config._layer_roles.to_string() + ")");
+    }
+    if (cmd._argv.size() < 3) {
+        return s._writer.error("ERR wrong number of arguments for 'kythira.call' command");
+    }
+    auto state = redis_call_wire::decode_state(cmd._argv[1]);
+    if (!state || (state->isolation && *state->isolation > 3)) {
+        return s._writer.error("ERR malformed connection state for 'kythira.call'");
+    }
+    session c;
+    c._writer.set_version(state->resp_version);
+    // The front end's own ACL decides the user's role and key scopes; the
+    // gateway only vouches for who authenticated.
+    c._identity = _acl.identity_of(state->user);
+    if (!c._identity && _acl.empty() && _config._allow_anonymous && state->user == "anonymous") {
+        c._identity = redis_identity{"anonymous", redis_role::admin, {""}};
+    }
+    if (!c._identity || state->user == _config._internal_user) {
+        audit(s, "KYTHIRA.CALL", "unknown or disabled user '" + state->user + "'");
+        return s._writer.error("NOAUTH the connection's user is not an enabled ACL user here");
+    }
+    c._source = s._source + " (call)";
+    c._rate_key = s._rate_key;
+    if (state->isolation) {
+        c._isolation = static_cast<txn_isolation>(*state->isolation);
+    }
+    c._in_multi = state->in_multi;
+    c._multi_failed = state->multi_failed;
+    c._watch_ts = state->watch_ts;
+    c._watched.insert(state->watched.begin(), state->watched.end());
+    for (auto& argv : state->queued) {
+        c._queued.push_back(resp_command{std::move(argv)});
+    }
+    const auto queued_before = c._queued.size();
+    resp_command inner;
+    inner._argv.assign(cmd._argv.begin() + 2, cmd._argv.end());
+    const auto upper = resp_to_upper(inner._argv[0]);
+
+    redis_call_wire::call_answer answer;
+    answer.reply = execute_command(c, upper, inner);
+    answer.queued = c._queued.size() > queued_before;
+    answer.state.user = state->user;
+    answer.state.resp_version = static_cast<std::uint8_t>(c._writer.version());
+    if (c._isolation) {
+        answer.state.isolation = static_cast<std::uint8_t>(*c._isolation);
+    }
+    answer.state.in_multi = c._in_multi;
+    answer.state.multi_failed = c._multi_failed;
+    answer.state.watch_ts = c._watch_ts;
+    answer.state.watched.assign(c._watched.begin(), c._watched.end());
+    return s._writer.bulk(redis_call_wire::encode_answer(answer));
+}
+
 template<typename Host, typename Logger, typename Metrics>
 auto redis_front_end<Host, Logger, Metrics>::handle_data(session& s, const resp_command& cmd)
     -> std::string {

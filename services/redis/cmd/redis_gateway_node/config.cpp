@@ -4,6 +4,7 @@
 #include "config.hpp"
 
 #include <kythira/redis/redis_server_identity.hpp>
+#include <raft/layer_identity_uri.hpp>
 #include <raft/net_bind.hpp>
 #include <raft/route_cache.hpp>
 
@@ -340,8 +341,8 @@ auto is_loopback_address(const std::string& address) -> bool {
 auto from_env() -> node_options {
     node_options o;
     // The layers this node runs (redis-general-data-types Requirement 16).
-    // Read first: a role set this build cannot serve stops the node before
-    // anything else is checked or bound, naming the missing piece.
+    // Read first: a malformed role set stops the node before anything else
+    // is checked or bound.
     if (auto roles = env_get("KYTHIRA_REDIS_ROLES")) {
         try {
             o._gateway._layer_roles = parse_redis_roles(*roles);
@@ -349,9 +350,6 @@ auto from_env() -> node_options {
             throw std::invalid_argument(std::string("redis_gateway_node: KYTHIRA_REDIS_ROLES: ") +
                                         e.what());
         }
-    }
-    if (auto why = redis_roles_unservable(o._gateway._layer_roles)) {
-        throw std::invalid_argument("redis_gateway_node: " + *why);
     }
     // Numeric or canonical composite text by `KYTHIRA_NODE_ID_KIND`; a text
     // build also takes `metadata:<provider>` and asks the instance metadata
@@ -535,6 +533,23 @@ auto from_env() -> node_options {
     g._allow_plaintext_forwarding =
         to_bool("KYTHIRA_REDIS_ALLOW_PLAINTEXT_FORWARDING",
                 get_opt("KYTHIRA_REDIS_ALLOW_PLAINTEXT_FORWARDING", "false"));
+    // Layer identities (redis-general-data-types Requirement 19): the
+    // cluster their URIs name, and the insecure escape hatch for nodes that
+    // are not co-located.
+    const auto cluster_default = get_opt("KYTHIRA_CLUSTER", "default");
+    g._layer_cluster = get_opt("KYTHIRA_REDIS_CLUSTER", cluster_default.c_str());
+    if (!layers::valid_identity_part(g._layer_cluster)) {
+        throw std::invalid_argument(
+            "redis_gateway_node: KYTHIRA_REDIS_CLUSTER must be 1-128 letters, digits, '-', '.', "
+            "'_' or '~' (got '" +
+            g._layer_cluster + "')");
+    }
+    g._insecure_plaintext = get_opt("KYTHIRA_NODE_INSECURE_PLAINTEXT", "") == "1";
+    if (g._insecure_plaintext) {
+        g._allow_plaintext_forwarding = true;
+    }
+    g._drain_timeout = std::chrono::milliseconds{to_u64(
+        "KYTHIRA_REDIS_DRAIN_TIMEOUT_MS", get_opt("KYTHIRA_REDIS_DRAIN_TIMEOUT_MS", "10000"))};
     if (g._forward_tls && g._forward_tls_ca_path.empty() && g._tls_ca_path.empty()) {
         throw std::invalid_argument(
             "redis_gateway_node: KYTHIRA_REDIS_FORWARD_TLS needs KYTHIRA_REDIS_FORWARD_TLS_CA or "
@@ -575,22 +590,34 @@ auto from_env() -> node_options {
     // A front end without the data layer (redis-general-data-types task 16)
     // asks these data nodes for routes; their gateways' addresses, by name
     // or literal, resolved when used (never static IPs).
-    if (auto nodes = get_opt("KYTHIRA_REDIS_DATA_NODES", ""); !nodes.empty()) {
+    const auto host_ports = [](const char* name, const std::string& text) {
+        std::vector<std::string> out;
         std::size_t start = 0;
-        while (start <= nodes.size()) {
-            const auto comma = std::min(nodes.find(',', start), nodes.size());
-            auto item = nodes.substr(start, comma - start);
+        while (!text.empty() && start <= text.size()) {
+            const auto comma = std::min(text.find(',', start), text.size());
+            auto item = text.substr(start, comma - start);
             if (item.empty() || !kythira::split_host_port(item)) {
-                throw std::invalid_argument(
-                    "redis_gateway_node: KYTHIRA_REDIS_DATA_NODES must be a comma-separated list "
-                    "of host:port (got '" +
-                    nodes + "')");
+                throw std::invalid_argument(std::string("redis_gateway_node: ") + name +
+                                            " must be a comma-separated list of host:port (got '" +
+                                            text + "')");
             }
-            g._data_nodes.push_back(std::move(item));
+            out.push_back(std::move(item));
             start = comma + 1;
         }
+        return out;
+    };
+    g._data_nodes = host_ports("KYTHIRA_REDIS_DATA_NODES", get_opt("KYTHIRA_REDIS_DATA_NODES", ""));
+    // A gateway without the front end (task 17) calls these front ends'
+    // listeners, by name or literal, resolved when used.
+    g._front_ends = host_ports("KYTHIRA_REDIS_FRONT_ENDS", get_opt("KYTHIRA_REDIS_FRONT_ENDS", ""));
+    if (g._layer_roles.has(layers::role::gateway) && !g._layer_roles.has(layers::role::front_end) &&
+        g._front_ends.empty()) {
+        throw std::invalid_argument(
+            "redis_gateway_node: KYTHIRA_REDIS_ROLES=" + g._layer_roles.to_string() +
+            ": a gateway without the front end needs KYTHIRA_REDIS_FRONT_ENDS, the front ends' "
+            "listener addresses");
     }
-    if (!g._layer_roles.has(layers::role::data)) {
+    if (g._layer_roles.has(layers::role::front_end) && !g._layer_roles.has(layers::role::data)) {
         if (g._data_nodes.empty()) {
             throw std::invalid_argument(
                 "redis_gateway_node: KYTHIRA_REDIS_ROLES=" + g._layer_roles.to_string() +
@@ -605,6 +632,16 @@ auto from_env() -> node_options {
                 ": a front end without the data layer needs KYTHIRA_CACHE_PERSISTENCE=memory or "
                 "engine");
         }
+    }
+    if (!kythira::redis_roles_colocated(g._layer_roles) && !g._insecure_plaintext &&
+        !g._forward_tls) {
+        throw std::invalid_argument(
+            "redis_gateway_node: KYTHIRA_REDIS_ROLES=" + g._layer_roles.to_string() +
+            ": a node that is not co-located calls the other layers over mutual TLS with layer "
+            "identities; set KYTHIRA_REDIS_TLS_LISTEN and certificates naming "
+            "kythira://redis/" +
+            g._layer_cluster + "/<node id>?roles=" + g._layer_roles.to_string() +
+            ", or KYTHIRA_NODE_INSECURE_PLAINTEXT=1 on an isolated network");
     }
     if (g._transactions && o._cache._persistence == cache_persistence::file) {
         // The disk-backed cache's state machine is not wrapped for
@@ -750,8 +787,17 @@ auto usage() -> std::string {
            "  KYTHIRA_EXECUTOR_STRIPES\n"
            "\n"
            "Gateway side (environment; design.md Component 9):\n"
-           "  KYTHIRA_REDIS_ROLES              layers this node runs: gateway,front_end,data\n"
-           "                                   (only all three serve in this build)  [all]\n"
+           "  KYTHIRA_REDIS_ROLES              layers this node runs, a subset of "
+           "gateway,front_end,data [all]\n"
+           "  KYTHIRA_REDIS_DATA_NODES         host:port,... of data nodes (a front end without "
+           "data)\n"
+           "  KYTHIRA_REDIS_FRONT_ENDS         host:port,... of front ends (a gateway without "
+           "front_end)\n"
+           "  KYTHIRA_REDIS_CLUSTER            cluster named in layer identities  [KYTHIRA_CLUSTER "
+           "or default]\n"
+           "  KYTHIRA_NODE_INSECURE_PLAINTEXT  1: split layers without TLS identities  [unset]\n"
+           "  KYTHIRA_REDIS_DRAIN_TIMEOUT_MS   SIGTERM: finish in-flight commands for up to "
+           "[10000]\n"
            "  KYTHIRA_REDIS_LISTEN             plaintext RESP listener                "
            "[0.0.0.0:6379]\n"
            "  KYTHIRA_REDIS_TLS_LISTEN         TLS listener (needs _TLS_CERT and _TLS_KEY)\n"

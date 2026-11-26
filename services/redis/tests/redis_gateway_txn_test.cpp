@@ -215,6 +215,8 @@ public:
             cfg._worker_threads = 4;
             cfg._command_timeout = std::chrono::milliseconds{5000};
             cfg._allow_plaintext_forwarding = true;
+            // Nodes apart join these cases without layer identities.
+            cfg._insecure_plaintext = true;
             cfg._transactions = true;
             auto resolver = [this](const node_id_t& to) -> std::optional<std::string> {
                 if (to < 1 || to > _gateways.size() || !_gateways[to - 1]) {
@@ -302,10 +304,41 @@ public:
         cfg._worker_threads = 4;
         cfg._command_timeout = std::chrono::milliseconds{5000};
         cfg._allow_plaintext_forwarding = true;
+        cfg._insecure_plaintext = true;
         cfg._transactions = true;
         cfg._layer_roles = {kythira::layers::role::gateway, kythira::layers::role::front_end};
         for (node_id_t n = 1; n <= k_node_count; ++n) {
             cfg._data_nodes.push_back("127.0.0.1:" + std::to_string(port(n)));
+        }
+        _front_ends.push_back(std::make_unique<gateway_type>(
+            *_front_end_hosts.back(), _acl, _logger, _metrics, cfg,
+            [](const node_id_t&) -> std::optional<std::string> { return std::nullopt; }));
+        _front_ends.back()->start();
+        return *_front_ends.back();
+    }
+
+    /// A gateway without the front end (task 17), calling every node's
+    /// front end; the connection state, `MULTI` queue included, is its.
+    auto add_gateway(const std::vector<std::uint16_t>& front_end_ports = {}) -> gateway_type& {
+        const auto id = static_cast<node_id_t>(k_node_count + 1 + _front_end_hosts.size());
+        _front_end_hosts.push_back(std::make_unique<host_type>(make_config(id)));
+        _front_end_hosts.back()->start();
+        redis_gateway_config cfg;
+        cfg._listen = "127.0.0.1:0";
+        cfg._internal_secret = "internal-secret";
+        cfg._io_threads = 1;
+        cfg._worker_threads = 4;
+        cfg._command_timeout = std::chrono::milliseconds{5000};
+        cfg._insecure_plaintext = true;
+        cfg._layer_roles = {kythira::layers::role::gateway};
+        for (node_id_t n = 1; n <= k_node_count; ++n) {
+            cfg._front_ends.push_back("127.0.0.1:" + std::to_string(port(n)));
+        }
+        if (!front_end_ports.empty()) {
+            cfg._front_ends.clear();
+            for (auto p : front_end_ports) {
+                cfg._front_ends.push_back("127.0.0.1:" + std::to_string(p));
+            }
         }
         _front_ends.push_back(std::make_unique<gateway_type>(
             *_front_end_hosts.back(), _acl, _logger, _metrics, cfg,
@@ -681,4 +714,69 @@ BOOST_AUTO_TEST_CASE(a_front_end_without_data_coordinates_transactions,
 
     BOOST_CHECK_GE(fe.stats()._txn_committed.load(), 3u);
     BOOST_CHECK_EQUAL(fe.stats()._txn_unknown.load(), 0u);
+}
+
+// A gateway without the front end (.kiro/specs/redis-general-data-types/
+// task 17) holds each connection's state: the MULTI queue, sent whole with
+// EXEC, and the isolation level. A front end keeps nothing between calls, so
+// the queue survives the connection moving to another front end mid-MULTI.
+BOOST_AUTO_TEST_CASE(a_gateway_apart_holds_the_connection_state, *boost::unit_test::timeout(180)) {
+    cluster c;
+    BOOST_REQUIRE(c.await_all_leaders(std::chrono::seconds{20}));
+    auto& gw = c.add_gateway();
+    resp_client client(gw.port());
+    BOOST_REQUIRE_EQUAL(client.call({"AUTH", "ops", "ops-secret"}), "+OK\r\n");
+    resp_client peer(c.port(1));
+    BOOST_REQUIRE_EQUAL(peer.call({"AUTH", "ops", "ops-secret"}), "+OK\r\n");
+
+    BOOST_CHECK_EQUAL(client.call({"EXEC"}), "-ERR EXEC without MULTI\r\n");
+    BOOST_CHECK_EQUAL(client.call({"MULTI"}), "+OK\r\n");
+    BOOST_CHECK_EQUAL(client.call({"MULTI"}), "-ERR MULTI calls can not be nested\r\n");
+    BOOST_CHECK_EQUAL(client.call({"SET", "a/g", "1"}), "+QUEUED\r\n");
+    BOOST_CHECK_EQUAL(client.call({"GET", "a/g"}), "+QUEUED\r\n");
+    BOOST_CHECK_EQUAL(client.call({"MSET", "z/g", "2", "z/h", "3"}), "+QUEUED\r\n");
+    BOOST_CHECK_EQUAL(peer.call({"GET", "a/g"}), "$-1\r\n");
+    BOOST_CHECK_EQUAL(client.call({"EXEC"}), "*3\r\n+OK\r\n" + bulk("1") + "+OK\r\n");
+    BOOST_CHECK_EQUAL(peer.call({"MGET", "a/g", "z/g", "z/h"}),
+                      "*3\r\n" + bulk("1") + bulk("2") + bulk("3"));
+
+    BOOST_CHECK_EQUAL(client.call({"MULTI"}), "+OK\r\n");
+    BOOST_CHECK_EQUAL(client.call({"DEL", "a/g"}), "+QUEUED\r\n");
+    BOOST_CHECK_EQUAL(client.call({"DISCARD"}), "+OK\r\n");
+    BOOST_CHECK_EQUAL(client.call({"GET", "a/g"}), bulk("1"));
+
+    BOOST_CHECK_EQUAL(client.call({"MULTI"}), "+OK\r\n");
+    BOOST_CHECK_EQUAL(client.call({"DEL", "a/g"}), "+QUEUED\r\n");
+    BOOST_CHECK(starts_with(client.call({"INFO"}), "-ERR INFO is not supported inside MULTI"));
+    BOOST_CHECK_EQUAL(client.call({"EXEC"}),
+                      "-EXECABORT Transaction discarded because of previous errors.\r\n");
+    BOOST_CHECK_EQUAL(client.call({"GET", "a/g"}), bulk("1"));
+
+    // The isolation level is the connection's, whichever front end runs it.
+    BOOST_CHECK_EQUAL(client.call({"KYTHIRA.ISOLATION", "read-committed-wait"}), "+OK\r\n");
+    BOOST_CHECK_EQUAL(client.call({"KYTHIRA.ISOLATION"}), bulk("read_committed_wait"));
+    resp_client other(gw.port());
+    BOOST_REQUIRE_EQUAL(other.call({"AUTH", "ops", "ops-secret"}), "+OK\r\n");
+    BOOST_CHECK_EQUAL(other.call({"KYTHIRA.ISOLATION"}), bulk("read_committed"));
+
+    BOOST_CHECK_EQUAL(gw.stats()._front_end_lost.load(), 0u);
+
+    // Three layers: this gateway over two front ends without data. The
+    // front end its connection is pinned to goes away mid-MULTI; the
+    // queue is the gateway's, so EXEC runs it whole on the other.
+    std::array<gateway_type*, 2> fes{&c.add_front_end(), &c.add_front_end()};
+    auto& apart = c.add_gateway({fes[0]->port(), fes[1]->port()});
+    resp_client tx(apart.port());
+    BOOST_REQUIRE_EQUAL(tx.call({"AUTH", "ops", "ops-secret"}), "+OK\r\n");
+    BOOST_CHECK_EQUAL(tx.call({"MULTI"}), "+OK\r\n");
+    const std::array<std::uint64_t, 2> before{fes[0]->stats()._commands.load(),
+                                              fes[1]->stats()._commands.load()};
+    BOOST_CHECK_EQUAL(tx.call({"SET", "a/p", "1"}), "+QUEUED\r\n");
+    const std::size_t pinned = fes[0]->stats()._commands.load() != before[0] ? 0 : 1;
+    fes[pinned]->stop();
+    BOOST_CHECK_EQUAL(tx.call({"SET", "z/p", "2"}), "+QUEUED\r\n");
+    BOOST_CHECK_EQUAL(tx.call({"EXEC"}), "*2\r\n+OK\r\n+OK\r\n");
+    BOOST_CHECK_EQUAL(peer.call({"MGET", "a/p", "z/p"}), "*2\r\n" + bulk("1") + bulk("2"));
+    BOOST_CHECK_EQUAL(apart.stats()._front_end_repins.load(), 1u);
+    BOOST_CHECK_EQUAL(apart.stats()._front_end_lost.load(), 0u);
 }
