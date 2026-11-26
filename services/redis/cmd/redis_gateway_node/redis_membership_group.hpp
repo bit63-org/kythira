@@ -55,6 +55,10 @@ public:
         -> std::optional<std::vector<std::byte>> = 0;
     /// This replica's member list.
     [[nodiscard]] virtual auto read() -> std::vector<layers::layer_member> = 0;
+    /// Whether this replica leads the group now, and its term: the capacity
+    /// loop's lease (only the leader provisions, fenced by the term).
+    [[nodiscard]] virtual auto leading() -> bool = 0;
+    [[nodiscard]] virtual auto term() -> std::uint64_t = 0;
 };
 
 /// The group's id in a module's group space: the last one, which the Redis

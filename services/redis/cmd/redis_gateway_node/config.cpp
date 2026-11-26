@@ -10,6 +10,7 @@
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#include <unistd.h>
 
 #include <algorithm>
 #include <cstring>
@@ -82,6 +83,20 @@ auto to_u64(const char* name, const std::string& v) -> std::uint64_t {
 
 auto to_ms(const char* name, const std::string& v) -> std::chrono::milliseconds {
     return std::chrono::milliseconds{static_cast<std::int64_t>(to_u64(name, v))};
+}
+
+auto to_double(const char* name, const std::string& v) -> double {
+    try {
+        std::size_t used = 0;
+        const auto d = std::stod(v, &used);
+        if (used != v.size() || !(d >= 0.0)) {
+            throw std::invalid_argument(v);
+        }
+        return d;
+    } catch (const std::exception&) {
+        throw std::invalid_argument(std::string("redis_gateway_node: ") + name +
+                                    " must be a number of at least 0, got '" + v + "'");
+    }
 }
 
 /// A peer's node id. Canonical composite text holds no `=` or `,`, so the
@@ -375,6 +390,19 @@ auto from_env() -> node_options {
             "KYTHIRA_ALLOW_PLAINTEXT_RAFT=true on a network you trust)");
     }
     o._peers = parse_id_map("KYTHIRA_PEERS", get_required("KYTHIRA_PEERS"));
+    if (!o._peers.contains(o._node_id) && env_get("KYTHIRA_REDIS_ROLES") &&
+        !o._gateway._layer_roles.has(layers::role::data)) {
+        // A node without data holds no replica of the data groups, so the
+        // voters never dial it: it may be one a capacity loop just created,
+        // which no fixed list could have named. It still needs its own
+        // entry, at the address it listens on.
+        std::string host = o._bind_address;
+        if (host.empty() || host == "0.0.0.0" || host == "::") {
+            char name[256] = {};
+            host = ::gethostname(name, sizeof(name) - 1) == 0 ? name : "localhost";
+        }
+        o._peers[o._node_id] = "http://" + host + ":" + std::to_string(o._raft_port);
+    }
     if (!o._peers.contains(o._node_id)) {
         throw std::invalid_argument(
             "redis_gateway_node: KYTHIRA_PEERS must include this node's own id " +
@@ -697,6 +725,106 @@ auto from_env() -> node_options {
                 "redis_gateway_node: KYTHIRA_REDIS_FRONT_END_INDEX must be 1-16383");
         }
     }
+    {
+        auto& c = o._capacity;
+        c._layer = get_opt("KYTHIRA_REDIS_CAPACITY_LAYER", "");
+        if (!c._layer.empty() && c._layer != "gateway" && c._layer != "front_end") {
+            throw std::invalid_argument(
+                "redis_gateway_node: KYTHIRA_REDIS_CAPACITY_LAYER must be gateway or front_end "
+                "(got '" +
+                c._layer + "')");
+        }
+        c._provider = get_opt("KYTHIRA_REDIS_CAPACITY_PROVIDER", "docker");
+        c._dry_run = to_bool("KYTHIRA_REDIS_CAPACITY_DRY_RUN",
+                             get_opt("KYTHIRA_REDIS_CAPACITY_DRY_RUN", "true"));
+        c._scale_in = to_bool("KYTHIRA_REDIS_CAPACITY_SCALE_IN",
+                              get_opt("KYTHIRA_REDIS_CAPACITY_SCALE_IN", "true"));
+        c._min_members = to_u64("KYTHIRA_REDIS_CAPACITY_MIN_MEMBERS",
+                                get_opt("KYTHIRA_REDIS_CAPACITY_MIN_MEMBERS", "2"));
+        c._max_members = to_u64("KYTHIRA_REDIS_CAPACITY_MAX_MEMBERS",
+                                get_opt("KYTHIRA_REDIS_CAPACITY_MAX_MEMBERS", "0"));
+        c._requests_high = to_double("KYTHIRA_REDIS_CAPACITY_REQUESTS_HIGH",
+                                     get_opt("KYTHIRA_REDIS_CAPACITY_REQUESTS_HIGH", "2000"));
+        c._requests_low = to_double("KYTHIRA_REDIS_CAPACITY_REQUESTS_LOW",
+                                    get_opt("KYTHIRA_REDIS_CAPACITY_REQUESTS_LOW", "600"));
+        c._connections_high = to_double("KYTHIRA_REDIS_CAPACITY_CONNECTIONS_HIGH",
+                                        get_opt("KYTHIRA_REDIS_CAPACITY_CONNECTIONS_HIGH", "0"));
+        c._connections_low = to_double("KYTHIRA_REDIS_CAPACITY_CONNECTIONS_LOW",
+                                       get_opt("KYTHIRA_REDIS_CAPACITY_CONNECTIONS_LOW", "0"));
+        c._overload_cpu = to_double("KYTHIRA_REDIS_CAPACITY_OVERLOAD_CPU",
+                                    get_opt("KYTHIRA_REDIS_CAPACITY_OVERLOAD_CPU", "0.85"));
+        c._sustained = to_ms("KYTHIRA_REDIS_CAPACITY_SUSTAINED_MS",
+                             get_opt("KYTHIRA_REDIS_CAPACITY_SUSTAINED_MS", "120000"));
+        c._scale_in_sustained =
+            to_ms("KYTHIRA_REDIS_CAPACITY_SCALE_IN_SUSTAINED_MS",
+                  get_opt("KYTHIRA_REDIS_CAPACITY_SCALE_IN_SUSTAINED_MS", "900000"));
+        c._cooldown = to_ms("KYTHIRA_REDIS_CAPACITY_COOLDOWN_MS",
+                            get_opt("KYTHIRA_REDIS_CAPACITY_COOLDOWN_MS", "300000"));
+        c._drain_deadline = to_ms("KYTHIRA_REDIS_CAPACITY_DRAIN_DEADLINE_MS",
+                                  get_opt("KYTHIRA_REDIS_CAPACITY_DRAIN_DEADLINE_MS", "600000"));
+        c._interval = to_ms("KYTHIRA_REDIS_CAPACITY_INTERVAL_MS",
+                            get_opt("KYTHIRA_REDIS_CAPACITY_INTERVAL_MS", "5000"));
+        c._docker_url = get_opt("KYTHIRA_REDIS_CAPACITY_DOCKER_URL", "unix:///var/run/docker.sock");
+        c._docker_image = get_opt("KYTHIRA_REDIS_CAPACITY_DOCKER_IMAGE", "");
+        c._docker_network = get_opt("KYTHIRA_REDIS_CAPACITY_DOCKER_NETWORK", "");
+        c._docker_cluster = get_opt("KYTHIRA_REDIS_CAPACITY_DOCKER_CLUSTER", "");
+        const auto port = to_u64("KYTHIRA_REDIS_CAPACITY_NODE_PORT",
+                                 get_opt("KYTHIRA_REDIS_CAPACITY_NODE_PORT", "0"));
+        if (port > 65535) {
+            throw std::invalid_argument(
+                "redis_gateway_node: KYTHIRA_REDIS_CAPACITY_NODE_PORT must be a port");
+        }
+        c._node_port = port == 0 ? o._raft_port : static_cast<std::uint16_t>(port);
+        c._join_env.clear();
+        // `;`-separated, since a value (a peer list) holds commas.
+        const auto env = get_opt("KYTHIRA_REDIS_CAPACITY_JOIN_ENV", "");
+        for (std::size_t start = 0; start < env.size();) {
+            const auto semi = std::min(env.find(';', start), env.size());
+            const auto item = env.substr(start, semi - start);
+            if (!item.empty()) {
+                if (item.find('=') == std::string::npos || item.starts_with("KYTHIRA_NODE_ID=")) {
+                    throw std::invalid_argument(
+                        "redis_gateway_node: KYTHIRA_REDIS_CAPACITY_JOIN_ENV entries are "
+                        "KEY=VALUE, and KYTHIRA_NODE_ID is the provider's to set (got '" +
+                        item + "')");
+                }
+                c._join_env.push_back(item);
+            }
+            start = semi + 1;
+        }
+        if (!c._layer.empty()) {
+            if (o._membership_voters.empty()) {
+                throw std::invalid_argument(
+                    "redis_gateway_node: KYTHIRA_REDIS_CAPACITY_LAYER needs the layer membership "
+                    "group (KYTHIRA_REDIS_MEMBERSHIP): its leader runs the loop, on the load "
+                    "the members report to it");
+            }
+            if (c._provider != "docker") {
+                throw std::invalid_argument(
+                    "redis_gateway_node: KYTHIRA_REDIS_CAPACITY_PROVIDER must be docker (got '" +
+                    c._provider + "')");
+            }
+            if (c._docker_image.empty() || c._docker_network.empty() || c._docker_cluster.empty()) {
+                throw std::invalid_argument(
+                    "redis_gateway_node: the docker capacity provider needs "
+                    "KYTHIRA_REDIS_CAPACITY_DOCKER_IMAGE, _DOCKER_NETWORK and _DOCKER_CLUSTER");
+            }
+            if (c._min_members == 0 || (c._max_members != 0 && c._max_members < c._min_members)) {
+                throw std::invalid_argument(
+                    "redis_gateway_node: KYTHIRA_REDIS_CAPACITY_MIN_MEMBERS must be at least 1 "
+                    "and at most KYTHIRA_REDIS_CAPACITY_MAX_MEMBERS");
+            }
+            if (c._requests_high == 0.0 && c._connections_high == 0.0 && c._overload_cpu == 0.0) {
+                throw std::invalid_argument(
+                    "redis_gateway_node: the capacity loop needs at least one signal: "
+                    "KYTHIRA_REDIS_CAPACITY_REQUESTS_HIGH, _CONNECTIONS_HIGH or _OVERLOAD_CPU");
+            }
+            if (c._interval.count() == 0) {
+                throw std::invalid_argument(
+                    "redis_gateway_node: KYTHIRA_REDIS_CAPACITY_INTERVAL_MS must be above 0");
+            }
+        }
+    }
     if (g._layer_roles.has(layers::role::gateway) && !g._layer_roles.has(layers::role::front_end) &&
         g._front_ends.empty() && g._front_ends_dns.empty() && g._membership_voters.empty()) {
         throw std::invalid_argument(
@@ -893,6 +1021,24 @@ auto usage() -> std::string {
            "  KYTHIRA_REDIS_PLACEMENT_GROUP    placement group reported to the group  [none]\n"
            "  KYTHIRA_REDIS_FRONT_END_INDEX    1-16383, names this front end in SCAN cursors "
            "[node id]\n"
+           "  KYTHIRA_REDIS_CAPACITY_LAYER     gateway or front_end: the group's leader scales "
+           "it  [off]\n"
+           "  KYTHIRA_REDIS_CAPACITY_DRY_RUN   decide and log, add and remove nothing  [true]\n"
+           "  KYTHIRA_REDIS_CAPACITY_SCALE_IN  remove members, not only add them  [true]\n"
+           "  KYTHIRA_REDIS_CAPACITY_MIN_MEMBERS / _MAX_MEMBERS  bounds  [2 / 3x first size]\n"
+           "  KYTHIRA_REDIS_CAPACITY_REQUESTS_HIGH / _LOW  commands/s per member  [2000 / 600]\n"
+           "  KYTHIRA_REDIS_CAPACITY_CONNECTIONS_HIGH / _LOW  connections per member  [off]\n"
+           "  KYTHIRA_REDIS_CAPACITY_OVERLOAD_CPU  CPU share that counts as overloaded  [0.85]\n"
+           "  KYTHIRA_REDIS_CAPACITY_SUSTAINED_MS / _SCALE_IN_SUSTAINED_MS / _COOLDOWN_MS  "
+           "[120000 / 900000 / 300000]\n"
+           "  KYTHIRA_REDIS_CAPACITY_DRAIN_DEADLINE_MS  longest drain before decommission "
+           "[600000]\n"
+           "  KYTHIRA_REDIS_CAPACITY_INTERVAL_MS  how often the loop runs  [5000]\n"
+           "  KYTHIRA_REDIS_CAPACITY_PROVIDER  docker  [docker]\n"
+           "  KYTHIRA_REDIS_CAPACITY_DOCKER_URL / _DOCKER_IMAGE / _DOCKER_NETWORK / "
+           "_DOCKER_CLUSTER\n"
+           "  KYTHIRA_REDIS_CAPACITY_NODE_PORT  new members' Raft port  [this node's]\n"
+           "  KYTHIRA_REDIS_CAPACITY_JOIN_ENV  KEY=VALUE;... every new member gets\n"
            "  KYTHIRA_REDIS_CLUSTER            cluster named in layer identities  [KYTHIRA_CLUSTER "
            "or default]\n"
            "  KYTHIRA_NODE_INSECURE_PLAINTEXT  1: split layers without TLS identities  [unset]\n"

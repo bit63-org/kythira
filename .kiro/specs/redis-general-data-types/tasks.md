@@ -188,7 +188,7 @@ is extended as the rest land.
     a CRL source lands
   - _Requirements: 17.1-17.4, 19.1-19.5_
 
-- [ ] 18. Layer membership group and scaling
+- [x] 18. Layer membership group and scaling
   - Gateways and front ends in the shared layer membership group
     (fixed voters, non-voting members); configuration and DNS fallback;
     front-end indexes for cursors; capacity policy over connections,
@@ -200,8 +200,13 @@ is extended as the rest land.
     the group on `KYTHIRA_REDIS_MEMBERSHIP` voters with other members
     reaching it through `KYTHIRA.MEMBERS`, DNS and configuration fallback,
     load reports, drain through `KYTHIRA.LAYERS`, and front-end indexes in
-    the group with the cursor layout. The capacity loop through
-    `quorum_manager` on the group's leader is next.
+    the group with the cursor layout. The capacity loop is in too
+    (`cmd/redis_gateway_node/redis_layer_capacity*.hpp`,
+    `KYTHIRA_REDIS_CAPACITY_*`): the group's leader runs the shared
+    controller with `layer_capacity_policy` over one layer through the
+    Docker quorum manager, and drains a member through the group before
+    decommissioning it. Other providers (ASG, MIG, VMSS and the rest) are
+    not wired to the Redis settings yet.
 
 - [ ] 19. Migration operations and runbook
   - `KYTHIRA.EVACUATE`, refuse to start without `data` while holding

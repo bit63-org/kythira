@@ -80,6 +80,45 @@ struct cache_options {
     std::map<kythira::host_node_id, std::string> _peer_http;
 };
 
+/// The elastic capacity loop over one stateless layer (redis-general-data-types
+/// task 18, Requirement 20.3). The membership group's leader runs it; plain
+/// numbers here so this header stays free of the controller's.
+struct capacity_options {
+    /// `gateway` or `front_end`; empty runs no loop.
+    std::string _layer;
+    /// The quorum manager that adds and removes machines. `docker` for now.
+    std::string _provider{"docker"};
+    /// Decide, log and count, but call no provider (the controller's first
+    /// step of adoption). On unless KYTHIRA_REDIS_CAPACITY_DRY_RUN=false.
+    bool _dry_run{true};
+    bool _scale_in{true};
+    std::size_t _min_members{2};
+    /// 0: three times the first size the loop sees.
+    std::size_t _max_members{0};
+    /// Requests per second per serving member; 0 turns the signal off.
+    double _requests_high{2000.0};
+    double _requests_low{600.0};
+    /// Open connections per serving member; 0 (the default) turns it off.
+    double _connections_high{0.0};
+    double _connections_low{0.0};
+    /// CPU share at which a member counts as overloaded; 0 turns it off.
+    double _overload_cpu{0.85};
+    std::chrono::milliseconds _sustained{std::chrono::minutes{2}};
+    std::chrono::milliseconds _scale_in_sustained{std::chrono::minutes{15}};
+    std::chrono::milliseconds _cooldown{std::chrono::minutes{5}};
+    std::chrono::milliseconds _drain_deadline{std::chrono::minutes{10}};
+    std::chrono::milliseconds _interval{std::chrono::seconds{5}};
+    // ── docker ───────────────────────────────────────────────────────────────
+    std::string _docker_url{"unix:///var/run/docker.sock"};
+    std::string _docker_image;
+    std::string _docker_network;
+    std::string _docker_cluster;
+    /// The new machines' Raft port; 0 means this node's own.
+    std::uint16_t _node_port{0};
+    /// `KEY=VALUE` entries every new machine gets, after KYTHIRA_NODE_ID.
+    std::vector<std::string> _join_env;
+};
+
 struct node_options {
     // ── the Raft side ────────────────────────────────────────────────────────
     /// `kythira::host_node_id`: a number, or canonical composite text in a
@@ -99,6 +138,8 @@ struct node_options {
     /// redis-general-data-types task 18), each one of `_peers`. A node
     /// listed here holds a replica of the group; empty runs no group.
     std::vector<kythira::host_node_id> _membership_voters;
+    /// The capacity loop a voter runs while it leads the group.
+    capacity_options _capacity;
     /// Keys the initial shard map is cut at; empty means one shard covering
     /// the whole key space, from which the split policy takes over.
     std::vector<std::string> _shard_cuts;

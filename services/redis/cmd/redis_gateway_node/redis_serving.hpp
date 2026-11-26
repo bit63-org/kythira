@@ -21,6 +21,7 @@
 /// (no id allocator is set), so those are all the ids it uses.
 
 #include "config.hpp"
+#include "redis_layer_capacity.hpp"
 #include "redis_membership_group.hpp"
 #include "redis_serving_api.hpp"
 
@@ -427,6 +428,11 @@ public:
         auto gateway_cfg = *_gateway_cfg;
         if (_membership) {
             _membership->start();
+            // Every voter has one; only the group's leader acts on it.
+            _capacity = make_layer_capacity_loop(_opt, *_membership);
+            if (_capacity) {
+                _capacity->start();
+            }
             auto* group = _membership.get();
             gateway_cfg._membership_local = kythira::redis_gateway_config::membership_replica{
                 ._propose =
@@ -513,6 +519,9 @@ public:
         _front_end.reset();
         if (_gateway) {
             _gateway->stop();  // its membership round reads the group
+        }
+        if (_capacity) {
+            _capacity->stop();  // it proposes to the group
         }
         if (_membership) {
             _membership->stop();
@@ -1012,6 +1021,7 @@ private:
     // Declared before the Redis host: destroyed after it, as the two share
     // the node's listener.
     std::unique_ptr<membership_group> _membership;
+    std::unique_ptr<layer_capacity_loop> _capacity;
     std::unique_ptr<host_type> _host;
     std::unique_ptr<gateway_type> _gateway;
     std::unique_ptr<front_end_type> _front_end;

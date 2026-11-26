@@ -138,6 +138,12 @@ struct elastic_capacity_config {
     /// Stop all provisioning and decommissioning, and every operator, from
     /// the next step on (Requirement 12.4). Also settable at run time.
     bool kill_switch{false};
+    /// A machine the controller adds is admitted once it has joined (reports
+    /// a fresh heartbeat), instead of once it holds a voting replica. For a
+    /// stateless layer (gateways, front ends), whose machines never hold a
+    /// replica, so that a scale-out completes rather than waiting out
+    /// `admit_deadline` and blocking the next intent. Off for data clusters.
+    bool admit_on_join{false};
 
     /// The policy is consulted at most this often — and immediately on a
     /// split, which is a trigger edge (Requirement 5.1).
@@ -1808,6 +1814,11 @@ private:
         const bool moving = std::any_of(_moves.begin(), _moves.end(), [&](const auto& kv) {
             return kv.second._intent == i._key;
         });
+        if (_cfg.admit_on_join && i._node && joined(*i._node, now) && !moving) {
+            count("admission", {{"outcome", "completed"}});
+            transition(i, S::completed, patch_type{._note = "admitted on join"}, now, work);
+            return;
+        }
         // Requirement 10.8: complete only once it holds a voting replica.
         if (i._node && holds_voter(*i._node) && !moving && _admission_saturated.contains(i._key)) {
             count("admission", {{"outcome", "completed"}});

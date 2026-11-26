@@ -14,10 +14,16 @@
 /// that connect the two:
 ///
 /// - `layer_capacity_snapshot` turns the members of one layer into the
-///   `cluster_capacity_snapshot` the controller hands a policy.
-///   Requests per second become `_read_qps`, bytes served become
-///   `_read_bytes_per_sec`, and a member above the CPU overload mark is
+///   `cluster_capacity_snapshot` the controller hands a policy, and
+///   `layer_node_report` turns one member into the `node_report` a
+///   controller observes. Requests per second become `_read_qps`, bytes
+///   served become `_read_bytes_per_sec`, open streams or connections become
+///   `_open_streams`, and a member above the CPU overload mark is
 ///   `_overloaded`.
+///
+/// Member ids are text in the group. The controller's node id type is the
+/// quorum manager's, so every piece takes a `NodeId` (default
+/// `std::string`) and converts through `node_id_traits`.
 /// - `layer_capacity_policy` is a `capacity_policy` over those signals,
 ///   with the same paired watermarks, sustained crossings and cooldown as
 ///   `threshold_capacity_policy`.
@@ -29,6 +35,7 @@
 /// data cluster's capacity controller runs under its lease.
 
 #include <raft/capacity_policy.hpp>
+#include <raft/composite_node_id.hpp>
 #include <raft/elastic_capacity_controller.hpp>
 #include <raft/layer_membership.hpp>
 #include <raft/layer_roles.hpp>
@@ -57,6 +64,10 @@ struct layer_capacity_config {
     capacity_watermark requests_per_member{._high = 2000.0, ._low = 600.0};
     /// Bytes served per second per serving member.
     capacity_watermark bytes_per_member{._high = 0.0, ._low = 0.0, ._enabled = false};
+    /// Open streams or client connections per serving member. Off by
+    /// default for the same reason as bytes: the right figure depends on
+    /// how much each connection costs.
+    capacity_watermark connections_per_member{._high = 0.0, ._low = 0.0, ._enabled = false};
     /// Fraction of serving members above `overload_cpu`. Scale out when over
     /// a third are; scale in only when none is.
     capacity_watermark overloaded{._high = 0.34, ._low = 0.0};
@@ -83,37 +94,61 @@ struct layer_capacity_config {
     std::size_t min_members{2};
 };
 
+/// @brief One member as the machine report a capacity controller observes.
+///
+/// nullopt when the member's id is not a `NodeId` (a text id in a numeric
+/// cluster): the controller could neither provision nor decommission it.
+template<typename NodeId = std::string>
+[[nodiscard]] auto layer_node_report(const layer_member& m, const layer_capacity_config& cfg)
+    -> std::optional<node_report<NodeId, std::string>> {
+    auto id = node_id_traits<NodeId>::from_text(m.id);
+    if (!id) {
+        return std::nullopt;
+    }
+    node_report<NodeId, std::string> r;
+    r._node_id = std::move(*id);
+    r._read_qps = m.load.requests_per_second;
+    r._read_bytes_per_sec = static_cast<double>(m.load.bytes_served_per_second);
+    r._open_streams = m.load.open_streams;
+    r._overloaded = m.load.cpu >= cfg.overload_cpu;
+    if (!m.placement_group.empty()) {
+        r._labels.push_back(m.placement_group);
+    }
+    return r;
+}
+
 /// @brief One layer's members as the snapshot a capacity policy reads.
 ///
-/// Members that run none of `roles` are left out. A member that has not
-/// reported within `stale_after_ms` is kept but marked stale: it may well be
-/// running, so it counts towards the layer's size, but its numbers are not a
-/// reason to act on. A draining or drained member is marked draining.
+/// Members that run none of `roles` are left out, and so are members whose
+/// id is not a `NodeId`. A member that has not reported within
+/// `stale_after_ms` is kept but marked stale: it may well be running, so it
+/// counts towards the layer's size, but its numbers are not a reason to act
+/// on. A draining or drained member is marked draining.
 ///
 /// @tparam GroupId The controller's shard group id type. A stateless layer
 ///                 has no shards, so the type only has to match the
 ///                 controller's.
 /// @tparam Key     The controller's routing key type, for the same reason.
-template<typename GroupId = std::uint64_t, typename Key = std::string>
+/// @tparam NodeId  The controller's node id type.
+template<typename GroupId = std::uint64_t, typename Key = std::string,
+         typename NodeId = std::string>
 [[nodiscard]] auto layer_capacity_snapshot(const std::vector<layer_member>& members, role_set roles,
                                            std::int64_t now_ms, std::int64_t stale_after_ms,
                                            const layer_capacity_config& cfg)
-    -> cluster_capacity_snapshot<std::string, GroupId, Key, std::string> {
-    cluster_capacity_snapshot<std::string, GroupId, Key, std::string> s;
+    -> cluster_capacity_snapshot<NodeId, GroupId, Key, std::string> {
+    cluster_capacity_snapshot<NodeId, GroupId, Key, std::string> s;
     s._taken_at = std::chrono::system_clock::time_point{std::chrono::milliseconds{now_ms}};
     std::map<std::string, placement_group_view<std::string>> groups;
     for (const auto& m : members) {
         if (!m.roles.intersects(roles)) {
             continue;
         }
-        node_capacity_view<std::string, std::string> v;
-        v._report._node_id = m.id;
-        v._report._read_qps = m.load.requests_per_second;
-        v._report._read_bytes_per_sec = static_cast<double>(m.load.bytes_served_per_second);
-        v._report._overloaded = m.load.cpu >= cfg.overload_cpu;
-        if (!m.placement_group.empty()) {
-            v._report._labels.push_back(m.placement_group);
+        auto report = layer_node_report<NodeId>(m, cfg);
+        if (!report) {
+            continue;
         }
+        node_capacity_view<NodeId, std::string> v;
+        v._report = std::move(*report);
         v._age = std::chrono::milliseconds{std::max<std::int64_t>(0, now_ms - m.reported_at_ms)};
         v._stale = now_ms - m.reported_at_ms > stale_after_ms;
         v._placement_group = m.placement_group;
@@ -158,10 +193,12 @@ template<typename GroupId = std::uint64_t, typename Key = std::string>
 ///
 /// It never decides on stale numbers. Only fresh, serving members count
 /// towards the averages, and with none it holds.
-template<typename GroupId = std::uint64_t, typename Key = std::string> class layer_capacity_policy {
+template<typename GroupId = std::uint64_t, typename Key = std::string,
+         typename NodeId = std::string>
+class layer_capacity_policy {
 public:
-    using snapshot_type = cluster_capacity_snapshot<std::string, GroupId, Key, std::string>;
-    using decision_type = capacity_decision<std::string, std::string>;
+    using snapshot_type = cluster_capacity_snapshot<NodeId, GroupId, Key, std::string>;
+    using decision_type = capacity_decision<std::string, NodeId>;
     using time_point = std::chrono::system_clock::time_point;
 
     layer_capacity_policy() = default;
@@ -226,6 +263,7 @@ public:
         };
         check("requests_per_member", _cfg.requests_per_member);
         check("bytes_per_member", _cfg.bytes_per_member);
+        check("connections_per_member", _cfg.connections_per_member);
         check("overloaded", _cfg.overloaded);
         if (_cfg.overloaded._enabled && _cfg.overloaded._high > 1.0) {
             errors.push_back("overloaded.high must be at most 1: it is a fraction of members");
@@ -234,7 +272,7 @@ public:
             errors.push_back("overload_cpu must be in (0, 1]: it is a share of the CPUs");
         }
         if (!_cfg.requests_per_member._enabled && !_cfg.bytes_per_member._enabled &&
-            !_cfg.overloaded._enabled) {
+            !_cfg.connections_per_member._enabled && !_cfg.overloaded._enabled) {
             errors.push_back("no signal is enabled, so the policy could never scale");
         }
         if (_cfg.sustained_for <= std::chrono::milliseconds::zero()) {
@@ -257,6 +295,7 @@ private:
     enum class signal_kind : std::uint8_t {
         requests,
         bytes,
+        connections,
         overloaded
     };
 
@@ -284,6 +323,12 @@ private:
             out.push_back({signal_kind::bytes, "bytes_per_member", capacity_reason::load,
                            s.fresh_mean([](const auto& r) { return r._read_bytes_per_sec; }),
                            &_cfg.bytes_per_member});
+        }
+        if (_cfg.connections_per_member._enabled) {
+            out.push_back(
+                {signal_kind::connections, "connections_per_member", capacity_reason::load,
+                 s.fresh_mean([](const auto& r) { return static_cast<double>(r._open_streams); }),
+                 &_cfg.connections_per_member});
         }
         if (_cfg.overloaded._enabled) {
             out.push_back({signal_kind::overloaded, "overloaded", capacity_reason::overload,
@@ -433,25 +478,27 @@ static_assert(
 /// - `cancel` returns the member to serving.
 ///
 /// `now_ms` is the controller's clock in milliseconds since the epoch.
-inline auto layer_drain_hooks(replicated_layer_membership& membership,
-                              std::function<std::int64_t()> now_ms, std::int64_t stale_after_ms)
-    -> capacity_drain_hooks<std::string> {
-    capacity_drain_hooks<std::string> h;
-    h.begin = [&membership](const std::string& id) {
-        static_cast<void>(membership.set_drain(id, drain_state::draining));
+template<typename NodeId = std::string>
+auto layer_drain_hooks(replicated_layer_membership& membership,
+                       std::function<std::int64_t()> now_ms, std::int64_t stale_after_ms)
+    -> capacity_drain_hooks<NodeId> {
+    using traits = node_id_traits<NodeId>;
+    capacity_drain_hooks<NodeId> h;
+    h.begin = [&membership](const NodeId& id) {
+        static_cast<void>(membership.set_drain(traits::to_text(id), drain_state::draining));
     };
-    h.holds_work = [&membership, now_ms = std::move(now_ms),
-                    stale_after_ms](const std::string& id) {
+    h.holds_work = [&membership, now_ms = std::move(now_ms), stale_after_ms](const NodeId& id) {
         const auto members = membership.members();
-        const auto it =
-            std::find_if(members.begin(), members.end(), [&](const auto& m) { return m.id == id; });
+        const auto text = traits::to_text(id);
+        const auto it = std::find_if(members.begin(), members.end(),
+                                     [&](const auto& m) { return m.id == text; });
         if (it == members.end() || it->drain == drain_state::drained) {
             return false;
         }
         return now_ms() - it->reported_at_ms <= stale_after_ms;
     };
-    h.cancel = [&membership](const std::string& id) {
-        static_cast<void>(membership.set_drain(id, drain_state::serving));
+    h.cancel = [&membership](const NodeId& id) {
+        static_cast<void>(membership.set_drain(traits::to_text(id), drain_state::serving));
     };
     return h;
 }

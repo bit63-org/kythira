@@ -101,6 +101,28 @@ struct gateway_env {
         "KYTHIRA_REDIS_PLACEMENT_GROUP",
         "KYTHIRA_REDIS_FRONT_END_INDEX",
         "KYTHIRA_REDIS_PEER_GATEWAYS",
+        "KYTHIRA_REDIS_CAPACITY_LAYER",
+        "KYTHIRA_REDIS_CAPACITY_PROVIDER",
+        "KYTHIRA_REDIS_CAPACITY_DRY_RUN",
+        "KYTHIRA_REDIS_CAPACITY_SCALE_IN",
+        "KYTHIRA_REDIS_CAPACITY_MIN_MEMBERS",
+        "KYTHIRA_REDIS_CAPACITY_MAX_MEMBERS",
+        "KYTHIRA_REDIS_CAPACITY_REQUESTS_HIGH",
+        "KYTHIRA_REDIS_CAPACITY_REQUESTS_LOW",
+        "KYTHIRA_REDIS_CAPACITY_CONNECTIONS_HIGH",
+        "KYTHIRA_REDIS_CAPACITY_CONNECTIONS_LOW",
+        "KYTHIRA_REDIS_CAPACITY_OVERLOAD_CPU",
+        "KYTHIRA_REDIS_CAPACITY_SUSTAINED_MS",
+        "KYTHIRA_REDIS_CAPACITY_SCALE_IN_SUSTAINED_MS",
+        "KYTHIRA_REDIS_CAPACITY_COOLDOWN_MS",
+        "KYTHIRA_REDIS_CAPACITY_DRAIN_DEADLINE_MS",
+        "KYTHIRA_REDIS_CAPACITY_INTERVAL_MS",
+        "KYTHIRA_REDIS_CAPACITY_DOCKER_URL",
+        "KYTHIRA_REDIS_CAPACITY_DOCKER_IMAGE",
+        "KYTHIRA_REDIS_CAPACITY_DOCKER_NETWORK",
+        "KYTHIRA_REDIS_CAPACITY_DOCKER_CLUSTER",
+        "KYTHIRA_REDIS_CAPACITY_NODE_PORT",
+        "KYTHIRA_REDIS_CAPACITY_JOIN_ENV",
     };
     gateway_env(const gateway_env&) = delete;
     auto operator=(const gateway_env&) -> gateway_env& = delete;
@@ -758,6 +780,84 @@ BOOST_AUTO_TEST_CASE(layer_membership_settings) {
         ::setenv("KYTHIRA_REDIS_FRONT_ENDS", "=10.0.0.5:6379", 1);
         BOOST_CHECK_THROW((void)from_env(), std::invalid_argument);
     }
+}
+
+BOOST_AUTO_TEST_CASE(capacity_loop_settings) {
+    const gateway_env env;
+    ::setenv("KYTHIRA_RAFT_BIND", "127.0.0.1", 1);
+    {
+        const auto o = from_env();
+        BOOST_TEST(o._capacity._layer.empty());  // off by default
+        BOOST_TEST(o._capacity._dry_run);
+        BOOST_TEST(o._capacity._node_port == o._raft_port);
+    }
+    // The loop needs the group, whose leader runs it.
+    ::setenv("KYTHIRA_REDIS_CAPACITY_LAYER", "front_end", 1);
+    ::setenv("KYTHIRA_REDIS_CAPACITY_DOCKER_IMAGE", "kythira/redis:test", 1);
+    ::setenv("KYTHIRA_REDIS_CAPACITY_DOCKER_NETWORK", "cache", 1);
+    ::setenv("KYTHIRA_REDIS_CAPACITY_DOCKER_CLUSTER", "fe", 1);
+    BOOST_CHECK_THROW((void)from_env(), std::invalid_argument);
+    ::setenv("KYTHIRA_REDIS_MEMBERSHIP", "1", 1);
+    ::setenv("KYTHIRA_REDIS_CAPACITY_DRY_RUN", "false", 1);
+    ::setenv("KYTHIRA_REDIS_CAPACITY_MIN_MEMBERS", "3", 1);
+    ::setenv("KYTHIRA_REDIS_CAPACITY_MAX_MEMBERS", "9", 1);
+    ::setenv("KYTHIRA_REDIS_CAPACITY_CONNECTIONS_HIGH", "800", 1);
+    ::setenv("KYTHIRA_REDIS_CAPACITY_CONNECTIONS_LOW", "200", 1);
+    ::setenv("KYTHIRA_REDIS_CAPACITY_OVERLOAD_CPU", "0.9", 1);
+    ::setenv("KYTHIRA_REDIS_CAPACITY_NODE_PORT", "7100", 1);
+    ::setenv("KYTHIRA_REDIS_CAPACITY_JOIN_ENV",
+             "KYTHIRA_REDIS_ROLES=front_end;KYTHIRA_PEERS=1=http://n1:7000,2=http://n2:7000", 1);
+    {
+        const auto o = from_env();
+        const auto& c = o._capacity;
+        BOOST_TEST(c._layer == "front_end");
+        BOOST_TEST(!c._dry_run);
+        BOOST_TEST(c._min_members == 3U);
+        BOOST_TEST(c._max_members == 9U);
+        BOOST_TEST(c._connections_high == 800.0);
+        BOOST_TEST(c._overload_cpu == 0.9);
+        BOOST_TEST(c._node_port == 7100U);
+        BOOST_REQUIRE_EQUAL(c._join_env.size(), 2U);
+        BOOST_TEST(c._join_env[1] == "KYTHIRA_PEERS=1=http://n1:7000,2=http://n2:7000");
+    }
+    const auto refused = [](const char* name, const char* value) {
+        const char* was = std::getenv(name);
+        const std::string old = was != nullptr ? was : "";
+        ::setenv(name, value, 1);
+        BOOST_CHECK_THROW((void)from_env(), std::invalid_argument);
+        if (old.empty()) {
+            ::unsetenv(name);
+        } else {
+            ::setenv(name, old.c_str(), 1);
+        }
+    };
+    refused("KYTHIRA_REDIS_CAPACITY_LAYER", "data");
+    refused("KYTHIRA_REDIS_CAPACITY_PROVIDER", "aws_asg");
+    refused("KYTHIRA_REDIS_CAPACITY_DOCKER_IMAGE", "");
+    refused("KYTHIRA_REDIS_CAPACITY_MIN_MEMBERS", "10");  // above the maximum
+    refused("KYTHIRA_REDIS_CAPACITY_MIN_MEMBERS", "0");
+    refused("KYTHIRA_REDIS_CAPACITY_OVERLOAD_CPU", "-1");
+    refused("KYTHIRA_REDIS_CAPACITY_JOIN_ENV", "KYTHIRA_NODE_ID=5");
+    refused("KYTHIRA_REDIS_CAPACITY_JOIN_ENV", "no-equals");
+    refused("KYTHIRA_REDIS_CAPACITY_INTERVAL_MS", "0");
+}
+
+BOOST_AUTO_TEST_CASE(a_node_without_data_may_be_missing_from_the_peer_list) {
+    // One a capacity loop created: no fixed list could have named it.
+    const gateway_env env;
+    ::setenv("KYTHIRA_RAFT_BIND", "127.0.0.1", 1);
+    ::setenv("KYTHIRA_NODE_ID", "40", 1);
+    ::setenv("KYTHIRA_PEERS", "1=http://10.0.0.1:7000", 1);
+    ::setenv("KYTHIRA_REDIS_PEER_GATEWAYS", "1=10.0.0.1:6379", 1);
+    ::setenv("KYTHIRA_REDIS_MEMBERSHIP", "1", 1);
+    ::setenv("KYTHIRA_NODE_INSECURE_PLAINTEXT", "1", 1);
+    ::setenv("KYTHIRA_REDIS_ROLES", "gateway", 1);
+    const auto o = from_env();
+    BOOST_TEST(o._peers.size() == 2U);
+    BOOST_TEST(o._peers.at(o._node_id).starts_with("http://127.0.0.1:"));
+    // A node with data still has to be listed: the voters dial it.
+    ::setenv("KYTHIRA_REDIS_ROLES", "gateway,front_end,data", 1);
+    BOOST_CHECK_THROW((void)from_env(), std::invalid_argument);
 }
 
 // ── front ends without data and data nodes (task 16) ───────────────────────
