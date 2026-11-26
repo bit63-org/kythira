@@ -64,7 +64,7 @@ Step 1 records the command's full content with its sequence number, so a
 leader change between 1 and 3 leaves a recorded command with no signed
 envelope; the new leader signs that same command again (Ed25519 is
 deterministic, so the bytes match) and the server's sequence never has a
-hole. Frames (`MapUpdate`,
+hole. Frames (`MapUpdate`, `VpcConfig`,
 `GroupPolicy`, `TunnelPeers`, `ReplicaConfig`) carry their own versions
 and are full snapshots, so the outbox keeps only the newest per key and a
 superseded frame is never sent.
@@ -311,6 +311,47 @@ with `requestId` and `<item>` list elements, and errors are
 The handler table is generated from the pinned model, like the other
 modules', and the generator's coverage check fails on any operation that
 is neither implemented nor listed as unsupported.
+
+### VPCs, subnets and route tables
+
+A VPC's network group (`n/<vni>`) holds everything antikythera's
+`VpcConfig` version 2 carries: the CIDR blocks with their association
+IDs, the subnets with their prefixes, the route tables with their routes
+and subnet associations, and the main table's ID. It also holds the
+address allocators: one bitmap per subnet IPv4 prefix (at most 8 KiB for
+a /16) with the five reserved addresses set from the start, and a
+counter with a free list per IPv6 /64.
+
+Every committed change to that state (a block, subnet, table, route or
+association) bumps the VPC's config version in the same commit and
+rebuilds one `VpcConfig` frame, which is signed and committed to the
+outbox of every server hosting a NIC in the VPC. As with `MapUpdate`,
+the outbox keeps only the newest frame per server and VNI. At the limits
+(five IPv4 blocks, 200 subnets, 200 tables, 4,096 routes) the frame is
+139,581 bytes, which helm and OarLink carry in chunks (antikythera
+vpc-subnets-routing tasks 2 and 3). The controller checks the frame's
+bounds itself (Requirement 11.7) rather than letting the encoder fail
+after the commit.
+
+A server's outbox delivers in commit order, so a workflow that puts the
+first NIC into a new subnet commits the `VpcConfig` naming the subnet
+before the `MapUpdate` naming the NIC. Antikythera fails closed in the
+other order (a NIC whose subnet it does not know carries nothing), so a
+mistake here shows up as lost traffic, not as traffic in the wrong
+subnet.
+
+`AssociateVpcCidrBlock` adds the block's `local` route to every table in
+the same commit, and `CreateRouteTable` starts a table with one per
+block; `DisassociateVpcCidrBlock` removes them. An `InstanceId` route
+target is resolved to the instance's interface when the route is
+created and stored as that interface, as EC2 shows it. `blackhole` is
+not part of the frame: `DescribeRouteTables` derives it from the target
+interface's attachment, and antikythera reaches the same result on its
+own because a detached interface is in no server's mapping.
+
+Subnet, route-table and association IDs come from the catalog's
+counters like every other ID and are rendered with antikythera's
+`proto::ec2_id`, whose 64-bit values the frames carry.
 
 ### Metering and the multicast setting
 

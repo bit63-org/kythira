@@ -106,14 +106,33 @@ is one PR unless noted.
     planned fleet drain triggers no failover
   - _Requirements: 9.3-9.5, 16.2_
 
-- [ ] 10. VPCs, subnets and network interfaces
+- [ ] 10. VPCs, subnets, route tables and network interfaces
   - `CreateVpc` / `DeleteVpc` with VNIs and `CREATE_NETWORK` /
-    `DELETE_NETWORK`; one subnet per VPC with address pools; default VPC
+    `DELETE_NETWORK`; primary and secondary IPv4 blocks and one IPv6 /56
+    (`AssociateVpcCidrBlock`, `DisassociateVpcCidrBlock`); default VPC
     per account and `CreateDefaultVpc`
-  - Network interfaces: NIC IDs, MACs, addresses, `ATTACH_DEVICE` /
-    `DETACH_DEVICE`, `MapUpdate` versions and convergence
+  - Subnets, up to 200 per VPC: `CreateSubnet`, `DeleteSubnet`,
+    `DescribeSubnets`, `ModifySubnetAttribute`,
+    `AssociateSubnetCidrBlock` / `DisassociateSubnetCidrBlock`; overlap
+    checks; address pools with the five reserved addresses
+  - Route tables: the main table, `CreateRouteTable`,
+    `DeleteRouteTable`, `DescribeRouteTables` (`blackhole` state),
+    `AssociateRouteTable`, `DisassociateRouteTable`,
+    `ReplaceRouteTableAssociation`; `local` routes per block;
+    `CreateRoute`, `ReplaceRoute`, `DeleteRoute` with
+    `NetworkInterfaceId` / `InstanceId` targets and the limits; other
+    targets refused
+  - `VpcConfig` version 2 frames with committed versions, sent before
+    the `MapUpdate` that first uses a subnet; IDs rendered with
+    antikythera's `proto::ec2_id`
+  - Network interfaces: NIC IDs, MACs, addresses from the subnet's
+    pool, `ATTACH_DEVICE` / `DETACH_DEVICE`, `MapUpdate` version 4
+    (subnet per NIC) versions and convergence
   - `TunnelPeers` per VTEP on peer-set or key change
-  - _Requirements: 11.1-11.7_
+  - Tests against antikythera's codecs and test vectors: frames at the
+    limits, the config-before-mapping order, a NIC route going
+    `blackhole` on detach and `active` again on attach
+  - _Requirements: 4.1, 11.1-11.13, 14.1_
 
 - [ ] 11. Network volumes and keys
   - `CreateVolume`, `DeleteVolume`, `AttachVolume`, `DetachVolume`
