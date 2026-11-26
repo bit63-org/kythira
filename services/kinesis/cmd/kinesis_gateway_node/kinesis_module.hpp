@@ -1233,8 +1233,25 @@ private:
     /// No Raft group, no store, no internal routes: a write is proposed on
     /// the data node that leads its group, a read answered by a replica.
     void build_front_end_node() {
+        kinesis::remote_data_options ro;
+        // A call the data layer never answered, with what each data node
+        // said on the way: at most one line a second, so a node kill does
+        // not flood the log.
+        ro._on_failure = [this, last = std::make_shared<std::atomic<std::int64_t>>(0)](
+                             std::string_view trail) {
+            const auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                 std::chrono::steady_clock::now().time_since_epoch())
+                                 .count();
+            auto prev = last->load();
+            if (now - prev < 1000 || !last->compare_exchange_strong(prev, now)) {
+                return;
+            }
+            _logger->log(kythira::log_level::warning,
+                         "kinesis front end: data-layer call failed: " + std::string(trail), {});
+        };
         _remote_data = std::make_unique<kinesis::remote_data_access>(
-            _opt._data_nodes, kinesis::make_http_data_transport(*_peers, _opt._forward_secret));
+            _opt._data_nodes, kinesis::make_http_data_transport(*_peers, _opt._forward_secret),
+            std::move(ro));
         const auto fc = make_front_end_config();
         _front_end = std::make_unique<front_end_type>(fc, *_authorizer);
         _remote_service = std::make_unique<kinesis::kinesis_service<kinesis::data_access>>(

@@ -613,8 +613,12 @@ BOOST_AUTO_TEST_CASE(a_write_that_may_have_committed_is_not_retried) {
     const auto rec = **f.data.find_stream(k_account, "s");
 
     // The leader answers "not committed here" (a timeout): the remote access
-    // reports it once and proposes nothing more.
+    // reports it once and proposes nothing more, and tells the operator
+    // which node said what.
     int calls = 0;
+    std::vector<std::string> failures;
+    kin::remote_data_options opts;
+    opts._on_failure = [&](std::string_view line) { failures.emplace_back(line); };
     kin::remote_data_access flaky(
         {"d1:4567"},
         [&](const std::string& address, std::string_view target,
@@ -624,10 +628,45 @@ BOOST_AUTO_TEST_CASE(a_write_that_may_have_committed_is_not_retried) {
                 return std::pair{503U, std::string("not committed here")};
             }
             return l.transport()(address, target, std::move(body));
-        });
+        },
+        opts);
     const kin::stream_command c = kin::shard_tip_command{kin::routing_key(rec._id, 0)};
     BOOST_TEST(!flaky.propose(kin::command_key(c), kin::encode_command(c), kin::admission::none));
     BOOST_TEST(calls == 1);
+    BOOST_REQUIRE(failures.size() == 1U);
+    BOOST_TEST(failures[0].find("may have committed") != std::string::npos, failures[0]);
+    BOOST_TEST(failures[0].find("d1@") != std::string::npos, failures[0]);
+    BOOST_TEST(failures[0].find("503 not committed here") != std::string::npos, failures[0]);
+}
+
+BOOST_AUTO_TEST_CASE(a_call_no_replica_answers_says_what_each_target_said) {
+    std::int64_t clock = 1'762'776'000'000;
+    layout l(clock);
+    auto& d1 = l.add_node("d1");
+    l.add_group(1, range(std::nullopt, std::nullopt), "d1", {"d1"}, "d1");
+    front_end_only f(l);
+    f.ok("CreateStream", {{"StreamName", "s"}, {"ShardCount", 1}});
+    const auto rec = **f.data.find_stream(k_account, "s");
+
+    // The only replica answers "no replica" to every read: the call gives
+    // up after its rounds, and the line names the node and its answer.
+    std::vector<std::string> failures;
+    kin::remote_data_options opts;
+    opts._on_failure = [&](std::string_view line) { failures.emplace_back(line); };
+    kin::remote_data_access lost(
+        {"d1:4567"},
+        [&](const std::string& address, std::string_view target,
+            std::string body) -> std::optional<std::pair<unsigned, std::string>> {
+            if (target == kin::data_api::k_shard_path) {
+                return std::pair{404U, std::string("no such group here")};
+            }
+            return l.transport()(address, target, std::move(body));
+        },
+        opts);
+    BOOST_TEST(!lost.shard(kin::routing_key(rec._id, 0)).has_value());
+    BOOST_REQUIRE(failures.size() == 1U);
+    BOOST_TEST(failures[0].find("found no replica") != std::string::npos, failures[0]);
+    BOOST_TEST(failures[0].find(": 404 no such group here") != std::string::npos, failures[0]);
 }
 
 BOOST_AUTO_TEST_CASE(a_dead_replica_is_skipped_for_reads) {

@@ -701,6 +701,11 @@ struct remote_data_options {
     /// this node's wall clock. Tests that drive a data node's clock hand
     /// the same one here, as NTP keeps every real layer's in step.
     std::function<std::int64_t()> _clock;
+    /// Told, for every keyed call that ends without an answer, what each
+    /// target answered on the way (`node@address: status reason`, in
+    /// order), so an operator sees where the data layer stopped taking
+    /// calls. Empty is silent.
+    std::function<void(std::string_view)> _on_failure;
 };
 
 struct remote_data_stats {
@@ -1027,9 +1032,28 @@ private:
     template<typename Build>
     auto keyed(const std::string& key, std::string_view target, bool write, Build&& build)
         -> std::optional<std::string> {
+        std::string trail;
+        const auto note = [&](const std::string& node, const std::string& address,
+                              std::string_view what) {
+            if (!_options._on_failure) {
+                return;
+            }
+            trail += trail.empty() ? "" : "; ";
+            trail += node + "@" + address + ": ";
+            trail += what.substr(0, 160);
+        };
+        const auto give_up = [&](std::string_view why) -> std::optional<std::string> {
+            if (_options._on_failure) {
+                std::string line = std::string(target) + " for key " + key + " " +
+                                   std::string(why) + " [" + trail + "]";
+                _options._on_failure(line);
+            }
+            return std::nullopt;
+        };
         for (int attempt = 0; attempt < _options._attempts; ++attempt) {
             const auto route = _routes.ensure(key);
             if (!route) {
+                note("-", "-", "no route");
                 break;
             }
             const route_ref ref{._group = route->_group_id, ._epoch = route->_epoch};
@@ -1041,16 +1065,24 @@ private:
                  write ? _routes.write_targets(key) : _routes.read_targets(key)) {
                 const auto address = _routes.address_of(node);
                 if (!address) {
+                    note(node, "-", "no address");
                     continue;
                 }
                 const auto res = call(*address, target, body);
                 if (!res) {
+                    note(node, *address, "unreachable");
                     _routes.on_connection_failure(node);
                     continue;
                 }
                 const auto& [code, answer] = *res;
                 if (code == data_api::k_ok) {
                     return answer;
+                }
+                if (_options._on_failure) {
+                    const bool text =
+                        code != data_api::k_not_leader && code != data_api::k_stale_route;
+                    note(node, *address,
+                         std::to_string(code) + (text ? " " + answer : std::string()));
                 }
                 if (code == data_api::k_not_leader) {
                     count([](remote_data_stats& s) { ++s._not_leader; });
@@ -1061,6 +1093,9 @@ private:
                     } catch (const std::exception&) {
                         hint.reset();
                     }
+                    if (_options._on_failure) {
+                        trail += " hint=" + hint.value_or("none");
+                    }
                     _routes.on_not_leader(route->_group_id, hint);
                     reroute = true;
                     break;
@@ -1069,7 +1104,16 @@ private:
                     count([](remote_data_stats& s) { ++s._stale_route; });
                     try {
                         auto r = data_api_detail::open_body(answer);
-                        _routes.on_stale_epoch(data_api_detail::get_route(r));
+                        const auto current = data_api_detail::get_route(r);
+                        if (_options._on_failure) {
+                            trail += " epoch=" + std::to_string(current._epoch._version) + "." +
+                                     std::to_string(current._epoch._conf_version) + " voters=";
+                            for (const auto& v : current._voters) {
+                                trail += v + ",";
+                            }
+                            trail += " leader=" + current._leader_hint.value_or("none");
+                        }
+                        _routes.on_stale_epoch(current);
                     } catch (const std::exception&) {
                         _routes.on_unknown_group(route->_group_id);
                     }
@@ -1083,7 +1127,7 @@ private:
                 }
                 if (write) {
                     // 503 on a write: it may still commit. Never retried.
-                    return std::nullopt;
+                    return give_up("may have committed");
                 }
                 // A read the node could not answer now: try the next.
             }
@@ -1094,7 +1138,7 @@ private:
             }
         }
         count([](remote_data_stats& s) { ++s._unreachable; });
-        return std::nullopt;
+        return give_up("found no replica to answer it");
     }
 
     template<typename T, typename Args, typename Parse>
