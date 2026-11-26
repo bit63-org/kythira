@@ -355,6 +355,12 @@ public:
         _host = std::make_unique<host_type>(make_config(node, space));
         _host_ptr.store(_host.get(), std::memory_order_release);
 
+        // A front end without the data layer (redis-general-data-types task
+        // 16) holds no replica: its host joins no group, and its gateway
+        // reaches the data nodes over KYTHIRA.DATA.
+        if (!_gateway_cfg->_layer_roles.has(kythira::layers::role::data)) {
+            return;
+        }
         // Initial tiling: cuts sorted and deduplicated, one shard per range.
         auto cuts = _opt._shard_cuts;
         std::sort(cuts.begin(), cuts.end());

@@ -193,6 +193,71 @@ BOOST_AUTO_TEST_CASE(every_propose_answer_round_trips, *boost::unit_test::timeou
     BOOST_CHECK(!propose_decode(std::string(1, '\x01')).has_value());
 }
 
+BOOST_AUTO_TEST_CASE(every_read_answer_round_trips, *boost::unit_test::timeout(10)) {
+    using wire::read_status;
+    auto value = wire::decode_read<node_t>(wire::encode_read_value(1234, std::string("v\0w", 3)));
+    BOOST_REQUIRE(value.has_value());
+    BOOST_CHECK(value->status == read_status::ok);
+    BOOST_CHECK(value->found);
+    BOOST_CHECK_EQUAL(value->expire_at_ms, 1234u);
+    BOOST_CHECK_EQUAL(value->value, std::string("v\0w", 3));
+
+    auto empty = wire::decode_read<node_t>(wire::encode_read_value(0, ""));
+    BOOST_REQUIRE(empty.has_value());
+    BOOST_CHECK(empty->found);
+    BOOST_CHECK(empty->value.empty());
+
+    auto miss = wire::decode_read<node_t>(wire::encode_read_miss());
+    BOOST_REQUIRE(miss.has_value());
+    BOOST_CHECK(miss->status == read_status::ok);
+    BOOST_CHECK(!miss->found);
+
+    for (auto s : {read_status::not_leader, read_status::not_replicated}) {
+        auto named =
+            wire::decode_read<node_t>(wire::encode_read_elsewhere(s, std::optional<node_t>{2}));
+        BOOST_REQUIRE(named.has_value());
+        BOOST_CHECK(named->status == s);
+        BOOST_CHECK(named->leader == std::optional<node_t>{2});
+        auto unnamed =
+            wire::decode_read<node_t>(wire::encode_read_elsewhere(s, std::optional<node_t>{}));
+        BOOST_REQUIRE(unnamed.has_value());
+        BOOST_CHECK(!unnamed->leader.has_value());
+    }
+    for (auto s : {read_status::unrouted, read_status::loading, read_status::barrier_failed}) {
+        auto d = wire::decode_read<node_t>(wire::encode_read_status(s));
+        BOOST_REQUIRE(d.has_value());
+        BOOST_CHECK(d->status == s);
+    }
+
+    for (auto m :
+         {wire::read_mode::leader, wire::read_mode::any_replica, wire::read_mode::linearizable}) {
+        BOOST_CHECK(wire::parse_read_mode(wire::read_mode_name(m)) == std::optional{m});
+    }
+    BOOST_CHECK(!wire::parse_read_mode("leader").has_value());
+    BOOST_CHECK(!wire::parse_read_mode("").has_value());
+}
+
+BOOST_AUTO_TEST_CASE(malformed_read_answers_are_refused, *boost::unit_test::timeout(10)) {
+    const auto good = wire::encode_read_value(99, "value");
+    // Every truncation, and a trailing byte.
+    for (std::size_t n = 0; n < good.size(); ++n) {
+        BOOST_TEST_INFO("prefix " << n);
+        BOOST_CHECK(!wire::decode_read<node_t>(good.substr(0, n)).has_value());
+    }
+    BOOST_CHECK(!wire::decode_read<node_t>(good + "x").has_value());
+    // An unknown status, a presence byte that is neither 0 nor 1, a miss or
+    // a status-only answer with bytes after it, a hint that is no node id.
+    BOOST_CHECK(!wire::decode_read<node_t>(std::string(1, '\x06')).has_value());
+    BOOST_CHECK(!wire::decode_read<node_t>(std::string{'\0', '\2'}).has_value());
+    BOOST_CHECK(!wire::decode_read<node_t>(wire::encode_read_miss() + "x").has_value());
+    BOOST_CHECK(
+        !wire::decode_read<node_t>(wire::encode_read_status(wire::read_status::loading) + "x")
+             .has_value());
+    BOOST_CHECK(!wire::decode_read<node_t>(std::string{'\1', '\1', '\2', 'x', 'y'}).has_value());
+    // A value length past the end.
+    BOOST_CHECK(!wire::decode_read<node_t>(std::string{'\0', '\1', '\0', '\x7f', 'a'}).has_value());
+}
+
 BOOST_AUTO_TEST_CASE(peer_answers_parse, *boost::unit_test::timeout(10)) {
     auto b = parse_redis_peer_answer(bulk(std::string("a\r\nb", 4)));
     BOOST_CHECK(b._kind == redis_peer_answer::kind::bulk);
@@ -357,6 +422,82 @@ BOOST_AUTO_TEST_CASE(refusals_the_caller_handles_raise_the_hosts_exceptions,
     } catch (const std::runtime_error& e) {
         BOOST_CHECK(std::string(e.what()).find("disk full") != std::string::npos);
     }
+}
+
+BOOST_AUTO_TEST_CASE(reads_go_to_the_leader_and_follow_its_refusals,
+                     *boost::unit_test::timeout(10)) {
+    fake_nodes f;
+    f.nodes["seed:1"] = [](const auto&) -> std::optional<std::string> {
+        return bulk(wire::encode_routes(one_group(1)));
+    };
+    f.nodes["n1:1"] = [](const std::vector<std::string>& argv) -> std::optional<std::string> {
+        BOOST_CHECK_EQUAL(argv.at(2), "LINEARIZABLE");
+        BOOST_CHECK_EQUAL(argv.at(3), "k");
+        return bulk(
+            wire::encode_read_elsewhere(wire::read_status::not_leader, std::optional<node_t>{3}));
+    };
+    f.nodes["n3:1"] = [](const auto&) -> std::optional<std::string> {
+        return bulk(wire::encode_read_value(7, "v"));
+    };
+    remote_t remote({"seed:1"}, f.call(), fast());
+    auto got = remote.read("k", wire::read_mode::linearizable, std::chrono::seconds{1});
+    BOOST_REQUIRE(got.has_value());
+    BOOST_CHECK(got->found);
+    BOOST_CHECK_EQUAL(got->value, "v");
+    BOOST_CHECK_EQUAL(got->expire_at_ms, 7u);
+    BOOST_CHECK((f.calls == std::vector<std::string>{"seed:1 ROUTES", "n1:1 READ", "n3:1 READ"}));
+    BOOST_CHECK(remote.leader_of("k") == std::optional<node_t>{3});
+}
+
+BOOST_AUTO_TEST_CASE(a_replica_without_the_bytes_hands_the_read_to_the_leader,
+                     *boost::unit_test::timeout(10)) {
+    // Any replica may answer; the first lacks the value's bytes and names
+    // the leader, which has them.
+    fake_nodes f;
+    f.nodes["seed:1"] = [](const auto&) -> std::optional<std::string> {
+        return bulk(wire::encode_routes(one_group(2)));
+    };
+    f.nodes["n1:1"] = [](const auto&) -> std::optional<std::string> {
+        return bulk(wire::encode_read_elsewhere(wire::read_status::not_replicated,
+                                                std::optional<node_t>{2}));
+    };
+    f.nodes["n2:1"] = [](const auto&) -> std::optional<std::string> {
+        return bulk(wire::encode_read_miss());
+    };
+    remote_t remote({"seed:1"}, f.call(), fast());
+    auto got = remote.read("k", wire::read_mode::any_replica, std::chrono::seconds{1});
+    BOOST_REQUIRE(got.has_value());
+    BOOST_CHECK(got->status == wire::read_status::ok);
+    BOOST_CHECK(!got->found);
+    BOOST_CHECK((f.calls == std::vector<std::string>{"seed:1 ROUTES", "n1:1 READ", "n2:1 READ"}));
+}
+
+BOOST_AUTO_TEST_CASE(a_read_nobody_serves_gives_up_at_the_timeout, *boost::unit_test::timeout(10)) {
+    // Every voter loading, then unreachable: no answer, and the row is
+    // refetched between rounds in case it went stale.
+    fake_nodes f;
+    f.nodes["seed:1"] = [](const auto&) -> std::optional<std::string> {
+        return bulk(wire::encode_routes(one_group(1)));
+    };
+    f.nodes["n1:1"] = [](const auto&) -> std::optional<std::string> {
+        return bulk(wire::encode_read_status(wire::read_status::loading));
+    };
+    remote_t remote({"seed:1"}, f.call(), fast());
+    const auto start = std::chrono::steady_clock::now();
+    BOOST_CHECK(!remote.read("k", wire::read_mode::leader, std::chrono::milliseconds{50}));
+    BOOST_CHECK_LT(std::chrono::steady_clock::now() - start, std::chrono::seconds{2});
+    BOOST_CHECK_GT(remote.cache().stats().refreshes, 1u);
+
+    // An unrouted key is an answer, not a retry.
+    fake_nodes g;
+    g.nodes["seed:1"] = f.nodes["seed:1"];
+    g.nodes["n1:1"] = [](const auto&) -> std::optional<std::string> {
+        return bulk(wire::encode_read_status(wire::read_status::unrouted));
+    };
+    remote_t other({"seed:1"}, g.call(), fast());
+    auto unrouted = other.read("k", wire::read_mode::leader, std::chrono::seconds{1});
+    BOOST_REQUIRE(unrouted.has_value());
+    BOOST_CHECK(unrouted->status == wire::read_status::unrouted);
 }
 
 BOOST_AUTO_TEST_CASE(no_answer_in_time_is_not_leader, *boost::unit_test::timeout(10)) {

@@ -5,6 +5,17 @@ current list of outstanding work, see [TODO.md](TODO.md).
 
 ### What Changed (November 26, 2026)
 
+- **A Redis node can serve clients without holding any data, and a data
+  node can serve only other nodes.** `KYTHIRA_REDIS_ROLES=gateway,front_end`
+  with `KYTHIRA_REDIS_DATA_NODES` runs a front end whose host joins no Raft
+  group: it reads keys with the new `KYTHIRA.DATA READ`, writes them with
+  `KYTHIRA.DATA PROPOSE`, and coordinates transactions over `KYTHIRA.TXN`
+  to the leaders the data nodes' routes name, answering with the bytes a
+  co-located node gives (the recorded Redis and Valkey streams replay
+  through it unchanged). `KYTHIRA_REDIS_ROLES=data` runs a node whose
+  listener serves those front ends and refuses clients. A route a data
+  node hands out now names the node itself when it leads the group, not
+  the leader before it (`.kiro/specs/redis-general-data-types/` task 16).
 - **DynamoDB global tables take replica updates and overrides.**
   `UpdateTable` `ReplicaUpdates` now accepts `Update`, and `Create` and
   `Update` take the per-replica overrides (`ProvisionedThroughputOverride`,

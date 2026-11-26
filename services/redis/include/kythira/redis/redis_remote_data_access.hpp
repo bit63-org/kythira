@@ -111,6 +111,7 @@ public:
     redis_remote_data_access(std::vector<std::string> seeds, call_fn call, options opts = {})
         : _call(std::move(call)),
           _opts(opts),
+          _seeds(seeds),
           _cache(
               std::move(seeds),
               [this](const std::string& address, const shard_range<std::string>& range) {
@@ -186,7 +187,125 @@ public:
         }
     }
 
+    // ── reads (KYTHIRA.DATA READ) ───────────────────────────────────────────
+
+    using read_answer = redis_data_wire::read_outcome<NodeId>;
+
+    /// Reads `key` at `mode` from a data node: for `any_replica` the
+    /// replicas in `read_targets` order, else the leader hint first and then
+    /// the other voters. Each node answers or refuses, never forwards
+    /// (Requirement 18.3), so this call makes the hops, as `propose` does.
+    ///
+    /// @return an `ok` or `unrouted` answer; `nullopt` when no data node
+    ///         served it before `timeout` (the caller's retry error).
+    auto read(const std::string& key, redis_data_wire::read_mode mode,
+              std::chrono::milliseconds timeout) -> std::optional<read_answer> {
+        const auto deadline = std::chrono::steady_clock::now() + std::min(timeout, _opts.timeout);
+        const std::vector<std::string> argv{
+            "KYTHIRA.DATA", "READ", std::string(redis_data_wire::read_mode_name(mode)), key};
+        using status = redis_data_wire::read_status;
+        for (;;) {
+            if (auto r = _cache.ensure(key)) {
+                const auto targets = mode == redis_data_wire::read_mode::any_replica
+                                         ? _cache.read_targets(key)
+                                         : _cache.write_targets(key);
+                bool learned = false;
+                for (const auto& target : targets) {
+                    auto answer = ask_read(target, argv);
+                    if (!answer) {
+                        continue;
+                    }
+                    if (answer->status == status::ok || answer->status == status::unrouted) {
+                        return answer;
+                    }
+                    if (answer->status == status::not_replicated && answer->leader &&
+                        *answer->leader != target) {
+                        // The leader has the bytes this replica lacks.
+                        if (auto there = ask_read(*answer->leader, argv);
+                            there && there->status == status::ok) {
+                            return there;
+                        }
+                        continue;
+                    }
+                    if (answer->status == status::not_leader &&
+                        mode != redis_data_wire::read_mode::any_replica) {
+                        _cache.on_not_leader(r->_group_id, answer->leader);
+                        if (answer->leader && *answer->leader != target) {
+                            learned = true;  // the hint goes first next round
+                            break;
+                        }
+                    }
+                }
+                if (!learned) {
+                    // Every replica the row names refused or was unreachable:
+                    // the row may be stale (a split, a move). Fetch it afresh.
+                    _cache.on_unknown_group(r->_group_id);
+                }
+            }
+            if (std::chrono::steady_clock::now() >= deadline) {
+                return std::nullopt;
+            }
+            std::this_thread::sleep_for(_opts.retry_pause);
+        }
+    }
+
+    /// Where `node` takes data-layer calls, as the routes named it.
+    [[nodiscard]] auto address_of(const NodeId& node) const -> std::optional<std::string> {
+        return _cache.address_of(node);
+    }
+
+    /// Every data node this access knows an address for: the voters and
+    /// learners of the cached routes, then the seeds. For a call any data
+    /// node may answer but only one can serve, such as a timestamp from
+    /// the oracle's leader, whose group has no key and so no route.
+    [[nodiscard]] auto data_addresses() const -> std::vector<std::string> {
+        std::vector<std::string> out;
+        auto add = [&out](const std::string& a) {
+            if (std::find(out.begin(), out.end(), a) == out.end()) {
+                out.push_back(a);
+            }
+        };
+        for (const auto& r : _cache.routes()) {
+            for (const auto* nodes : {&r._voters, &r._learners}) {
+                for (const auto& n : *nodes) {
+                    if (auto a = _cache.address_of(n)) {
+                        add(*a);
+                    }
+                }
+            }
+        }
+        for (const auto& seed : _seeds) {
+            add(seed);
+        }
+        return out;
+    }
+
 private:
+    /// One `READ` to `target`; `nullopt` when it could not be reached or
+    /// its answer was not one (the node goes to the back of the order).
+    auto ask_read(const NodeId& target, const std::vector<std::string>& argv)
+        -> std::optional<read_answer> {
+        const auto address = _cache.address_of(target);
+        if (!address) {
+            return std::nullopt;
+        }
+        const auto reply = _call(*address, argv);
+        if (!reply) {
+            _cache.on_connection_failure(target);
+            return std::nullopt;
+        }
+        const auto answer = parse_redis_peer_answer(*reply);
+        if (answer._kind != redis_peer_answer::kind::bulk) {
+            _cache.on_connection_failure(target);
+            return std::nullopt;
+        }
+        auto outcome = redis_data_wire::decode_read<NodeId>(answer._text);
+        if (!outcome) {
+            _cache.on_connection_failure(target);
+        }
+        return outcome;
+    }
+
     /// One pass over `r`'s write targets. The result bytes when one applied
     /// the entry; `nullopt` to go round again (the cache has learned
     /// something, or nobody answered).
@@ -290,6 +409,7 @@ private:
 
     call_fn _call;
     options _opts;
+    std::vector<std::string> _seeds;
     cache_type _cache;
 };
 

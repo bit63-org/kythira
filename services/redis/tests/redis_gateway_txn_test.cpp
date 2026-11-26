@@ -241,6 +241,12 @@ public:
 
     ~cluster() {
         _running = false;
+        for (auto& g : _front_ends) {
+            g->stop();
+        }
+        for (auto& h : _front_end_hosts) {
+            h->stop();
+        }
         for (auto& t : _drivers) {
             t.join();
         }
@@ -281,6 +287,33 @@ public:
         return false;
     }
 
+    /// A node without the data layer (redis-general-data-types task 16):
+    /// its host is in no group; routes and proposals cross KYTHIRA.DATA,
+    /// and the coordinator's participant messages cross KYTHIRA.TXN to
+    /// the leaders the routes name.
+    auto add_front_end() -> gateway_type& {
+        const auto id = static_cast<node_id_t>(k_node_count + 1 + _front_end_hosts.size());
+        _front_end_hosts.push_back(std::make_unique<host_type>(make_config(id)));
+        _front_end_hosts.back()->start();
+        redis_gateway_config cfg;
+        cfg._listen = "127.0.0.1:0";
+        cfg._internal_secret = "internal-secret";
+        cfg._io_threads = 1;
+        cfg._worker_threads = 4;
+        cfg._command_timeout = std::chrono::milliseconds{5000};
+        cfg._allow_plaintext_forwarding = true;
+        cfg._transactions = true;
+        cfg._layer_roles = {kythira::layers::role::gateway, kythira::layers::role::front_end};
+        for (node_id_t n = 1; n <= k_node_count; ++n) {
+            cfg._data_nodes.push_back("127.0.0.1:" + std::to_string(port(n)));
+        }
+        _front_ends.push_back(std::make_unique<gateway_type>(
+            *_front_end_hosts.back(), _acl, _logger, _metrics, cfg,
+            [](const node_id_t&) -> std::optional<std::string> { return std::nullopt; }));
+        _front_ends.back()->start();
+        return *_front_ends.back();
+    }
+
 private:
     auto make_config(node_id_t id) -> config_type {
         config_type cfg{
@@ -305,6 +338,8 @@ private:
     kythira::noop_metrics _metrics;
     std::vector<std::unique_ptr<host_type>> _hosts;
     std::vector<std::unique_ptr<gateway_type>> _gateways;
+    std::vector<std::unique_ptr<host_type>> _front_end_hosts;
+    std::vector<std::unique_ptr<gateway_type>> _front_ends;
     std::vector<std::thread> _drivers;
     std::atomic<bool> _running{false};
 };
@@ -608,3 +643,42 @@ BOOST_AUTO_TEST_CASE(txn_resp_replies_match_the_golden_file, *boost::unit_test::
 }
 
 BOOST_AUTO_TEST_SUITE_END()
+
+// A front end without the data layer (.kiro/specs/redis-general-data-types/
+// task 16) coordinates cross-shard transactions: it holds no replica, so
+// every participant message and transactional read goes to the leader the
+// data nodes' routes name, over KYTHIRA.TXN, and the replies are the bytes a
+// co-located gateway gives.
+BOOST_AUTO_TEST_CASE(a_front_end_without_data_coordinates_transactions,
+                     *boost::unit_test::timeout(180)) {
+    cluster c;
+    BOOST_REQUIRE(c.await_all_leaders(std::chrono::seconds{20}));
+    auto& fe = c.add_front_end();
+    resp_client client(fe.port());
+    BOOST_REQUIRE_EQUAL(client.call({"AUTH", "ops", "ops-secret"}), "+OK\r\n");
+    resp_client peer(c.port(1));
+    BOOST_REQUIRE_EQUAL(peer.call({"AUTH", "ops", "ops-secret"}), "+OK\r\n");
+
+    BOOST_CHECK_EQUAL(client.call({"MSET", "a/fe", "left", "z/fe", "right"}), "+OK\r\n");
+    BOOST_CHECK_EQUAL(peer.call({"MGET", "a/fe", "z/fe", "a/none"}),
+                      "*3\r\n" + bulk("left") + bulk("right") + "$-1\r\n");
+    BOOST_CHECK_EQUAL(client.call({"MGET", "a/fe", "z/fe", "a/none"}),
+                      "*3\r\n" + bulk("left") + bulk("right") + "$-1\r\n");
+    BOOST_CHECK_EQUAL(client.call({"MSET", "a/fe", "other", "z/fe2", "x"}),
+                      "-ERR value conflict for an existing key\r\n");
+
+    BOOST_CHECK_EQUAL(client.call({"MULTI"}), "+OK\r\n");
+    BOOST_CHECK_EQUAL(client.call({"SET", "a/fe/m", "1"}), "+QUEUED\r\n");
+    BOOST_CHECK_EQUAL(client.call({"GET", "a/fe/m"}), "+QUEUED\r\n");
+    BOOST_CHECK_EQUAL(client.call({"MSET", "z/fe/m", "2", "z/fe/n", "3"}), "+QUEUED\r\n");
+    BOOST_CHECK_EQUAL(client.call({"DEL", "z/fe/n", "a/absent"}), "+QUEUED\r\n");
+    BOOST_CHECK_EQUAL(client.call({"EXEC"}), "*4\r\n+OK\r\n" + bulk("1") + "+OK\r\n:1\r\n");
+    BOOST_CHECK_EQUAL(peer.call({"MGET", "a/fe/m", "z/fe/m", "z/fe/n"}),
+                      "*3\r\n" + bulk("1") + bulk("2") + "$-1\r\n");
+
+    BOOST_CHECK_EQUAL(client.call({"DEL", "a/fe", "z/fe", "a/none"}), ":2\r\n");
+    BOOST_CHECK_EQUAL(peer.call({"MGET", "a/fe", "z/fe"}), "*2\r\n$-1\r\n$-1\r\n");
+
+    BOOST_CHECK_GE(fe.stats()._txn_committed.load(), 3u);
+    BOOST_CHECK_EQUAL(fe.stats()._txn_unknown.load(), 0u);
+}

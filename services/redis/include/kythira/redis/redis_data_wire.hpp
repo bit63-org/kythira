@@ -17,6 +17,7 @@
 /// | `KYTHIRA.DATA ROUTE <key>` | bulk: a routes payload with the key's route |
 /// | `KYTHIRA.DATA ROUTES <range>` | bulk: a routes payload for the range |
 /// | `KYTHIRA.DATA PROPOSE <group> <version> <conf> <entry>` | bulk: a proposal outcome |
+/// | `KYTHIRA.DATA READ <mode> <key>` | bulk: a read outcome |
 ///
 /// Every answer is one bulk string (an error is only for a malformed or
 /// refused call), so a reply never needs an error string parsed to find
@@ -425,6 +426,158 @@ template<typename GroupId, typename NodeId>
         case propose_status::unknown_group:
         case propose_status::unrouted:
         case propose_status::timeout:
+            break;
+    }
+    if (!in.done()) {
+        return std::nullopt;
+    }
+    return out;
+}
+
+// ── reads ──────────────────────────────────────────────────────────────────
+
+/// Which replica may answer `KYTHIRA.DATA READ`, as the front end's
+/// `redis_read_consistency` asks: the argument is the name.
+enum class read_mode : std::uint8_t {
+    /// Only a leader that has applied every write its predecessor
+    /// acknowledged (the default consistency).
+    leader,
+    /// Any replica, which may lag.
+    any_replica,
+    /// The leader, after a committed no-op proves its state is current.
+    linearizable,
+};
+
+[[nodiscard]] inline auto read_mode_name(read_mode m) -> std::string_view {
+    switch (m) {
+        case read_mode::any_replica:
+            return "ANY";
+        case read_mode::linearizable:
+            return "LINEARIZABLE";
+        case read_mode::leader:
+            break;
+    }
+    return "LEADER";
+}
+
+/// The mode a `READ` names, upper case only; `nullopt` for anything else.
+[[nodiscard]] inline auto parse_read_mode(std::string_view name) -> std::optional<read_mode> {
+    for (auto m : {read_mode::leader, read_mode::any_replica, read_mode::linearizable}) {
+        if (name == read_mode_name(m)) {
+            return m;
+        }
+    }
+    return std::nullopt;
+}
+
+/// How a data node answered `KYTHIRA.DATA READ`. The values are wire bytes:
+/// append only.
+enum class read_status : std::uint8_t {
+    /// Read; payload: a presence byte and, for a present key, its deadline
+    /// (ms since the Unix epoch, 0 for none) as a varint and its bytes.
+    ok = 0,
+    /// This replica cannot answer at the mode (not the leader, or a leader
+    /// still catching up, or no replica of the key's group here); payload:
+    /// a presence byte and the leader hint's text. Never forwarded.
+    not_leader = 1,
+    /// The value's bytes are not all on this replica yet (the disk-backed
+    /// store); payload as `not_leader`, naming the leader that has them.
+    not_replicated = 2,
+    /// No group owns the key.
+    unrouted = 3,
+    /// The node is not serving yet.
+    loading = 4,
+    /// The linearizable read's no-op did not commit.
+    barrier_failed = 5,
+};
+
+inline constexpr std::uint8_t k_read_status_max = 5;
+
+/// A decoded read answer.
+template<typename NodeId> struct read_outcome {
+    read_status status = read_status::loading;
+    /// `ok`: whether the key exists here.
+    bool found = false;
+    std::uint64_t expire_at_ms = 0;
+    std::string value;
+    /// `not_leader`, `not_replicated`.
+    std::optional<NodeId> leader;
+};
+
+/// `ok` for a present key.
+[[nodiscard]] inline auto encode_read_value(std::uint64_t expire_at_ms, std::string_view value)
+    -> std::string {
+    std::string out{static_cast<char>(read_status::ok), '\1'};
+    detail::put_varint(out, expire_at_ms);
+    detail::put_bytes(out, value);
+    return out;
+}
+
+/// `ok` for a missing key.
+[[nodiscard]] inline auto encode_read_miss() -> std::string {
+    return std::string{static_cast<char>(read_status::ok), '\0'};
+}
+
+/// `not_leader` or `not_replicated` with the leader to ask, when known.
+template<typename NodeId>
+[[nodiscard]] auto encode_read_elsewhere(read_status status, const std::optional<NodeId>& leader)
+    -> std::string {
+    std::string out(1, static_cast<char>(status));
+    out.push_back(leader ? '\1' : '\0');
+    if (leader) {
+        detail::put_bytes(out, detail::node_text(*leader));
+    }
+    return out;
+}
+
+/// `unrouted`, `loading` and `barrier_failed`.
+[[nodiscard]] inline auto encode_read_status(read_status status) -> std::string {
+    return std::string(1, static_cast<char>(status));
+}
+
+template<typename NodeId>
+[[nodiscard]] auto decode_read(std::string_view bytes) -> std::optional<read_outcome<NodeId>> {
+    if (bytes.empty() || static_cast<std::uint8_t>(bytes[0]) > k_read_status_max) {
+        return std::nullopt;
+    }
+    read_outcome<NodeId> out;
+    out.status = static_cast<read_status>(bytes[0]);
+    detail::reader in(bytes.substr(1));
+    switch (out.status) {
+        case read_status::ok: {
+            const auto has = in.byte();
+            if (!has || *has > 1) {
+                return std::nullopt;
+            }
+            if (*has == 1) {
+                const auto expire = in.varint();
+                auto value = expire ? in.bytes() : std::nullopt;
+                if (!value) {
+                    return std::nullopt;
+                }
+                out.found = true;
+                out.expire_at_ms = *expire;
+                out.value = std::move(*value);
+            }
+            break;
+        }
+        case read_status::not_leader:
+        case read_status::not_replicated: {
+            const auto has = in.byte();
+            if (!has || *has > 1) {
+                return std::nullopt;
+            }
+            if (*has == 1) {
+                out.leader = detail::get_node<NodeId>(in);
+                if (!out.leader) {
+                    return std::nullopt;
+                }
+            }
+            break;
+        }
+        case read_status::unrouted:
+        case read_status::loading:
+        case read_status::barrier_failed:
             break;
     }
     if (!in.done()) {

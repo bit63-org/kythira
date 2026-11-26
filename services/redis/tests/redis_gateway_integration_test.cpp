@@ -578,6 +578,12 @@ public:
 
     ~cluster() {
         _running = false;
+        for (auto& g : _front_ends) {
+            g->stop();
+        }
+        for (auto& h : _front_end_hosts) {
+            h->stop();
+        }
         for (auto& t : _drivers) {
             if (t.joinable()) {
                 t.join();
@@ -673,6 +679,35 @@ public:
         return false;
     }
 
+    /// A node without the data layer (.kiro/specs/redis-general-data-types/
+    /// task 16): its host is in no group, and its gateway reaches the data
+    /// layer over `KYTHIRA.DATA` at every cluster node's gateway. It knows
+    /// no peer endpoint of its own, so every address comes from the routes.
+    auto add_front_end(redis_gateway_config cfg = {}) -> gateway_type& {
+        const auto id = static_cast<node_id_t>(k_node_count + 1 + _front_end_hosts.size());
+        _front_end_hosts.push_back(std::make_unique<host_type>(make_config(id)));
+        _front_end_hosts.back()->start();
+        cfg._listen = "127.0.0.1:0";
+        if (cfg._internal_secret.empty()) {
+            cfg._internal_secret = "internal-secret";
+        }
+        cfg._io_threads = 1;
+        cfg._worker_threads = 4;
+        cfg._command_timeout = std::chrono::milliseconds{3000};
+        cfg._allow_plaintext_forwarding = true;
+        cfg._layer_roles = {kythira::layers::role::gateway, kythira::layers::role::front_end};
+        if (cfg._data_nodes.empty()) {
+            for (node_id_t n = 1; n <= k_node_count; ++n) {
+                cfg._data_nodes.push_back("127.0.0.1:" + std::to_string(port(n)));
+            }
+        }
+        _front_ends.push_back(std::make_unique<gateway_type>(
+            *_front_end_hosts.back(), _acl, _logger, _metrics, cfg,
+            [](const node_id_t&) -> std::optional<std::string> { return std::nullopt; }));
+        _front_ends.back()->start();
+        return *_front_ends.back();
+    }
+
     /// Run the gateway's maintenance on the leader of `group` right now.
     auto maintain(group_id_type group) -> std::size_t {
         auto leader = leader_of(group);
@@ -729,6 +764,8 @@ private:
     kythira::noop_metrics _metrics;
     std::vector<std::unique_ptr<host_type>> _hosts;
     std::vector<std::unique_ptr<gateway_type>> _gateways;
+    std::vector<std::unique_ptr<host_type>> _front_end_hosts;
+    std::vector<std::unique_ptr<gateway_type>> _front_ends;
     std::vector<std::thread> _drivers;
     std::atomic<bool> _running{false};
     std::array<std::atomic<bool>, k_node_count> _alive{true, true, true};
@@ -2575,4 +2612,223 @@ BOOST_AUTO_TEST_CASE(remote_data_access_routes_and_proposes_over_kythira_data,
     resp_client ops(c.port(leader));
     BOOST_REQUIRE_EQUAL(ops.auth("ops", "ops-secret"), "+OK\r\n");
     BOOST_CHECK(ops.call({"KYTHIRA.DATA", "ROUTE", key}).rfind("-NOPERM", 0) == 0);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Front ends without data (.kiro/specs/redis-general-data-types/ task 16,
+// Requirements 18.1-18.6): a node whose host holds no group serves every
+// command through `KYTHIRA.DATA READ|PROPOSE` and the `KYTHIRA.TXN` hop, with
+// the bytes a co-located node gives.
+// ─────────────────────────────────────────────────────────────────────────────
+
+namespace {
+
+/// The same commands, in order, on two nodes (each on its own keys): every
+/// reply byte-for-byte (Requirement 18.6).
+[[maybe_unused]] void check_same_replies(resp_client& a, resp_client& b, const std::string& tag) {
+    const std::vector<std::vector<std::string>> script{
+        {"SET", tag + "/a", "alpha"},
+        {"GET", tag + "/a"},
+        {"EXISTS", tag + "/a"},
+        {"STRLEN", tag + "/a"},
+        {"GETRANGE", tag + "/a", "1", "3"},
+        {"TTL", tag + "/a"},
+        {"SETEX", tag + "/b", "100", "beta"},
+        {"GET", tag + "/b"},
+        {"GET", tag + "/missing"},
+        {"EXISTS", tag + "/missing"},
+        {"TTL", tag + "/missing"},
+        {"DEL", tag + "/a"},
+        {"DEL", tag + "/a"},
+        {"GET", tag + "/a"},
+    };
+    for (const auto& argv : script) {
+        auto left = argv;
+        auto right = argv;
+        for (std::size_t i = 1; i < argv.size(); ++i) {
+            if (argv[i].rfind(tag, 0) == 0) {
+                left[i] = "x" + argv[i];
+                right[i] = "y" + argv[i];
+            }
+        }
+        BOOST_TEST_CONTEXT(argv[0] << " " << argv[1]) {
+            BOOST_CHECK_EQUAL(a.call(left), b.call(right));
+        }
+    }
+}
+
+}  // namespace
+
+// The disk-backed store keeps a value's chunks on its data nodes, which a
+// front end without data cannot read, so it refuses to start (see the next
+// case); these run on the in-memory and engine stores.
+#if !defined(KYTHIRA_GATEWAY_TEST_DISK_STORE)
+BOOST_AUTO_TEST_CASE(front_end_without_data_serves_commands_from_the_data_nodes,
+                     *boost::unit_test::timeout(180)) {
+    cluster c;
+    BOOST_REQUIRE(c.await_all_leaders(std::chrono::seconds{20}));
+    auto& fe = c.add_front_end();
+
+    resp_client remote(fe.port());
+    BOOST_REQUIRE_EQUAL(remote.auth("farm", "farm-secret"), "+OK\r\n");
+    resp_client local(c.port(c.leader_of(k_sccache_group)));
+    BOOST_REQUIRE_EQUAL(local.auth("farm", "farm-secret"), "+OK\r\n");
+
+    // Both shards, through the leader and (for the co-located side) not.
+    check_same_replies(remote, local, "sccache/fe");
+    check_same_replies(remote, local, "a/fe");
+
+    // A write through the front end is a write on the data layer, and the
+    // reverse: no copy lives on the front end.
+    BOOST_CHECK_EQUAL(remote.call({"SET", "sccache/fe/shared", "one"}), "+OK\r\n");
+    BOOST_CHECK_EQUAL(local.call({"GET", "sccache/fe/shared"}), "$3\r\none\r\n");
+    BOOST_CHECK_EQUAL(local.call({"SET", "sccache/fe/back", "two"}), "+OK\r\n");
+    BOOST_CHECK_EQUAL(remote.call({"GET", "sccache/fe/back"}), "$3\r\ntwo\r\n");
+    BOOST_CHECK_EQUAL(remote.call({"DBSIZE"}), ":0\r\n");
+
+    resp_client ops(fe.port());
+    BOOST_REQUIRE_EQUAL(ops.auth("ops", "ops-secret"), "+OK\r\n");
+    auto info = ops.call({"INFO"});
+    BOOST_CHECK(info.find("kythira_roles:gateway,front_end\r\n") != std::string::npos);
+
+    // The data layer's own leader moves: the front end follows the
+    // refusals to the new one.
+    const auto old_leader = c.leader_of(k_sccache_group);
+    c.kill(old_leader);
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{20};
+    std::string reply;
+    while (std::chrono::steady_clock::now() < deadline) {
+        reply = remote.call({"SET", "sccache/fe/after", "three"});
+        if (reply == "+OK\r\n") {
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds{100});
+    }
+    BOOST_REQUIRE_EQUAL(reply, "+OK\r\n");
+    BOOST_CHECK_EQUAL(remote.call({"GET", "sccache/fe/after"}), "$5\r\nthree\r\n");
+    BOOST_CHECK_EQUAL(remote.call({"GET", "sccache/fe/back"}), "$3\r\ntwo\r\n");
+}
+
+BOOST_AUTO_TEST_CASE(data_only_nodes_serve_front_ends_and_refuse_clients,
+                     *boost::unit_test::timeout(180)) {
+    redis_gateway_config data_only;
+    data_only._layer_roles = {kythira::layers::role::data};
+    cluster c(data_only);
+    BOOST_REQUIRE(c.await_all_leaders(std::chrono::seconds{20}));
+
+    // A client of a data node gets PING and nothing else.
+    resp_client direct(c.port(1));
+    BOOST_REQUIRE_EQUAL(direct.auth("farm", "farm-secret"), "+OK\r\n");
+    BOOST_CHECK_EQUAL(direct.call({"PING"}), "+PONG\r\n");
+    BOOST_CHECK(
+        direct.call({"GET", "sccache/x"}).rfind("-ERR this node runs only the data layer", 0) == 0);
+
+    // Every read consistency through a front end.
+    for (auto consistency : {redis_read_consistency::leader, redis_read_consistency::any_replica,
+                             redis_read_consistency::linearizable}) {
+        redis_gateway_config cfg;
+        cfg._read_consistency = consistency;
+        auto& fe = c.add_front_end(cfg);
+        resp_client k(fe.port());
+        BOOST_REQUIRE_EQUAL(k.auth("farm", "farm-secret"), "+OK\r\n");
+        const auto key = "sccache/split/" + std::to_string(static_cast<int>(consistency));
+        BOOST_CHECK_EQUAL(k.call({"SET", key, "v"}), "+OK\r\n");
+        // A replica may lag by a moment.
+        std::string got;
+        for (int i = 0; i < 50 && got != "$1\r\nv\r\n"; ++i) {
+            got = k.call({"GET", key});
+            if (got != "$1\r\nv\r\n") {
+                std::this_thread::sleep_for(std::chrono::milliseconds{20});
+            }
+        }
+        BOOST_CHECK_EQUAL(got, "$1\r\nv\r\n");
+        BOOST_CHECK_EQUAL(k.call({"DEL", key}), ":1\r\n");
+        for (int i = 0; i < 50 && got != ":0\r\n"; ++i) {
+            got = k.call({"EXISTS", key});
+            if (got != ":0\r\n") {
+                std::this_thread::sleep_for(std::chrono::milliseconds{20});
+            }
+        }
+        BOOST_CHECK_EQUAL(got, ":0\r\n");
+    }
+
+    // READ off the wire: a follower refuses a leader read with the leader's
+    // name, and never forwards it (Requirement 18.3).
+    const auto leader = c.leader_of(k_sccache_group);
+    const auto follower = c.a_follower_of(k_sccache_group);
+    auto& link = c.gateway(follower);
+    auto address = [&](node_id_t id) { return "127.0.0.1:" + std::to_string(c.port(id)); };
+    auto read = [&](node_id_t at, const std::string& mode, const std::string& key) {
+        auto answer = kythira::parse_redis_peer_answer(
+            *link.data_call(address(at), {"KYTHIRA.DATA", "READ", mode, key}));
+        BOOST_REQUIRE(answer._kind == kythira::redis_peer_answer::kind::bulk);
+        auto out = kythira::redis_data_wire::decode_read<node_id_t>(answer._text);
+        BOOST_REQUIRE(out.has_value());
+        return *out;
+    };
+    using kythira::redis_data_wire::read_status;
+    auto& fe = c.add_front_end();
+    resp_client k(fe.port());
+    BOOST_REQUIRE_EQUAL(k.auth("farm", "farm-secret"), "+OK\r\n");
+    BOOST_CHECK_EQUAL(k.call({"SETEX", "sccache/split/ttl", "100", "w"}), "+OK\r\n");
+    auto refused = read(follower, "LEADER", "sccache/split/ttl");
+    BOOST_CHECK(refused.status == read_status::not_leader);
+    BOOST_CHECK(refused.leader == std::optional<node_id_t>{leader});
+    auto served = read(leader, "LEADER", "sccache/split/ttl");
+    BOOST_CHECK(served.status == read_status::ok);
+    BOOST_CHECK(served.found);
+    BOOST_CHECK_EQUAL(served.value, "w");
+    BOOST_CHECK_GT(served.expire_at_ms, 0u);
+    auto missing = read(leader, "LINEARIZABLE", "sccache/split/none");
+    BOOST_CHECK(missing.status == read_status::ok);
+    BOOST_CHECK(!missing.found);
+    BOOST_CHECK(link.data_call(address(leader), {"KYTHIRA.DATA", "READ", "SOMETIMES", "k"})
+                    ->rfind("-ERR unknown read mode", 0) == 0);
+}
+
+#endif  // !KYTHIRA_GATEWAY_TEST_DISK_STORE
+
+BOOST_AUTO_TEST_CASE(front_end_without_data_refuses_to_start_without_a_way_to_reach_it,
+                     *boost::unit_test::timeout(60)) {
+    redis_acl acl;
+    acl.reload(acl_text());
+    kythira::console_logger logger{kythira::log_level::error};
+    kythira::noop_metrics metrics;
+    message_fabric fabric{2};
+    config_type hc{
+        .node_id = 1,
+        .network_client = fabric_client{fabric, 1},
+        .network_server = fabric_server{fabric, 1},
+        .store_factory = [](const group_id_type&) { return host_types::persistence_engine_type{}; },
+    };
+    hc.partitioner = kythira::make_partitioner<key_type>(kythira::redis_kv_partitioner{});
+    with_state_machines(hc);
+    host_type host(std::move(hc));
+    auto attempt = [&](redis_gateway_config cfg) -> std::string {
+        cfg._listen = "127.0.0.1:0";
+        cfg._layer_roles = {kythira::layers::role::gateway, kythira::layers::role::front_end};
+        gateway_type gw(host, acl, logger, metrics, cfg, {});
+        try {
+            gw.start();
+        } catch (const std::exception& e) {
+            return e.what();
+        }
+        gw.stop();
+        return {};
+    };
+    redis_gateway_config none;
+    none._internal_secret = "s";
+    none._allow_plaintext_forwarding = true;
+    BOOST_CHECK(attempt(none).find("KYTHIRA_REDIS_DATA_NODES") != std::string::npos);
+    redis_gateway_config no_secret;
+    no_secret._data_nodes = {"127.0.0.1:1"};
+    no_secret._allow_plaintext_forwarding = true;
+    BOOST_CHECK(attempt(no_secret).find("internal secret") != std::string::npos);
+    redis_gateway_config ok = no_secret;
+    ok._internal_secret = "s";
+#if defined(KYTHIRA_GATEWAY_TEST_DISK_STORE)
+    BOOST_CHECK(attempt(ok).find("disk-backed store") != std::string::npos);
+#else
+    BOOST_CHECK_EQUAL(attempt(ok), "");
+#endif
 }

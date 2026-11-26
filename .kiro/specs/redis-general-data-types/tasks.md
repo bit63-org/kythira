@@ -157,7 +157,7 @@ is extended as the rest land.
   - Docker and rootless Podman, service names, `container_runtime()`
   - _Requirements: 1.4, 23.1-23.6_
 
-- [ ] 15. Layer roles and the in-process split of the code
+- [x] 15. Layer roles and the in-process split of the code
   - `KYTHIRA_REDIS_ROLES` parsing and start-time validation, roles in
     `INFO` and metrics, `kythira_node` per-module roles
   - Move dispatch, authorization, planning and the coordinator into
@@ -168,12 +168,14 @@ is extended as the rest land.
     after; every existing test unchanged
   - _Requirements: 16.1-16.7, 24.4_
 
-- [ ] 16. Data-layer API and front ends without data
+- [x] 16. Data-layer API and front ends without data
   - `redis_data_service` on the internal listener (`KYTHIRA.DATA
     PROPOSE|READ|PAGE|ROUTE|ROUTES`), one-hop rule, epochs; route cache;
     `remote_data_access`; `KYTHIRA_REDIS_DATA_NODES` via `net_resolve`
   - Handler tests over local and remote access against an in-process data
     cluster; differential suite in a front-end/data split layout
+  - `PAGE` arrives with `SCAN` (task 12), as a `handle_data` subcommand
+    beside `READ`; nothing on main pages yet
   - _Requirements: 18.1-18.6_
 
 - [ ] 17. Gateway apart from the front end, and layer identities

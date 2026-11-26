@@ -5,10 +5,12 @@
 
 #include <kythira/redis/redis_server_identity.hpp>
 #include <raft/net_bind.hpp>
+#include <raft/route_cache.hpp>
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
 
+#include <algorithm>
 #include <cstring>
 #include <cstdlib>
 #include <filesystem>
@@ -570,6 +572,40 @@ auto from_env() -> node_options {
         }
     }
     read_cache_options(o);
+    // A front end without the data layer (redis-general-data-types task 16)
+    // asks these data nodes for routes; their gateways' addresses, by name
+    // or literal, resolved when used (never static IPs).
+    if (auto nodes = get_opt("KYTHIRA_REDIS_DATA_NODES", ""); !nodes.empty()) {
+        std::size_t start = 0;
+        while (start <= nodes.size()) {
+            const auto comma = std::min(nodes.find(',', start), nodes.size());
+            auto item = nodes.substr(start, comma - start);
+            if (item.empty() || !kythira::split_host_port(item)) {
+                throw std::invalid_argument(
+                    "redis_gateway_node: KYTHIRA_REDIS_DATA_NODES must be a comma-separated list "
+                    "of host:port (got '" +
+                    nodes + "')");
+            }
+            g._data_nodes.push_back(std::move(item));
+            start = comma + 1;
+        }
+    }
+    if (!g._layer_roles.has(layers::role::data)) {
+        if (g._data_nodes.empty()) {
+            throw std::invalid_argument(
+                "redis_gateway_node: KYTHIRA_REDIS_ROLES=" + g._layer_roles.to_string() +
+                ": a front end without the data layer needs KYTHIRA_REDIS_DATA_NODES, the data "
+                "nodes' gateway addresses");
+        }
+        if (o._cache._persistence == cache_persistence::file) {
+            // The disk-backed store's entries name chunks held on the data
+            // nodes, which a remote read cannot carry.
+            throw std::invalid_argument(
+                "redis_gateway_node: KYTHIRA_REDIS_ROLES=" + g._layer_roles.to_string() +
+                ": a front end without the data layer needs KYTHIRA_CACHE_PERSISTENCE=memory or "
+                "engine");
+        }
+    }
     if (g._transactions && o._cache._persistence == cache_persistence::file) {
         // The disk-backed cache's state machine is not wrapped for
         // transactions (its chunk-referencing snapshots are untested under

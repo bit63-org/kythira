@@ -194,6 +194,13 @@ struct redis_gateway_config {
     /// `INFO`'s `kythira_roles:` (Requirement 16.7). Every role, the default,
     /// is the gateway as it has always been.
     layers::role_set _layer_roles = k_redis_all_roles;
+    /// Data nodes a front end without the `data` role asks for routes
+    /// (`KYTHIRA_REDIS_DATA_NODES`, `host:port` each, names resolved when
+    /// used; task 16). Commands then reach the data layer over
+    /// `KYTHIRA.DATA` on the forward link, which therefore needs the
+    /// internal secret and TLS (or plaintext forwarding allowed). Ignored by
+    /// a node with `data`; required, non-empty, by one without.
+    std::vector<std::string> _data_nodes;
 
     resp_parser_limits _parser_limits{};
 
@@ -538,6 +545,16 @@ protected:
     auto handle_data(session& s, const resp_command& cmd) -> std::string;
     /// `KYTHIRA.DATA PROPOSE`'s answer bytes.
     auto data_propose(const resp_command& cmd) -> std::string;
+    /// `KYTHIRA.DATA READ`'s answer bytes, from this node's own replica.
+    auto data_read(redis_data_wire::read_mode mode, const std::string& key) -> std::string;
+    /// Why this front end cannot serve with its layer roles and store, or
+    /// `nullopt`; checked at `start()`.
+    [[nodiscard]] auto layer_refusal() const -> std::optional<std::string>;
+    /// Whether this node runs the data layer only: client sessions are
+    /// refused, internal ones served.
+    [[nodiscard]] auto data_only() const noexcept -> bool {
+        return !_config._layer_roles.has(layers::role::front_end);
+    }
     /// `routes` with the addresses of every node they name.
     auto data_routes_payload(std::vector<typename Host::descriptor_type> routes)
         -> redis_data_wire::routes_payload<group_id_type, node_id_type>;
@@ -636,7 +653,7 @@ protected:
 
     /// The data layer (redis_data_access.hpp). Every command reaches data
     /// through it, never through the host directly (Requirement 16.5).
-    redis_local_data_access<Host> _data;
+    redis_data_access<Host> _data;
     redis_acl& _acl;
     Logger& _logger;
     Metrics& _metrics;

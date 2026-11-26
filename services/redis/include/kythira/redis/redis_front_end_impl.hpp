@@ -236,7 +236,47 @@ redis_front_end<Host, Logger, Metrics>::redis_front_end(Host& host, redis_acl& a
       _logger(logger),
       _metrics(metrics),
       _config(std::move(config)),
-      _resolver(std::move(resolver)) {}
+      _resolver(std::move(resolver)) {
+    // A front end without the data layer reaches it over KYTHIRA.DATA on
+    // the forward link (task 16). Its host holds no groups, so every call
+    // goes remote; a node with `data` never attaches one.
+    if (!_config._layer_roles.has(layers::role::data) && !_config._data_nodes.empty()) {
+        typename decltype(_data)::remote_type::options opts;
+        opts.timeout = _config._command_timeout;
+        _data.attach_remote(
+            _config._data_nodes,
+            [this](const std::string& address, const std::vector<std::string>& argv) {
+                return data_call(address, argv);
+            },
+            opts);
+    }
+}
+
+template<typename Host, typename Logger, typename Metrics>
+auto redis_front_end<Host, Logger, Metrics>::layer_refusal() const -> std::optional<std::string> {
+    const auto& roles = _config._layer_roles;
+    if (roles.has(layers::role::data)) {
+        return std::nullopt;
+    }
+    const auto named = "redis gateway: KYTHIRA_REDIS_ROLES=" + roles.to_string() + ": ";
+    if (_config._data_nodes.empty()) {
+        return named +
+               "a front end without the data layer needs the data nodes to reach "
+               "(KYTHIRA_REDIS_DATA_NODES)";
+    }
+    if (_config._internal_secret.empty() ||
+        (!_config._forward_tls && !_config._allow_plaintext_forwarding)) {
+        return named +
+               "a front end without the data layer reaches it over the forward link, which needs "
+               "the internal secret and forwarding TLS (or plaintext forwarding allowed)";
+    }
+    if constexpr (!decltype(_data)::k_remote_reads) {
+        return named +
+               "the disk-backed store keeps a value's chunks on its data nodes, so a front end "
+               "without the data layer cannot read them; run the in-memory or engine store";
+    }
+    return std::nullopt;
+}
 
 template<typename Host, typename Logger, typename Metrics>
 auto redis_front_end<Host, Logger, Metrics>::build_forward_ssl_context()
@@ -493,6 +533,24 @@ template<typename Host, typename Logger, typename Metrics>
 auto redis_front_end<Host, Logger, Metrics>::read_local(session& s, const std::string& key)
     -> read_result {
     read_result r;
+    if (_data.remote_for(key)) {
+        // No replica here: the data node runs the barrier and the lookup,
+        // and answers with the entry's bytes (KYTHIRA.DATA READ).
+        auto mode = redis_data_wire::read_mode::leader;
+        if (_config._read_consistency == redis_read_consistency::any_replica) {
+            mode = redis_data_wire::read_mode::any_replica;
+        } else if (_config._read_consistency == redis_read_consistency::linearizable) {
+            mode = redis_data_wire::read_mode::linearizable;
+        }
+        auto outcome = _data.read_remote(key, mode, _config._command_timeout);
+        if (outcome._status != redis_data_status::ok) {
+            r._error = data_error(outcome._status);
+            return r;
+        }
+        r._entry = std::move(outcome._entry);
+        r._context = std::move(outcome._context);
+        return r;
+    }
     auto read = [&](auto&& barrier) {
         return _data.read(key, _config._read_consistency == redis_read_consistency::any_replica,
                           std::forward<decltype(barrier)>(barrier));
@@ -525,10 +583,13 @@ auto redis_front_end<Host, Logger, Metrics>::read_local(session& s, const std::s
 template<typename Host, typename Logger, typename Metrics>
 auto redis_front_end<Host, Logger, Metrics>::forward_endpoint(const node_id_type& to)
     -> std::optional<std::string> {
-    if (!_resolver) {
-        return std::nullopt;
+    if (_resolver) {
+        if (auto endpoint = _resolver(to)) {
+            return endpoint;
+        }
     }
-    return _resolver(to);
+    // A front end without data knows the data nodes from their routes.
+    return _data.address_of(to);
 }
 
 template<typename Host, typename Logger, typename Metrics>
@@ -607,7 +668,10 @@ template<typename Host, typename Logger, typename Metrics>
 auto redis_front_end<Host, Logger, Metrics>::forward(session& s, const resp_command& cmd,
                                                      const node_id_type& to)
     -> std::optional<std::string> {
-    if (!_config._forwarding || s._internal) {
+    // A front end without data never hands a whole command to another
+    // node: it reaches the data layer only through KYTHIRA.DATA and
+    // KYTHIRA.TXN (task 16), so the command logic stays on the front end.
+    if (!_config._forwarding || s._internal || _data.remote() != nullptr) {
         return std::nullopt;
     }
     auto reply = forward_argv(cmd._argv, to, resp_to_upper(cmd._argv[0]));
@@ -1028,25 +1092,33 @@ auto redis_front_end<Host, Logger, Metrics>::handle_set(session& s, const resp_c
 
     std::string error;
     std::optional<node_id_type> forward_to;
-    auto* node = locate(key, error, forward_to);
-    if (node != nullptr && !node->is_leader()) {
-        forward_to = node->known_leader();
-        error = s._writer.error("ERR shard has no reachable leader, retry");
-        node = nullptr;
-    }
-    if (node == nullptr) {
-        if (forward_to) {
-            if (auto reply = forward(s, cmd, *forward_to)) {
-                return *reply;
-            }
+    // No replica here (a front end without data, task 16): the checks below
+    // read the data node's leader, and the entry goes over KYTHIRA.DATA.
+    const bool remote = _data.remote_for(key);
+    group_node_type* node = nullptr;
+    if (!remote) {
+        node = locate(key, error, forward_to);
+        if (node != nullptr && !node->is_leader()) {
+            forward_to = node->known_leader();
+            error = s._writer.error("ERR shard has no reachable leader, retry");
+            node = nullptr;
         }
-        return error;
-    }
+        if (node == nullptr) {
+            if (forward_to) {
+                if (auto reply = forward(s, cmd, *forward_to)) {
+                    return *reply;
+                }
+            }
+            return error;
+        }
 
-    if (auto refused = space_refusal(key)) {
-        ++_stats._space_refusals;
-        emit("redis.space_refusals", name);
-        return s._writer.error("ERR " + *refused + ", retry later");
+        // The space hooks belong to the disk-backed store, which a front end
+        // without data cannot run.
+        if (auto refused = space_refusal(key)) {
+            ++_stats._space_refusals;
+            emit("redis.space_refusals", name);
+            return s._writer.error("ERR " + *refused + ", retry later");
+        }
     }
 
     if (_config._immutable_values) {
@@ -1054,8 +1126,18 @@ auto redis_front_end<Host, Logger, Metrics>::handle_set(session& s, const resp_c
         // bytes (sccache rewriting its `.sccache_check` probe) or a bug
         // somewhere. The first is a free no-op; the second is refused.
         // Checked against a caught-up leader's state only; see read_local().
-        auto looked_up = node->with_leader_state_machine(
-            [&key](auto& sm) { return redis_gateway_detail::kv_of(sm).lookup(key); });
+        std::optional<entry_handle> looked_up;
+        if (remote) {
+            auto outcome = _data.read_remote(key, redis_data_wire::read_mode::leader,
+                                             _config._command_timeout);
+            if (outcome._status != redis_data_status::ok) {
+                return data_error(outcome._status);
+            }
+            looked_up = std::move(outcome._entry);
+        } else {
+            looked_up = node->with_leader_state_machine(
+                [&key](auto& sm) { return redis_gateway_detail::kv_of(sm).lookup(key); });
+        }
         if (!looked_up) {
             return s._writer.error("ERR shard has no reachable leader, retry");
         }
@@ -1106,24 +1188,35 @@ auto redis_front_end<Host, Logger, Metrics>::handle_del(session& s, const resp_c
     }
     std::string error;
     std::optional<node_id_type> forward_to;
-    auto* node = locate(key, error, forward_to);
-    if (node != nullptr && !node->is_leader()) {
-        forward_to = node->known_leader();
-        error = s._writer.error("ERR shard has no reachable leader, retry");
-        node = nullptr;
-    }
-    if (node == nullptr) {
-        if (forward_to) {
-            if (auto reply = forward(s, cmd, *forward_to)) {
-                return *reply;
-            }
+    std::optional<entry_handle> looked_up;
+    if (_data.remote_for(key)) {
+        // From the leader on the data node, which has caught up, as below.
+        auto outcome =
+            _data.read_remote(key, redis_data_wire::read_mode::leader, _config._command_timeout);
+        if (outcome._status != redis_data_status::ok) {
+            return data_error(outcome._status);
         }
-        return error;
+        looked_up = std::move(outcome._entry);
+    } else {
+        auto* node = locate(key, error, forward_to);
+        if (node != nullptr && !node->is_leader()) {
+            forward_to = node->known_leader();
+            error = s._writer.error("ERR shard has no reachable leader, retry");
+            node = nullptr;
+        }
+        if (node == nullptr) {
+            if (forward_to) {
+                if (auto reply = forward(s, cmd, *forward_to)) {
+                    return *reply;
+                }
+            }
+            return error;
+        }
+        // On a leader that has not caught up, "no such key" could be a key an
+        // earlier leader acknowledged, and answering 0 would skip the delete.
+        looked_up = node->with_leader_state_machine(
+            [&key](auto& sm) { return redis_gateway_detail::kv_of(sm).lookup(key); });
     }
-    // On a leader that has not caught up, "no such key" could be a key an
-    // earlier leader acknowledged, and answering 0 would skip the delete.
-    auto looked_up = node->with_leader_state_machine(
-        [&key](auto& sm) { return redis_gateway_detail::kv_of(sm).lookup(key); });
     if (!looked_up) {
         return s._writer.error("ERR shard has no reachable leader, retry");
     }
@@ -1367,12 +1460,29 @@ auto redis_front_end<Host, Logger, Metrics>::txn_allocate_timestamps(
     std::string last = "no reachable timestamp oracle";
     for (;;) {
         std::optional<node_id_type> hint;
-        try {
-            return _data.allocate_timestamps(n, left()).get();
-        } catch (const shard_not_leader_exception<group_id_type, node_id_type>& e) {
-            hint = e.leader_hint();
-        } catch (const timestamp_oracle_unavailable_exception& e) {
-            last = e.what();
+        if (auto* remote = _data.remote(); remote != nullptr) {
+            // A front end without data holds no replica of the oracle group,
+            // and the group has no key to route by: ask the data nodes in
+            // turn, and the oracle's leader answers (task 16).
+            for (const auto& address : remote->data_addresses()) {
+                auto reply = data_call(address, {"KYTHIRA.TXN", "TS", std::to_string(n)});
+                if (!reply) {
+                    continue;
+                }
+                auto parsed = redis_gateway_detail::parse_peer_reply(*reply);
+                if (parsed._kind == redis_gateway_detail::peer_reply::kind::bulk) {
+                    return redis_gateway_detail::decode_timestamp_range(parsed._body);
+                }
+                last = parsed._body;
+            }
+        } else {
+            try {
+                return _data.allocate_timestamps(n, left()).get();
+            } catch (const shard_not_leader_exception<group_id_type, node_id_type>& e) {
+                hint = e.leader_hint();
+            } catch (const timestamp_oracle_unavailable_exception& e) {
+                last = e.what();
+            }
         }
         if (hint && *hint != _data.self()) {
             if (auto reply =
@@ -2418,6 +2528,16 @@ auto redis_front_end<Host, Logger, Metrics>::handle_data(session& s, const resp_
         }
         return s._writer.bulk(data_propose(cmd));
     }
+    if (sub == "READ") {
+        if (cmd._argv.size() != 4) {
+            return s._writer.error("ERR wrong number of arguments for 'kythira.data' command");
+        }
+        auto mode = redis_data_wire::parse_read_mode(resp_to_upper(cmd._argv[2]));
+        if (!mode) {
+            return s._writer.error("ERR unknown read mode for 'kythira.data read'");
+        }
+        return s._writer.bulk(data_read(*mode, cmd._argv[3]));
+    }
     return s._writer.error("ERR unknown KYTHIRA.DATA subcommand '" + cmd._argv[1] + "'");
 }
 
@@ -2506,6 +2626,67 @@ auto redis_front_end<Host, Logger, Metrics>::data_propose(const resp_command& cm
     } catch (const std::exception& e) {
         return redis_data_wire::encode_propose_status(propose_status::failed, e.what());
     }
+}
+
+/// A read on this node's own replica, never another node's (Requirement
+/// 18.3): the front end that asked makes every hop. The same lookup a
+/// co-located `GET` makes (redis_data_access.hpp), so the reply bytes match
+/// whichever layout serves them (Requirement 18.6). The deadline travels
+/// with the value: the front end decides expiry on its clock, as a
+/// co-located node does on its own.
+template<typename Host, typename Logger, typename Metrics>
+auto redis_front_end<Host, Logger, Metrics>::data_read(redis_data_wire::read_mode mode,
+                                                       const std::string& key) -> std::string {
+    using redis_data_wire::read_status;
+    auto& local = _data.local();
+    auto read = [&](auto&& barrier) {
+        return local.read(key, mode == redis_data_wire::read_mode::any_replica,
+                          std::forward<decltype(barrier)>(barrier));
+    };
+    auto outcome =
+        mode == redis_data_wire::read_mode::linearizable
+            // read_local()'s no-op: a sweep naming the key with deadline 0.
+            ? read([&] {
+                  try {
+                      auto f = local.propose(
+                          key, encode_redis_kv_command(redis_kv_sweep_command{{{key, 0}}}),
+                          _config._command_timeout);
+                      if (!f.wait(_config._command_timeout)) {
+                          return false;
+                      }
+                      (void)std::move(f).get();
+                      return true;
+                  } catch (const std::exception&) {
+                      return false;
+                  }
+              })
+            : read(nullptr);
+    switch (outcome._status) {
+        case redis_data_status::ok:
+            break;
+        case redis_data_status::loading:
+            return redis_data_wire::encode_read_status(read_status::loading);
+        case redis_data_status::unrouted:
+            return redis_data_wire::encode_read_status(read_status::unrouted);
+        case redis_data_status::barrier_failed:
+            return redis_data_wire::encode_read_status(read_status::barrier_failed);
+        case redis_data_status::not_replicated:
+            return redis_data_wire::encode_read_elsewhere(read_status::not_replicated,
+                                                          outcome._leader);
+        case redis_data_status::no_leader:
+            return redis_data_wire::encode_read_elsewhere(read_status::not_leader, outcome._leader);
+    }
+    if (!outcome._entry) {
+        return redis_data_wire::encode_read_miss();
+    }
+    auto bytes = value_access::read(outcome._context, *outcome._entry);
+    if (!bytes) {
+        return redis_data_wire::encode_read_miss();  // as read_local(): unvouched bytes
+    }
+    const auto view = bytes->view();
+    return redis_data_wire::encode_read_value(
+        outcome._entry->_expire_at_ms,
+        std::string_view(reinterpret_cast<const char*>(view.data()), view.size()));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
