@@ -46,6 +46,7 @@
 
 #include <raft/beast_https_server.hpp>
 #include <raft/certificate_authority.hpp>
+#include <raft/layer_identity_uri.hpp>
 #include <raft/layer_roles.hpp>
 #include <raft/tls_material_source.hpp>
 
@@ -66,106 +67,6 @@
 
 namespace kythira::layers {
 
-/// The URI scheme of a layer identity.
-inline constexpr std::string_view identity_scheme = "kythira://";
-
-/// Whether `part` may be a service, cluster or node id in the SAN URI:
-/// 1..128 of RFC 3986's unreserved characters, so nothing needs escaping and
-/// no part can carry a '/', '?' or '&' into the next.
-[[nodiscard]] constexpr auto valid_identity_part(std::string_view part) noexcept -> bool {
-    if (part.empty() || part.size() > 128) {
-        return false;
-    }
-    return std::ranges::all_of(part, [](char c) {
-        return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
-               c == '-' || c == '.' || c == '_' || c == '~';
-    });
-}
-
-/// A node's identity to the other layers of one service in one cluster.
-struct identity {
-    std::string service;
-    std::string cluster;
-    std::string node_id;
-    role_set roles;
-
-    /// The SAN URI. Throws `std::invalid_argument` when a part is not a
-    /// `valid_identity_part` or the role set is empty (a node with no role
-    /// has nothing to call or serve).
-    [[nodiscard]] auto to_uri() const -> std::string {
-        for (const auto& [what, part] :
-             {std::pair<std::string_view, std::string_view>{"service", service},
-              {"cluster", cluster},
-              {"node id", node_id}}) {
-            if (!valid_identity_part(part)) {
-                throw std::invalid_argument(
-                    "layer identity: the " + std::string(what) + " \"" + std::string(part) +
-                    "\" must be 1-128 letters, digits, '-', '.', '_' or '~'");
-            }
-        }
-        if (roles.empty()) {
-            throw std::invalid_argument("layer identity: needs at least one role");
-        }
-        std::string out(identity_scheme);
-        out += service;
-        out += '/';
-        out += cluster;
-        out += '/';
-        out += node_id;
-        out += "?roles=";
-        out += roles.to_string();
-        return out;
-    }
-
-    /// Parses a SAN URI written by `to_uri`. `nullopt` for any other URI,
-    /// including one with an unknown role or extra query parameters: a
-    /// certificate whose identity this node cannot read in full grants
-    /// nothing.
-    [[nodiscard]] static auto parse_uri(std::string_view uri) -> std::optional<identity> {
-        if (!uri.starts_with(identity_scheme)) {
-            return std::nullopt;
-        }
-        uri.remove_prefix(identity_scheme.size());
-        const auto q = uri.find('?');
-        if (q == std::string_view::npos) {
-            return std::nullopt;
-        }
-        const auto path = uri.substr(0, q);
-        const auto query = uri.substr(q + 1);
-        constexpr std::string_view roles_key = "roles=";
-        if (!query.starts_with(roles_key) || query.find('&') != std::string_view::npos) {
-            return std::nullopt;
-        }
-        const auto s1 = path.find('/');
-        if (s1 == std::string_view::npos) {
-            return std::nullopt;
-        }
-        const auto s2 = path.find('/', s1 + 1);
-        if (s2 == std::string_view::npos || path.find('/', s2 + 1) != std::string_view::npos) {
-            return std::nullopt;
-        }
-        identity out;
-        out.service = std::string(path.substr(0, s1));
-        out.cluster = std::string(path.substr(s1 + 1, s2 - s1 - 1));
-        out.node_id = std::string(path.substr(s2 + 1));
-        if (!valid_identity_part(out.service) || !valid_identity_part(out.cluster) ||
-            !valid_identity_part(out.node_id)) {
-            return std::nullopt;
-        }
-        try {
-            out.roles = role_set::parse(query.substr(roles_key.size()));
-        } catch (const std::invalid_argument&) {
-            return std::nullopt;
-        }
-        if (out.roles.empty()) {
-            return std::nullopt;
-        }
-        return out;
-    }
-
-    friend auto operator==(const identity&, const identity&) -> bool = default;
-};
-
 /// Adds `id`'s SAN URI to the options a CSR is signed with, and asks for a
 /// certificate usable on both sides of a connection: a node is a server to
 /// the layer above it and a client of the layer below.
@@ -173,26 +74,6 @@ inline void add_layer_identity(::raft::testing::csr_signing_options& options, co
     options.uri_names.push_back(id.to_uri());
     options.server_auth = true;
     options.client_auth = true;
-}
-
-/// The one identity of `service` and `cluster` among `uris`. `nullopt` when
-/// there is none, or more than one: a certificate naming two identities of
-/// the same cluster is ambiguous and grants nothing.
-[[nodiscard]] inline auto find_identity(const std::vector<std::string>& uris,
-                                        std::string_view service, std::string_view cluster)
-    -> std::optional<identity> {
-    std::optional<identity> found;
-    for (const auto& u : uris) {
-        auto id = identity::parse_uri(u);
-        if (!id || id->service != service || id->cluster != cluster) {
-            continue;
-        }
-        if (found) {
-            return std::nullopt;
-        }
-        found = std::move(id);
-    }
-    return found;
 }
 
 /// The identity in the leaf of a PEM chain (a node's own material, or a
