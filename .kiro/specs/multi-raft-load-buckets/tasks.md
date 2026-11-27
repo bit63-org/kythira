@@ -1,6 +1,6 @@
 # Implementation Plan — Multi-Raft load buckets
 
-## Status: In progress (tasks 1-7 done; Clark's go 2026-11-20)
+## Status: Complete (all tasks done 2026-11-20; Clark's go 2026-11-20)
 
 Follow-up to `.kiro/specs/multi-raft/` Phase 9 and open question 4.
 
@@ -77,14 +77,46 @@ Follow-up to `.kiro/specs/multi-raft/` Phase 9 and open question 4.
     window spans the gaps and the split lands inside the hot quarter.
   - _Requirements: 6.1-6.4, 7.3_
 
-- [ ] 8. Measure
+- [x] 8. Measure
   - `multi_raft_bench` with buckets off and on; record the routing-path cost
     here, and replace the `std::atomic<std::shared_ptr>` layout pointer if it
     shows.
+  - `tests/multi_raft_performance_report.cpp` gains a `load-buckets` axis:
+    `fabric/none/128B/16/buckets-off` and `-on` (`kv_cluster_options::
+    _buckets`; with buckets on the harness runs the policy phase once a
+    second so leaders cut their sets).
+  - Measured 2026-11-20 in a 4-core cloud sandbox, g++ 13 -O2, boost
+    backend, `std::string` keys. `bucket_set::count` alone, 4M calls:
+
+    | layout pointer | buckets | 1 thread | 4 threads, one shard |
+    |---|---|---|---|
+    | `std::atomic<std::shared_ptr>` | 2 | 68 ns | 1488 ns |
+    | | 16 | 67 ns | 1574 ns |
+    | | 256 | 125 ns | 1580 ns |
+    | raw pointer + retirement | 2 | 23 ns | 341 ns |
+    | | 16 | 28 ns | 172 ns |
+    | | 256 | 71 ns | 192 ns |
+
+    (4-thread figures are wall time per call per thread with every thread
+    in a tight loop on one set: the worst case, since a routed request does
+    microseconds of other work between counts.) The shared pointer showed,
+    so it is replaced, as the design allowed: `count()` loads a raw pointer,
+    and a replaced layout is freed by a later policy-phase call once it has
+    been retired for two slots (at least a second). The reservoir stride
+    also moved from a shared atomic to a per-thread counter, the other line
+    every routing thread wrote. What remains contended is the counters
+    themselves.
+  - The fabric write row (3 nodes, 4 groups, closed loop, 16 in flight), 3
+    alternating repetitions each: off 1327 / 1592 / 1296 ops/s, on 1639 /
+    1263 / 1162 ops/s, p50 9.3-12.9 ms either way. The run-to-run spread
+    (about 20%) is far larger than any bucket cost; at roughly 30 ns a count
+    against a ~10 ms request, none is visible at the row level.
   - _Requirements: 7.4_
 
-- [ ] 9. Documentation
+- [x] 9. Documentation
   - Document `bucket_config` beside `load_split_sampler_config` in
     `multi_raft.hpp`'s config reference and in the multi-raft design's §6.3,
     including how the bucket split relates to the sampler.
+  - Done as a knob table on `multi_raft_config::buckets` and the multi-raft
+    design's new §6.3.1.
   - _Requirements: 1.1_

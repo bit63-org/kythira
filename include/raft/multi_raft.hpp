@@ -558,12 +558,35 @@ struct multi_raft_config {
     /// On any other transport this field changes nothing.
     batching_config batching{};
 
-    /// @brief Sub-shard load buckets (`.kiro/specs/multi-raft-load-buckets/`).
+    /// @brief Sub-shard load buckets, TiKV RFC 0082 (design §6.3.1,
+    ///        `.kiro/specs/multi-raft-load-buckets/`).
     ///
     /// Off by default, and one predictable branch per routed request when off
-    /// (Requirement 1.2). The constructor clamps the counts into range and
-    /// refuses an enabled config with a non-positive duration; see
-    /// `normalized(bucket_config)`.
+    /// (Requirement 1.2). On, each leader keeps per-range read/write load for
+    /// the shards it leads, in `shard_stats::_buckets`, and the default
+    /// policy can aim a load split at a bucket boundary. The knobs:
+    ///
+    /// | knob | default | meaning |
+    /// |---|---|---|
+    /// | `_target_buckets` | 16 | buckets per shard, clamped to [2, 256] |
+    /// | `_refresh_interval` | 60 s | how often a leader re-cuts boundaries |
+    /// | `_window_slots` | 6 | slots in the sliding window, the filling one included |
+    /// | `_slot_duration` | 10 s | so rates cover the last 50-60 s |
+    /// | `_reservoir_size` | 1024 | routed keys kept for traffic-derived cuts |
+    /// | `_reservoir_stride` | 16 | feed the reservoir 1 keyed request in N |
+    /// | `_report_top_buckets` | 4 | buckets per shard in a driver report |
+    ///
+    /// **With the load split.** Buckets add no thresholds of their own: the
+    /// bucket split uses the policy's `_load_split_*` knobs, waits for the
+    /// window to span `_load_split_duration`, and declines on the one-sided
+    /// rule, narrowing `load_split` (the sampler) to the hottest bucket
+    /// instead. The sampler's hot key keeps priority and its back-off holds
+    /// bucket proposals too. Turn both on for the faster aim; buckets alone
+    /// still report where load sits but never split by themselves unless the
+    /// policy's `_load_split_enabled` is set.
+    ///
+    /// The constructor clamps the counts and refuses an enabled config with a
+    /// non-positive duration; see `normalized(bucket_config)`.
     bucket_config buckets{};
 
     /// @brief Sub-windows in each group's latency digest (design §6.1.4).
