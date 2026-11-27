@@ -90,7 +90,9 @@ from the environment; `dynamodb_gateway_node --help` lists them all.
 | `KYTHIRA_DYNAMODB_DISK_FLOOR_BYTES` | writes are refused below this much free space (1 GiB) |
 | `KYTHIRA_DYNAMODB_SPLIT_BYTES`, `_SPLIT_KEYS`, `_SPLIT_INTERVAL_MS` | the split policy; both thresholds 0 turns splits off |
 | `KYTHIRA_DYNAMODB_COMPAT` | the cluster's compatibility profile (below) |
-| `KYTHIRA_DYNAMODB_ROLES` | the layers this node runs: unset is all four (`gateway,front_end,data,segments`), as before; `data,segments` makes a voter that serves only forwarded ops and answers clients 404. Other sets are refused at start until the independent-layers spec builds them (`.kiro/specs/dynamodb-independent-layers/`) |
+| `KYTHIRA_DYNAMODB_ROLES` | the layers this node runs: unset is all four (`gateway,front_end,data,segments`), as before; `data,segments` makes a voter that serves only forwarded ops and answers clients 404; `gateway,front_end` makes a front end with no replica and no Raft, which needs `DATA_NODES`, `FORWARD_SECRET` and `FRONT_ENDS` and no `PEERS`. Other sets are refused at start until the independent-layers spec builds them (`.kiro/specs/dynamodb-independent-layers/`) |
+| `KYTHIRA_DYNAMODB_DATA_NODES` | `host:port,...`: data nodes' gateways a front end without the data role asks for routes first; the routes name the rest (each voter's `PEER_GATEWAYS` entry, so list a voter's own gateway there too, or set its `ADVERTISED_ENDPOINT`) |
+| `KYTHIRA_DYNAMODB_FRONT_ENDS` | how many front ends share each capacity limit; unset is the number of voters. Set the same count on every node that serves clients |
 
 Without `PEERS` the daemon runs one node with no Raft on the memory
 engine, like DynamoDB Local's `-inMemory`: good for tests, nothing kept.
@@ -183,10 +185,12 @@ against DynamoDB Local 3.3.2. Throttling is on, at a provisioned table's
 capacity and at AWS's on-demand defaults, or at an on-demand table's or
 GSI's `OnDemandThroughput` maximum when one is set (`ThrottlingException`
 with `<Table|Index><Read|Write>MaxOnDemandThroughputExceeded`); each
-gateway node enforces its share (one over the number of voters). A
-maximum is kept while a table is provisioned, and applies again when it
-returns to on demand. Changing one on a multi-region strongly consistent
-table is not supported yet.
+front end enforces its share (one over `KYTHIRA_DYNAMODB_FRONT_ENDS`,
+else over the number of voters). Limits are exact when clients spread
+requests over the gateways, and stricter when they do not. A maximum is
+kept while a table is provisioned, and applies again when it returns to
+on demand. Changing one on a multi-region strongly consistent table is
+not supported yet.
 
 ## Operations
 

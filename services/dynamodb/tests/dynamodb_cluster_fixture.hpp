@@ -544,7 +544,15 @@ struct cluster {
     /// `op` signed now and sent to node `i`'s gateway.
     auto call(int i, std::string_view op, const std::string& body,
               std::string_view target = "DynamoDB_20120810") -> answer {
-        const auto port = gateway_ports.at(i);
+        return call_at(gateway_ports.at(i), regions ? std::string(k_regions.at(i)) : "us-east-1",
+                       op, body, target);
+    }
+
+    /// `op` signed now for `region` and sent to the gateway on `port` (a
+    /// node outside the three, such as a front end without the data role).
+    static auto call_at(std::uint16_t port, const std::string& region, std::string_view op,
+                        const std::string& body, std::string_view target = "DynamoDB_20120810")
+        -> answer {
         const auto now = std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
         const auto amz_date = sv4::detail::format_amz_date(now);
         const std::string host = "127.0.0.1:" + std::to_string(port);
@@ -553,9 +561,7 @@ struct cluster {
             {"Host", host},
             {"X-Amz-Date", amz_date},
             {"X-Amz-Target", std::string(target) + "." + std::string(op)}};
-        const sv4::credential_scope scope{amz_date.substr(0, 8),
-                                          regions ? std::string(k_regions.at(i)) : "us-east-1",
-                                          "dynamodb"};
+        const sv4::credential_scope scope{amz_date.substr(0, 8), region, "dynamodb"};
         headers.emplace_back("Authorization",
                              "AWS4-HMAC-SHA256 Credential=AKIDADMIN/" + scope.text() +
                                  ", SignedHeaders=content-type;host;x-amz-date;x-amz-target"

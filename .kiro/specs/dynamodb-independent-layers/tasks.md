@@ -53,10 +53,22 @@ built by `.kiro/specs/kinesis-independent-layers/` tasks 1, 3, 5, 9 and
     cross-group transaction and a leader loss; an old-layout routed op;
     a `hybrid_backend` on a follower.
 
-- [ ] 4. Front end without the data role
+- [x] 4. Front end without the data role
   - Wire `remote_backend` when the node lacks `data`; capacity share over
     live front ends; `DescribeEndpoints` names the gateway layer
   - _Requirements: 4.3, 5.1-5.4_
+  - Built as `front_end_node` (`run_cluster.hpp`) and the module's
+    `front_end_serving`: `KYTHIRA_DYNAMODB_ROLES=gateway,front_end` with
+    `KYTHIRA_DYNAMODB_DATA_NODES` (seed gateways), the forward secret and
+    no `PEERS`. Ops go over the existing authenticated forward channel
+    (`forward_client::send_to`); data nodes answer routes naming each
+    voter's gateway. The live front-end count is configuration for now
+    (`KYTHIRA_DYNAMODB_FRONT_ENDS`, also on voters, replacing one over
+    the voters when set); following the layer membership group within a
+    refresh interval comes with the membership group (Kinesis
+    independent-layers task 11). `DescribeEndpoints` already answered
+    the node's own advertised endpoint, which is the gateway's; the
+    cluster test checks it on a front-end-only node.
 
 - [ ] 5. Gateway apart from the front end
   - The authenticated-call handoff (shared with Kinesis), drain, role
