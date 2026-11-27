@@ -181,14 +181,14 @@ BOOST_AUTO_TEST_CASE(a_trusted_service_forwards_its_caller_over_https) {
                  k_now, "kms.us-east-1.amazonaws.com");
     BOOST_TEST(fwd::header_is_signed(signed_req.headers, fwd::principal_header));
     BOOST_TEST(fwd::header_is_signed(signed_req.headers, fwd::via_service_header));
-    const auto r = fixture::answer(f.fe.handle(as_received(signed_req)));
+    const auto r = fixture::answer(f.handle(as_received(signed_req)));
     BOOST_REQUIRE_MESSAGE(r.status == 200U, r.type() + ": " + r.message());
     BOOST_TEST(rec.who.back() == end_caller().arn);
     BOOST_TEST(rec.via.back().value_or("") == k_via);
     BOOST_TEST(f.auth.asked.back().source_ip == "203.0.113.9");
 
     // Administration is refused even from a trusted service.
-    const auto admin = fixture::answer(f.fe.handle(as_received(
+    const auto admin = fixture::answer(f.handle(as_received(
         svc.sign(service_request("DisableKey", kid(id)), k_now, "kms.us-east-1.amazonaws.com"))));
     BOOST_TEST(admin.type() == "AccessDeniedException");
 }
@@ -203,7 +203,7 @@ BOOST_AUTO_TEST_CASE(only_trusted_signers_may_forward) {
     const auto stranger =
         endpoint("AKIDREAD")
             .sign(service_request("DescribeKey", kid(id)), k_now, "kms.us-east-1.amazonaws.com");
-    auto r = fixture::answer(f.fe.handle(as_received(stranger)));
+    auto r = fixture::answer(f.handle(as_received(stranger)));
     BOOST_TEST(r.type() == "AccessDeniedException");
     BOOST_TEST(r.message().find("not a service trusted") != std::string::npos, r.message());
     BOOST_TEST(rec.who.empty());
@@ -212,7 +212,7 @@ BOOST_AUTO_TEST_CASE(only_trusted_signers_may_forward) {
     auto unsigned_hdr = sign(request("DescribeKey", kid(id)), "AKIDSVC");
     unsigned_hdr.headers.emplace_back("X-Kythira-Principal", fwd::encode_principal(end_caller()));
     unsigned_hdr.headers.emplace_back("X-Kythira-Via-Service", "kinesis");
-    r = fixture::answer(f.fe.handle(unsigned_hdr));
+    r = fixture::answer(f.handle(unsigned_hdr));
     BOOST_TEST(r.type() == "AccessDeniedException");
     BOOST_TEST(r.message().find("must be signed") != std::string::npos, r.message());
 

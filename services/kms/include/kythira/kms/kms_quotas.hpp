@@ -37,6 +37,7 @@
 #include <boost/json.hpp>
 
 #include <algorithm>
+#include <atomic>
 #include <array>
 #include <chrono>
 #include <cstdint>
@@ -185,7 +186,16 @@ public:
     explicit request_quotas(quota_config config, clock_ms now = steady_ms)
         : _config(std::move(config)), _now(std::move(now)) {
         _config.members = std::max<std::size_t>(_config.members, 1);
+        _members.store(_config.members);
     }
+
+    /// Changes how many members share the quotas (at least one): the live
+    /// front ends, as their count changes (kms-independent-layers task 4,
+    /// Requirement 7). Buckets keep their tokens; only the refill rate
+    /// changes.
+    void set_members(std::size_t n) { _members.store(std::max<std::size_t>(n, 1)); }
+
+    [[nodiscard]] auto members() const -> std::size_t { return _members.load(); }
 
     /// Admits `op` by `account` before its handler runs: false when its
     /// own quota is spent. A shared cryptographic operation is admitted
@@ -264,7 +274,7 @@ private:
     /// One request against `account`'s `quota` at `rate` per second.
     auto take(std::string_view account, const std::string& quota, double rate) -> bool {
         const auto now = _now();
-        const auto per_member = rate / static_cast<double>(_config.members);
+        const auto per_member = rate / static_cast<double>(_members.load());
         const std::scoped_lock lock(_mu);
         auto key = std::make_pair(std::string(account), quota);
         auto [it, fresh] = _buckets.try_emplace(key, bucket{rate, now});
@@ -283,6 +293,7 @@ private:
     }
 
     quota_config _config;
+    std::atomic<std::size_t> _members{1};
     clock_ms _now;
     mutable std::mutex _mu;
     std::map<std::pair<std::string, std::string>, bucket> _buckets;

@@ -26,6 +26,13 @@
 //
 // The front end is transport-free: the module adapts the HTTPS listener's
 // request into `front_end_request` and the response back.
+//
+// Steps 1 and 2 are the gateway's and the rest the front end's
+// (.kiro/specs/kms-independent-layers/ task 4): handle() runs both on one
+// node, and a gateway on another node runs authenticate() and sends the
+// `authenticated_call` it makes to a front end, which runs execute()
+// (kms_front_end_api.hpp). Either way each request is recorded once: by
+// the gateway when it refuses it, else by the front end.
 
 #include <kythira/kms/kms_actions.hpp>
 #include <kythira/kms/kms_errors.hpp>
@@ -54,6 +61,7 @@
 #include <string>
 #include <string_view>
 #include <utility>
+#include <variant>
 #include <vector>
 
 namespace kythira::kms {
@@ -91,6 +99,22 @@ struct front_end_request {
     std::string body;
     std::string source_ip;
     bool secure = true;
+};
+
+/// A request a gateway has framed and whose SigV4 signature it verified
+/// (.kiro/specs/kms-independent-layers/ task 4, Requirement 6.1): what a
+/// front end needs to authorize and run it. The request travels whole,
+/// headers included, so a trusted service's forwarding headers reach the
+/// front end unchanged (Requirement 6.3) and the condition keys it reads
+/// (source IP, user agent, secure transport) are the client's.
+struct authenticated_call {
+    std::string operation;
+    /// The id the client is answered with, chosen by the gateway so its
+    /// record and the front end's name the same request.
+    std::string request_id;
+    /// Who signed: the principal SigV4 proved.
+    aws_auth::principal_context principal;
+    front_end_request request;
 };
 
 /// The parts of a KMS ARN (`arn:<partition>:kms:<region>:<account>:
@@ -309,7 +333,63 @@ public:
         rec.source_ip = req.source_ip;
         rec.user_agent = std::string(front_end_detail::header_value(req, "user-agent"));
         const auto start = std::chrono::steady_clock::now();
-        auto res = handle_impl(req, rec);
+        auto first = authenticate_impl(req, rec);
+        auto res = std::holds_alternative<aws_json::http_response>(first)
+                       ? std::get<aws_json::http_response>(std::move(first))
+                       : execute_impl(std::get<authenticated_call>(std::move(first)), rec);
+        observe(rec, res, start);
+        return res;
+    }
+
+    /// The gateway's half of handle() (.kiro/specs/kms-independent-layers/
+    /// task 4, Requirement 6.1): framing and SigV4 only. Either the
+    /// answer to send (a framing or signature failure, recorded here) or
+    /// the call to hand a front end, which authorizes and runs it with
+    /// execute(). Nothing in it depends on the handlers, so a gateway's
+    /// front end registers none.
+    [[nodiscard]] auto authenticate(const front_end_request& req)
+        -> std::variant<aws_json::http_response, authenticated_call> {
+        request_record rec;
+        rec.time = std::chrono::system_clock::now();
+        rec.source_ip = req.source_ip;
+        rec.user_agent = std::string(front_end_detail::header_value(req, "user-agent"));
+        const auto start = std::chrono::steady_clock::now();
+        auto first = authenticate_impl(req, rec);
+        if (std::holds_alternative<aws_json::http_response>(first)) {
+            observe(rec, std::get<aws_json::http_response>(first), start);
+        }
+        return first;
+    }
+
+    /// The front end's half of handle(): `call` authenticated by a gateway
+    /// (this node's or another's), authorized and run here as `call.
+    /// principal`. A trusted service's forwarding headers travel in the
+    /// call's request unchanged and are judged here (Requirement 6.3).
+    [[nodiscard]] auto execute(authenticated_call call) -> aws_json::http_response {
+        request_record rec;
+        rec.time = std::chrono::system_clock::now();
+        rec.source_ip = call.request.source_ip;
+        rec.user_agent = std::string(front_end_detail::header_value(call.request, "user-agent"));
+        const auto start = std::chrono::steady_clock::now();
+        auto res = execute_impl(std::move(call), rec);
+        observe(rec, res, start);
+        return res;
+    }
+
+    /// The KMS error `e` for `call`, recorded as its answer: how a gateway
+    /// answers a call no front end took.
+    [[nodiscard]] auto fail(const authenticated_call& call, const aws_json::error& e)
+        -> aws_json::http_response {
+        request_record rec;
+        rec.time = std::chrono::system_clock::now();
+        rec.operation = call.operation;
+        rec.request_id = call.request_id;
+        rec.principal = call.principal;
+        rec.access_key_id = call.principal.access_key_id;
+        rec.source_ip = call.request.source_ip;
+        rec.user_agent = std::string(front_end_detail::header_value(call.request, "user-agent"));
+        const auto start = std::chrono::steady_clock::now();
+        auto res = _codec.respond(e, call.request_id, aws_json::body_encoding::json);
         observe(rec, res, start);
         return res;
     }
@@ -339,8 +419,8 @@ public:
     }
 
 private:
-    [[nodiscard]] auto handle_impl(const front_end_request& req, request_record& rec)
-        -> aws_json::http_response {
+    [[nodiscard]] auto authenticate_impl(const front_end_request& req, request_record& rec)
+        -> std::variant<aws_json::http_response, authenticated_call> {
         const auto target = front_end_detail::header_value(req, "x-amz-target");
         const auto content_type = front_end_detail::header_value(req, "content-type");
         const aws_json::http_request_view view{req.method, req.path, content_type, target,
@@ -374,16 +454,42 @@ private:
             e.message = who.error().message;
             return _codec.respond(e, id, json);
         }
-        auto principal = *who;
         rec.access_key_id = who->access_key_id;
-        rec.principal = principal;
+        rec.principal = *who;
+        return authenticated_call{
+            .operation = std::string(op->name),
+            .request_id = std::move(id),
+            .principal = *who,
+            .request = req,
+        };
+    }
+
+    [[nodiscard]] auto execute_impl(authenticated_call call, request_record& rec)
+        -> aws_json::http_response {
+        constexpr auto json = aws_json::body_encoding::json;
+        const auto& req = call.request;
+        rec.request_id = call.request_id;
+        rec.operation = call.operation;
+        rec.access_key_id = call.principal.access_key_id;
+        rec.principal = call.principal;
+        const auto target = front_end_detail::header_value(req, "x-amz-target");
+        const auto content_type = front_end_detail::header_value(req, "content-type");
+        const aws_json::http_request_view view{req.method, req.path, content_type, target,
+                                               req.body};
+        const auto* op = _codec.resolve_target(view);
+        if (op == nullptr || op->name != call.operation) {
+            // A gateway resolved this target already; a mismatch is a
+            // gateway's bug or a different model, never the client's.
+            return _codec.respond(internal_error(), call.request_id, json);
+        }
+        auto principal = call.principal;
         std::string via;
-        if (auto bad = forwarded(*who, req, principal, via)) {
-            return _codec.respond(*bad, id, json);
+        if (auto bad = forwarded(call.principal, req, principal, via)) {
+            return _codec.respond(*bad, call.request_id, json);
         }
         rec.principal = principal;
         rec.via_service = via;
-        return run(req, view, *op, std::move(principal), std::move(via), id, rec);
+        return run(req, view, *op, std::move(principal), std::move(via), call.request_id, rec);
     }
 
     [[nodiscard]] auto service_call_impl(std::string_view operation, std::string body,

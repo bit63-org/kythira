@@ -18,7 +18,7 @@ using namespace kms_api_fixture;  // NOLINT(google-build-using-namespace)
 
 BOOST_AUTO_TEST_CASE(an_unsigned_call_learns_only_that_it_must_sign) {
     fixture f;
-    const auto r = fixture::answer(f.fe.handle(request("CreateKey", "{not json")));
+    const auto r = fixture::answer(f.handle(request("CreateKey", "{not json")));
     BOOST_TEST(r.status == 400U);
     BOOST_TEST(r.type() == "IncompleteSignatureException", r.type());
     BOOST_TEST(f.auth.asked.empty());
@@ -27,7 +27,7 @@ BOOST_AUTO_TEST_CASE(an_unsigned_call_learns_only_that_it_must_sign) {
     // A bad signature too, and for the wrong service.
     auto forged = sign(request("ListKeys", "{}"), "AKIDADMIN");
     forged.body = R"({"Limit":1})";
-    BOOST_TEST(fixture::answer(f.fe.handle(forged)).type() == "InvalidSignatureException");
+    BOOST_TEST(fixture::answer(f.handle(forged)).type() == "InvalidSignatureException");
 }
 
 BOOST_AUTO_TEST_CASE(framing_errors_and_unimplemented_operations) {

@@ -19,6 +19,7 @@
 #include <kythira/kms/kms_catalog_api.hpp>
 #include <kythira/kms/kms_crypto_api.hpp>
 #include <kythira/kms/kms_front_end.hpp>
+#include <kythira/kms/kms_front_end_api.hpp>
 #include <kythira/kms/kms_grants_api.hpp>
 #include <kythira/kms/kms_keys.hpp>
 #include <kythira/kms/kms_signing_api.hpp>
@@ -55,9 +56,10 @@ inline constexpr std::string_view k_service_arn = "arn:aws:iam::111122223333:use
 
 using catalog_t = kms::kms_catalog_state_machine<>;
 
-/// Whether fixtures run the handlers in the split layout (a front end
-/// reaching the catalog through the data layer's API) rather than
-/// co-located: KMS_API_FIXTURE_LAYOUT=split, which CTest sets for the
+/// Whether fixtures run the handlers in the split layout (requests
+/// through a gateway that hands the front end each call over the
+/// front-end API, and a front end reaching the catalog through the data
+/// layer's API) rather than co-located: KMS_API_FIXTURE_LAYOUT=split, which CTest sets for the
 /// *_split runs of the API suites; a test may also set it.
 inline auto split_layout() -> bool& {
     static bool split = [] {
@@ -217,6 +219,10 @@ struct fixture {
                                  [this] { return now; }, std::chrono::minutes(5)};
     test_authorizer auth;
     kms::front_end<test_authorizer> fe{config(), auth};
+    /// The split layout's gateway (kms-independent-layers task 4): framing
+    /// and SigV4 only, handing `fe` the call over the front-end API's wire
+    /// (kms_front_end_api.hpp), so gateway, front end and data are apart.
+    kms::front_end<test_authorizer> gateway{config(), auth};
     kms::key_management_api<reader_t> api{with_catalog(kms::api_deps<reader_t>{
         .create_key = [this](kms::key_record k,
                              const kms::tag_map& t) { return jobs.create_key(std::move(k), t); },
@@ -307,7 +313,27 @@ struct fixture {
 
     auto call(std::string_view op, const std::string& body, std::string_view akid = "AKIDADMIN")
         -> reply {
-        return answer(fe.handle(sign(request(op, body), akid)));
+        return answer(handle(sign(request(op, body), akid)));
+    }
+
+    /// `req` as a client's request reaches the KMS: straight to `fe`
+    /// co-located, else through `gateway` and the front-end API.
+    auto handle(const kms::front_end_request& req) -> kythira::aws_json::http_response {
+        if (!split_layout()) {
+            return fe.handle(req);
+        }
+        auto first = gateway.authenticate(req);
+        if (auto* refused = std::get_if<kythira::aws_json::http_response>(&first)) {
+            return *refused;
+        }
+        const auto wire = kms::front_end_api::encode_call(std::get<kms::authenticated_call>(first));
+        const auto a = kms::front_end_api::serve_front_end(
+            true, true, "POST", kms::front_end_api::k_call_path, wire,
+            [this](kms::authenticated_call c) { return fe.execute(std::move(c)); });
+        BOOST_REQUIRE_EQUAL(a.status, kms::front_end_api::k_ok);
+        auto res = kms::front_end_api::decode_answer(a.body);
+        BOOST_REQUIRE(res.has_value());
+        return *res;
     }
 
     static auto answer(const kythira::aws_json::http_response& res) -> reply {

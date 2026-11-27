@@ -28,6 +28,8 @@
 #include <kythira/kms/kms_codec.hpp>
 #include <kythira/kms/kms_host.hpp>
 
+#include <raft/layer_identity_uri.hpp>
+#include <raft/layer_roles.hpp>
 #include <raft/mtls_https_client.hpp>
 
 #include <cstddef>
@@ -122,12 +124,26 @@ template<typename NodeId, typename FromText>
     return out;
 }
 
-/// Who may send peer requests.
+/// Who may call a node's internal routes: the peer, catalog and front-end
+/// APIs.
+///
+/// Two kinds of caller are known (.kiro/specs/kms-independent-layers/
+/// Requirement 9). A certificate carrying a KMS layer identity of this
+/// cluster (`kythira://kms/<cluster>/<node id>?roles=...`,
+/// raft/layer_identity.hpp) is held to its roles, route by route: the
+/// peer API takes `data`, the catalog API `front_end` and `data`, the
+/// front-end call `gateway`. A certificate with no such identity whose
+/// SAN is listed in `identities` (KYTHIRA_KMS_PEER_IDENTITIES) is a
+/// member trusted as every layer, as before layer identities existed, so
+/// a deployment that lists its nodes keeps working; listing a layer
+/// identity's URI never widens what its roles allow.
 struct peer_policy {
     /// The members' certificate identities (a URI or DNS SAN each).
     std::set<std::string> identities;
     /// Accept peer requests on a plaintext listener (tests only).
     bool allow_plaintext = false;
+    /// The cluster named in this KMS's layer identities.
+    std::string cluster = "default";
 };
 
 /// What the listener knows of a caller: the verified certificate's SANs.
@@ -138,13 +154,25 @@ struct peer_caller {
     std::vector<std::string> dns_sans;
 };
 
-/// Whether `caller` is a member under `policy`.
-[[nodiscard]] inline auto is_member(const peer_policy& policy, const peer_caller& caller) -> bool {
+/// The routes each layer may call (Requirement 9.2).
+inline constexpr kythira::layers::role_set peer_route_roles{kythira::layers::role::data};
+inline constexpr kythira::layers::role_set catalog_route_roles{kythira::layers::role::front_end,
+                                                               kythira::layers::role::data};
+inline constexpr kythira::layers::role_set front_end_call_roles{kythira::layers::role::gateway};
+inline constexpr kythira::layers::role_set front_end_health_roles{kythira::layers::role::gateway,
+                                                                  kythira::layers::role::front_end};
+
+/// Whether `caller` may call a route open to `allowed` under `policy`.
+[[nodiscard]] inline auto admits(const peer_policy& policy, const peer_caller& caller,
+                                 kythira::layers::role_set allowed) -> bool {
     if (!caller.tls) {
         return policy.allow_plaintext;
     }
     if (!caller.verified) {
         return false;
+    }
+    if (const auto id = kythira::layers::find_identity(caller.uri_sans, "kms", policy.cluster)) {
+        return id->roles.intersects(allowed);
     }
     for (const auto* sans : {&caller.uri_sans, &caller.dns_sans}) {
         for (const auto& san : *sans) {
@@ -154,6 +182,12 @@ struct peer_caller {
         }
     }
     return false;
+}
+
+/// Whether `caller` is a data-layer member under `policy`: who may use
+/// the peer routes.
+[[nodiscard]] inline auto is_member(const peer_policy& policy, const peer_caller& caller) -> bool {
+    return admits(policy, caller, peer_route_roles);
 }
 
 /// An answer to a peer request: the HTTP status and body.

@@ -30,6 +30,18 @@
 // (kms_peer.hpp) to verified member certificates only. A member that does
 // not lead forwards writes and read barriers to the leader there, so any
 // member answers any request.
+//
+// Layers (.kiro/specs/kms-independent-layers/). KYTHIRA_KMS_ROLES picks
+// which of gateway, front end and data this node runs, all three by
+// default. A data node holds the catalog and serves it to front ends
+// (kms_catalog_api.hpp); a front end without data reads it from them. A
+// gateway without its own front end verifies SigV4 and hands each call to
+// a front end KYTHIRA_KMS_FRONT_END_URLS lists, on its
+// /v1/kms/front-end/call route (kms_front_end_api.hpp). Front ends that
+// list each other ask each other's health and share the quotas over the
+// live ones. Callers of the internal routes are held to their layer
+// identity's roles, or trusted as every layer when listed in
+// KYTHIRA_KMS_PEER_IDENTITIES (kms_peer.hpp).
 
 #include "kms_config.hpp"
 
@@ -41,6 +53,7 @@
 #include <kythira/kms/kms_crypto_api.hpp>
 #include <kythira/kms/kms_audit.hpp>
 #include <kythira/kms/kms_front_end.hpp>
+#include <kythira/kms/kms_front_end_api.hpp>
 #include <kythira/kms/kms_grants_api.hpp>
 #include <kythira/kms/kms_group_state_machine.hpp>
 #include <kythira/kms/kms_host.hpp>
@@ -181,10 +194,14 @@ public:
         -> std::optional<std::string> override {
         try {
             _opt = from_env(composite_env(service_node::module_tuning(env, "KYTHIRA_KMS_")));
-            if (!runs(role::front_end)) {
-                return std::nullopt;  // no handlers: no HSM client, no authorizer
+            _peer_policy.identities = _opt.peer_identities;
+            _peer_policy.allow_plaintext = _opt.insecure_plaintext;
+            _peer_policy.cluster = _opt.cluster;
+            if (!runs(role::front_end) && !runs(role::gateway)) {
+                return std::nullopt;  // a data node: no authorizer, no HSM client
             }
-            if (_opt.pkcs11 == co_located_hsm && !service_node::co_located(env, "hsm")) {
+            if (runs(role::front_end) && _opt.pkcs11 == co_located_hsm &&
+                !service_node::co_located(env, "hsm")) {
                 return std::string(
                     "KYTHIRA_KMS_PKCS11=hsm needs the HSM co-located (KYTHIRA_SERVICES naming "
                     "hsm); set it to a PKCS#11 library's path to use another HSM");
@@ -214,7 +231,7 @@ public:
         if (runs(role::data)) {
             open_catalog(host, space);
             _access = _local.get();
-        } else {
+        } else if (runs(role::front_end)) {
             open_remote_catalog();
             _access = _remote.get();
         }
@@ -222,7 +239,10 @@ public:
             _handler_access = std::make_unique<kythira::kms::bounded_staleness_access>(
                 *_access, _opt.bounded_staleness);
             build_api();
+        } else if (runs(role::gateway)) {
+            build_gateway();
         }
+        open_front_end_directory();
     }
 
     /// kms.client: co-located consumers' calls for their callers, through
@@ -236,8 +256,11 @@ public:
     }
 
     void start(service_node::module_registry& registry) override {
+        if (runs(role::front_end) || runs(role::gateway)) {
+            bind_authorizer(registry);
+        }
         if (runs(role::front_end)) {
-            bind_front_end(registry);
+            bind_hsm(registry);
         }
         _driving = true;
         if (_raft) {
@@ -257,6 +280,10 @@ public:
         if (runs(role::front_end)) {
             _jobs_running = true;
             _jobs_thread = std::thread([this] { jobs_loop(); });
+        }
+        if (_directory) {
+            _probing = true;
+            _probe_thread = std::thread([this] { probe_loop(); });
         }
 
         https::server_config hc;
@@ -281,8 +308,11 @@ public:
         _started = true;
         std::cout << "kms " << kythira::host_node_id_text(_opt.node_id)
                   << " ready: roles=" << _opt.roles.to_string()
-                  << (runs(role::data) ? " members=" : " data_nodes=") << _opt.api_urls.size()
-                  << " api=" << _server->port()
+                  << (runs(role::data) ? " members=" : " data_nodes=") << _opt.api_urls.size();
+        if (!_opt.front_end_urls.empty()) {
+            std::cout << " front_ends=" << _opt.front_end_urls.size();
+        }
+        std::cout << " api=" << _server->port()
                   << (_opt.insecure_plaintext ? " (http)" : " (https)");
         if (runs(role::front_end)) {
             std::cout << " auth=" << auth_name(_opt.auth) << " pkcs11="
@@ -293,8 +323,11 @@ public:
         std::cout << std::endl;
     }
 
-    /// No request in flight once the listener has stopped.
+    /// No request in flight once the listener has stopped. Calls a gateway
+    /// hands this front end meanwhile answer "not executed", so the
+    /// gateway takes them elsewhere (Requirement 10.1).
     void drain() override {
+        _draining.store(true, std::memory_order_release);
         if (_server) {
             _server->stop();
         }
@@ -310,6 +343,14 @@ public:
         if (_jobs_thread.joinable()) {
             _jobs_thread.join();
         }
+        {
+            const std::scoped_lock lock(_probe_mutex);
+            _probing.store(false, std::memory_order_release);
+        }
+        _probe_wake.notify_all();
+        if (_probe_thread.joinable()) {
+            _probe_thread.join();
+        }
         // While Raft still ticks: a proposal's commit timeout is checked on
         // the tick, so with the driver stopped a release that cannot
         // commit (the last member stopping) would wait forever.
@@ -323,6 +364,9 @@ public:
         }
         // Everything that refers to the host goes before it.
         _server.reset();
+        _link.reset();
+        _directory.reset();
+        _front_end_client.reset();
         if (_client) {
             _client->close();  // consumers stopped first; any late call answers 503
         }
@@ -408,6 +452,22 @@ public:
             };
             mine.insert(mine.end(), front_end.begin(), front_end.end());
         }
+        if (_directory) {
+            mine.push_back({"front_ends_live", static_cast<double>(_directory->live_count()), {}});
+        }
+        if (_link) {  // a gateway without its own front end
+            const auto c = _link->counters();
+            const std::vector<service_node::module_metric> gateway{
+                {"calls_handed_over", static_cast<double>(c.handed_over), {}},
+                {"calls_not_executed", static_cast<double>(c.not_executed), {}},
+                {"calls_outcome_unknown", static_cast<double>(c.outcome_unknown), {}},
+                {"calls_without_front_end", static_cast<double>(c.no_front_end), {}},
+            };
+            mine.insert(mine.end(), gateway.begin(), gateway.end());
+        }
+        if (_quotas) {
+            mine.push_back({"quota_share_members", static_cast<double>(_quotas->members()), {}});
+        }
         out.insert(out.end(), mine.begin(), mine.end());
         return out;
     }
@@ -451,8 +511,6 @@ private:
                 return from_peer(_peers->read_index(url_of(leader)));
             };
         }
-        _peer_policy.identities = _opt.peer_identities;
-        _peer_policy.allow_plaintext = _opt.insecure_plaintext;
         _host = std::make_unique<kms_host>(*_raft, _ctx, hopts);
         _host->bootstrap();
         _local = std::make_unique<access_type>(access_type::over_host(*_host));
@@ -476,9 +534,9 @@ private:
             });
     }
 
-    /// The front end's dependencies on other modules: IAM's evaluator and
-    /// the PKCS#11 backend. Nothing else in the node holds an HSM client.
-    void bind_front_end(service_node::module_registry& registry) {
+    /// IAM's evaluator, which a gateway needs for SigV4 and a front end
+    /// for authorization too.
+    void bind_authorizer(service_node::module_registry& registry) {
         if (_opt.auth != kythira::aws_auth::auth_mode::static_keys) {
             // IAM starts first (starts_after), so its evaluator answers
             // before the listener opens.
@@ -495,6 +553,11 @@ private:
                     "KYTHIRA_KMS_AUTH=both: IAM also has the static access key " + clash.front());
             }
         }
+    }
+
+    /// The front end's PKCS#11 backend. Nothing else in the node holds an
+    /// HSM client (Requirement 2.3).
+    void bind_hsm(service_node::module_registry& registry) {
         if (_opt.pkcs11 == co_located_hsm) {
             auto provider = registry.lookup<service_node::pkcs11_provider>(
                 std::string(service_node::interface_names::hsm_pkcs11));
@@ -565,6 +628,76 @@ private:
         return _store;
     }
 
+    /// A gateway without its own front end: a front end with no handlers
+    /// that only frames and verifies (front_end::authenticate), its audit
+    /// for the requests it refuses, and the link to the front ends.
+    void build_gateway() {
+        kythira::kms::front_end_config fc;
+        fc.region = _opt.region;
+        fc.partition = _opt.partition;
+        fc.limits.max_body_bytes = static_cast<std::size_t>(_opt.max_body_bytes);
+        _front_end = std::make_unique<front_end_type>(fc, *_authorizer);
+        _audit = std::make_unique<kythira::kms::request_audit>(_opt.audit, _opt.region);
+        _front_end->set_observer(
+            [audit = _audit.get()](const kythira::kms::request_record& r) { audit->record(r); });
+    }
+
+    /// The front ends this node hands calls to or shares the quotas with,
+    /// when KYTHIRA_KMS_FRONT_END_URLS lists them.
+    void open_front_end_directory() {
+        if (_opt.front_end_urls.empty() || (!runs(role::front_end) && !runs(role::gateway))) {
+            return;
+        }
+        std::vector<kythira::kms::front_end_endpoint> others;
+        for (const auto& [id, url] : _opt.front_end_urls) {
+            if (id != _opt.node_id) {
+                others.push_back({kythira::host_node_id_text(id), url});
+            }
+        }
+        _directory = std::make_unique<kythira::kms::front_end_directory>(
+            std::move(others), runs(role::front_end), 3 * _opt.front_end_probe);
+        auto pc = node_client_config();
+        // A call runs catalog reads and proposals and HSM operations.
+        pc.timeout = 2 * _opt.propose_timeout + std::chrono::seconds(2);
+        _front_end_client = std::make_shared<const kythira::mtls::client>(pc);
+        if (runs(role::gateway) && !runs(role::front_end)) {
+            _link = std::make_unique<kythira::kms::front_end_link>(
+                *_directory,
+                [client = _front_end_client](std::string_view base_url, std::string_view target,
+                                             std::string body) {
+                    auto a = client->attempt_request("POST", base_url, std::string(target),
+                                                     std::move(body), "application/octet-stream",
+                                                     "kythira-kms-gateway");
+                    return kythira::kms::front_end_attempt{std::move(a.answer), a.may_have_arrived};
+                });
+        }
+    }
+
+    /// Asks each listed front end's health every probe interval, and
+    /// shares the quotas over the live ones (Requirement 7.2).
+    void probe_loop() {
+        auto pc = node_client_config();
+        pc.timeout =
+            std::min<std::chrono::milliseconds>(_opt.front_end_probe * 2, std::chrono::seconds(5));
+        const kythira::mtls::client probe(pc);
+        std::unique_lock lock(_probe_mutex);
+        while (_probing.load(std::memory_order_acquire)) {
+            lock.unlock();
+            _directory->probe([&probe](std::string_view url) {
+                const auto r = probe.request(
+                    "POST", url, std::string(kythira::kms::front_end_api::k_health_path), {},
+                    "application/octet-stream", "kythira-kms-probe");
+                return r && r->first == kythira::kms::front_end_api::k_ok;
+            });
+            if (_quotas) {
+                _quotas->set_members(_directory->live_count());
+            }
+            lock.lock();
+            _probe_wake.wait_for(lock, _opt.front_end_probe,
+                                 [this] { return !_probing.load(std::memory_order_acquire); });
+        }
+    }
+
     void build_api() {
         kythira::kms::front_end_config fc;
         fc.region = _opt.region;
@@ -580,10 +713,12 @@ private:
         _audit = std::make_unique<kythira::kms::request_audit>(_opt.audit, _opt.region);
         if (_opt.throttling) {
             auto q = _opt.quotas;
-            // Each member's share of the quotas. Front ends without a
-            // replica count the data nodes for now; the share over live
-            // front ends comes with the gateway apart (task 4).
-            q.members = std::max<std::size_t>(_opt.api_urls.size(), 1);
+            // Each front end's share of the quotas (Requirement 7): over
+            // the live front ends when they are listed (the probe loop
+            // keeps it current, starting from all of them), else over the
+            // catalog members, every one a front end when co-located.
+            q.members = std::max<std::size_t>(
+                _opt.front_end_urls.empty() ? _opt.api_urls.size() : _opt.front_end_urls.size(), 1);
             _quotas = std::make_shared<kythira::kms::request_quotas>(std::move(q));
             _front_end->set_quotas(_quotas);
         }
@@ -670,13 +805,14 @@ private:
         }
         if (kythira::kms::is_catalog_path(target)) {
             // The data layer's catalog API (kms-independent-layers task 3)
-            // for front ends without a replica. Until layer identities
-            // carry roles, the members' identities are who may call.
+            // for front ends without a replica: front ends and data nodes
+            // only (Requirement 9.2).
             ++_peer_requests;
             const kythira::kms::peer_caller caller{ctx.tls, ctx.client_verified,
                                                    ctx.client_uri_sans, ctx.client_dns_sans};
             const auto answer = kythira::kms::serve_catalog(
-                _catalog_server, kythira::kms::is_member(_peer_policy, caller),
+                _catalog_server,
+                kythira::kms::admits(_peer_policy, caller, kythira::kms::catalog_route_roles),
                 std::string_view(req.method_string()), target, req.body());
             res.result(answer->status);
             res.set(http::field::content_type, "application/octet-stream");
@@ -698,6 +834,9 @@ private:
             res.prepare_payload();
             return res;
         }
+        if (kythira::kms::front_end_api::is_front_end_path(target)) {
+            return serve_front_end_api(req, ctx, res, target);
+        }
         if (!runs(role::gateway)) {
             return refuse(res, http::status::not_found, "this node runs no KMS gateway");
         }
@@ -713,7 +852,7 @@ private:
         in.body = req.body();
         in.source_ip = ctx.peer_address;
         in.secure = ctx.tls;
-        const auto out = _front_end->handle(in);
+        const auto out = runs(role::front_end) ? _front_end->handle(in) : hand_over(in);
         res.result(out.status);
         for (const auto& [k, v] : out.headers) {
             res.set(k, v);
@@ -721,6 +860,54 @@ private:
         res.body() = out.body;
         res.prepare_payload();
         return res;
+    }
+
+    /// A gateway without its own front end (task 4, Requirement 6.1):
+    /// framing and SigV4 here, the call to a front end on another node,
+    /// and its answer passed on unchanged.
+    auto hand_over(const kythira::kms::front_end_request& in) -> kythira::aws_json::http_response {
+        auto first = _front_end->authenticate(in);
+        if (auto* refused = std::get_if<kythira::aws_json::http_response>(&first)) {
+            return std::move(*refused);
+        }
+        const auto& call = std::get<kythira::kms::authenticated_call>(first);
+        auto handed = _link->hand_over(call);
+        if (auto* res = std::get_if<kythira::aws_json::http_response>(&handed)) {
+            return std::move(*res);
+        }
+        const auto why = std::get<kythira::kms::handoff_failure>(handed);
+        log(kythira::log_level::warning,
+            std::string("kms: gateway: ") +
+                (why == kythira::kms::handoff_failure::no_front_end
+                     ? "no front end took " + call.operation + " " + call.request_id
+                     : "no answer from the front end for " + call.operation + " " +
+                           call.request_id + "; it may have run"));
+        return _front_end->fail(call, kythira::kms::front_end_link::error_for(why));
+    }
+
+    /// The front-end API (kms_front_end_api.hpp): calls from gateways,
+    /// health from gateways and front ends (Requirement 9.1).
+    auto serve_front_end_api(const https::request& req, const https::request_context& ctx,
+                             https::response& res, std::string_view target) -> https::response {
+        namespace fe_api = kythira::kms::front_end_api;
+        ++_peer_requests;
+        const kythira::kms::peer_caller caller{ctx.tls, ctx.client_verified, ctx.client_uri_sans,
+                                               ctx.client_dns_sans};
+        const auto roles = target == fe_api::k_health_path ? kythira::kms::front_end_health_roles
+                                                           : kythira::kms::front_end_call_roles;
+        const bool accepting =
+            runs(role::front_end) && _front_end && !_draining.load(std::memory_order_acquire);
+        const auto answer =
+            fe_api::serve_front_end(kythira::kms::admits(_peer_policy, caller, roles), accepting,
+                                    std::string_view(req.method_string()), target, req.body(),
+                                    [this](kythira::kms::authenticated_call call) {
+                                        return _front_end->execute(std::move(call));
+                                    });
+        res.result(answer.status);
+        res.set(boost::beast::http::field::content_type, "application/octet-stream");
+        res.body() = answer.body;
+        res.prepare_payload();
+        return std::move(res);
     }
 
     [[nodiscard]] static auto refuse(https::response& res, boost::beast::http::status status,
@@ -1064,6 +1251,15 @@ private:
     std::shared_ptr<const kythira::kms::peer_client> _peers;
     kythira::kms::peer_policy _peer_policy;
     std::unique_ptr<https::server> _server;
+    // The front ends (task 4): who is live, and a gateway's link to them.
+    std::unique_ptr<kythira::kms::front_end_directory> _directory;
+    std::shared_ptr<const kythira::mtls::client> _front_end_client;
+    std::unique_ptr<kythira::kms::front_end_link> _link;
+    std::atomic<bool> _draining{false};
+    std::atomic<bool> _probing{false};
+    std::mutex _probe_mutex;
+    std::condition_variable _probe_wake;
+    std::thread _probe_thread;
     std::atomic<std::uint64_t> _requests{0};
     std::atomic<std::uint64_t> _peer_requests{0};
     std::atomic<hsm_state> _hsm{hsm_state::unknown};

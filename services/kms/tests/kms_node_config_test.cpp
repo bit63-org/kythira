@@ -74,6 +74,9 @@ public:
         });
     }
 
+    /// The fixture's PIN file.
+    [[nodiscard]] auto options_pin() const -> std::string { return (_dir / "pin").string(); }
+
     /// The message from_env refuses with, or "" when it accepts.
     [[nodiscard]] auto refusal() const -> std::string {
         try {
@@ -117,10 +120,13 @@ BOOST_FIXTURE_TEST_CASE(the_role_sets_a_node_can_serve, env_fixture) {
 }
 
 BOOST_FIXTURE_TEST_CASE(role_sets_it_cannot_serve_stop_it_with_the_reason, env_fixture) {
-    set("KYTHIRA_KMS_ROLES", "gateway");
-    BOOST_TEST(contains(refusal(), "a gateway needs the front_end role"));
-    set("KYTHIRA_KMS_ROLES", "gateway,data");
-    BOOST_TEST(contains(refusal(), "a gateway needs the front_end role"));
+    // A gateway without its own front end must know the front ends.
+    set("KYTHIRA_KMS_ROLES", "gateway").set("KYTHIRA_KMS_PIN_FILE", "");
+    set("KYTHIRA_NODE_ID", "9");
+    BOOST_TEST(contains(refusal(), "needs KYTHIRA_KMS_FRONT_END_URLS"));
+    set("KYTHIRA_NODE_ID", "1").set("KYTHIRA_KMS_ROLES", "gateway,data");
+    BOOST_TEST(contains(refusal(), "needs KYTHIRA_KMS_FRONT_END_URLS"));
+    set("KYTHIRA_KMS_PIN_FILE", options_pin());
     set("KYTHIRA_KMS_ROLES", "front_end,segments");
     BOOST_TEST(contains(refusal(), "segments is Kinesis's"));
     set("KYTHIRA_KMS_ROLES", "frontend");
@@ -165,10 +171,60 @@ BOOST_FIXTURE_TEST_CASE(bounded_staleness_is_a_front_end_switch, env_fixture) {
     BOOST_TEST(contains(refusal(), "must be a number of milliseconds"));
 }
 
+// Task 4: a gateway apart from the front end (Requirement 6.1).
+BOOST_FIXTURE_TEST_CASE(a_gateway_alone_hands_calls_to_the_listed_front_ends, env_fixture) {
+    set("KYTHIRA_NODE_ID", "9").set("KYTHIRA_KMS_ROLES", "gateway").set("KYTHIRA_KMS_PIN_FILE", "");
+    set("KYTHIRA_KMS_FRONT_END_URLS", "4=http://fe-4:1,5=http://fe-5:1");
+    // It reaches no catalog, so the data nodes need not be listed.
+    set("KYTHIRA_KMS_API_URLS", "");
+    auto o = options();
+    BOOST_TEST(o.roles.to_string() == "gateway");
+    BOOST_TEST(o.front_end_urls.size() == 2U);
+    BOOST_TEST(o.api_urls.empty());
+    BOOST_TEST(o.pin_file.empty());
+
+    // It holds no PIN (Requirement 2.3) and is no front end.
+    set("KYTHIRA_KMS_PIN_FILE", "/some/pin");
+    BOOST_TEST(contains(refusal(), "holds no HSM PIN"));
+    set("KYTHIRA_KMS_PIN_FILE", "");
+    set("KYTHIRA_KMS_FRONT_END_URLS", "9=http://self:1,4=http://fe-4:1");
+    BOOST_TEST(contains(refusal(), "but it runs no front end"));
+    set("KYTHIRA_KMS_FRONT_END_URLS", "4=https://fe-4:1");
+    BOOST_TEST(contains(refusal(), "is not an http:// URL"));
+
+    // A front end that lists the front ends lists itself among them: the
+    // live ones share the quotas.
+    set("KYTHIRA_NODE_ID", "4").set("KYTHIRA_KMS_ROLES", "front_end");
+    set("KYTHIRA_KMS_PIN_FILE", options_pin());
+    set("KYTHIRA_KMS_API_URLS", "1=http://a:1");
+    set("KYTHIRA_KMS_FRONT_END_URLS", "5=http://fe-5:1");
+    BOOST_TEST(contains(refusal(), "must include this front end's own id 4"));
+    set("KYTHIRA_KMS_FRONT_END_URLS", "4=http://fe-4:1,5=http://fe-5:1");
+    o = options();
+    BOOST_TEST(o.front_end_urls.size() == 2U);
+    BOOST_TEST(o.front_end_probe.count() == 1000);
+    // A front end without the data role still needs the data nodes.
+    set("KYTHIRA_KMS_API_URLS", "");
+    BOOST_TEST(contains(refusal(), "KYTHIRA_KMS_API_URLS"));
+}
+
+BOOST_FIXTURE_TEST_CASE(layer_identities_name_the_cluster, env_fixture) {
+    BOOST_TEST(options().cluster == "default");
+    set("KYTHIRA_CLUSTER", "prod-east");
+    BOOST_TEST(options().cluster == "prod-east");
+    set("KYTHIRA_KMS_CLUSTER", "kms-east");
+    BOOST_TEST(options().cluster == "kms-east");
+    set("KYTHIRA_KMS_CLUSTER", "bad/name");
+    BOOST_TEST(contains(refusal(), "KYTHIRA_KMS_CLUSTER"));
+    set("KYTHIRA_KMS_CLUSTER", "").set("KYTHIRA_KMS_FRONT_END_PROBE_MS", "0");
+    BOOST_TEST(contains(refusal(), "KYTHIRA_KMS_FRONT_END_PROBE_MS must be at least 1"));
+}
+
 BOOST_AUTO_TEST_CASE(usage_names_the_new_settings) {
     const auto u = std::string(kn::usage_text());
     for (const auto* name :
-         {"KYTHIRA_KMS_ROLES", "KYTHIRA_KMS_BOUNDED_STALENESS_MS", "KYTHIRA_KMS_JOB_LEASE_MS"}) {
+         {"KYTHIRA_KMS_ROLES", "KYTHIRA_KMS_BOUNDED_STALENESS_MS", "KYTHIRA_KMS_JOB_LEASE_MS",
+          "KYTHIRA_KMS_FRONT_END_URLS", "KYTHIRA_KMS_FRONT_END_PROBE_MS", "KYTHIRA_KMS_CLUSTER"}) {
         BOOST_TEST(contains(u, name), name);
     }
 }

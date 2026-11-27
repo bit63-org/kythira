@@ -97,9 +97,30 @@ public:
         std::string body, std::string_view content_type, std::string_view agent,
         const std::vector<std::pair<std::string, std::string>>& headers) const
         -> std::optional<std::pair<unsigned, std::string>> {
+        return attempt_request(method, base_url, target, std::move(body), content_type, agent,
+                               headers)
+            .answer;
+    }
+
+    /// What became of one request: the answer, if one came, and whether
+    /// the request may have reached the server. A caller that must not
+    /// run a request twice retries elsewhere only when it cannot have
+    /// (the dial, resolution or handshake failed before any of it was
+    /// written).
+    struct attempt {
+        std::optional<std::pair<unsigned, std::string>> answer;
+        bool may_have_arrived = false;
+    };
+
+    /// request(), saying whether a failed exchange may have delivered it.
+    [[nodiscard]] auto attempt_request(
+        std::string_view method, std::string_view base_url, const std::string& target,
+        std::string body, std::string_view content_type, std::string_view agent,
+        const std::vector<std::pair<std::string, std::string>>& headers = {}) const -> attempt {
+        attempt out;
         const auto e = parse(base_url);
         if (!e || e->tls == _config.plaintext) {
-            return std::nullopt;  // a plaintext URL needs plaintext asked for, and the reverse
+            return out;  // a plaintext URL needs plaintext asked for, and the reverse
         }
         try {
             namespace http = boost::beast::http;
@@ -112,10 +133,12 @@ public:
             }
             req.body() = std::move(body);
             req.prepare_payload();
-            return e->tls ? exchange_tls(*e, req) : exchange_plain(*e, req);
+            out.answer = e->tls ? exchange_tls(*e, req, out.may_have_arrived)
+                                : exchange_plain(*e, req, out.may_have_arrived);
         } catch (const std::exception&) {
-            return std::nullopt;
+            out.answer.reset();
         }
+        return out;
     }
 
 private:
@@ -167,10 +190,12 @@ private:
     }
 
     template<typename Stream, typename Request>
-    [[nodiscard]] auto send(boost::asio::io_context& ioc, Stream& stream, const Request& req) const
+    [[nodiscard]] auto send(boost::asio::io_context& ioc, Stream& stream, const Request& req,
+                            bool& written) const
         -> std::optional<std::pair<unsigned, std::string>> {
         namespace http = boost::beast::http;
         using kythira::beast_deadline::run;
+        written = true;  // from the first byte on, the server may act on it
         if (run(ioc, [&](auto h) { http::async_write(stream, req, std::move(h)); })) {
             return std::nullopt;
         }
@@ -185,7 +210,7 @@ private:
     }
 
     template<typename Request>
-    [[nodiscard]] auto exchange_plain(const endpoint& e, const Request& req) const
+    [[nodiscard]] auto exchange_plain(const endpoint& e, const Request& req, bool& written) const
         -> std::optional<std::pair<unsigned, std::string>> {
         const auto dialled_at = std::chrono::steady_clock::now();
         const auto endpoints = resolve(e);
@@ -200,14 +225,14 @@ private:
             kythira::net_resolve::mark_unreachable(e.host, e.port, SOCK_STREAM, dialled_at);
             return std::nullopt;
         }
-        auto out = send(ioc, stream, req);
+        auto out = send(ioc, stream, req, written);
         boost::beast::error_code ec;
         (void)stream.socket().shutdown(boost::asio::ip::tcp::socket::shutdown_both, ec);
         return out;
     }
 
     template<typename Request>
-    [[nodiscard]] auto exchange_tls(const endpoint& e, const Request& req) const
+    [[nodiscard]] auto exchange_tls(const endpoint& e, const Request& req, bool& written) const
         -> std::optional<std::pair<unsigned, std::string>> {
         namespace ssl = boost::asio::ssl;
         ssl::context ctx(ssl::context::tls_client);
@@ -246,7 +271,7 @@ private:
                 [&](auto h) { stream.async_handshake(ssl::stream_base::client, std::move(h)); })) {
             return std::nullopt;
         }
-        auto out = send(ioc, stream, req);
+        auto out = send(ioc, stream, req, written);
         // The close_notify exchange is a courtesy: a peer that drops the
         // connection instead is fine, and it never outlasts the deadline.
         (void)run(ioc, [&](auto h) { stream.async_shutdown(std::move(h)); });

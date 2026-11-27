@@ -119,6 +119,16 @@ kythira_kms_test(kms_catalog_api_test kms_catalog_api_test.cpp)
 set_tests_properties(kms_catalog_api_test PROPERTIES
     LABELS "unit;kms;kms-module" TIMEOUT 120)
 
+# kms-independent-layers task 4, Requirements 6.1-6.3, 7 and 9: the
+# authenticated call's wire (with seeded mutations through its decoders),
+# the front-end API's answers, who may call which internal route, the
+# gateway's handover and its not-executed rule, the live front ends and
+# the quota share over them, and a gateway and front end end to end. The
+# *_split runs below put a gateway in front of every API suite.
+kythira_kms_test(kms_front_end_api_test kms_front_end_api_test.cpp)
+set_tests_properties(kms_front_end_api_test PROPERTIES
+    LABELS "unit;kms;kms-module" TIMEOUT 120)
+
 # Task 5, Requirements 3.4, 4.1, 4.4, 4.5 and 9.2-9.4: two-step key
 # creation and the leader's jobs over an in-memory PKCS#11 backend, with
 # the scan of the catalog's log, engine and checkpoint for generated
@@ -246,11 +256,12 @@ if(KYTHIRA_KMS_NODE_DAEMON)
         PASS_REGULAR_EXPRESSION "kms_node runs kms, hsm and iam only"
         LABELS "unit;kms;kms-module" TIMEOUT 30)
     # kms-independent-layers Requirement 2.4: a role set the node cannot
-    # serve stops it at start with the reason.
-    add_test(NAME kms_node_refuses_a_lone_gateway COMMAND kms_node)
-    set_tests_properties(kms_node_refuses_a_lone_gateway PROPERTIES
+    # serve stops it at start with the reason; a gateway alone (task 4)
+    # needs the front ends it hands calls to.
+    add_test(NAME kms_node_refuses_a_gateway_without_front_ends COMMAND kms_node)
+    set_tests_properties(kms_node_refuses_a_gateway_without_front_ends PROPERTIES
         ENVIRONMENT "KYTHIRA_SERVICES=kms;KYTHIRA_KMS_ROLES=gateway;KYTHIRA_NODE_ID=1;KYTHIRA_NODE_DATA_DIR=${CMAKE_CURRENT_BINARY_DIR}/lone-gateway;KYTHIRA_NODE_INSECURE_PLAINTEXT=1"
-        PASS_REGULAR_EXPRESSION "a gateway needs the front_end role"
+        PASS_REGULAR_EXPRESSION "gateway needs KYTHIRA_KMS_FRONT_END_URLS"
         LABELS "unit;kms;kms-module" TIMEOUT 30)
     add_test(NAME kms_node_needs_kms COMMAND kms_node)
     set_tests_properties(kms_node_needs_kms PROPERTIES
@@ -280,7 +291,8 @@ endif()
 
 kythira_scale_test_timeouts()
 
-# kms-independent-layers task 3: the API suites in the split layout.
+# kms-independent-layers tasks 3 and 4: the API suites in the split layout
+# (gateway, front end and data apart, Requirement 11.1).
 foreach(_kms_suite IN ITEMS kms_api_test kms_crypto_test kms_asymmetric_test kms_grants_test
                             kms_policy_test kms_managed_test kms_rotation_test kms_quotas_test
                             kms_audit_test kms_client_test kms_job_lease_test)
