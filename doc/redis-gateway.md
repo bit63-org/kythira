@@ -168,7 +168,7 @@ useless.
 One user per line; `#` starts a comment and blank lines are ignored:
 
 ```
-user <name> <secret-record|nopass|disabled> <role> [prefix ...] [cert=<subject>] [auth=password|iam|both]
+user <name> <secret-record|nopass|disabled> <role> [rule or scope ...] [cert=<subject>] [auth=password|iam|both]
 ```
 
 - `<secret-record>` is `pbkdf2-sha256$<iterations>$<base64 salt>$<base64 key>`
@@ -178,15 +178,33 @@ user <name> <secret-record|nopass|disabled> <role> [prefix ...] [cert=<subject>]
   with a client certificate, so the line must carry a `cert=` (the ACL is
   rejected otherwise) and `AUTH` as that user always fails. `disabled` in
   this position keeps the line but lets nobody authenticate as the user.
-- `<role>` is `read_only` (`GET`, `EXISTS`, `STRLEN`, `GETRANGE`, `TTL`,
-  `TYPE`, `TOUCH`, `OBJECT`, `DBSIZE`, `COMMAND` and the connection
-  commands), `read_write` (adds `SET`, `SETEX`, `DEL`, `UNLINK` and the
-  string writes of *Strings*) or `admin` (adds `INFO` and
-  `KYTHIRA.FORMAT`). `ro` and `rw` are accepted
-  abbreviations.
-- Each `prefix` is a key prefix the user may touch; `*` means every key. A
-  user with no prefix can run `PING` and nothing that names a key: scope is
-  granted, never assumed.
+- `<role>` is the starting set of commands, named by Redis ACL categories:
+  `read_only` is `+@all -@write -@admin -@dangerous` (the reads, the
+  connection commands, `COMMAND`, `MULTI`/`EXEC`), `read_write` is
+  `+@all -@admin -@dangerous` (adds `SET`, `DEL` and every write) and
+  `admin` is `+@all` (adds `INFO` and `KYTHIRA.FORMAT`). `ro` and `rw` are
+  accepted abbreviations. A command's categories are the ones `COMMAND
+  INFO` reports.
+- Rules after the role edit that set, left to right, the later rule
+  winning as in Redis: `+@<category>` / `-@<category>` (`@string`, `@hash`,
+  `@set`, `@list`, `@keyspace`, `@read`, `@write`, `@admin`,
+  `@dangerous`, `@connection`, `@transaction`, `@fast`, `@slow`, ...;
+  categories with no command in this build yet, like `@sortedset`, are
+  accepted and match nothing), `+<command>` / `-<command>`, and
+  `allcommands` / `nocommands`. A rule never reaches a command the build
+  does not ship. Subcommand rules (`+client|list`) are refused.
+- Key scopes are prefixes. A bare word, or `~prefix`, lets the user read and
+  write keys under it; `*`, `~*` and `allkeys` mean every key.
+  `%R~prefix` grants reads only and `%W~prefix` writes only (`%RW~` is
+  `~`). A command that only looks at a key's metadata (`EXISTS`, `TYPE`,
+  the TTL family, `STRLEN`, `TOUCH`, `OBJECT`) accepts either scope; one
+  that both writes and returns or uses the old value (`INCR`, `GETDEL`,
+  `GETEX`, `GETSET`, `SET ... GET`) needs both. A trailing `*` is
+  optional (`~app:*` is `~app:`); any other glob character rejects the
+  file. A user with no scope can run `PING` and nothing that names a key:
+  scope is granted, never assumed.
+- `mutable~prefix` names keys the immutable-value rule lets this user
+  change (see *Strings*). It grants no access by itself.
 - `cert=<subject>` maps an mTLS client certificate's subject to this user,
   so it is authenticated on connect without an `AUTH`.
 - `auth=` says how `AUTH` authenticates the user: `password` (the default)
@@ -205,6 +223,20 @@ starting `auth=iam`. Run the new build on every gateway in the cluster
 before any ACL file uses `auth=`. Where that cannot be guaranteed, give an
 IAM-only user the secret `disabled`: an old build refuses that user
 outright, and a new one logs it in with a token only.
+
+The rules and scopes above have the same hazard: a gateway built before
+them reads every one of these words as a key prefix. Most of that fails
+closed: `~app:`, `%R~app:` and `mutable~app:` become prefixes no key
+starts with, so the old gateway refuses those keys (or keeps them
+immutable), and `+@hash` grants nothing it did not already. A `-` rule
+fails open: an old gateway ignores `-flushdb` and the role's full set
+applies. So upgrade every gateway before adding `-` rules or narrowing a
+user with `%R~`/`%W~`, or meanwhile give the user the narrower role. The
+original line format reads exactly as before, except that a bare prefix
+beginning with `+`, `-`, `~` or `%`, or spelled `allkeys`, `allcommands`,
+`nocommands` or `mutable~...`, is now syntax: write such a prefix as
+`~<prefix>`. `services/redis/tests/golden/redis/acl_permissions.txt` pins
+what the original lines grant.
 
 Example, the shape of a build farm:
 
@@ -650,11 +682,21 @@ A write that depends on the current value is decided where the log is
 applied, at the entry's command time (the leader's clock, never earlier
 than the group's last), so every replica gives the same answer and an
 expiring key cannot satisfy two `SET NX` at once. `APPEND` and `SETRANGE`
-refuse a result longer than `KYTHIRA_REDIS_MAX_VALUE_BYTES`. With
-immutable values on (the default), a command that would change the bytes
-of a live value answers `-ERR value conflict for an existing key`; creating
-a key, rewriting the same bytes, deleting and changing a deadline are
-allowed. `COMMAND`, `COMMAND INFO` and `COMMAND DOCS` describe exactly the
+refuse a result longer than `KYTHIRA_REDIS_MAX_VALUE_BYTES`.
+
+With immutable values on (`KYTHIRA_REDIS_IMMUTABLE_VALUES`, the default),
+a command that would change a live key's bytes or deadline, or take it
+away as `GETDEL` does, answers `-ERR value conflict for an existing key`,
+unless the key is under one of the user's `mutable~` prefixes (see *The
+ACL file*). Creating a key and rewriting the same bytes are allowed, and
+`DEL` works as before. The front end marks each key it proposes as
+mutable or not, and the decision is made against the stored value where
+the log is applied, so two writers racing to create a key cannot both
+pass: one creates it and the other finds it existing. A plain `SET` or
+`SETEX` of a key in a mutable prefix goes as an `exec` record once its
+group has the typed-values gate, so the mark reaches the leader even
+through a follower; before the gate only `SET` on the leader's node honours
+it. With the rule off every key is mutable. `COMMAND`, `COMMAND INFO` and `COMMAND DOCS` describe exactly the
 commands the node accepts, from the command registry
 (`services/redis/tools/redis_commands.yaml`).
 
@@ -673,7 +715,8 @@ that time deletes the key and answers 1, as Redis does. `GT` treats a key
 without a deadline as never expiring (it never passes there) and `LT`
 always passes there. The leader's expiry sweep names each key with the
 deadline it saw, so an `EXPIRE` or `PERSIST` that lands in the log after
-the sweep was built and before it applied keeps the key alive.
+the sweep was built and before it applied keeps the key alive. Under the
+immutable-value rule a deadline is part of what the rule protects.
 
 ## Transactions
 

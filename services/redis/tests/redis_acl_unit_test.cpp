@@ -264,3 +264,112 @@ BOOST_AUTO_TEST_CASE(an_iam_user_needs_no_password_and_disabled_keeps_it_iam_onl
     BOOST_CHECK_THROW((void)redis_acl::parse("user e nopass read_only p/\n"),
                       kythira::redis_acl_parse_error);
 }
+
+// ── categories, single commands, scopes, mutable prefixes ──────────────────
+// (.kiro/specs/redis-general-data-types/ task 5, Requirements 5.2, 15.1-15.3)
+
+namespace {
+auto only_user(const std::string& rest) -> redis_identity {
+    auto users = redis_acl::parse("user u disabled " + rest + "\n");
+    BOOST_REQUIRE_EQUAL(users.size(), 1U);
+    return redis_identity_of(users[0]);
+}
+}  // namespace
+
+BOOST_AUTO_TEST_CASE(roles_are_category_sets, *boost::unit_test::timeout(30)) {
+    // Every shipped command: the role grants it exactly when the category
+    // set the documentation gives for the role does.
+    const auto ro = only_user("read_only *");
+    const auto rw = only_user("read_write *");
+    const auto ad = only_user("admin *");
+    const auto ro_rules = only_user("admin * +@all -@write -@admin -@dangerous");
+    const auto rw_rules = only_user("admin * +@all -@admin -@dangerous");
+    for (const auto& c : k_redis_commands) {
+        if (c.status != redis_command_status::shipped || c.name == "KYTHIRA.ADVISE" ||
+            c.name == "KYTHIRA.TXN") {
+            continue;
+        }
+        BOOST_TEST_CONTEXT(c.name) {
+            BOOST_CHECK_EQUAL(redis_acl::command_allowed(ro, c.name),
+                              redis_acl::command_allowed(ro_rules, c.name));
+            BOOST_CHECK_EQUAL(redis_acl::command_allowed(rw, c.name),
+                              redis_acl::command_allowed(rw_rules, c.name));
+            BOOST_CHECK(redis_acl::command_allowed(ad, c.name));
+        }
+    }
+    // The internal hop is in the read_write set whatever its categories.
+    BOOST_CHECK(redis_acl::command_allowed(rw, "KYTHIRA.TXN"));
+    BOOST_CHECK(!redis_acl::command_allowed(ro, "KYTHIRA.TXN"));
+}
+
+BOOST_AUTO_TEST_CASE(later_command_rules_win, *boost::unit_test::timeout(30)) {
+    const auto u = only_user("read_only app: +@write -set -SETEX +incr");
+    BOOST_CHECK(redis_acl::authorize(u, "INCR", {"app:n"}) == acl_decision::allow);
+    BOOST_CHECK(redis_acl::authorize(u, "APPEND", {"app:n"}) == acl_decision::allow);
+    BOOST_CHECK(redis_acl::authorize(u, "SET", {"app:n"}) == acl_decision::deny_command);
+    BOOST_CHECK(redis_acl::authorize(u, "SETEX", {"app:n"}) == acl_decision::deny_command);
+    BOOST_CHECK(redis_acl::authorize(u, "GET", {"app:n"}) == acl_decision::allow);
+    BOOST_CHECK(redis_acl::authorize(u, "INFO", {}) == acl_decision::deny_command);
+
+    const auto v = only_user("admin * nocommands +@read +@connection");
+    BOOST_CHECK(redis_acl::authorize(v, "GET", {"k"}) == acl_decision::allow);
+    BOOST_CHECK(redis_acl::authorize(v, "PING", {}) == acl_decision::allow);
+    BOOST_CHECK(redis_acl::authorize(v, "SET", {"k"}) == acl_decision::deny_command);
+    BOOST_CHECK(redis_acl::authorize(v, "INFO", {}) == acl_decision::deny_command);
+
+    // A rule never reaches a command this build does not ship.
+    const auto w = only_user("admin * allcommands +flushall");
+    BOOST_CHECK(redis_acl::authorize(w, "FLUSHALL", {}) == acl_decision::deny_command);
+    // Categories with no command yet are accepted and match nothing.
+    const auto x = only_user("read_only * -@pubsub -@sortedset");
+    BOOST_CHECK(redis_acl::authorize(x, "GET", {"k"}) == acl_decision::allow);
+}
+
+BOOST_AUTO_TEST_CASE(read_and_write_scopes, *boost::unit_test::timeout(30)) {
+    const auto u = only_user("read_write %R~shared:* %W~inbox: ~own:");
+    // Reads need a read scope, writes a write scope, and a write that
+    // returns the old value needs both.
+    BOOST_CHECK(redis_acl::authorize(u, "GET", {"shared:a"}) == acl_decision::allow);
+    BOOST_CHECK(redis_acl::authorize(u, "SET", {"shared:a"}) == acl_decision::deny_key);
+    BOOST_CHECK(redis_acl::authorize(u, "SET", {"inbox:a"}) == acl_decision::allow);
+    BOOST_CHECK(redis_acl::authorize(u, "GET", {"inbox:a"}) == acl_decision::deny_key);
+    BOOST_CHECK(redis_acl::authorize(u, "INCR", {"inbox:a"}) == acl_decision::deny_key);
+    BOOST_CHECK(redis_acl::authorize(u, "GETDEL", {"own:a"}) == acl_decision::allow);
+    BOOST_CHECK(redis_acl::authorize(u, "EXPIRE", {"inbox:a"}) == acl_decision::allow);
+    BOOST_CHECK(redis_acl::authorize(u, "SET", {"inbox:a"},
+                                     redis_key_access::read | redis_key_access::write) ==
+                acl_decision::deny_key);
+    // Metadata reads accept either scope.
+    BOOST_CHECK(redis_acl::authorize(u, "TTL", {"inbox:a"}) == acl_decision::allow);
+    BOOST_CHECK(redis_acl::authorize(u, "EXISTS", {"shared:a"}) == acl_decision::allow);
+    BOOST_CHECK(redis_acl::authorize(u, "EXISTS", {"other:a"}) == acl_decision::deny_key);
+    BOOST_CHECK(redis_acl::authorize(u, "MGET", {"shared:a", "own:b"}) == acl_decision::allow);
+    BOOST_CHECK(redis_acl::authorize(u, "MGET", {"shared:a", "inbox:b"}) == acl_decision::deny_key);
+
+    const auto all = only_user("read_only allkeys");
+    BOOST_CHECK(redis_acl::authorize(all, "GET", {"anything"}) == acl_decision::allow);
+    const auto rw = only_user("read_only %RW~a:");
+    BOOST_CHECK(redis_acl::authorize(rw, "GET", {"a:1"}) == acl_decision::allow);
+}
+
+BOOST_AUTO_TEST_CASE(mutable_prefixes, *boost::unit_test::timeout(30)) {
+    const auto u = only_user("read_write * mutable~counters:* mutable~app:");
+    BOOST_CHECK(redis_acl::key_is_mutable(u, "counters:x"));
+    BOOST_CHECK(redis_acl::key_is_mutable(u, "app:"));
+    BOOST_CHECK(!redis_acl::key_is_mutable(u, "sccache/x"));
+    BOOST_CHECK(!redis_acl::key_is_mutable(only_user("admin *"), "x"));
+    // A mutable prefix grants no access by itself.
+    const auto v = only_user("read_write mutable~app:");
+    BOOST_CHECK(redis_acl::authorize(v, "SET", {"app:x"}) == acl_decision::deny_key);
+}
+
+BOOST_AUTO_TEST_CASE(new_syntax_refuses_what_it_cannot_honour, *boost::unit_test::timeout(30)) {
+    for (const auto* bad : {"read_only ~a*b", "read_only %R~a?", "read_only %X~a", "read_only %R",
+                            "read_only +@nosuch", "read_only +nosuch", "read_only +client|list",
+                            "read_only mutable~[ab]"}) {
+        BOOST_TEST_CONTEXT(bad) {
+            BOOST_CHECK_THROW((void)redis_acl::parse(std::string("user u disabled ") + bad + "\n"),
+                              redis_acl_parse_error);
+        }
+    }
+}

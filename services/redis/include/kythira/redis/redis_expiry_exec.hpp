@@ -25,8 +25,10 @@
 /// `GT` treats a key without a deadline as never expiring, so it never
 /// passes there; `LT` always passes there.
 ///
-/// Changing or dropping a deadline is allowed under the immutable-value
-/// rule (D11): it does not change the value's bytes.
+/// Under the immutable-value rule (Requirement 5.2) a key outside the
+/// user's mutable prefixes keeps its deadline: a command that passes its
+/// condition and would change the deadline answers `ERR value conflict for
+/// an existing key` instead. One that fails its condition still answers 0.
 ///
 /// The leader's expiry sweep names each key with the deadline it saw and
 /// deletes only on a match, so a sweep built before an `EXPIRE` or
@@ -138,6 +140,10 @@ auto apply_redis_expiry_exec(Store& store, const redis_kv_exec_command& c, std::
     if (live && live->_expire_at_ms != 0 && live->_expire_at_ms <= t) {
         live = nullptr;
     }
+    const bool may_mutate = redis_string_detail::may_mutate_key(c, 0);
+    const auto conflict = [] {
+        return redis_reply::error(std::string(redis_string_detail::k_conflict));
+    };
 
     if (id == redis_command_id::persist) {
         if (a.size() != 1) {
@@ -145,6 +151,9 @@ auto apply_redis_expiry_exec(Store& store, const redis_kv_exec_command& c, std::
         }
         if (!live || live->_expire_at_ms == 0) {
             return redis_reply::integer(0);
+        }
+        if (!may_mutate) {
+            return conflict();
         }
         store.put(key, live->_value, 0);
         return redis_reply::integer(1);
@@ -170,6 +179,9 @@ auto apply_redis_expiry_exec(Store& store, const redis_kv_exec_command& c, std::
     }
     if (!live || !expire_condition_holds(flags, *when, live->_expire_at_ms)) {
         return redis_reply::integer(0);
+    }
+    if (!may_mutate) {
+        return conflict();
     }
     if (*when <= 0 || static_cast<std::uint64_t>(*when) <= t) {
         (void)store.erase(key);

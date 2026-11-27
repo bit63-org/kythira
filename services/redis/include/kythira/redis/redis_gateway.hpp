@@ -638,12 +638,23 @@ protected:
     // ---- tier 1 strings (redis-general-data-types task 3) ------------------
 
     /// Proposes an `exec` record for `key` (design Component 2) on its
-    /// group's leader, forwarding `cmd` when the leader is elsewhere, and
-    /// renders the reply `apply()` decided. `args` are the record's
-    /// arguments in normal form (redis_string_exec.hpp).
+    /// group's leader and renders the reply `apply()` decided. `args` are
+    /// the record's arguments in normal form (redis_string_exec.hpp). When
+    /// the leader is elsewhere the record goes there as `KYTHIRA.EXEC`, so
+    /// the normal form and the user's mutable bit (Requirement 5) travel
+    /// with it; `mutable_key` is that bit as the hop carries it.
     auto propose_exec(session& s, const resp_command& cmd, const std::string& key,
-                      redis_command_id id, std::vector<std::string> args, bool may_grow)
-        -> std::string;
+                      redis_command_id id, std::vector<std::string> args, bool may_grow,
+                      std::optional<bool> mutable_key = std::nullopt) -> std::string;
+    /// Whether a plain `SET` or `SETEX` of `key` goes as an `exec` record:
+    /// the key is in one of the user's mutable prefixes under the
+    /// immutable-value rule, and its group has the typed-values gate. The
+    /// record carries the mutable bit to the leader; the original record
+    /// would reach it as the internal user, who has no mutable prefix.
+    auto mutable_exec(const session& s, const std::string& key) -> bool;
+    /// `KYTHIRA.EXEC <command id> <mutable 0|1> <may grow 0|1> <args...>`:
+    /// the internal hop of an `exec` record whose leader is on this node.
+    auto handle_internal_exec(session& s, const resp_command& cmd) -> std::string;
     /// SET with options, SETNX, PSETEX, GETSET, the INCR family, GETDEL,
     /// GETEX, APPEND and SETRANGE: syntax checks and normal form.
     auto handle_string_write(session& s, std::string_view upper, const resp_command& cmd)
@@ -820,8 +831,10 @@ protected:
     auto locate(const std::string& key, std::string& error_reply,
                 std::optional<node_id_type>& forward_to) -> group_node_type*;
     [[nodiscard]] static auto data_error(redis_data_status status) -> std::string;
-    auto authorize(session& s, std::string_view upper, const std::vector<std::string_view>& keys)
-        -> std::optional<std::string>;
+    /// `access` overrides what the command needs of its keys
+    /// (`redis_key_access` bits), as `SET ... GET` needs a read scope too.
+    auto authorize(session& s, std::string_view upper, const std::vector<std::string_view>& keys,
+                   std::optional<unsigned> access = std::nullopt) -> std::optional<std::string>;
     auto audit(session& s, std::string_view command, std::string_view outcome) -> void;
     auto emit(std::string_view name, std::string_view command, std::int64_t count = 1) -> void;
     auto emit_duration(std::string_view name, std::string_view command, std::chrono::nanoseconds d)
