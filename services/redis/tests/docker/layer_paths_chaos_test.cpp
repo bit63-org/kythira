@@ -758,9 +758,20 @@ BOOST_FIXTURE_TEST_CASE(full_path_both_ways_killing_one_node_per_layer, LayerPat
     auto cancel = [&](int admin) {
         BOOST_REQUIRE_EQUAL(on(admin, {"KYTHIRA.EVACUATE", "CANCEL"}, 60s), "+OK\r\n");
     };
+    // RELEASE asks every data node for its view again, and refuses while
+    // any it can reach is short of done. Right after a kill, aardvark-dns
+    // can stall every lookup on the network for a while, so the evacuee
+    // may not reach its peers moments after STATUS through it said done:
+    // ask again until it answers +OK, as an operator would.
     auto release = [&](int evacuee) {
-        const auto r = on(evacuee, {"KYTHIRA.EVACUATE", "RELEASE"});
-        BOOST_REQUIRE_MESSAGE(r == "+OK\r\n", "RELEASE on " << evacuee << ": " << first_line(r));
+        std::string r;
+        const bool ok = await(
+            [&] {
+                r = on(evacuee, {"KYTHIRA.EVACUATE", "RELEASE"}, 60s);
+                return r == "+OK\r\n";
+            },
+            90s);
+        BOOST_REQUIRE_MESSAGE(ok, "RELEASE on " << evacuee << ": " << first_line(r));
     };
     auto require_serves = [&](int id) {
         BOOST_REQUIRE_MESSAGE(await([&] { return serves(id); }, 90s),
