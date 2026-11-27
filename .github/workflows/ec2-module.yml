@@ -1,0 +1,297 @@
+# Copyright (c) 2026 Clark Rawlins
+# SPDX-License-Identifier: Apache-2.0
+
+# The EC2 module's own workflow (services/ec2/, services/README.md
+# "CI", .kiro/specs/ec2-compatible-api/ Requirement 1.3). ci.yml is
+# the gate: it builds the module and runs its tests on every pull request,
+# because ci_full_defconfig sets CONFIG_EC2=y. This workflow adds, for
+# changes to the module or what it builds on:
+#
+#   - the boundary check (also in ci.yml's kconfig-check job);
+#   - a module-on build of just the module's targets, with its tests (every
+#     test labelled ec2), so a module change gets an answer in minutes
+#     instead of after the full build-and-test legs;
+#   - a module-off configure (configs/ci_no_ec2_defconfig) that asserts
+#     no EC2 target or ec2-module test exists with the switch off;
+#   - a container job that runs ec2_node --self-test under rootful Docker
+#     and rootless Podman (CLAUDE.md, "Container runtime compatibility";
+#     Requirement 1.3). It grows into the module's compose scenario once the
+#     daemon serves requests.
+#
+# The module-off configure does not build core: ci.yml's config-variants job
+# already builds every target of minimal_defconfig, where CONFIG_EC2 is
+# off by default, and the boundary check's core-includes-module rule keeps
+# core from including a module header at all.
+#
+# NOT a required check: GitHub reports nothing for a workflow its paths
+# filter skips, so a required check from it would hang every unrelated pull
+# request. Whoever merges a pull request that touches the module waits for
+# this workflow too (services/README.md).
+
+name: EC2 Module
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "services/ec2/**"
+      - "services/README.md"
+      - "cmake/kythira_test_helpers.cmake"
+      - "cmake/Kconfig.cmake"
+      - "scripts/check_module_boundaries.py"
+      - "scripts/tests/test_check_module_boundaries.py"
+      - "configs/ci_full_defconfig"
+      - "configs/ci_no_ec2_defconfig"
+      - "Kconfig"
+      - "CMakeLists.txt"
+      - ".github/workflows/ec2-module.yml"
+  pull_request:
+    branches: ['**']
+    # Keep in step with the push list above.
+    paths:
+      - "services/ec2/**"
+      - "services/README.md"
+      - "cmake/kythira_test_helpers.cmake"
+      - "cmake/Kconfig.cmake"
+      - "scripts/check_module_boundaries.py"
+      - "scripts/tests/test_check_module_boundaries.py"
+      - "configs/ci_full_defconfig"
+      - "configs/ci_no_ec2_defconfig"
+      - "Kconfig"
+      - "CMakeLists.txt"
+      - ".github/workflows/ec2-module.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ec2-module-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  boundary:
+    name: EC2 module boundary check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # The fixture tests first, so a broken checker cannot pass the tree by
+      # reporting nothing (same order as ci.yml's kconfig-check).
+      - name: Module boundary checker passes its fixture tests
+        run: python3 scripts/tests/test_check_module_boundaries.py -v
+      - name: services/ec2 uses only Kythira's public surface
+        run: python3 scripts/check_module_boundaries.py
+
+  build:
+    name: EC2 module on and off (clang++-18, x64)
+    runs-on: ubuntu-24.04
+    # A warm vcpkg tree and sccache make this minutes. A cold vcpkg tree is
+    # config-variants' 78-minute install, which this job shares by key.
+    timeout-minutes: 180
+    # The read-write build-cache key is an environment secret of
+    # build-cache-write (main only); same-repository pull requests write
+    # with the create-only pr key, and everything else reads only. See
+    # doc/ci_build_cache.md.
+    environment: ${{ github.ref == 'refs/heads/main' && 'build-cache-write' || '' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install system dependencies
+        run: |
+          ./scripts/drop-unused-apt-repos.sh
+          # autoconf & co. are for vcpkg's gperf port, needed only on a cold
+          # vcpkg cache; see ci.yml's build-and-test job.
+          for attempt in 1 2 3; do
+            if timeout 300 sudo apt-get update -q \
+                 && timeout 600 sudo apt-get install -y --no-install-recommends \
+                 clang-18 cmake ninja-build libfiu-dev \
+                 autoconf autoconf-archive automake libtool mold; then
+              exit 0
+            fi
+            echo "::warning::apt-get install failed (attempt ${attempt}/3), retrying in 30s..."
+            sleep 30
+          done
+          echo "::error::apt-get install failed after 3 attempts" >&2
+          exit 1
+
+      - name: Install kconfiglib
+        run: pip3 install --user -r scripts/kconfig/requirements.txt
+
+      # Only reached on a cold vcpkg cache: the edhoc feature builds the
+      # lakers overlay port from Rust source.
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+
+      - name: Resolve vcpkg triplet
+        id: triplet
+        run: echo "value=x64-linux" >> "$GITHUB_OUTPUT"
+
+      - name: OCI build cache
+        id: buildcache
+        uses: ./.github/actions/oci-build-cache
+        with:
+          triplet: ${{ steps.triplet.outputs.value }}
+          rw-access-key-id: ${{ secrets.OCI_BUILD_CACHE_RW_ACCESS_KEY_ID }}
+          rw-secret-access-key: ${{ secrets.OCI_BUILD_CACHE_RW_SECRET_ACCESS_KEY }}
+          pr-access-key-id: ${{ secrets.OCI_BUILD_CACHE_PR_ACCESS_KEY_ID }}
+          pr-secret-access-key: ${{ secrets.OCI_BUILD_CACHE_PR_SECRET_ACCESS_KEY }}
+          ro-access-key-id: ${{ secrets.OCI_BUILD_CACHE_RO_ACCESS_KEY_ID }}
+          ro-secret-access-key: ${{ secrets.OCI_BUILD_CACHE_RO_SECRET_ACCESS_KEY }}
+          bucket: ${{ vars.OCI_BUILD_CACHE_BUCKET }}
+          namespace: ${{ vars.OCI_BUILD_CACHE_NAMESPACE }}
+          region: ${{ vars.OCI_CI_REGION }}
+
+      # Byte-identical to ci.yml's x64 clang++-18 key (config-variants and
+      # the clang build-and-test leg), so this job reuses their tree.
+      - name: Cache vcpkg packages
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: vcpkg-cache
+        with:
+          path: vcpkg_installed
+          key: vcpkg-${{ runner.os }}-${{ runner.arch }}-edhoc-clang++-18-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json', 'vcpkg-overlays/**') }}
+
+      - name: Bootstrap vcpkg and install dependencies
+        if: steps.vcpkg-cache.outputs.cache-hit != 'true'
+        run: |
+          echo "vcpkg binary cache: ${VCPKG_BINARY_SOURCES:-<none>}"
+          # clang-built ports, for mold: see ci.yml's build-and-test vcpkg step.
+          export CC=clang-18 CXX=clang++-18
+          export LDFLAGS="-Wl,--push-state,--no-as-needed -latomic -Wl,--pop-state"
+          git clone --filter=blob:none https://github.com/microsoft/vcpkg.git /tmp/vcpkg
+          git -C /tmp/vcpkg checkout 9a7f7340a6c5f11f24c3d59f85e07143feb84e06
+          /tmp/vcpkg/bootstrap-vcpkg.sh -disableMetrics
+          /tmp/vcpkg/vcpkg install --triplet ${{ steps.triplet.outputs.value }} --no-print-usage --x-feature=edhoc
+        env:
+          VCPKG_DEFAULT_TRIPLET: ${{ steps.triplet.outputs.value }}
+
+      - name: Start sccache
+        id: sccache
+        if: steps.buildcache.outputs.enabled == 'true'
+        run: scripts/oci-build-cache/start-sccache.sh
+
+      - name: Configure (module on, ci_full_defconfig, strict)
+        run: |
+          cmake -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CXX_COMPILER=clang++-18 \
+            -DKYTHIRA_KCONFIG=configs/ci_full_defconfig \
+            -DKYTHIRA_KCONFIG_STRICT=ON \
+            -DKYTHIRA_COMPILER_LAUNCHER=${{ steps.sccache.outputs.launcher || 'none' }} \
+            -DKYTHIRA_LINKER=mold \
+            -DCMAKE_PREFIX_PATH=${{ github.workspace }}/vcpkg_installed/${{ steps.triplet.outputs.value }}
+
+      # Every test labelled ec2, built by name. The list comes from ctest, so
+      # a new test joins without an edit here.
+      - name: Build the module's tests
+        run: |
+          mapfile -t tests < <(ctest --test-dir build -N -L '^ec2$' \
+            | sed -n 's/^ *Test *#[0-9]*: \(.*\)$/\1/p')
+          if (( ${#tests[@]} == 0 )); then
+            echo "::error::no test carries the ec2 label in the module-on build"
+            exit 1
+          fi
+          echo "EC2 tests: ${tests[*]}"
+          # Some tests are scripts (the coverage and generated-header
+          # checks) with no target of their own; build the tests that are
+          # targets, plus the daemon the self-test runs.
+          mapfile -t known < <(ninja -C build -t targets all | sed -n 's/^\([^:]*\):.*/\1/p')
+          targets=(ec2_node)
+          for t in "${tests[@]}"; do
+            if printf '%s\n' "${known[@]}" | grep -qxF "$t"; then
+              targets+=("$t")
+            fi
+          done
+          echo "Building: ${targets[*]}"
+          cmake --build build -j"$(nproc)" --target "${targets[@]}"
+
+      - name: Run the module's tests
+        run: ctest --test-dir build -L '^ec2$' --output-on-failure --no-tests=error
+
+      # The container job below runs this binary under Docker and Podman.
+      - name: Upload ec2_node
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ec2-node
+          path: build/ec2_node
+          retention-days: 3
+          if-no-files-found: error
+
+      - name: Configure (module off, ci_no_ec2_defconfig, strict)
+        run: |
+          cmake -B build-off -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CXX_COMPILER=clang++-18 \
+            -DKYTHIRA_KCONFIG=configs/ci_no_ec2_defconfig \
+            -DKYTHIRA_KCONFIG_STRICT=ON \
+            -DKYTHIRA_LINKER=mold \
+            -DCMAKE_PREFIX_PATH=${{ github.workspace }}/vcpkg_installed/${{ steps.triplet.outputs.value }}
+
+      - name: Assert nothing of the module is configured with it off
+        run: |
+          rc=0
+          # `ec2-module`, not `ec2`: a core suite the module builds on may
+          # carry `ec2` too and rightly exist with the module off.
+          if ctest --test-dir build -N -L '^ec2-module$' | grep -q '^ *Test *#'; then :; else
+            echo "::error::no ec2-module test in the module-on build, so the check below proves nothing"
+            rc=1
+          fi
+          if ctest --test-dir build-off -N -L '^ec2-module$' | grep -q '^ *Test *#'; then
+            echo "::error::an ec2-module test exists with CONFIG_EC2 off"
+            rc=1
+          fi
+          # Every output Ninja knows; a module target or object would sit
+          # under build-off/services/ec2/ or be named after the module.
+          # ec2_node must start a path component: core's
+          # aws_ec2_node_id_mock_test rightly exists with the module off.
+          if ninja -C build-off -t targets all \
+               | grep -E '(^|/)services/ec2/|kythira_ec2|(^|/)ec2_node([:./ ]|$)'; then
+            echo "::error::a services/ec2 target exists with CONFIG_EC2 off"
+            rc=1
+          fi
+          exit $rc
+
+  container:
+    name: ec2_node in a container (${{ matrix.runtime }})
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        # Rootful Docker (the default CI runtime) and rootless Podman: the
+        # runner user is unprivileged, so podman runs rootless here.
+        runtime: [docker, podman]
+    steps:
+      - name: Download ec2_node
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ec2-node
+          path: bin
+
+      # ubuntu:24.04 is the build runner's distribution, so the binary's
+      # glibc and libstdc++ match. The image is named in full so podman
+      # needs no short-name resolution. No --privileged, host networking or
+      # added capabilities (CLAUDE.md).
+      - name: ec2_node --self-test under ${{ matrix.runtime }}
+        env:
+          RUNTIME: ${{ matrix.runtime }}
+        run: |
+          chmod +x bin/ec2_node
+          if [ "$RUNTIME" = podman ]; then
+            if [ "$(id -u)" = 0 ]; then
+              echo "::error::podman would run rootful here; this job checks rootless podman"
+              exit 1
+            fi
+            podman info --format '{{.Host.Security.Rootless}}' | grep -qx true
+          fi
+          "$RUNTIME" --version
+          "$RUNTIME" run --rm --network none \
+            -v "$PWD/bin:/opt/ec2:ro,Z" \
+            docker.io/library/ubuntu:24.04 /opt/ec2/ec2_node --self-test

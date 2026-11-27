@@ -1,0 +1,25 @@
+# Copyright (c) 2026 Clark Rawlins
+# SPDX-License-Identifier: Apache-2.0
+
+# The Amazon EC2-compatible compute API (services/ec2/,
+# .kiro/specs/ec2-compatible-api/). Sourced from the top-level Kconfig's
+# "Service Modules" menu.
+
+config EC2
+	bool "Amazon EC2-compatible compute API (antikythera's controller)"
+	default n
+	depends on OPENSSL
+	help
+	  Builds the services/ec2/ module: an Amazon EC2-compatible API that
+	  the AWS CLI, the AWS SDKs and Terraform's AWS provider can point at
+	  to launch, stop, start and terminate instances, create and attach
+	  EBS-style volumes, take snapshots and make VPCs and network
+	  interfaces. The instances run on antikythera servers: this module
+	  is antikythera's controller, sending signed commands and frames to
+	  each server's helm over a mutually authenticated link. So far the
+	  module holds the pinned botocore model, the generated operation
+	  table, the coverage check and the ec2_node placeholder (task 1);
+	  the codec, gateway, catalog, fleet layer and workflows follow.
+	  OpenSSL is needed for SigV4 and the link's TLS. Off by default like
+	  every new module (services/README.md). See
+	  .kiro/specs/ec2-compatible-api/.

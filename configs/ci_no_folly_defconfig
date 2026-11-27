@@ -64,3 +64,6 @@ CONFIG_SNS=y
 # The S3 module, as in ci_full_defconfig: its tests use no Folly, so the
 # no-Folly leg builds and runs them like the reference build does.
 CONFIG_S3=y
+# The EC2 module, as in ci_full_defconfig: its tests use no Folly, so the
+# no-Folly leg builds and runs them like the reference build does.
+CONFIG_EC2=y

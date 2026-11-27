@@ -24,6 +24,20 @@ is one PR unless noted.
     aws-sdk-go-v2, aws-sdk-js-v3, Terraform's AWS provider) from a
     recording stub
   - _Requirements: 1.1-1.4, 2.1_
+  - Part done (November 27, 2026): the module skeleton (`EC2`, CMake,
+    empty boundary allow list, `ec2_node` placeholder with `--self-test`),
+    `module_numbers::ec2 = 11` in core, `ci_full` and its copies turning it
+    on, `configs/ci_no_ec2_defconfig` and `ec2-module.yml` (boundary,
+    module-on tests, module-off assertion, `--self-test` under Docker and
+    rootless Podman), the pinned model (botocore 1.43.126, 811 operations,
+    no error shapes), the generated operation table (with which operations
+    take `ClientToken`, `DryRun`, filters and paging) and its `--check`
+    test, and the coverage test: 75 operations planned in tasks 4 and
+    10-14, 156 refused or answered empty under Requirements 10.6 and 14,
+    580 out of scope, all answered with `UnsupportedOperation` until
+    implemented. Still open: the antikythera `src/proto/` port with the
+    test-vector test (the `antikythera-proto` overlay port arrives with
+    the khold module), and the recording stub with the wire evidence.
 
 - [ ] 2. EC2 query protocol codec
   - Core `aws_ec2_protocol.hpp`: `Name.N` flattening, EC2 response and

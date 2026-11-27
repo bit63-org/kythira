@@ -1,0 +1,35 @@
+# Copyright (c) 2026 Clark Rawlins
+# SPDX-License-Identifier: Apache-2.0
+
+# ci_no_ec2_defconfig — ci_full_defconfig with the EC2 module (services/ec2/,
+# .kiro/specs/ec2-compatible-api/) switched off. ec2-module.yml configures
+# core with it to show that with CONFIG_EC2 off nothing under services/ec2/
+# is configured: no EC2 target and no ec2-module test. Written, like
+# ci_full_defconfig, against `-DKYTHIRA_KCONFIG_STRICT=ON`; see that file's
+# header for the reasoning behind every other line, which must stay verbatim
+# from it.
+#
+#   EC2                     — the point of the file.
+# CONFIG_EC2 is not set
+CONFIG_EDHOC=y
+CONFIG_STDEXEC_BACKEND=y
+CONFIG_BOOST_FUTURE_BACKEND=y
+CONFIG_BOOST_BEAST_TRANSPORT=y
+CONFIG_PROXYGEN_TRANSPORT=y
+CONFIG_REDIS_GATEWAY=y
+CONFIG_REDIS_GATEWAY_TRANSACTIONS=y
+CONFIG_PROTOBUF_SERIALIZER=y
+# CONFIG_GCP_SDK is not set
+# CONFIG_GCP_PRIVATECA is not set
+# CONFIG_GCP_STORAGE is not set
+# CONFIG_GCP_STORAGE_PERSISTENCE is not set
+# CONFIG_DNS_DISCOVERY is not set
+# CONFIG_POCO_DISCOVERY is not set
+CONFIG_IAM=y
+CONFIG_KINESIS=y
+CONFIG_DYNAMODB=y
+CONFIG_HSM=y
+CONFIG_KMS=y
+CONFIG_SQS=y
+CONFIG_SNS=y
+CONFIG_S3=y
