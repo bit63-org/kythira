@@ -27,7 +27,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && chown 10001:10001 /data \
     && chmod 0750 /data
 
-COPY services/redis/docker/engine-chaos/dist/redis_gateway_node /usr/local/bin/redis_gateway_node
+# The rolling-upgrade scenario (redis-general-data-types task 14) builds a
+# second image from an older binary with GATEWAY_BINARY.
+ARG GATEWAY_BINARY=services/redis/docker/engine-chaos/dist/redis_gateway_node
+COPY ${GATEWAY_BINARY} /usr/local/bin/redis_gateway_node
 
 ENV KYTHIRA_CACHE_PERSISTENCE=engine \
     KYTHIRA_CACHE_DATA_DIR=/data

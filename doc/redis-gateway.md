@@ -1171,6 +1171,18 @@ an older binary cannot read, so a downgrade needs a restore from a snapshot
 taken before the gate. An older binary that meets a gate, a record or a
 snapshot above its level does not skip it: the group stops applying its log
 and logs `this log needs Redis format level N; run a newer build`.
+A binary from before format levels existed stops with the error of whichever
+reader meets the new data first: `persistent_kv_state_machine: meta record
+has the wrong size` when the engine store opens, or `unknown redis kv
+command format version 3` when a log entry replays. Either way it serves
+nothing from the gated data, and the nodes still on level 3 carry on.
+
+`docker-redis-rolling-upgrade-tests` runs this whole sequence in containers
+(`services/redis/tests/docker/rolling_upgrade_test.cpp`): three engine nodes
+start on the last build before the gate, are rolled one at a time onto this
+tree's build, pass the gate, and then one node is rolled back to show the
+refusal. CI builds the old binary from a pinned commit in the engine
+storage job.
 
 `INFO` (admin) reports the shards this node holds and leads, key and expiring
 key counts, approximate bytes, and counters for writes, deletes, value
