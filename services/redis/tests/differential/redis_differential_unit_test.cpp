@@ -6,6 +6,8 @@
 
 #include "redis_differential.hpp"
 
+#include <kythira/redis/redis_command_ids.hpp>
+
 #include <boost/json.hpp>
 
 #include <algorithm>
@@ -112,8 +114,8 @@ BOOST_AUTO_TEST_CASE(seed_one_is_stable) {
     diff::generator_options opt;
     opt.tag = "s1";
     const auto stream = diff::generate(1, opt);
-    BOOST_TEST(diff::k_generator_version == 1);
-    BOOST_TEST(diff::fingerprint(stream) == 0x77c62aa7e4256344ULL,
+    BOOST_TEST(diff::k_generator_version == 2);
+    BOOST_TEST(diff::fingerprint(stream) == 0x57d751085589e14cULL,
                std::hex << diff::fingerprint(stream));
 }
 
@@ -123,6 +125,9 @@ BOOST_AUTO_TEST_CASE(keys_stay_in_the_key_space_and_blocks_are_whole) {
     opt.tag = "x";
     const auto stream = diff::generate(42, opt);
     BOOST_TEST(stream.size() >= opt.length);
+    const auto all_keys = diff::stream_keys(opt);
+    const std::set<std::string> keys(all_keys.begin(), all_keys.end());
+    BOOST_TEST(keys.size() == 32U);
     std::set<std::string> shapes;
     int depth = 0;
     for (const auto& c : stream) {
@@ -136,14 +141,40 @@ BOOST_AUTO_TEST_CASE(keys_stay_in_the_key_space_and_blocks_are_whole) {
         }
         for (std::size_t i = 1; i < c.argv.size(); ++i) {
             const auto& a = c.argv[i];
-            if (a.size() == 3 && a[1] == ':' && a[2] == 'x') {
-                BOOST_TEST((a[0] >= 'a' && a[0] < 'a' + 8));
+            if (a.ends_with(":x") && !a.starts_with("*")) {
+                BOOST_TEST(keys.contains(a), a);
             }
         }
     }
     BOOST_TEST(depth == 0);
     // Every shape turns up in a long stream.
     BOOST_TEST(shapes.size() == diff::shapes().size());
+}
+
+// Every shipped command is generated, or excluded with a reason
+// (redis_differential.hpp's excluded_commands()).
+BOOST_AUTO_TEST_CASE(every_shipped_command_is_generated_or_excluded) {
+    diff::generator_options opt;
+    opt.length = 20000;
+    opt.tag = "x";
+    std::set<std::string> generated;
+    for (const auto& c : diff::generate(7, opt)) {
+        generated.insert(diff::detail::upper(c.argv.front()));
+    }
+    for (const auto& info : kythira::k_redis_commands) {
+        if (info.status != kythira::redis_command_status::shipped) {
+            continue;
+        }
+        const std::string name(info.name);
+        const bool excluded = diff::excluded_commands().contains(name);
+        BOOST_TEST((generated.contains(name) || excluded),
+                   name << " is shipped but neither generated nor excluded");
+        BOOST_TEST((!generated.contains(name) || !excluded), name << " is both");
+    }
+    for (const auto& [name, why] : diff::excluded_commands()) {
+        BOOST_TEST(kythira::find_redis_command(name) != nullptr, name << " is not in the registry");
+        BOOST_TEST(!why.empty());
+    }
 }
 
 BOOST_AUTO_TEST_CASE(transactions_off_leaves_out_transaction_shapes) {
@@ -212,7 +243,7 @@ BOOST_AUTO_TEST_CASE(rules_are_named_and_gaps_name_their_task) {
             BOOST_TEST(r.reference.find("task") != std::string::npos, r.id);
         }
     }
-    const std::set<std::string> expected{"clock", "D2", "G1", "G2"};
+    const std::set<std::string> expected{"clock", "D1", "D2"};
     BOOST_TEST((ids == expected));
 }
 
@@ -257,7 +288,7 @@ BOOST_AUTO_TEST_CASE(committed_recordings_match_the_generator) {
         BOOST_TEST(rec.generator_version == diff::k_generator_version, f.path());
         diff::generator_options opt;
         opt.length = rec.length;
-        opt.tag = "s" + std::to_string(rec.seed);
+        opt.tag = rec.key_tag();
         const auto stream = diff::generate(rec.seed, opt);
         BOOST_REQUIRE_EQUAL(stream.size(), rec.entries.size());
         for (std::size_t i = 0; i < stream.size(); ++i) {
@@ -282,6 +313,64 @@ BOOST_AUTO_TEST_CASE(committed_recordings_match_the_generator) {
         BOOST_TEST_MESSAGE("seed " << seed << ": Redis " << r.version << " and Valkey " << v.version
                                    << " disagree on " << differ << " replies");
     }
+}
+
+// recs/aws/ holds what ElastiCache (Valkey and Redis OSS) and MemoryDB
+// answered (Requirement 25.1), recorded by the dispatch-only real-cloud
+// bundle with redis_differential_record. Each must still be its seed's
+// stream under its hash tag, and name the engine, version and date. The
+// directory is empty until the first recording run.
+BOOST_AUTO_TEST_CASE(committed_aws_recordings_match_the_generator) {
+    const fs::path dir = fs::path(KYTHIRA_REDIS_DIFF_RECS_DIR) / "aws";
+    if (!fs::exists(dir)) {
+        BOOST_TEST_MESSAGE("no AWS recordings yet");
+        return;
+    }
+    for (const auto& f : fs::directory_iterator(dir)) {
+        if (f.path().extension() != ".json") {
+            continue;
+        }
+        std::ifstream in(f.path());
+        std::stringstream text;
+        text << in.rdbuf();
+        const auto rec = diff::recording_from_json(boost::json::parse(text.str()));
+        BOOST_TEST((rec.server == "elasticache-valkey" || rec.server == "elasticache-redis" ||
+                    rec.server == "memorydb"),
+                   f.path());
+        BOOST_TEST(!rec.version.empty(), f.path());
+        BOOST_TEST(rec.date.size() == 10U, f.path());
+        BOOST_TEST(rec.tag == "{s" + std::to_string(rec.seed) + "}", f.path());
+        diff::generator_options opt;
+        opt.length = rec.length;
+        opt.tag = rec.key_tag();
+        const auto stream = diff::generate(rec.seed, opt);
+        BOOST_REQUIRE_EQUAL(stream.size(), rec.entries.size());
+        for (std::size_t i = 0; i < stream.size(); ++i) {
+            BOOST_TEST((stream[i].argv == rec.entries[i].argv), f.path() << " entry " << i);
+            BOOST_CHECK_NO_THROW(diff::parse_one(rec.entries[i].resp2));
+            if (!rec.entries[i].resp3.empty()) {
+                BOOST_CHECK_NO_THROW(diff::parse_one(rec.entries[i].resp3));
+            }
+        }
+    }
+}
+
+// A recording's tag survives a round trip, and one without a tag keeps its
+// original bytes (the committed Redis and Valkey recordings have none).
+BOOST_AUTO_TEST_CASE(recording_tag_round_trips) {
+    diff::recording r;
+    r.server = "memorydb";
+    r.version = "7.1";
+    r.date = "2026-11-19";
+    r.seed = 2;
+    r.length = 1;
+    r.entries.push_back({{"GET", "a:{s2}"}, "get", "$-1\r\n", "_\r\n"});
+    BOOST_TEST(r.key_tag() == "s2");
+    BOOST_TEST(diff::serialize(r).find("\"tag\"") == std::string::npos);
+    r.tag = "{s2}";
+    const auto back = diff::recording_from_json(boost::json::parse(diff::serialize(r)));
+    BOOST_TEST(back.tag == "{s2}");
+    BOOST_TEST(back.key_tag() == "{s2}");
 }
 
 BOOST_AUTO_TEST_SUITE_END()

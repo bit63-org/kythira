@@ -1,0 +1,167 @@
+# Copyright (c) 2026 Clark Rawlins
+# SPDX-License-Identifier: Apache-2.0
+
+# go-redis's own Ginkgo specs that the client-suite run selects (.kiro/specs/
+# redis-general-data-types Requirement 23.3): the specs in commands_test.go
+# whose name is "should <Command>" for a command Kythira ships, and every
+# spec in pipeline_test.go, tx_test.go and tx_unwatch_test.go, at the
+# go-redis release services/redis/docker/clients/Dockerfile pins. One full
+# spec text per line (containers and It joined by spaces, labels left
+# off); run.sh focuses on exactly these. The ones left out are listed at
+# the end with the reason.
+
+Tx should discard
+Tx returns no error when there are no commands
+Tx should exec bulks
+Tx should recover from bad connection
+Commands server should Auth
+Commands server should hello
+Commands server should Echo
+Commands server should Ping
+Commands server should Ping with Do method
+Commands server should DBSize
+Commands server should Info
+Commands server should Info Modules
+Commands server should Command
+Commands server should Command Tips
+Commands keys should Del
+Commands keys should Unlink
+Commands keys should Exists
+Commands keys should Expire
+Commands keys should ExpireAt
+Commands keys should Keys
+Commands keys should Persist
+Commands keys should PExpire
+Commands keys should PExpireAt
+Commands keys should PExpireTime
+Commands keys should PTTL
+Commands keys should RandomKey
+Commands keys should Rename
+Commands keys should RenameNX
+Commands keys should Touch
+Commands keys should ExpireTime
+Commands keys should TTL
+Commands keys should Type
+Commands scanning should Scan
+Commands scanning should SScan
+Commands scanning should HScan
+Commands scanning should HScan without values
+Commands strings should Append
+Commands strings should Decr
+Commands strings should DecrBy
+Commands strings should Get
+Commands strings should GetRange
+Commands strings should GetSet
+Commands strings should GetEX
+Commands strings should GetDel
+Commands strings should Incr
+Commands strings should IncrBy
+Commands strings should IncrByFloat
+Commands strings should scan Mget
+Commands strings should MSetNX
+Commands strings should Set with expiration
+Commands strings should Set with keepttl
+Commands strings should SetEX
+Commands strings should SetNX
+Commands strings should SetNX with expiration
+Commands strings should SetNX with keepttl
+Commands strings should SetRange
+Commands strings should StrLen
+Commands strings should Copy
+Commands strings should IncrByFloat with edge cases
+Commands hashes should HDel
+Commands hashes should HExists
+Commands hashes should HGet
+Commands hashes should HGetAll
+Commands hashes should scan
+Commands hashes should HIncrBy
+Commands hashes should HIncrByFloat
+Commands hashes should HKeys
+Commands hashes should HLen
+Commands hashes should HMGet
+Commands hashes should HSet
+Commands hashes should HSetNX
+Commands hashes should HVals
+Commands hashes should HRandField
+Commands hashes should HStrLen
+Commands lists should LIndex
+Commands lists should LInsert
+Commands lists should LMPop
+Commands lists should LLen
+Commands lists should LPop
+Commands lists should LPos
+Commands lists should LPush
+Commands lists should LPushX
+Commands lists should LRange
+Commands lists should LRem
+Commands lists should LSet
+Commands lists should LTrim
+Commands lists should RPop
+Commands lists should RPopLPush
+Commands lists should RPush
+Commands lists should RPushX
+Commands lists should LMove
+Commands sets should SAdd
+Commands sets should SAdd strings
+Commands sets should SCard
+Commands sets should SDiff
+Commands sets should SDiffStore
+Commands sets should SInter
+Commands sets should SInterCard
+Commands sets should SInterStore
+Commands sets should SMIsMember
+Commands sets should SMembers
+Commands sets should SMove
+Commands sets should SPop
+Commands sets should SRandMember and SRandMemberN
+Commands sets should SRem
+Commands sets should SUnion
+Commands sets should SUnionStore
+Commands json marshaling/unmarshaling should scan custom values using json
+Tx UNWATCH elision does not send UNWATCH after a committed EXEC
+Tx UNWATCH elision does not send UNWATCH when no keys are watched
+Tx UNWATCH elision does not send a second UNWATCH when fn already called Unwatch
+Tx UNWATCH elision does not send UNWATCH when WATCH itself fails
+Tx UNWATCH elision sends UNWATCH when fn returns an error before EXEC
+Tx UNWATCH elision sends UNWATCH when fn reads and decides not to write
+Tx UNWATCH elision sends UNWATCH when fn uses only a non-transactional pipeline
+Tx UNWATCH elision sends UNWATCH when TxPipelined queues no commands
+Tx UNWATCH elision sends UNWATCH when bailing with multiple keys watched
+Tx UNWATCH elision sends UNWATCH when a WATCH is re-armed after a committed EXEC
+Tx UNWATCH elision sends UNWATCH when fn panics
+Tx UNWATCH elision sends UNWATCH when the EXEC pipeline fails before EXEC runs
+Tx UNWATCH elision does not send UNWATCH after an aborted EXEC (optimistic lock)
+Tx UNWATCH elision does not send UNWATCH after an EXECABORT
+Tx UNWATCH elision does not leak a watch onto a pooled connection
+pipelining supports block style
+pipelining exports queued commands
+pipelining pipeline: basic exec
+pipelining pipeline: exec pipeline when get conn failed
+pipelining Pipeline returns no errors when there are no commands
+pipelining Pipeline discards queued commands
+pipelining Pipeline handles val/err
+pipelining Pipeline supports custom command
+pipelining Pipeline handles large pipelines
+pipelining Pipeline should Exec, not Do
+pipelining Pipeline should process
+pipelining Pipeline should batchProcess
+pipelining TxPipeline returns no errors when there are no commands
+pipelining TxPipeline discards queued commands
+pipelining TxPipeline handles val/err
+pipelining TxPipeline supports custom command
+pipelining TxPipeline handles large pipelines
+pipelining TxPipeline should Exec, not Do
+pipelining TxPipeline should process
+pipelining TxPipeline should batchProcess
+
+# Left out:
+# Commands Geo add and radius search should get geo distance with unit options: GEO commands are not shipped (its BeforeEach runs GEOADD)
+# Commands Geo add and radius search should get geo hash in string representation: GEO commands are not shipped (its BeforeEach runs GEOADD)
+# Commands keys should Object: OBJECT REFCOUNT is not offered (ENCODING is)
+# Commands server should Info cpu: INFO has no cpu section yet (full INFO is a later task)
+# Commands server should Info cpu and memory: INFO has no cpu section yet (full INFO is a later task)
+# Commands server should Select: Kythira has only database 0
+# Tx UNWATCH elision records UNWATCH server-side when fn returns before EXEC (commandstats): needs CONFIG RESETSTAT, which Kythira does not offer
+# Tx UNWATCH elision records no UNWATCH server-side after a committed EXEC (commandstats): needs CONFIG RESETSTAT, which Kythira does not offer
+# Tx UNWATCH elision records no UNWATCH server-side after an aborted EXEC (commandstats): needs CONFIG RESETSTAT, which Kythira does not offer
+# Tx should Watch: opens 100 connections at once; Kythira caps concurrent AUTH key derivations (half the worker pool) and answers the rest "too many concurrent authentication attempts"

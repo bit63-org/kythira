@@ -51,11 +51,28 @@ target_include_directories(docker_engine_chaos_test PRIVATE "${KYTHIRA_REDIS_INC
 add_docker_chaos_scenario_test(docker_redis_differential_test
     "${CMAKE_CURRENT_SOURCE_DIR}/../differential/redis_differential_test.cpp")
 target_include_directories(docker_redis_differential_test PRIVATE
-    "${CMAKE_CURRENT_SOURCE_DIR}/../differential")
+    "${KYTHIRA_REDIS_INCLUDE_DIR}" "${CMAKE_CURRENT_SOURCE_DIR}/../differential")
 target_link_libraries(docker_redis_differential_test PRIVATE kythira_test_support)
+# The format-level rolling upgrade (.kiro/specs/redis-general-data-types/
+# task 14): engine-storage gateways from before the format gate and from
+# this tree mixed in one cluster. Uses the differential client for RESP
+# and test_ports.hpp for its published ports.
+add_docker_chaos_scenario_test(docker_redis_rolling_upgrade_test
+    "${CMAKE_CURRENT_SOURCE_DIR}/rolling_upgrade_test.cpp")
+target_include_directories(docker_redis_rolling_upgrade_test PRIVATE
+    "${KYTHIRA_REDIS_INCLUDE_DIR}" "${CMAKE_CURRENT_SOURCE_DIR}/../differential")
+target_link_libraries(docker_redis_rolling_upgrade_test PRIVATE kythira_test_support)
+# The client-library suites (redis-general-data-types task 14): RESP for
+# its readiness probe and the format gate, test_ports.hpp for kv1's port.
+add_docker_chaos_scenario_test(docker_redis_client_suites_test
+    "${CMAKE_CURRENT_SOURCE_DIR}/client_suites_test.cpp")
+target_include_directories(docker_redis_client_suites_test PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/../differential")
+target_link_libraries(docker_redis_client_suites_test PRIVATE kythira_test_support)
 # Where they were built before the move.
 set_target_properties(docker_sccache_e2e_test docker_cache_cluster_test docker_txn_bank_chaos_test
-    docker_engine_chaos_test docker_redis_differential_test
+    docker_engine_chaos_test docker_redis_differential_test docker_redis_rolling_upgrade_test
+    docker_redis_client_suites_test
     PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests/docker_chaos")
 
 if(_RUNTIME_EXE)
@@ -71,6 +88,9 @@ if(_RUNTIME_EXE)
     set(_ENGINE_CHAOS_DOCKERFILE         "${KYTHIRA_REDIS_DOCKER_DIR}/engine-chaos/Dockerfile")
     set(_ENGINE_CHAOS_COMPOSE_FILE       "${KYTHIRA_REDIS_DOCKER_DIR}/engine-chaos-compose.yml")
     set(_REDIS_DIFF_COMPOSE_FILE         "${KYTHIRA_REDIS_DOCKER_DIR}/differential/compose.yml")
+    set(_REDIS_UPGRADE_COMPOSE_FILE      "${KYTHIRA_REDIS_DOCKER_DIR}/rolling-upgrade-compose.yml")
+    set(_REDIS_CLIENTS_DOCKERFILE        "${KYTHIRA_REDIS_DOCKER_DIR}/clients/Dockerfile")
+    set(_REDIS_CLIENTS_COMPOSE_FILE      "${KYTHIRA_REDIS_DOCKER_DIR}/clients/compose.yml")
 
     # The redis-compatible-kv acceptance tests (tasks 12 and 13). Two images:
     # the gateway daemon, staged from the host build exactly like
@@ -270,6 +290,33 @@ if(_RUNTIME_EXE)
         WORKING_DIRECTORY "${KYTHIRA_IMAGE_CONTEXT}"
     )
 
+    # The client-library suites (redis-general-data-types task 14): the
+    # transaction chaos image again (WATCH needs its snapshot isolation),
+    # and an image holding redis-py, go-redis and ioredis at pinned
+    # releases with their own tests, which needs nothing from this build.
+    add_custom_target(docker-redis-clients-image
+        COMMAND ${_RUNTIME_EXE} build ${_IMAGE_FORMAT_ARGS}
+                --file "${_REDIS_CLIENTS_DOCKERFILE}"
+                --tag kythira-redis-clients:dev
+                "${KYTHIRA_IMAGE_CONTEXT}"
+        COMMENT "Building kythira-redis-clients:dev (redis-py, go-redis and ioredis with their tests)"
+        WORKING_DIRECTORY "${KYTHIRA_IMAGE_CONTEXT}"
+    )
+
+    add_custom_target(docker-redis-client-suites-tests
+        COMMAND ${CMAKE_COMMAND} -E env
+                ${_RT_ENV}
+                KYTHIRA_DOCKER_INTEGRATION_TESTS=1
+                KYTHIRA_CLIENTS_COMPOSE_FILE=${_REDIS_CLIENTS_COMPOSE_FILE}
+                KYTHIRA_CLIENTS_OUT=${CMAKE_BINARY_DIR}/redis-clients-out
+                $<TARGET_FILE:docker_redis_client_suites_test>
+                --log_level=message
+        DEPENDS docker-txn-chaos-image docker-redis-clients-image
+                docker_redis_client_suites_test
+        COMMENT "Running redis-py, go-redis and ioredis test subsets against a Kythira cluster (runtime: ${CONTAINER_RUNTIME})"
+        WORKING_DIRECTORY "${KYTHIRA_IMAGE_CONTEXT}"
+    )
+
     # Engine storage under faults (persistent-state-machine task 8,
     # file-install-snapshot task 8): redis_gateway_node itself, which only a
     # CONFIG_REDIS_GATEWAY_ENGINE=y configure (RocksDB from the vcpkg feature
@@ -309,12 +356,57 @@ if(_RUNTIME_EXE)
         WORKING_DIRECTORY "${KYTHIRA_IMAGE_CONTEXT}"
     )
 
+    # The format-level rolling upgrade (redis-general-data-types task 14):
+    # the engine-chaos image again, once with an engine-storage
+    # redis_gateway_node built from the last commit before the format gate
+    # (CI builds it out of tree from a pinned commit and hands it in) and
+    # once with this tree's. Only the binary differs between the two.
+    set(KYTHIRA_REDIS_OLD_ENGINE_GATEWAY_BINARY "" CACHE FILEPATH
+        "engine-storage redis_gateway_node from before the format gate, for docker-redis-rolling-upgrade-tests")
+    if(KYTHIRA_REDIS_OLD_ENGINE_GATEWAY_BINARY)
+        add_custom_target(docker-engine-chaos-old-image
+            COMMAND ${CMAKE_COMMAND} -E make_directory
+                    "${KYTHIRA_REDIS_DOCKER_DIR}/engine-chaos/dist-old"
+            COMMAND ${CMAKE_COMMAND} -E copy
+                    "${KYTHIRA_REDIS_OLD_ENGINE_GATEWAY_BINARY}"
+                    "${KYTHIRA_REDIS_DOCKER_DIR}/engine-chaos/dist-old/redis_gateway_node"
+            COMMAND ${_RUNTIME_EXE} build ${_IMAGE_FORMAT_ARGS}
+                    --file "${_ENGINE_CHAOS_DOCKERFILE}"
+                    --build-arg GATEWAY_BINARY=services/redis/docker/engine-chaos/dist-old/redis_gateway_node
+                    --tag kythira-engine-chaos:old
+                    "${KYTHIRA_IMAGE_CONTEXT}"
+            COMMENT "Staging the pre-gate redis_gateway_node and building kythira-engine-chaos:old image"
+            WORKING_DIRECTORY "${KYTHIRA_IMAGE_CONTEXT}"
+        )
+    else()
+        add_custom_target(docker-engine-chaos-old-image
+            COMMAND ${CMAKE_COMMAND} -E echo
+                    "'docker-engine-chaos-old-image' needs -DKYTHIRA_REDIS_OLD_ENGINE_GATEWAY_BINARY=<engine-storage redis_gateway_node from before the format gate>"
+            COMMAND ${CMAKE_COMMAND} -E false
+        )
+    endif()
+
+    add_custom_target(docker-redis-rolling-upgrade-tests
+        COMMAND ${CMAKE_COMMAND} -E env
+                ${_RT_ENV}
+                KYTHIRA_DOCKER_INTEGRATION_TESTS=1
+                KYTHIRA_UPGRADE_COMPOSE_FILE=${_REDIS_UPGRADE_COMPOSE_FILE}
+                $<TARGET_FILE:docker_redis_rolling_upgrade_test>
+                --log_level=message
+        DEPENDS docker-engine-chaos-old-image docker-engine-chaos-image
+                docker_redis_rolling_upgrade_test
+        COMMENT "Running the Redis format-level rolling upgrade, pre-gate and current gateways mixed (runtime: ${CONTAINER_RUNTIME})"
+        WORKING_DIRECTORY "${KYTHIRA_IMAGE_CONTEXT}"
+    )
+
     message(STATUS
         "Container runtime: docker-redis-gateway-image, docker-sccache-runner-image, "
         "docker-sccache-e2e-tests, docker-cache-cluster-image, docker-cache-client-image, "
         "docker-cache-cluster-tests, docker-cache-cluster-old-image, "
         "docker-cache-rolling-upgrade-tests, docker-txn-chaos-image, docker-txn-chaos-tests, "
         "docker-engine-chaos-image, docker-engine-chaos-tests, "
+        "docker-engine-chaos-old-image, docker-redis-rolling-upgrade-tests, "
+        "docker-redis-clients-image, docker-redis-client-suites-tests, "
         "docker-redis-differential-tests targets available")
 else()
     foreach(_t
@@ -323,6 +415,8 @@ else()
         docker-cache-cluster-old-image docker-cache-rolling-upgrade-tests
         docker-txn-chaos-image docker-txn-chaos-tests
         docker-engine-chaos-image docker-engine-chaos-tests
+        docker-engine-chaos-old-image docker-redis-rolling-upgrade-tests
+        docker-redis-clients-image docker-redis-client-suites-tests
         docker-redis-differential-tests)
         add_custom_target(${_t}
             COMMAND ${CMAKE_COMMAND} -E echo

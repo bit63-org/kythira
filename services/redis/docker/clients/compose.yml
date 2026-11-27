@@ -1,0 +1,65 @@
+# Copyright (c) 2026 Clark Rawlins
+# SPDX-License-Identifier: Apache-2.0
+
+# The client-library suites (.kiro/specs/redis-general-data-types/
+# Requirement 23.3; services/redis/tests/docker/client_suites_test.cpp).
+# A three-node Kythira cluster, the snapshot-isolation build the
+# differential suite also uses (WATCH needs it), and the client image,
+# which the test starts with `run --profile clients` once the cluster
+# serves. Containers address each other by service name (CLAUDE.md).
+
+name: kythira-redis-clients
+
+x-gateway: &gateway
+  image: kythira-txn-chaos:dev
+  env_file: kythira.env
+  volumes:
+    - ../differential/acl.txt:/etc/kythira/acl.txt:ro
+  networks:
+    - clients_net
+
+x-gateway-env: &gateway-env
+  KYTHIRA_PEERS: "1=http://kv1:7000,2=http://kv2:7000,3=http://kv3:7000"
+  KYTHIRA_REDIS_PEER_GATEWAYS: "1=kv1:6379,2=kv2:6379,3=kv3:6379"
+
+services:
+  kv1:
+    <<: *gateway
+    hostname: kv1
+    environment:
+      <<: *gateway-env
+      KYTHIRA_NODE_ID: "1"
+    ports:
+      - "127.0.0.1:${KYTHIRA_CLIENTS_PORT_KV1:?set by the test}:6379"
+
+  kv2:
+    <<: *gateway
+    hostname: kv2
+    environment:
+      <<: *gateway-env
+      KYTHIRA_NODE_ID: "2"
+
+  kv3:
+    <<: *gateway
+    hostname: kv3
+    environment:
+      <<: *gateway-env
+      KYTHIRA_NODE_ID: "3"
+
+  clients:
+    image: kythira-redis-clients:dev
+    profiles: ["clients"]
+    environment:
+      KYTHIRA_REDIS_HOST: kv1
+      KYTHIRA_REDIS_PORT: "6379"
+      KYTHIRA_CLIENT_SUITES: ${KYTHIRA_CLIENT_SUITES:-redis-py go-redis ioredis}
+    # Each suite's JUnit report, which the AWS interop bundle compares with
+    # the same suites against ElastiCache and MemoryDB (Requirement 25.2).
+    volumes:
+      - ${KYTHIRA_CLIENTS_OUT:-/tmp/kythira-redis-clients-out}:/out
+    networks:
+      - clients_net
+
+networks:
+  clients_net:
+    driver: bridge

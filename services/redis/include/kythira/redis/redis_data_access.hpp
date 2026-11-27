@@ -439,6 +439,15 @@ public:
         return _host.group_node(group);
     }
     [[nodiscard]] auto local_groups() const { return _host.group_ids(); }
+    /// False for a group that holds no keys: the snapshot-isolation
+    /// build's timestamp oracle group.
+    [[nodiscard]] auto holds_keys(const group_id_type& group) const -> bool {
+        if constexpr (requires { _host.is_oracle_group(group); }) {
+            return !_host.is_oracle_group(group);
+        } else {
+            return true;
+        }
+    }
     [[nodiscard]] auto local_route(const group_id_type& group) const {
         return _host.local_descriptor(group);
     }

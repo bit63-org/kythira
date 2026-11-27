@@ -1,0 +1,102 @@
+# Copyright (c) 2026 Clark Rawlins
+# SPDX-License-Identifier: Apache-2.0
+
+# The format-gate rolling upgrade (.kiro/specs/redis-general-data-types/
+# Requirement 23.5), for services/redis/tests/docker/rolling_upgrade_test.cpp:
+# three engine-storage nodes, each on the image the test names in
+# KYTHIRA_UPGRADE_IMAGE_<n>. The test starts them all on
+# kythira-engine-chaos:old (redis_gateway_node from the last commit before
+# the format gate) and recreates them one at a time on
+# kythira-engine-chaos:dev, keeping each node's volume, as an operator
+# would roll a real cluster.
+#
+# CLAUDE.md's container rules, as they apply here:
+#
+#   * **No static IPs.** Raft peers and gateway forwarding address each
+#     other by service name.
+#   * **No fixed host ports.** Each node publishes 6379 on the loopback port
+#     the test picked with tests/test_ports.hpp, passed in as
+#     KYTHIRA_UPGRADE_PORT_<n>.
+#   * **No runtime named anywhere.** The test drives this file through
+#     `container_runtime()` / `compose_prefix()`.
+#   * **No capabilities, no privileged or host networking.**
+
+name: kythira-redis-rolling-upgrade
+
+x-node: &node
+  networks:
+    upgrade_net: {}
+
+x-node-env: &node-env
+  KYTHIRA_PEERS: "1=http://upgrade-1:7000,2=http://upgrade-2:7000,3=http://upgrade-3:7000"
+  KYTHIRA_RAFT_PORT: "7000"
+  KYTHIRA_ALLOW_PLAINTEXT_RAFT: "true"
+  # Two shards, so the gate has two groups to reach.
+  KYTHIRA_SHARD_CUTS: "k/2"
+  KYTHIRA_ELECTION_TIMEOUT_MIN_MS: "800"
+  KYTHIRA_ELECTION_TIMEOUT_MAX_MS: "1600"
+  KYTHIRA_HEARTBEAT_INTERVAL_MS: "100"
+  KYTHIRA_REDIS_LISTEN: "0.0.0.0:6379"
+  KYTHIRA_REDIS_ACL_FILE: "/etc/kythira/acl.txt"
+  KYTHIRA_REDIS_INTERNAL_SECRET: "rolling-upgrade-internal"
+  KYTHIRA_REDIS_ALLOW_PLAINTEXT_FORWARDING: "true"
+  KYTHIRA_REDIS_PEER_GATEWAYS: "1=upgrade-1:6379,2=upgrade-2:6379,3=upgrade-3:6379"
+  KYTHIRA_REDIS_IMMUTABLE_VALUES: "false"
+  KYTHIRA_REDIS_COMMAND_TIMEOUT_MS: "5000"
+  KYTHIRA_CACHE_PERSISTENCE: "engine"
+  KYTHIRA_CACHE_DATA_DIR: "/data"
+  KYTHIRA_CACHE_MAX_DISK_BYTES: "1073741824"
+  KYTHIRA_CACHE_MIN_FREE_BYTES: "134217728"
+
+services:
+  upgrade-1:
+    <<: *node
+    image: ${KYTHIRA_UPGRADE_IMAGE_1:-kythira-engine-chaos:old}
+    container_name: kythira-upgrade-1
+    hostname: upgrade-1
+    environment:
+      <<: *node-env
+      KYTHIRA_NODE_ID: "1"
+    volumes:
+      - ./engine-chaos/acl.txt:/etc/kythira/acl.txt:ro
+      - upgrade-1-data:/data
+    ports:
+      - "127.0.0.1:${KYTHIRA_UPGRADE_PORT_1:?set by the test}:6379"
+
+  upgrade-2:
+    <<: *node
+    image: ${KYTHIRA_UPGRADE_IMAGE_2:-kythira-engine-chaos:old}
+    container_name: kythira-upgrade-2
+    hostname: upgrade-2
+    environment:
+      <<: *node-env
+      KYTHIRA_NODE_ID: "2"
+    volumes:
+      - ./engine-chaos/acl.txt:/etc/kythira/acl.txt:ro
+      - upgrade-2-data:/data
+    ports:
+      - "127.0.0.1:${KYTHIRA_UPGRADE_PORT_2:?set by the test}:6379"
+
+  upgrade-3:
+    <<: *node
+    image: ${KYTHIRA_UPGRADE_IMAGE_3:-kythira-engine-chaos:old}
+    container_name: kythira-upgrade-3
+    hostname: upgrade-3
+    environment:
+      <<: *node-env
+      KYTHIRA_NODE_ID: "3"
+    volumes:
+      - ./engine-chaos/acl.txt:/etc/kythira/acl.txt:ro
+      - upgrade-3-data:/data
+    ports:
+      - "127.0.0.1:${KYTHIRA_UPGRADE_PORT_3:?set by the test}:6379"
+
+volumes:
+  upgrade-1-data:
+  upgrade-2-data:
+  upgrade-3-data:
+
+networks:
+  upgrade_net:
+    name: kythira_redis_upgrade_net
+    driver: bridge

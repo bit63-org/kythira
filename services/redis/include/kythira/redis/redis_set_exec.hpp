@@ -273,7 +273,8 @@ auto apply_redis_set_exec(Store& store, const redis_kv_exec_command& c, std::uin
                     return redis_reply::integer(removed);
                 }
                 if (with_count) {
-                    return redis_reply::array(std::move(popped));
+                    // A set in RESP3, as Redis replies to SPOP with a count.
+                    return redis_reply::set(std::move(popped));
                 }
                 return popped.empty() ? redis_reply::null() : std::move(popped.front());
             };
@@ -296,11 +297,16 @@ auto apply_redis_set_exec(Store& store, const redis_kv_exec_command& c, std::uin
             }
             const auto from = live(a[0]);
             const auto to = live(a[1]);
+            // As smoveCommand: a missing source answers 0 before either
+            // key's type is checked.
+            if (!from) {
+                return redis_reply::integer(0);
+            }
             if (!is_set(from) || !is_set(to)) {
                 return wrongtype();
             }
             const auto& member = a[4];
-            if (!from || !from->_set->contains(member)) {
+            if (!from->_set->contains(member)) {
                 return redis_reply::integer(0);
             }
             if (a[0] == a[1]) {
@@ -445,17 +451,24 @@ auto apply_redis_set_exec(Store& store, const redis_kv_exec_command& c, std::uin
     }
 }
 
-/// `OBJECT ENCODING` of a set: what Redis 7.0 would choose under its
-/// default `set-max-intset-entries 512`.
+/// `OBJECT ENCODING` of a set: what Redis 7.2 would choose under its
+/// defaults, an `intset` for at most `set-max-intset-entries 512` integers,
+/// else a `listpack` for at most `set-max-listpack-entries 128` members of
+/// at most `set-max-listpack-value 64` bytes, else a `hashtable`.
 [[nodiscard]] inline auto redis_set_encoding(const redis_set& s) -> std::string {
     if (s.size() > 512) {
         return "hashtable";
     }
     bool integers = true;
+    bool short_members = true;
     s.for_each([&](const std::string& m) {
         integers = integers && redis_string_detail::parse_int64(m).has_value();
+        short_members = short_members && m.size() <= 64;
     });
-    return integers ? "intset" : "hashtable";
+    if (integers) {
+        return "intset";
+    }
+    return s.size() <= 128 && short_members ? "listpack" : "hashtable";
 }
 
 }  // namespace kythira

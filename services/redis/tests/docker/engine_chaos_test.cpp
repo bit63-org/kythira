@@ -37,7 +37,7 @@
 
 // redis_gateway_node on engine storage in containers.
 // services/redis/docker/engine-chaos-compose.yml starts three nodes with
-// KYTHIRA_CACHE_PERSISTENCE=engine, each publishing RESP on 1641<n>. Two
+// KYTHIRA_CACHE_PERSISTENCE=engine, each publishing RESP on 1641<n>. Three
 // cases share the stack:
 //
 //   1. .kiro/specs/persistent-state-machine/ Requirement 9.3. Clients GET
@@ -55,7 +55,12 @@
 //      the last push. Their element rows and headers go through the same
 //      kills and replays as the strings.
 //
-//   2. .kiro/specs/file-install-snapshot/ Requirement 8.3. A follower is
+//   2. .kiro/specs/redis-general-data-types/ Requirement 23.4. INCR
+//      counters, SET NX / GETDEL locks, LPUSH / RPOP queues and hash fields,
+//      each against its own model in the same checker, while nodes are
+//      SIGKILLed, restarted, cut off the network and reconnected.
+//
+//   3. .kiro/specs/file-install-snapshot/ Requirement 8.3. A follower is
 //      stopped while the others take a bulk load large enough to compact
 //      the leader's log past it many times, so catching it up takes a
 //      format-1 snapshot transfer (paced by
@@ -89,6 +94,12 @@ constexpr int k_keys = 30;
 /// the shard cut ("h/..." sorts below "k/2", "l/..." above).
 constexpr int k_typed_keys = 10;
 constexpr auto k_think = std::chrono::milliseconds{100};
+/// Keys of each Redis data-type model (Requirement 23.4 of
+/// redis-general-data-types): counters, locks, queues and hash fields, half
+/// below the "k/2" shard cut and half above it.
+constexpr int k_model_keys = 4;
+/// Fields per hash of the hash-field model, each its own register.
+constexpr int k_hash_fields = 3;
 /// The transfer case's bulk load: incompressible values, so the RocksDB
 /// checkpoint is about as large as the load.
 constexpr int k_bulk_values = 600;
@@ -133,6 +144,23 @@ std::string register_key(kind kd, int i) {
             break;
     }
     return key(i);
+}
+
+/// The data-type models the second workload exercises.
+enum class model : std::uint8_t {
+    counter,     // INCR / GET
+    lock,        // SET NX / GETDEL / GET
+    queue,       // LPUSH / RPOP / LRANGE
+    hash_field,  // HSET / HDEL / HGET, one register per field
+};
+
+/// The Redis key of model `m`'s key `i`: even ones sort below the "k/2"
+/// cut, odd ones above it.
+std::string model_key(model m, int i) {
+    static constexpr std::array<std::array<const char*, 2>, 4> prefixes{
+        {{"c/", "n/"}, {"d/", "o/"}, {"e/", "q/"}, {"f/", "t/"}}};
+    return std::string(prefixes[static_cast<std::size_t>(m)][static_cast<std::size_t>(i % 2)]) +
+           std::to_string(i);
 }
 
 std::string bulk_key(int i) {
@@ -223,6 +251,27 @@ std::optional<std::optional<std::string>> parse_get(const std::string& reply) {
     const auto crlf = reply.find("\r\n");
     const auto len = std::stoul(reply.substr(1, crlf - 1));
     return std::optional<std::string>{reply.substr(crlf + 2, len)};
+}
+
+/// An array of bulk strings (LRANGE): nullopt for anything else.
+std::optional<std::vector<std::string>> parse_bulk_array(const std::string& reply) {
+    if (reply.rfind('*', 0) != 0) {
+        return std::nullopt;
+    }
+    auto crlf = reply.find("\r\n");
+    const auto n = std::stol(reply.substr(1, crlf - 1));
+    std::vector<std::string> out;
+    std::size_t pos = crlf + 2;
+    for (long i = 0; i < n; ++i) {
+        if (pos >= reply.size() || reply[pos] != '$') {
+            return std::nullopt;
+        }
+        crlf = reply.find("\r\n", pos);
+        const auto len = std::stoul(reply.substr(pos + 1, crlf - pos - 1));
+        out.push_back(reply.substr(crlf + 2, len));
+        pos = crlf + 2 + len + 2;
+    }
+    return out;
 }
 
 /// The identity a value carries before its padding: "p3-17:xxxx" -> "p3-17".
@@ -348,12 +397,13 @@ public:
     }
     auto complete(std::int64_t p, history::event_type type, history::op_kind f,
                   const std::string& k, std::optional<std::string> value, int node,
-                  std::string error = {}) -> void {
+                  std::string error = {}, std::optional<std::string> expected = {}) -> void {
         add(history::event{.process = p,
                            .type = type,
                            .f = f,
                            .key = k,
                            .value = std::move(value),
+                           .expected = std::move(expected),
                            .mode = f == history::op_kind::read ? "linearizable" : "",
                            .node = node,
                            .error = std::move(error)});
@@ -534,6 +584,289 @@ private:
     std::optional<resp_client> _conn;
 };
 
+/// The second workload's client: the same process rules as `client`, over
+/// the data-type models. Each model key is one history key (a hash field is
+/// `<key>#<field>`), so each is checked against its own model.
+class model_client {
+public:
+    model_client(recorder& rec, counts& n, std::size_t home, unsigned seed)
+        : _rec(rec), _n(n), _node(home), _rng(seed), _p(rec.next_process()) {}
+
+    auto step() -> void {
+        if (!connected()) {
+            ++_n.refused_connects;
+            std::this_thread::sleep_for(100ms);
+            return;
+        }
+        const auto m = static_cast<model>(std::uniform_int_distribution<int>(0, 3)(_rng));
+        const auto i = std::uniform_int_distribution<int>(0, k_model_keys - 1)(_rng);
+        const auto field = std::uniform_int_distribution<int>(0, k_hash_fields - 1)(_rng);
+        const auto roll = std::uniform_int_distribution<int>(0, 99)(_rng);
+        switch (m) {
+            case model::counter:
+                if (roll < 70) {
+                    incr(i);
+                } else {
+                    read(m, i, 0);
+                }
+                break;
+            case model::lock:
+                if (roll < 40) {
+                    acquire(i);
+                } else if (roll < 70) {
+                    release(i);
+                } else {
+                    read(m, i, 0);
+                }
+                break;
+            case model::queue:
+                if (roll < 45) {
+                    push(i);
+                } else if (roll < 90) {
+                    pop(i);
+                } else {
+                    read(m, i, 0);
+                }
+                break;
+            case model::hash_field:
+                if (roll < 40) {
+                    hset(i, field);
+                } else if (roll < 55) {
+                    hdel(i, field);
+                } else {
+                    read(m, i, field);
+                }
+                break;
+        }
+    }
+
+    /// Reads every model key once, retrying through the nodes.
+    auto final_reads() -> void {
+        for (const auto m : {model::counter, model::lock, model::queue, model::hash_field}) {
+            for (int i = 0; i < k_model_keys; ++i) {
+                for (int f = 0; f < (m == model::hash_field ? k_hash_fields : 1); ++f) {
+                    bool done = false;
+                    for (int attempt = 0; attempt < 40 && !done; ++attempt) {
+                        done = connected() && read(m, i, f);
+                        if (!done) {
+                            std::this_thread::sleep_for(250ms);
+                        }
+                    }
+                    BOOST_CHECK_MESSAGE(done, "no final read of " << history_key(m, i, f));
+                }
+            }
+        }
+    }
+
+private:
+    [[nodiscard]] auto node_id() const -> int { return static_cast<int>(_node) + 1; }
+
+    auto connected() -> bool {
+        if (_conn) {
+            return true;
+        }
+        try {
+            _conn.emplace(k_resp_ports[_node]);
+            return true;
+        } catch (const std::exception&) {
+            _node = (_node + 1) % k_resp_ports.size();
+            return false;
+        }
+    }
+
+    static auto history_key(model m, int i, int field) -> std::string {
+        auto k = model_key(m, i);
+        if (m == model::hash_field) {
+            k += "#f" + std::to_string(field);
+        }
+        return k;
+    }
+
+    auto next_id() -> std::string {
+        return "p" + std::to_string(_p) + "-" + std::to_string(_seq++);
+    }
+
+    /// An operation whose outcome is unknown: record `info` and retire the
+    /// process, as `client::lost` does.
+    auto lost(history::op_kind f, const std::string& hk, std::optional<std::string> value,
+              const std::string& why) -> void {
+        _rec.complete(_p, history::event_type::info, f, hk, std::move(value), node_id(), why);
+        ++_n.indeterminate;
+        _p = _rec.next_process();
+        _conn.reset();
+        _node = (_node + 1) % k_resp_ports.size();
+    }
+
+    /// Sends `argv` for an operation already invoked; nullopt after
+    /// recording it lost.
+    auto send(history::op_kind f, const std::string& hk, std::optional<std::string> sent,
+              const std::vector<std::string>& argv) -> std::optional<std::string> {
+        try {
+            return _conn->call(argv);
+        } catch (const std::exception& e) {
+            lost(f, hk, std::move(sent), e.what());
+            return std::nullopt;
+        }
+    }
+
+    auto ok(history::op_kind f, const std::string& hk, std::optional<std::string> value,
+            std::optional<std::string> expected = {}) -> void {
+        _rec.complete(_p, history::event_type::ok, f, hk, std::move(value), node_id(), {},
+                      std::move(expected));
+        ++_n.ok_writes;
+    }
+
+    auto incr(int i) -> void {
+        const auto k = model_key(model::counter, i);
+        _rec.invoke(_p, history::op_kind::incr, k, std::nullopt);
+        const auto reply = send(history::op_kind::incr, k, std::nullopt, {"INCR", k});
+        if (!reply) {
+            return;
+        }
+        if (reply->rfind(':', 0) == 0) {
+            ok(history::op_kind::incr, k, reply->substr(1, reply->size() - 3));
+            return;
+        }
+        lost(history::op_kind::incr, k, std::nullopt, reply->substr(0, 200));
+    }
+
+    auto acquire(int i) -> void {
+        const auto k = model_key(model::lock, i);
+        const auto token = next_id();
+        _rec.invoke(_p, history::op_kind::setnx, k, token);
+        const auto reply = send(history::op_kind::setnx, k, token, {"SET", k, token, "NX"});
+        if (!reply) {
+            return;
+        }
+        if (*reply == "+OK\r\n" || *reply == "$-1\r\n") {
+            ok(history::op_kind::setnx, k, token, *reply == "+OK\r\n" ? "1" : "0");
+            return;
+        }
+        lost(history::op_kind::setnx, k, token, reply->substr(0, 200));
+    }
+
+    auto release(int i) -> void {
+        const auto k = model_key(model::lock, i);
+        _rec.invoke(_p, history::op_kind::getdel, k, std::nullopt);
+        const auto reply = send(history::op_kind::getdel, k, std::nullopt, {"GETDEL", k});
+        if (!reply) {
+            return;
+        }
+        if (auto got = parse_get(*reply)) {
+            ok(history::op_kind::getdel, k, *got);
+            return;
+        }
+        lost(history::op_kind::getdel, k, std::nullopt, reply->substr(0, 200));
+    }
+
+    auto push(int i) -> void {
+        const auto k = model_key(model::queue, i);
+        const auto element = next_id();
+        _rec.invoke(_p, history::op_kind::lpush, k, element);
+        const auto reply = send(history::op_kind::lpush, k, element, {"LPUSH", k, element});
+        if (!reply) {
+            return;
+        }
+        if (reply->rfind(':', 0) == 0) {
+            ok(history::op_kind::lpush, k, element, reply->substr(1, reply->size() - 3));
+            return;
+        }
+        lost(history::op_kind::lpush, k, element, reply->substr(0, 200));
+    }
+
+    auto pop(int i) -> void {
+        const auto k = model_key(model::queue, i);
+        _rec.invoke(_p, history::op_kind::rpop, k, std::nullopt);
+        const auto reply = send(history::op_kind::rpop, k, std::nullopt, {"RPOP", k});
+        if (!reply) {
+            return;
+        }
+        if (auto got = parse_get(*reply)) {
+            ok(history::op_kind::rpop, k, *got);
+            return;
+        }
+        lost(history::op_kind::rpop, k, std::nullopt, reply->substr(0, 200));
+    }
+
+    auto hset(int i, int field) -> void {
+        const auto k = model_key(model::hash_field, i);
+        const auto hk = history_key(model::hash_field, i, field);
+        const auto id = next_id();
+        _rec.invoke(_p, history::op_kind::write, hk, id);
+        const auto reply =
+            send(history::op_kind::write, hk, id, {"HSET", k, "f" + std::to_string(field), id});
+        if (!reply) {
+            return;
+        }
+        if (reply->rfind(':', 0) == 0) {
+            ok(history::op_kind::write, hk, id);
+            return;
+        }
+        lost(history::op_kind::write, hk, id, reply->substr(0, 200));
+    }
+
+    /// HDEL is a write of "absent" to the field's register.
+    auto hdel(int i, int field) -> void {
+        const auto k = model_key(model::hash_field, i);
+        const auto hk = history_key(model::hash_field, i, field);
+        _rec.invoke(_p, history::op_kind::write, hk, std::nullopt);
+        const auto reply = send(history::op_kind::write, hk, std::nullopt,
+                                {"HDEL", k, "f" + std::to_string(field)});
+        if (!reply) {
+            return;
+        }
+        if (reply->rfind(':', 0) == 0) {
+            ok(history::op_kind::write, hk, std::nullopt);
+            return;
+        }
+        lost(history::op_kind::write, hk, std::nullopt, reply->substr(0, 200));
+    }
+
+    auto read(model m, int i, int field) -> bool {
+        const auto k = model_key(m, i);
+        const auto hk = history_key(m, i, field);
+        _rec.invoke(_p, history::op_kind::read, hk, std::nullopt);
+        std::vector<std::string> argv{"GET", k};
+        if (m == model::queue) {
+            argv = {"LRANGE", k, "0", "-1"};
+        } else if (m == model::hash_field) {
+            argv = {"HGET", k, "f" + std::to_string(field)};
+        }
+        const auto reply = send(history::op_kind::read, hk, std::nullopt, argv);
+        if (!reply) {
+            return false;
+        }
+        std::optional<std::optional<std::string>> got;
+        if (m == model::queue) {
+            if (auto list = parse_bulk_array(*reply)) {
+                std::optional<std::string> joined;
+                for (const auto& e : *list) {
+                    joined = joined ? *joined + "\n" + e : e;
+                }
+                got = joined;
+            }
+        } else {
+            got = parse_get(*reply);
+        }
+        if (!got) {
+            _rec.complete(_p, history::event_type::fail, history::op_kind::read, hk, std::nullopt,
+                          node_id(), reply->substr(0, 200));
+            return false;
+        }
+        _rec.complete(_p, history::event_type::ok, history::op_kind::read, hk, *got, node_id());
+        ++_n.ok_reads;
+        return true;
+    }
+
+    recorder& _rec;
+    counts& _n;
+    std::size_t _node;
+    std::mt19937 _rng;
+    std::int64_t _p;
+    std::uint64_t _seq{0};
+    std::optional<resp_client> _conn;
+};
+
 std::string random_value(std::mt19937& rng, std::size_t bytes) {
     std::string s(bytes, 'a');
     std::uniform_int_distribution<int> letter(0, 25);
@@ -612,10 +945,9 @@ private:
 
 BOOST_TEST_GLOBAL_FIXTURE(EngineChaosFixture);
 
-BOOST_AUTO_TEST_CASE(sigkilled_replicas_keep_the_history_linearizable,
-                     *boost::unit_test::timeout(1200)) {
-    // Hashes and lists need the typed-values format gate, which every
-    // engine node can pass.
+/// Raises the typed-values format gate, which every engine node can pass;
+/// hashes, lists and the data-type models need it.
+void raise_format_gate() {
     std::string upgraded;
     for (int attempt = 0; attempt < 60 && upgraded != "+OK\r\n"; ++attempt) {
         try {
@@ -629,6 +961,11 @@ BOOST_AUTO_TEST_CASE(sigkilled_replicas_keep_the_history_linearizable,
         }
     }
     BOOST_REQUIRE_EQUAL(upgraded, "+OK\r\n");
+}
+
+BOOST_AUTO_TEST_CASE(sigkilled_replicas_keep_the_history_linearizable,
+                     *boost::unit_test::timeout(1200)) {
+    raise_format_gate();
     recorder rec;
     counts n;
     std::atomic<bool> stop{false};
@@ -711,6 +1048,74 @@ BOOST_AUTO_TEST_CASE(sigkilled_replicas_keep_the_history_linearizable,
     // The load was real, on both sides of the faults.
     BOOST_CHECK_GT(n.ok_writes.load(), 200);
     BOOST_CHECK_GT(n.ok_reads.load(), 200);
+}
+
+// Requirement 23.4 of redis-general-data-types: INCR counters, SET NX /
+// GETDEL locks, LPUSH / RPOP queues and hash fields, each checked against
+// its own model (tests/docker_chaos/checkers/linearizability.hpp), while
+// nodes (leaders among them) are SIGKILLed and started again and cut off
+// the network and reconnected. A counter that skips or repeats, a lock with
+// two holders, a queue that loses, duplicates or reorders an element, or a
+// field that goes back shows up as a violation.
+BOOST_AUTO_TEST_CASE(data_type_models_stay_linearizable_under_kills_and_partitions,
+                     *boost::unit_test::timeout(1200)) {
+    raise_format_gate();
+    recorder rec;
+    counts n;
+    std::atomic<bool> stop{false};
+    constexpr std::size_t k_clients = 6;
+    std::vector<std::thread> workers;
+    const workers_guard guard(stop, workers);
+    for (std::size_t w = 0; w < k_clients; ++w) {
+        workers.emplace_back([&, w] {
+            model_client c(rec, n, w % k_resp_ports.size(), 100U + static_cast<unsigned>(w));
+            while (!stop.load()) {
+                c.step();
+                std::this_thread::sleep_for(k_think);
+            }
+        });
+    }
+    std::this_thread::sleep_for(5s);
+    for (std::size_t i = 0; i < k_containers.size(); ++i) {
+        kill_node(i);
+        std::this_thread::sleep_for(5s);
+        start_node(i);
+        std::this_thread::sleep_for(8s);
+        BOOST_TEST_MESSAGE("isolate " << k_containers[i]);
+        os::checked_exec(os::real_exec, os::network_disconnect_cmd(k_network, k_containers[i]));
+        std::this_thread::sleep_for(6s);
+        os::checked_exec(os::real_exec,
+                         os::network_connect_cmd(k_network, k_containers[i], k_services[i]));
+        std::this_thread::sleep_for(8s);
+    }
+    BOOST_REQUIRE_MESSAGE(wait_ready(180s),
+                          "cluster not ready after the faults: " << g_not_ready_reason);
+    std::this_thread::sleep_for(5s);
+    stop = true;
+    for (auto& t : workers) {
+        t.join();
+    }
+    for (std::size_t i = 0; i < k_resp_ports.size(); ++i) {
+        model_client c(rec, n, i, 2000U + static_cast<unsigned>(i));
+        c.final_reads();
+    }
+
+    const auto events = rec.take();
+    BOOST_REQUIRE_EQUAL(history::structural_error(events), "");
+    const auto result = lin::check(events, lin::options{.max_steps_per_key = 20'000'000});
+    for (const auto* v : result.violations()) {
+        BOOST_TEST_MESSAGE("violation: " << boost::json::serialize(lin::violation_json(*v)));
+    }
+    for (const auto& k : result.keys) {
+        BOOST_TEST_MESSAGE(k.key << ": " << k.result << ", " << k.operations << " operations, "
+                                 << k.steps << " steps");
+    }
+    BOOST_TEST_MESSAGE("ok writes " << n.ok_writes.load() << ", ok reads " << n.ok_reads.load()
+                                    << ", indeterminate " << n.indeterminate.load() << ", "
+                                    << events.size() << " events");
+    BOOST_CHECK_EQUAL(result.overall, docker_chaos::checkers::verdict::ok);
+    BOOST_CHECK_GT(n.ok_writes.load(), 200);
+    BOOST_CHECK_GT(n.ok_reads.load(), 100);
 }
 
 BOOST_AUTO_TEST_CASE(a_lagging_follower_cut_off_and_killed_mid_transfer_still_catches_up,

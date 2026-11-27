@@ -36,8 +36,29 @@ enum class event_type : std::uint8_t {
 enum class op_kind : std::uint8_t {
     read,
     write,
-    cas
+    cas,
+    // Redis data-type operations (.kiro/specs/redis-general-data-types/
+    // Requirement 23.4), each checked against its own model in
+    // checkers/linearizability.hpp. A key carries one family only.
+    incr,    // INCR: value is the count it returned
+    setnx,   // SET k token NX: [acquired "1"/"0", token]
+    getdel,  // GETDEL: value is what it returned (absent: nil)
+    lpush,   // LPUSH k element: [length returned, element]
+    rpop     // RPOP: value is the element it returned (absent: nil)
 };
+
+/// The kinds whose value is what the operation returned, taken from its
+/// completion; the others' value is what the invoke sent.
+[[nodiscard]] constexpr auto value_from_completion(op_kind k) noexcept -> bool {
+    return k == op_kind::read || k == op_kind::incr || k == op_kind::getdel || k == op_kind::rpop;
+}
+
+/// The kinds that carry a second field, serialised as [expected, value]:
+/// cas's expected value (from the invoke), setnx's and lpush's outcome
+/// (from the completion).
+[[nodiscard]] constexpr auto has_pair(op_kind k) noexcept -> bool {
+    return k == op_kind::cas || k == op_kind::setnx || k == op_kind::lpush;
+}
 
 [[nodiscard]] inline auto to_string(event_type t) -> std::string_view {
     switch (t) {
@@ -61,6 +82,16 @@ enum class op_kind : std::uint8_t {
             return "write";
         case op_kind::cas:
             return "cas";
+        case op_kind::incr:
+            return "incr";
+        case op_kind::setnx:
+            return "setnx";
+        case op_kind::getdel:
+            return "getdel";
+        case op_kind::lpush:
+            return "lpush";
+        case op_kind::rpop:
+            return "rpop";
     }
     return "read";
 }
@@ -104,7 +135,7 @@ struct event {
         {"type", to_string(e.type)},
         {"f", to_string(e.f)},
         {"key", e.key},
-        {"value", e.f == op_kind::cas
+        {"value", has_pair(e.f)
                       ? boost::json::value(boost::json::array{opt(e.expected), opt(e.value)})
                       : opt(e.value)},
         {"t", e.time_ns},
@@ -170,6 +201,12 @@ inline auto parse_kind(std::string_view s) -> op_kind {
     if (s == "cas") {
         return op_kind::cas;
     }
+    for (const auto k :
+         {op_kind::incr, op_kind::setnx, op_kind::getdel, op_kind::lpush, op_kind::rpop}) {
+        if (s == to_string(k)) {
+            return k;
+        }
+    }
     throw std::invalid_argument("history: unknown f '" + std::string(s) + "'");
 }
 }  // namespace detail
@@ -185,10 +222,11 @@ inline auto parse_kind(std::string_view s) -> op_kind {
     e.key = std::string(obj.at("key").as_string());
     e.time_ns = obj.at("t").to_number<std::int64_t>();
     const auto& v = obj.at("value");
-    if (e.f == op_kind::cas) {
+    if (has_pair(e.f)) {
         const auto& pair = v.as_array();
         if (pair.size() != 2) {
-            throw std::invalid_argument("history: cas value must be [expected, new]");
+            throw std::invalid_argument("history: " + std::string(to_string(e.f)) +
+                                        " value must be a pair");
         }
         e.expected = detail::opt_string(pair[0]);
         e.value = detail::opt_string(pair[1]);

@@ -94,11 +94,22 @@ BOOST_FIXTURE_TEST_CASE(pushes_pops_and_reads, fixture) {
     BOOST_CHECK(read(redis_command_id::llen, "l") == redis_reply::integer(4));
     BOOST_CHECK(read(redis_command_id::lindex, "l", {"-1"}) == redis_reply::bulk("c"));
     BOOST_CHECK(read(redis_command_id::lindex, "l", {"9"}) == redis_reply::null());
+    // The key before the index, as lindexCommand.
+    BOOST_CHECK(read(redis_command_id::lindex, "none", {"x"}) == redis_reply::null());
+    BOOST_CHECK(read(redis_command_id::lindex, "l", {"x"}) ==
+                redis_reply::error("ERR value is not an integer or out of range"));
     BOOST_CHECK(read(redis_command_id::lrange, "l", {"1", "100"}) == bulks({"a", "b", "c"}));
     BOOST_CHECK(read(redis_command_id::lrange, "l", {"-2", "-3"}) == bulks({}));
     BOOST_CHECK(read(redis_command_id::type, "l") == redis_reply::simple("list"));
-    BOOST_CHECK(read(redis_command_id::object, "l", {"ENCODING"}) ==
+    BOOST_CHECK(read(redis_command_id::object, "l", {"ENCODING"}) == redis_reply::bulk("listpack"));
+    // Past 8 KiB of listpack bytes, Redis 7.2 moves to a quicklist.
+    BOOST_CHECK(push(redis_command_id::rpush, "big",
+                     {std::string(5000, 'x'), std::string(5000, 'y')}) == redis_reply::integer(2));
+    BOOST_CHECK(read(redis_command_id::object, "big", {"ENCODING"}) ==
                 redis_reply::bulk("quicklist"));
+    BOOST_CHECK(exec(redis_command_id::rpop, {"big", "1", "2"}) ==
+                redis_reply::array({redis_reply::bulk(std::string(5000, 'y')),
+                                    redis_reply::bulk(std::string(5000, 'x'))}));
 
     BOOST_CHECK(exec(redis_command_id::lpop, {"l", "0", "1"}) == redis_reply::bulk("z"));
     BOOST_CHECK(exec(redis_command_id::rpop, {"l", "1", "2"}) == bulks({"c", "b"}));

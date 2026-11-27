@@ -56,7 +56,19 @@
 ///
 /// - `read_only`: `+@all -@write -@admin -@dangerous`;
 /// - `read_write`: `+@all -@admin -@dangerous`;
-/// - `admin`: `+@all`.
+/// - `admin`: `+@all`;
+/// - `none`: no commands (`-@all`), for a line that carries a Redis or
+///   ElastiCache access string after it (Requirement 25.3), such as
+///   `user app <secret> none on ~app:* &* +@string -@dangerous`. After
+///   `none`, `on`/`off`, channel scopes (`&p`, `allchannels`,
+///   `resetchannels`, accepted and granting nothing until pub/sub ships),
+///   `resetkeys` and `reset` mean what they mean in Redis, and a bare word
+///   is an error instead of a key prefix.
+///
+/// A command rule may name any command Redis 7.2 or Valkey 8 knows
+/// (redis_known_commands.hpp); one this build does not ship matches
+/// nothing. A subcommand rule (`+client|list`) is refused for a command
+/// this build ships and matches nothing for one it does not.
 ///
 /// (`KYTHIRA.TXN`, the transaction coordinator's internal hop, is in the
 /// `read_write` set whatever its categories say.) A rule never reaches a
@@ -80,6 +92,7 @@
 #include <vector>
 
 #include <kythira/redis/redis_command_ids.hpp>
+#include <kythira/redis/redis_known_commands.hpp>
 
 #include <openssl/crypto.h>
 #include <openssl/evp.h>
@@ -206,6 +219,71 @@ enum class acl_decision : std::uint8_t {
     deny_key
 };
 
+/// The ACL categories of a `CONTAINER|SUB` subcommand where they differ
+/// from its container's, as Redis 7.2 reports them (`COMMAND INFO
+/// object|encoding`): Redis checks a subcommand's own categories, so
+/// `+@read` reaches `OBJECT ENCODING` and `MEMORY USAGE` but not
+/// `CLIENT KILL`. Containers whose subcommands all share its categories
+/// (`COMMAND`) need no entry.
+[[nodiscard]] inline auto redis_subcommand_categories(std::string_view upper)
+    -> std::optional<std::uint32_t> {
+    namespace c = redis_acl_category;
+    constexpr std::uint32_t object_read = c::keyspace | c::read | c::slow;
+    constexpr std::uint32_t client_admin = c::admin | c::slow | c::dangerous | c::connection;
+    constexpr std::uint32_t slowlog_admin = c::admin | c::slow | c::dangerous;
+    struct entry {
+        std::string_view name;
+        std::uint32_t bits;
+    };
+    static constexpr std::array<entry, 21> k_subcommands{{
+        {"CLIENT|KILL", client_admin},
+        {"CLIENT|LIST", client_admin},
+        {"CLIENT|NO-EVICT", client_admin},
+        {"CLIENT|PAUSE", client_admin},
+        {"CLIENT|UNBLOCK", client_admin},
+        {"CLIENT|UNPAUSE", client_admin},
+        {"MEMORY|DOCTOR", c::slow},
+        {"MEMORY|HELP", c::slow},
+        {"MEMORY|MALLOC-STATS", c::slow},
+        {"MEMORY|PURGE", c::slow},
+        {"MEMORY|STATS", c::slow},
+        {"MEMORY|USAGE", c::read | c::slow},
+        {"OBJECT|ENCODING", object_read},
+        {"OBJECT|FREQ", object_read},
+        {"OBJECT|HELP", c::keyspace | c::slow},
+        {"OBJECT|IDLETIME", object_read},
+        {"OBJECT|REFCOUNT", object_read},
+        {"SLOWLOG|GET", slowlog_admin},
+        {"SLOWLOG|HELP", c::slow},
+        {"SLOWLOG|LEN", slowlog_admin},
+        {"SLOWLOG|RESET", slowlog_admin},
+    }};
+    for (const auto& e : k_subcommands) {
+        if (e.name == upper) {
+            return e.bits;
+        }
+    }
+    return std::nullopt;
+}
+
+/// The ACL categories authorization uses for `upper`, a command or a
+/// `CONTAINER|SUB` subcommand, and the container's registry entry; null
+/// for a command this build does not ship.
+[[nodiscard]] inline auto redis_command_acl_categories(std::string_view upper)
+    -> std::pair<const redis_command_info*, std::uint32_t> {
+    const auto bar = upper.find('|');
+    const auto* info = find_redis_command(upper.substr(0, bar));
+    if (info == nullptr || info->status != redis_command_status::shipped) {
+        return {nullptr, 0};
+    }
+    if (bar != std::string_view::npos) {
+        if (auto bits = redis_subcommand_categories(upper)) {
+            return {info, *bits};
+        }
+    }
+    return {info, info->acl_categories};
+}
+
 /// Which role a command needs: from the command's ACL categories in the
 /// registry (`@admin` or `@dangerous`: admin; `@write`: read_write; else
 /// read_only), so a command shipped later needs no entry here. Commands
@@ -223,14 +301,14 @@ enum class acl_decision : std::uint8_t {
     if (upper_name == "KYTHIRA.ADVISE" || upper_name == "KYTHIRA.INSTALL") {
         return std::nullopt;
     }
-    const auto* info = find_redis_command(upper_name);
-    if (info == nullptr || info->status != redis_command_status::shipped) {
+    const auto [info, categories] = redis_command_acl_categories(upper_name);
+    if (info == nullptr) {
         return std::nullopt;
     }
-    if ((info->acl_categories & (redis_acl_category::admin | redis_acl_category::dangerous)) != 0) {
+    if ((categories & (redis_acl_category::admin | redis_acl_category::dangerous)) != 0) {
         return redis_role::admin;
     }
-    if ((info->acl_categories & redis_acl_category::write) != 0) {
+    if ((categories & redis_acl_category::write) != 0) {
         return redis_role::read_write;
     }
     return redis_role::read_only;
@@ -242,9 +320,15 @@ enum class acl_decision : std::uint8_t {
 /// too when it also returns or uses the old value.
 [[nodiscard]] inline auto redis_command_key_access(std::string_view upper_name) -> unsigned {
     using namespace redis_key_access;
-    if (upper_name == "EXISTS" || upper_name == "TYPE" || upper_name == "TTL" ||
-        upper_name == "PTTL" || upper_name == "EXPIRETIME" || upper_name == "PEXPIRETIME" ||
-        upper_name == "TOUCH" || upper_name == "OBJECT" || upper_name == "STRLEN" ||
+    upper_name = upper_name.substr(0, upper_name.find('|'));
+    // The TTL family reads (Redis's key spec says `RO ACCESS`): a write-only
+    // scope does not reveal when a key expires.
+    if (upper_name == "TTL" || upper_name == "PTTL" || upper_name == "EXPIRETIME" ||
+        upper_name == "PEXPIRETIME") {
+        return read;
+    }
+    if (upper_name == "EXISTS" || upper_name == "TYPE" || upper_name == "TOUCH" ||
+        upper_name == "OBJECT" || upper_name == "MEMORY" || upper_name == "STRLEN" ||
         upper_name == "WATCH" || upper_name == "HLEN" || upper_name == "HEXISTS" ||
         upper_name == "HSTRLEN" || upper_name == "SCARD" || upper_name == "LLEN") {
         return none;
@@ -252,10 +336,9 @@ enum class acl_decision : std::uint8_t {
     if (upper_name == "GETSET" || upper_name == "GETDEL" || upper_name == "GETEX" ||
         upper_name == "INCR" || upper_name == "DECR" || upper_name == "INCRBY" ||
         upper_name == "DECRBY" || upper_name == "INCRBYFLOAT" || upper_name == "RENAME" ||
-        upper_name == "RENAMENX" || upper_name == "COPY" || upper_name == "HINCRBY" ||
-        upper_name == "HINCRBYFLOAT" || upper_name == "SPOP" || upper_name == "LPOP" ||
-        upper_name == "RPOP" || upper_name == "LMOVE" || upper_name == "RPOPLPUSH" ||
-        upper_name == "LMPOP") {
+        upper_name == "RENAMENX" || upper_name == "HINCRBY" || upper_name == "HINCRBYFLOAT" ||
+        upper_name == "SPOP" || upper_name == "LPOP" || upper_name == "RPOP" ||
+        upper_name == "LMOVE" || upper_name == "RPOPLPUSH" || upper_name == "LMPOP") {
         return read | write;
     }
     const auto* info = find_redis_command(upper_name);
@@ -269,6 +352,27 @@ enum class acl_decision : std::uint8_t {
         return read;
     }
     return none;
+}
+
+/// What a command needs of the `index`th of the keys it names, where
+/// Redis's key specs differ by position: a source is read and a
+/// destination only written (`COPY`, the `*STORE` set commands), and a
+/// move reads and deletes its source but only inserts into its
+/// destination. Elsewhere every key needs redis_command_key_access().
+[[nodiscard]] inline auto redis_command_key_access_at(std::string_view upper_name,
+                                                      std::size_t index) -> unsigned {
+    using namespace redis_key_access;
+    if (upper_name == "COPY") {
+        return index == 0 ? read : write;
+    }
+    if (upper_name == "RENAME" || upper_name == "RENAMENX" || upper_name == "LMOVE" ||
+        upper_name == "RPOPLPUSH" || upper_name == "SMOVE") {
+        return index == 0 ? read | write : write;
+    }
+    if (upper_name == "SINTERSTORE" || upper_name == "SUNIONSTORE" || upper_name == "SDIFFSTORE") {
+        return index == 0 ? write : read;
+    }
+    return redis_command_key_access(upper_name);
 }
 
 /// The `redis_acl_category` bit of a category name (without the `@`).
@@ -639,9 +743,9 @@ public:
         if (!command_allowed(id, command)) {
             return acl_decision::deny_command;
         }
-        const auto needed = access.value_or(redis_command_key_access(command));
-        for (auto key : keys) {
-            if (!key_permits(id, key, needed)) {
+        for (std::size_t i = 0; i < keys.size(); ++i) {
+            if (!key_permits(id, keys[i],
+                             access.value_or(redis_command_key_access_at(command, i)))) {
                 return acl_decision::deny_key;
             }
         }
@@ -659,12 +763,14 @@ public:
         if (id._command_rules.empty()) {
             return allowed;
         }
-        const auto* info = find_redis_command(command);
-        const std::uint32_t categories = info == nullptr ? 0 : info->acl_categories;
+        // A subcommand (`OBJECT|ENCODING`) is matched by its own categories
+        // and by a rule naming its container (`+object`), as in Redis.
+        const auto categories = redis_command_acl_categories(command).second;
+        const auto container = command.substr(0, command.find('|'));
         for (const auto& rule : id._command_rules) {
             const bool matches = rule._command.empty() ? (rule._categories & categories) != 0 ||
                                                              rule._categories == 0xFFFFFFFFU
-                                                       : rule._command == command;
+                                                       : rule._command == container;
             if (matches) {
                 allowed = rule._allow;
             }
@@ -680,14 +786,19 @@ public:
     /// Whether `id` may do `needed` (`redis_key_access` bits) to `key`.
     [[nodiscard]] static auto key_permits(const redis_identity& id, std::string_view key,
                                           unsigned needed) -> bool {
+        // As in Redis, one scope must grant everything the key needs: a
+        // read-modify-write (`INCR`) under `%R~*` and `%W~app:` is refused,
+        // since neither scope grants both.
         const bool both = under_any(id._key_prefixes, key);
         const bool read = both || under_any(id._read_prefixes, key);
         const bool write = both || under_any(id._write_prefixes, key);
         if (needed == redis_key_access::none) {
             return read || write;
         }
-        return ((needed & redis_key_access::read) == 0 || read) &&
-               ((needed & redis_key_access::write) == 0 || write);
+        if (needed == (redis_key_access::read | redis_key_access::write)) {
+            return both;
+        }
+        return (needed & redis_key_access::read) != 0 ? read : write;
     }
 
     /// Whether the immutable-value rule lets `id` change `key`
@@ -773,11 +884,21 @@ public:
             } else {
                 fail("secret must be 'nopass', 'disabled' or a pbkdf2-sha256$... record");
             }
-            auto role = parse_redis_role(words[3]);
-            if (!role.has_value()) {
-                fail("unknown role '" + words[3] + "' (read_only|read_write|admin)");
+            // `none` starts from no commands, as a Redis or ElastiCache
+            // user does, so an access string can follow it verbatim. The
+            // role underneath is read_only: the cache's HTTP front end,
+            // which knows roles and not rules, gives such a user reads.
+            const bool access_string = words[3] == "none";
+            if (access_string) {
+                u._role = redis_role::read_only;
+                u._command_rules.push_back({false, 0xFFFFFFFFU, {}});
+            } else {
+                auto role = parse_redis_role(words[3]);
+                if (!role.has_value()) {
+                    fail("unknown role '" + words[3] + "' (read_only|read_write|admin|none)");
+                }
+                u._role = *role;
             }
-            u._role = *role;
             for (std::size_t i = 4; i < words.size(); ++i) {
                 const auto& w = words[i];
                 if (w.rfind("auth=", 0) == 0) {
@@ -789,9 +910,12 @@ public:
                         fail("empty cert= subject");
                     }
                     u._cert_subjects.push_back(subject);
-                } else if (auto why = parse_rule_word(w, u); !why.empty()) {
+                } else if (auto why = parse_rule_word(w, u, access_string); !why.empty()) {
                     fail(why);
                 }
+            }
+            if (words[2] == "disabled" && u._auth == redis_auth_mode::password) {
+                u._enabled = false;  // whatever an access string's `on` says
             }
             if (u._enabled && u._secret.empty() && u._cert_subjects.empty() &&
                 u._auth == redis_auth_mode::password) {
@@ -804,8 +928,43 @@ public:
     }
 
     /// Applies one word after the role to `u`; returns why it is refused,
-    /// or empty.
-    static auto parse_rule_word(const std::string& w, redis_acl_user& u) -> std::string {
+    /// or empty. `access_string` is set after the `none` role: the words
+    /// of a Redis or ElastiCache access string (`on`, `off`, channel
+    /// scopes, `resetkeys`, `reset`) are read as such, and a bare word is
+    /// refused rather than taken for a key prefix.
+    static auto parse_rule_word(const std::string& w, redis_acl_user& u, bool access_string = false)
+        -> std::string {
+        if (access_string) {
+            if (w == "on") {
+                u._enabled = true;  // parse() keeps a `disabled` password user off
+                return {};
+            }
+            if (w == "off") {
+                u._enabled = false;
+                return {};
+            }
+            // Channel scopes. Nothing here publishes or subscribes yet, so
+            // they grant nothing; they are accepted so a line written for
+            // ElastiCache (which adds `&*` to its defaults) parses.
+            if (w.starts_with('&') || w == "allchannels" || w == "resetchannels") {
+                return {};
+            }
+            if (w == "resetkeys" || w == "reset") {
+                u._key_prefixes.clear();
+                u._read_prefixes.clear();
+                u._write_prefixes.clear();
+                if (w == "reset") {
+                    u._enabled = false;
+                    u._command_rules.assign(1, {false, 0xFFFFFFFFU, {}});
+                }
+                return {};
+            }
+            if (w.starts_with('>') || w.starts_with('<') || w.starts_with('#') ||
+                w.starts_with('!') || w == "nopass" || w == "resetpass") {
+                return "password word '" + w +
+                       "' in an access string: the secret is the line's third word";
+            }
+        }
         // A scope: `~p`, `%R~p`, `%W~p`, `%RW~p`, `mutable~p`.
         const auto prefix_of = [](std::string_view pattern, std::string& out) -> bool {
             if (pattern.ends_with('*')) {
@@ -875,14 +1034,26 @@ public:
             for (auto& c : upper) {
                 c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
             }
-            if (upper.find('|') != std::string::npos) {
-                return "subcommand rules ('" + w + "') are not supported";
+            const auto* shipped = find_redis_command(upper);
+            if (shipped != nullptr && shipped->status == redis_command_status::shipped) {
+                u._command_rules.push_back({allow, 0, std::move(upper)});
+                return {};
             }
-            if (find_redis_command(upper) == nullptr) {
-                return "unknown command '" + std::string(rest) + "'";
+            if (const auto bar = upper.find('|'); bar != std::string::npos) {
+                const auto* container = find_redis_command(upper.substr(0, bar));
+                if (container != nullptr && container->status == redis_command_status::shipped) {
+                    return "subcommand rules ('" + w + "') are not supported";
+                }
             }
-            u._command_rules.push_back({allow, 0, std::move(upper)});
-            return {};
+            // A command another server knows and this build does not ship:
+            // the rule is valid and matches nothing here.
+            if (is_known_redis_command(upper)) {
+                return {};
+            }
+            return "unknown command '" + std::string(rest) + "'";
+        }
+        if (access_string) {
+            return "unknown access string word '" + w + "'";
         }
         // The original format: a bare word is a read and write prefix.
         u._key_prefixes.push_back(w);

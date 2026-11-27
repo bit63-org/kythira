@@ -5,6 +5,7 @@
 #include <boost/test/unit_test.hpp>
 
 #include "os_faults.hpp"
+#include "redis_acl_probes.hpp"
 #include "redis_differential.hpp"
 #include "test_ports.hpp"
 
@@ -42,6 +43,10 @@
 //
 //   $KYTHIRA_DIFF_OUT/difference-table.md   every row where any two disagree
 //   $KYTHIRA_DIFF_OUT/recs/<server>-seed<N>.json   what each server answered
+//   $KYTHIRA_DIFF_OUT/recs/acl/access-strings.json what each reference's
+//       ACL DRYRUN says of every access string and probe in
+//       redis_acl_probes.hpp (Requirement 25.3; the replay test checks the
+//       gateway against it)
 //
 // and fails if a Kythira reply differs from both references with no rule to
 // cover it.
@@ -52,7 +57,7 @@
 //                                  (default "kv1 kv2 kv3"); empty runs the
 //                                  references alone, to regenerate recs/
 //   KYTHIRA_DIFF_SEEDS             space-separated seeds (default "1 2 3")
-//   KYTHIRA_DIFF_LENGTH            commands per stream (default 400)
+//   KYTHIRA_DIFF_LENGTH            commands per stream (default 600)
 //   KYTHIRA_DIFF_OUT               output directory (default
 //                                  ./redis-differential-out)
 //   KYTHIRA_DIFF_KEEP_UP           non-empty: leave the containers running
@@ -308,7 +313,7 @@ BOOST_AUTO_TEST_CASE(differential_against_reference_servers) {
     for (const auto& w : split_words(env_or("KYTHIRA_DIFF_SEEDS", "1 2 3"))) {
         seeds.push_back(std::stoull(w));
     }
-    const auto length = std::stoull(env_or("KYTHIRA_DIFF_LENGTH", "400"));
+    const auto length = std::stoull(env_or("KYTHIRA_DIFF_LENGTH", "600"));
     const fs::path out_dir = env_or("KYTHIRA_DIFF_OUT", "redis-differential-out");
     fs::create_directories(out_dir / "recs");
 
@@ -316,6 +321,21 @@ BOOST_AUTO_TEST_CASE(differential_against_reference_servers) {
     try {
         for (const auto& e : s.endpoints()) {
             wait_ready(e, e.server == "kythira" ? 120s : 60s);
+        }
+        if (!kythira_services.empty()) {
+            // The typed commands need the format gate raised first.
+            auto admin = open_session(s.find(kythira_services[0]), 2);
+            diff::reply up;
+            for (int i = 0; i < 60; ++i) {
+                up = admin->call({"KYTHIRA.FORMAT", "UPGRADE", "3"});
+                if (up.kind != diff::reply_kind::error) {
+                    break;
+                }
+                std::this_thread::sleep_for(500ms);
+            }
+            if (up.kind == diff::reply_kind::error) {
+                throw std::runtime_error("KYTHIRA.FORMAT UPGRADE 3 refused: " + up.text);
+            }
         }
     } catch (...) {
         std::cerr << s.logs();
@@ -368,9 +388,8 @@ BOOST_AUTO_TEST_CASE(differential_against_reference_servers) {
             // Each stream starts from an empty key space. Kythira refuses
             // FLUSHALL by default (D6), so every key the generator can name is
             // deleted one by one, on every server alike.
-            for (std::size_t i = 0; i < opt.key_space; ++i) {
-                const std::vector<std::string> del{
-                    "DEL", std::string(1, static_cast<char>('a' + i)) + ":" + opt.tag};
+            for (const auto& key : diff::stream_keys(opt)) {
+                const std::vector<std::string> del{"DEL", key};
                 rc->call(del);
                 vc->call(del);
                 if (kc) {
@@ -452,6 +471,27 @@ BOOST_AUTO_TEST_CASE(differential_against_reference_servers) {
                 << diff::serialize(rec);
         }
     }
+
+    // ElastiCache access strings: what Redis and Valkey grant.
+    diff::acl_recording acl;
+    acl.date = today();
+    acl.probes = diff::acl_probes();
+    for (const auto* server : {"redis", "valkey"}) {
+        acl.versions[server] = versions.at(server);
+        auto admin = open_session(s.find(server), 2);
+        const auto decisions = diff::record_acl_decisions(
+            [&](const std::vector<std::string>& argv) { return admin->call(argv); });
+        if (acl.decisions.empty()) {
+            for (const auto& [access, d] : decisions) {
+                acl.decisions.push_back({access, {}});
+            }
+        }
+        for (std::size_t i = 0; i < decisions.size(); ++i) {
+            acl.decisions[i].second[server] = decisions[i].second;
+        }
+    }
+    fs::create_directories(out_dir / "recs" / "acl");
+    std::ofstream(out_dir / "recs" / "acl" / "access-strings.json") << diff::serialize(acl);
 
     std::ostringstream summary;
     summary << "# Redis differential run\n\n"

@@ -74,6 +74,13 @@ endfunction()
 # off unless Kconfig turns it on explicitly; IAM and the engine stack as
 # above.
 function(_kythira_redis_gateway_kconfig target scope)
+    # CONFIG_REDIS_GATEWAY_DATA_TYPES (redis-general-data-types
+    # Requirement 37.1, default y): off, the gateway serves only the
+    # commands from before that spec. A negative define, so targets built
+    # outside Kconfig (the chaos images' variant) keep the data types.
+    if(DEFINED KCONFIG_REDIS_GATEWAY_DATA_TYPES AND NOT KCONFIG_REDIS_GATEWAY_DATA_TYPES)
+        target_compile_definitions(${target} ${scope} KYTHIRA_REDIS_GATEWAY_NO_DATA_TYPES)
+    endif()
     if(KCONFIG_REDIS_GATEWAY_TRANSACTIONS)
         target_compile_definitions(${target} ${scope} KYTHIRA_REDIS_GATEWAY_TRANSACTIONS)
     endif()

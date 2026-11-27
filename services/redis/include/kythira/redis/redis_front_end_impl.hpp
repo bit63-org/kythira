@@ -1034,6 +1034,13 @@ auto redis_front_end<Host, Logger, Metrics>::execute_command(session& s, std::st
         return handle_data(s, cmd);
     }
 
+    // A node built without the phase 1 data types answers their commands
+    // as one from before the spec does (Requirement 37.1).
+    if (const auto* info = find_redis_command(upper);
+        info != nullptr && info->task > 0 && !serves(info)) {
+        return unknown_command(s, cmd);
+    }
+
     if (s._txn_view != nullptr) {
         // EXEC evaluating its queue: every write is an `exec` record the
         // view takes, so the plain SET/SETEX/DEL paths and the
@@ -1297,7 +1304,7 @@ auto redis_front_end<Host, Logger, Metrics>::execute_command(session& s, std::st
         if (auto e = arity(2, 3)) {
             return *e;
         }
-        if (auto e = authorize(s, upper, {})) {
+        if (auto e = authorize(s, "SLOWLOG|" + resp_to_upper(cmd._argv[1]), {})) {
             return *e;
         }
         return handle_slowlog(s, cmd);
@@ -1327,7 +1334,13 @@ auto redis_front_end<Host, Logger, Metrics>::execute_command(session& s, std::st
         return handle_internal_exec(s, cmd);
     }
 
-    // Requirement 1.8: unknown commands are an error, not a disconnect.
+    return unknown_command(s, cmd);
+}
+
+/// Requirement 1.8: unknown commands are an error, not a disconnect.
+template<typename Host, typename Logger, typename Metrics>
+auto redis_front_end<Host, Logger, Metrics>::unknown_command(session& s, const resp_command& cmd)
+    -> std::string {
     std::string args;
     for (std::size_t i = 1; i < cmd._argv.size(); ++i) {
         args += "'" + cmd._argv[i].substr(0, 32) + "' ";
@@ -1638,7 +1651,7 @@ template<typename Host, typename Logger, typename Metrics>
 auto redis_front_end<Host, Logger, Metrics>::handle_del(session& s, const resp_command& cmd)
     -> std::string {
     const auto& key = cmd._argv[1];
-    if (auto e = authorize(s, "DEL", {key})) {
+    if (auto e = authorize(s, resp_to_upper(cmd._argv[0]), {key})) {  // DEL or UNLINK
         return *e;
     }
     std::string error;
@@ -1778,7 +1791,11 @@ auto redis_front_end<Host, Logger, Metrics>::handle_info(session& s, const resp_
             << "kythira_version:" << _config._kythira_version << "\r\n"
             << "kythira_gateway:1\r\n"
             << "kythira_format_level:" << reported_format_level() << "\r\n"
-            << "redis_mode:" << server_mode() << "\r\n"
+            << "redis_mode:" << server_mode()
+            << "\r\n"
+            // Client test suites and tools read these two unconditionally
+            // (redis-py's conftest indexes both), so they are always here.
+            << "arch_bits:" << (sizeof(void*) * 8) << "\r\n"
             << "uptime_in_seconds:" << uptime.count() << "\r\n"
             << "kythira_roles:" << _config._layer_roles.to_string() << "\r\n"
             << "kythira_membership:" << membership_mode_name() << "\r\n"
@@ -1832,6 +1849,10 @@ auto redis_front_end<Host, Logger, Metrics>::handle_info(session& s, const resp_
     if (wanted("errorstats", true)) {
         section("Errorstats");
         out << errorstats_text();
+    }
+    if (wanted("cluster", true)) {
+        section("Cluster");
+        out << "cluster_enabled:" << (_config._cluster_compat_mode ? 1 : 0) << "\r\n";
     }
     if (wanted("keyspace", true)) {
         // The whole keyspace, each group read once in key order, as DBSIZE
@@ -1889,7 +1910,7 @@ auto redis_front_end<Host, Logger, Metrics>::handle_command(session& s, const re
         return *e;
     }
     const auto accepted = [this](const redis_command_info& c) {
-        if (c.status != redis_command_status::shipped) {
+        if (!serves(&c)) {
             return false;
         }
         const bool txn = c.name == "MULTI" || c.name == "EXEC" || c.name == "DISCARD" ||
@@ -1942,9 +1963,15 @@ auto redis_front_end<Host, Logger, Metrics>::handle_command(session& s, const re
                                                       {"keystep", w.integer(c.step)},
                                                       {"limit", w.integer(0)}})}})}}));
         }
+        std::vector<std::string> tips;
+        for (std::string_view rest = c.tips; !rest.empty();) {
+            const auto space = rest.find(' ');
+            tips.push_back(w.bulk(rest.substr(0, space)));
+            rest = space == std::string_view::npos ? std::string_view{} : rest.substr(space + 1);
+        }
         return w.array({w.bulk(lower(c.name)), w.integer(c.arity), w.array(flags),
                         w.integer(c.first_key), w.integer(c.last_key), w.integer(c.step),
-                        w.array(categories), w.array({}), w.array(key_specs), w.array({})});
+                        w.array(categories), w.array(tips), w.array(key_specs), w.array({})});
     };
     const auto docs = [&](const redis_command_info& c) {
         return w.map({{"since", w.bulk(c.since)}, {"group", w.bulk(c.group)}});
@@ -2565,6 +2592,11 @@ auto redis_front_end<Host, Logger, Metrics>::execute_txn_command(session& s, std
         return s._writer.simple_string("OK");
     }
     if (upper == "DISCARD") {
+        // Authorized before the state check, as in Redis: a user without
+        // @transaction gets NOPERM, not "without MULTI".
+        if (auto e = authorize(s, upper, {})) {
+            return *e;
+        }
         if (!s._in_multi) {
             return s._writer.error("ERR DISCARD without MULTI");
         }
@@ -2576,6 +2608,9 @@ auto redis_front_end<Host, Logger, Metrics>::execute_txn_command(session& s, std
         return s._writer.simple_string("OK");
     }
     if (upper == "EXEC") {
+        if (auto e = authorize(s, upper, {})) {
+            return *e;
+        }
         if (!s._in_multi) {
             return s._writer.error("ERR EXEC without MULTI");
         }
@@ -2838,12 +2873,16 @@ auto redis_front_end<Host, Logger, Metrics>::queue_in_multi(session& s, std::str
     const bool keyed_group =
         info != nullptr && (info->group == "string" || info->group == "generic" ||
                             info->group == "hash" || info->group == "set" || info->group == "list");
+    // PING and ECHO touch no data and answer the same inside EXEC; Redis
+    // queues them, and clients put them in a transaction to check the
+    // connection (go-redis's TxPipeline "supports custom command").
+    const bool keyless = upper == "PING" || upper == "ECHO";
     const bool queueable =
-        keyed_group && info->status == redis_command_status::shipped &&
-        (info->flags & redis_command_flag::no_multi) == 0 &&
-        (info->flags & redis_command_flag::blocking) == 0 &&
-        (info->first_key > 0 || (info->flags & redis_command_flag::movablekeys) != 0) &&
-        !k_string_only_store;
+        info != nullptr && !k_string_only_store &&
+        (keyless ||
+         (keyed_group && serves(info) && (info->flags & redis_command_flag::no_multi) == 0 &&
+          (info->flags & redis_command_flag::blocking) == 0 &&
+          (info->first_key > 0 || (info->flags & redis_command_flag::movablekeys) != 0)));
     if (!queueable) {
         return refuse(s._writer.error("ERR " + std::string(upper) +
                                       " is not supported inside MULTI on this gateway"));
@@ -3967,7 +4006,11 @@ auto redis_front_end<Host, Logger, Metrics>::format_status_text() -> std::string
         << "binary_level:" << k_redis_format_level << "\r\n";
     for (const auto& g : _data.local_groups()) {
         auto* node = _data.local_replica(g);
-        if (node == nullptr) {
+        // Only key-range groups hold Redis data. The snapshot-isolation
+        // build's timestamp oracle group owns no keys and never takes the
+        // gate; listing it at level 2 made UPGRADE wait out its whole
+        // budget for a group that will never change.
+        if (node == nullptr || !_data.holds_keys(g)) {
             continue;
         }
         std::uint16_t level = 0;
@@ -4521,10 +4564,11 @@ auto redis_front_end<Host, Logger, Metrics>::handle_string_write(session& s, std
                             true);
     }
     if (upper == "INCRBYFLOAT") {
-        const auto incr = parse_redis_float128(a[2]);
-        if (!incr || !is_finite_redis_float128(*incr)) {
-            return s._writer.error(incr ? "ERR increment would produce NaN or Infinity"
-                                        : "ERR value is not a valid float");
+        // An infinite increment goes to apply(): Redis checks the stored
+        // value first, so a non-numeric value answers "not a valid float"
+        // and a numeric one "would produce NaN or Infinity".
+        if (!parse_redis_float128(a[2])) {
+            return s._writer.error("ERR value is not a valid float");
         }
         return propose_exec(s, cmd, key, redis_command_id::incrbyfloat, {key, a[2]}, true);
     }
@@ -4680,6 +4724,8 @@ auto redis_front_end<Host, Logger, Metrics>::handle_multi_key_write(session& s,
     for (const auto pos : redis_exec_key_positions(id, args)) {
         key_views.emplace_back(a[pos + 1]);
     }
+    // Per position for COPY and RENAME (redis_command_key_access_at): the
+    // destination is only written.
     if (auto e = authorize(s, upper, key_views)) {
         return *e;
     }
@@ -4779,7 +4825,7 @@ auto redis_front_end<Host, Logger, Metrics>::handle_key_read(session& s, std::st
     for (std::size_t i = first; i < cmd._argv.size(); ++i) {
         keys.emplace_back(cmd._argv[i]);
     }
-    if (auto e = authorize(s, upper, keys)) {
+    if (auto e = authorize(s, upper == "OBJECT" ? "OBJECT|ENCODING" : upper, keys)) {
         return *e;
     }
     std::int64_t touched = 0;
@@ -4924,8 +4970,14 @@ auto redis_front_end<Host, Logger, Metrics>::handle_collection(session& s,
         if (id == redis_command_id::hincrby && !redis_string_detail::parse_int64(a[3])) {
             return s._writer.error("ERR value is not an integer or out of range");
         }
-        if (id == redis_command_id::hincrbyfloat && !parse_redis_float128(a[3])) {
-            return s._writer.error("ERR value is not a valid float");
+        if (id == redis_command_id::hincrbyfloat) {
+            const auto incr = parse_redis_float128(a[3]);
+            if (!incr) {
+                return s._writer.error("ERR value is not a valid float");
+            }
+            if (!is_finite_redis_float128(*incr)) {
+                return s._writer.error("ERR value is NaN or Infinity");
+            }
         }
         args.insert(args.end(), a.begin() + 2, a.end());
         return propose_exec(s, cmd, key, id, std::move(args), id != redis_command_id::hdel);
@@ -4933,7 +4985,9 @@ auto redis_front_end<Host, Logger, Metrics>::handle_collection(session& s,
 
     // A read: arguments the data side expects already valid.
     std::vector<std::string> args(a.begin() + 2, a.end());
-    if (id == redis_command_id::lindex || id == redis_command_id::lrange) {
+    // LINDEX checks the key's type before its index (lindexCommand), so its
+    // index is parsed on the data side; LRANGE parses first, as Redis does.
+    if (id == redis_command_id::lrange) {
         for (const auto& v : args) {
             if (!redis_string_detail::parse_int64(v)) {
                 return s._writer.error("ERR value is not an integer or out of range");
@@ -5064,7 +5118,11 @@ auto redis_front_end<Host, Logger, Metrics>::handle_spop(session& s, const resp_
     if (auto refused = format_refusal(s, key, k_redis_typed_values_level)) {
         return *refused;
     }
-    const auto empty_reply = [&] { return count ? s._writer.array({}) : s._writer.null(); };
+    const auto empty_reply = [&] {
+        // With a count, an empty set (RESP3 `~0`), as Redis replies.
+        return count ? render_redis_reply(redis_reply::set({}), s._writer.version())
+                     : s._writer.null();
+    };
     if (count && *count == 0) {
         return empty_reply();
     }
@@ -5104,7 +5162,13 @@ auto redis_front_end<Host, Logger, Metrics>::handle_spop(session& s, const resp_
     if (args.size() == 2) {
         return empty_reply();
     }
-    return propose_exec(s, cmd, key, redis_command_id::spop, std::move(args), false);
+    auto reply = propose_exec(s, cmd, key, redis_command_id::spop, std::move(args), false);
+    // A reply forwarded from the leader comes back as a RESP2 array; a RESP3
+    // client gets the set Redis sends for SPOP with a count.
+    if (count && s._writer.version() >= 3 && reply.starts_with('*')) {
+        reply.front() = '~';
+    }
+    return reply;
 }
 
 template<typename Host, typename Logger, typename Metrics>
@@ -6376,7 +6440,7 @@ auto redis_front_end<Host, Logger, Metrics>::handle_memory(session& s, const res
         return s._writer.error("ERR syntax error");
     }
     const auto& key = a[2];
-    if (auto e = authorize(s, "MEMORY", {key})) {
+    if (auto e = authorize(s, "MEMORY|USAGE", {key})) {
         return *e;
     }
     auto r = read_local(s, key);

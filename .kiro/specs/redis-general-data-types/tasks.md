@@ -148,7 +148,7 @@ is extended as the rest land.
     `commandstats`, `errorstats`, `SLOWLOG`; audit lines
   - _Requirements: 8.1-8.6, 22.1-22.3_
 
-- [ ] 14. Phase 1 conformance suites
+- [x] 14. Phase 1 conformance suites
   - Seeded command generator and recording format; differential runs
     against Redis 7.2 and Valkey 8 containers in RESP2 and RESP3 with the
     difference table; redis-py, go-redis and ioredis subsets; history
@@ -236,7 +236,7 @@ is extended as the rest land.
   - Each real-cloud run needs Clark's go in his own words
   - _Requirements: 25.1-25.3_
 
-- [ ] 22. Phase 1 documentation and default
+- [x] 22. Phase 1 documentation and default
   - `doc/redis-gateway.md`: command tables, difference table, mutability
     and categories, format gate procedure, layer guide (roles, which
     layer holds which secret, sizing), split/merge runbook link

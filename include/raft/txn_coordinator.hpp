@@ -241,6 +241,7 @@ public:
         _options = options;
         _writes.clear();
         _reads.clear();
+        _watched.clear();
         _start_ts = 0;
         if constexpr (k_mvcc) {
             if (is_versioned(options.isolation)) {
@@ -263,7 +264,10 @@ public:
     /// @brief Under `serializable`, validate `key` at commit as if it had
     ///        been read, without reading it (a Redis `WATCH`): the commit
     ///        aborts with `read_conflict` if a version of it committed after
-    ///        the start timestamp, or another transaction holds it.
+    ///        the start timestamp, or another transaction holds it. Unlike a
+    ///        key read, a watched key is validated even when the transaction
+    ///        writes nothing, because Redis's `EXEC` fails when a watched key
+    ///        changed whatever the `MULTI` held.
     ///
     /// @throws std::logic_error below `serializable`, where nothing would
     ///         validate it.
@@ -273,6 +277,7 @@ public:
             throw std::logic_error("transaction_coordinator: watch needs serializable");
         }
         _reads.insert(key);
+        _watched.insert(key);
     }
 
     /// @brief Buffer a write. Nothing reaches a shard before `commit()`
@@ -336,6 +341,9 @@ public:
         require_open("commit");
         _open = false;
         if (_writes.empty()) {
+            if (!_watched.empty()) {
+                return validate_watched();
+            }
             // Requirement 9.3: a read-only transaction commits without a
             // prepare, at every level. Its reads were one snapshot, which is
             // serializable at the start timestamp on its own.
@@ -365,6 +373,7 @@ public:
         require_open("rollback");
         _writes.clear();
         _reads.clear();
+        _watched.clear();
         _open = false;
     }
 
@@ -866,6 +875,60 @@ private:
         return out;
     }
 
+    /// A transaction that writes nothing but watched keys: serializable
+    /// on its own (Requirement 9.3), but a Redis `EXEC` must still fail if
+    /// a watched key changed after the `WATCH`. Each shard validates its
+    /// watched keys as a prepare with no writes would (read intents, the
+    /// newer-version check), then every group is released as an abort
+    /// releases it. No record is ever pending, so nothing can commit; the
+    /// smallest watched key stands as the primary only so that a resolver
+    /// meeting a read intent left by a lost release can clear it.
+    auto validate_watched() -> outcome_type {
+        const auto deadline = clock::now() + _options.timeout;
+        const std::vector<Key> keys(_watched.begin(), _watched.end());
+        auto groups = partition({}, keys);
+        if (!groups.has_value()) {
+            return aborted(txn_abort_reason::unroutable);
+        }
+        const Key& primary = keys.front();
+        const auto ttl_deadline =
+            _client.now_ms() + static_cast<std::uint64_t>(_options.lock_ttl.count());
+        std::vector<pending_prepare> pending;
+        for (const auto& [g, gw] : *groups) {
+            pending.push_back(send_prepare(gw, primary, false, ttl_deadline, deadline));
+        }
+        std::vector<group_writes> sent;
+        std::optional<outcome_type> failure;
+        for (auto& p : pending) {
+            sent.push_back(p._group);
+            if (!ready_by(p._future, deadline)) {
+                _in_flight.push_back(std::move(p._future));
+                if (!failure.has_value()) {
+                    failure = aborted(txn_abort_reason::prepare_failed, primary);
+                    failure->_detail = "watch validation timed out";
+                }
+                continue;
+            }
+            try {
+                const auto res = decode(std::move(p._future).get());
+                if (res._status != txn_result_status::ok &&
+                    res._status != txn_result_status::validated && !failure.has_value()) {
+                    failure = from_result(res, primary);
+                }
+            } catch (...) {
+                if (!failure.has_value()) {
+                    failure = aborted(txn_abort_reason::prepare_failed, primary);
+                    failure->_detail = describe(std::current_exception());
+                }
+            }
+        }
+        abort_groups(sent, primary, deadline);
+        if (failure.has_value()) {
+            return *failure;
+        }
+        return outcome_type{._txn = _txn};
+    }
+
     /// Best effort: an abort that is lost leaves intents a resolver clears
     /// after their TTL.
     auto abort_groups(const std::vector<group_writes>& groups, const Key& primary,
@@ -908,6 +971,8 @@ private:
     write_map _writes;
     /// `serializable` only: the keys read or watched, validated at commit.
     std::set<Key> _reads;
+    /// The keys `watch()` named: validated even with no writes.
+    std::set<Key> _watched;
     std::function<void(txn_step)> _crash_hook;
     /// Sends nobody waits on, kept so `drain()` can wait for them.
     std::vector<send_future> _in_flight;

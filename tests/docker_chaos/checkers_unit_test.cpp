@@ -380,6 +380,101 @@ bool flags(const rs::result& r, const std::string& invariant) {
 
 }  // namespace
 
+// ── Redis data-type models (redis-general-data-types Requirement 23.4) ────────
+
+namespace {
+
+spec op(h::op_kind f, std::int64_t p, opt value, opt expected, std::int64_t call,
+        std::optional<std::int64_t> ret, h::event_type type = h::event_type::ok) {
+    return spec{.p = p,
+                .f = f,
+                .key = "k",
+                .value = std::move(value),
+                .expected = std::move(expected),
+                .call = call,
+                .ret = ret,
+                .type = type};
+}
+
+}  // namespace
+
+BOOST_AUTO_TEST_SUITE(redis_models)
+
+BOOST_AUTO_TEST_CASE(round_trips_through_json) {
+    for (const auto f : {h::op_kind::incr, h::op_kind::setnx, h::op_kind::getdel, h::op_kind::lpush,
+                         h::op_kind::rpop}) {
+        h::event e;
+        e.f = f;
+        e.key = "x";
+        e.value = "v";
+        e.expected = h::has_pair(f) ? opt("1") : std::nullopt;
+        const auto back = h::from_line(h::to_line(e));
+        BOOST_TEST((back.f == f));
+        BOOST_TEST((back.value == e.value));
+        BOOST_TEST((back.expected == e.expected));
+    }
+}
+
+BOOST_AUTO_TEST_CASE(counters_count_once) {
+    using h::op_kind::incr;
+    BOOST_TEST(lin_verdict({op(incr, 0, "1", {}, 0, 10), op(incr, 1, "2", {}, 20, 30),
+                            rd(2, "2", 40, 50)}) == c::verdict::ok);
+    // Two increments may not both return 1, and a lost one shows in a read.
+    BOOST_TEST(lin_verdict({op(incr, 0, "1", {}, 0, 10), op(incr, 1, "1", {}, 5, 15)}) ==
+               c::verdict::violation);
+    BOOST_TEST(lin_verdict({op(incr, 0, "1", {}, 0, 10), op(incr, 1, "2", {}, 20, 30),
+                            rd(2, "1", 40, 50)}) == c::verdict::violation);
+    // An indeterminate increment may land late or never.
+    BOOST_TEST(lin_verdict({op(incr, 0, {}, {}, 0, 10, h::event_type::info),
+                            op(incr, 1, "1", {}, 20, 30), op(incr, 2, "3", {}, 40, 50)}) ==
+               c::verdict::ok);
+    BOOST_TEST(lin_verdict({op(incr, 0, {}, {}, 0, 10, h::event_type::info),
+                            op(incr, 1, "1", {}, 20, 30), rd(2, "1", 40, 50)}) == c::verdict::ok);
+    // Applied twice (a replayed log) is caught.
+    BOOST_TEST(lin_verdict({op(incr, 0, "1", {}, 0, 10), rd(1, "2", 20, 30)}) ==
+               c::verdict::violation);
+}
+
+BOOST_AUTO_TEST_CASE(locks_have_one_holder) {
+    using h::op_kind::getdel;
+    using h::op_kind::setnx;
+    BOOST_TEST(lin_verdict({op(setnx, 0, "a", "1", 0, 10), op(setnx, 1, "b", "0", 20, 30),
+                            op(getdel, 0, "a", {}, 40, 50), op(setnx, 1, "b", "1", 60, 70)}) ==
+               c::verdict::ok);
+    // Two holders at once.
+    BOOST_TEST(lin_verdict({op(setnx, 0, "a", "1", 0, 10), op(setnx, 1, "b", "1", 20, 30)}) ==
+               c::verdict::violation);
+    // A release that returns another holder's token.
+    BOOST_TEST(lin_verdict({op(setnx, 0, "a", "1", 0, 10), op(getdel, 1, "b", {}, 20, 30)}) ==
+               c::verdict::violation);
+    // A refused acquire on a free lock.
+    BOOST_TEST(lin_verdict({op(setnx, 0, "a", "0", 0, 10)}) == c::verdict::violation);
+    // An indeterminate acquire explains a later refusal.
+    BOOST_TEST(lin_verdict({op(setnx, 0, "a", {}, 0, 10, h::event_type::info),
+                            op(setnx, 1, "b", "0", 20, 30), op(getdel, 1, "a", {}, 40, 50)}) ==
+               c::verdict::ok);
+}
+
+BOOST_AUTO_TEST_CASE(queues_are_first_in_first_out) {
+    using h::op_kind::lpush;
+    using h::op_kind::rpop;
+    BOOST_TEST(lin_verdict({op(lpush, 0, "a", "1", 0, 10), op(lpush, 0, "b", "2", 20, 30),
+                            rd(1, "b\na", 40, 50), op(rpop, 1, "a", {}, 60, 70),
+                            op(rpop, 1, "b", {}, 80, 90), op(rpop, 1, {}, {}, 100, 110)}) ==
+               c::verdict::ok);
+    // Out of order, a duplicate, or a wrong length.
+    BOOST_TEST(lin_verdict({op(lpush, 0, "a", "1", 0, 10), op(lpush, 0, "b", "2", 20, 30),
+                            op(rpop, 1, "b", {}, 40, 50)}) == c::verdict::violation);
+    BOOST_TEST(lin_verdict({op(lpush, 0, "a", "1", 0, 10), op(rpop, 1, "a", {}, 20, 30),
+                            op(rpop, 1, "a", {}, 40, 50)}) == c::verdict::violation);
+    BOOST_TEST(lin_verdict({op(lpush, 0, "a", "2", 0, 10)}) == c::verdict::violation);
+    // Concurrent pushes may order either way.
+    BOOST_TEST(lin_verdict({op(lpush, 0, "a", "2", 0, 30), op(lpush, 1, "b", "1", 5, 25),
+                            op(rpop, 2, "b", {}, 40, 50)}) == c::verdict::ok);
+}
+
+BOOST_AUTO_TEST_SUITE_END()
+
 BOOST_AUTO_TEST_SUITE(raft_safety)
 
 BOOST_AUTO_TEST_CASE(agreeing_nodes_are_safe) {

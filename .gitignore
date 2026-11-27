@@ -64,6 +64,7 @@ services/redis/docker/cache-cluster/dist/
 services/redis/docker/cache-cluster/dist-old/
 services/redis/docker/txn-chaos/dist/
 services/redis/docker/engine-chaos/dist/
+services/redis/docker/engine-chaos/dist-old/
 services/iam/docker/iam_node/dist/
 docker/kythira_node/dist/
 services/ledger/docker/ledger-chaos/dist/

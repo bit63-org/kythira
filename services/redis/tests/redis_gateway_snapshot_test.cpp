@@ -456,12 +456,32 @@ void check_watch(resp_client& client, resp_client& other, const std::string& n) 
     BOOST_CHECK_EQUAL(client.call({"SET", "z/u" + n, "mine"}), "+QUEUED\r\n");
     BOOST_CHECK_EQUAL(client.call({"EXEC"}), "*1\r\n+OK\r\n");
 
-    // A read-only EXEC reads as of the WATCH and commits.
+    // A read-only EXEC, or an empty one, fails too when a watched key
+    // changed, as Redis's does (redis-py's test_watch_failure and
+    // test_watch_failure_in_empty_transaction), including a watched
+    // key the MULTI never names and one on the other shard.
+    BOOST_CHECK_EQUAL(client.call({"WATCH", "a/r" + n, "z/r" + n}), "+OK\r\n");
+    BOOST_CHECK_EQUAL(other.call({"SET", "z/r" + n, "later"}), "+OK\r\n");
+    BOOST_CHECK_EQUAL(client.call({"MULTI"}), "+OK\r\n");
+    BOOST_CHECK_EQUAL(client.call({"GET", "a/r" + n}), "+QUEUED\r\n");
+    BOOST_CHECK_EQUAL(client.call({"EXEC"}), "*-1\r\n");
     BOOST_CHECK_EQUAL(client.call({"WATCH", "a/r" + n}), "+OK\r\n");
     BOOST_CHECK_EQUAL(other.call({"SET", "a/r" + n, "later"}), "+OK\r\n");
     BOOST_CHECK_EQUAL(client.call({"MULTI"}), "+OK\r\n");
+    BOOST_CHECK_EQUAL(client.call({"EXEC"}), "*-1\r\n");
+    // Unchanged, a read-only EXEC reads as of the WATCH and commits,
+    // and its validation leaves no lock behind for a writer to meet.
+    BOOST_CHECK_EQUAL(client.call({"WATCH", "a/r" + n, "z/r" + n}), "+OK\r\n");
+    BOOST_CHECK_EQUAL(client.call({"MULTI"}), "+OK\r\n");
     BOOST_CHECK_EQUAL(client.call({"GET", "a/r" + n}), "+QUEUED\r\n");
-    BOOST_CHECK_EQUAL(client.call({"EXEC"}), "*1\r\n$-1\r\n");
+    BOOST_CHECK_EQUAL(client.call({"EXEC"}), "*1\r\n" + bulk("later"));
+    BOOST_CHECK_EQUAL(client.call({"WATCH", "a/r" + n}), "+OK\r\n");
+    BOOST_CHECK_EQUAL(client.call({"MULTI"}), "+OK\r\n");
+    BOOST_CHECK_EQUAL(client.call({"EXEC"}), "*0\r\n");
+    const auto before_write = std::chrono::steady_clock::now();
+    BOOST_CHECK_EQUAL(other.call({"DEL", "a/r" + n}), ":1\r\n");
+    BOOST_CHECK_EQUAL(other.call({"DEL", "z/r" + n}), ":1\r\n");
+    BOOST_CHECK_LT(std::chrono::steady_clock::now() - before_write, std::chrono::seconds{2});
 
     // Not inside MULTI.
     BOOST_CHECK_EQUAL(client.call({"MULTI"}), "+OK\r\n");
@@ -500,7 +520,15 @@ BOOST_AUTO_TEST_CASE(watch_covers_typed_values, *boost::unit_test::timeout(180))
     resp_client other(c.port(2));
     BOOST_REQUIRE_EQUAL(client.call({"AUTH", "ops", "ops-secret"}), "+OK\r\n");
     BOOST_REQUIRE_EQUAL(other.call({"AUTH", "ops", "ops-secret"}), "+OK\r\n");
+    // The timestamp oracle's group holds no keys and never takes the gate:
+    // STATUS leaves it out, and UPGRADE does not wait out its budget (four
+    // command timeouts, 20 s here) for it.
+    const auto started = std::chrono::steady_clock::now();
     BOOST_REQUIRE_EQUAL(client.call({"KYTHIRA.FORMAT", "UPGRADE", "3"}), "+OK\r\n");
+    BOOST_CHECK_LT(std::chrono::steady_clock::now() - started, std::chrono::seconds{10});
+    const auto status = client.call({"KYTHIRA.FORMAT", "STATUS"});
+    BOOST_CHECK(status.find("gate=2") == std::string::npos);
+    BOOST_CHECK(status.find("group:1:gate=3") != std::string::npos);
     BOOST_REQUIRE_EQUAL(client.call({"HSET", "a/h", "n", "1"}), ":1\r\n");
 
     // A field changed after the WATCH: a null array, nothing applied.

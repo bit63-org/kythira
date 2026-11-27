@@ -1021,6 +1021,15 @@ BOOST_AUTO_TEST_CASE(hello_3_switches_the_reply_encoding, *boost::unit_test::tim
     BOOST_CHECK(hello.find("$5\r\nproto\r\n:3\r\n") != std::string::npos);
     BOOST_CHECK_EQUAL(client.call({"GET", "sccache/none"}), "_\r\n");
     BOOST_CHECK_EQUAL(client.call({"CLIENT", "GETNAME"}), bulk("t"));
+    // CLIENT ID is positive and differs between connections, as Redis's
+    // does: clients key client-side caching and redirection on it.
+    const auto id = client.call({"CLIENT", "ID"});
+    BOOST_CHECK(id.starts_with(":") && id != ":0\r\n");
+    resp_client other(c.port(c.leader_of(1)));
+    BOOST_REQUIRE_EQUAL(other.auth("farm", "farm-secret"), "+OK\r\n");
+    const auto other_id = other.call({"CLIENT", "ID"});
+    BOOST_CHECK(other_id.starts_with(":") && other_id != ":0\r\n");
+    BOOST_CHECK_NE(id, other_id);
 
     BOOST_CHECK_EQUAL(client.call({"RESET"}), "+RESET\r\n");
     BOOST_CHECK_EQUAL(client.call({"GET", "sccache/none"}), "-NOAUTH Authentication required.\r\n");
@@ -1108,6 +1117,11 @@ BOOST_AUTO_TEST_CASE(authentication_and_authorization, *boost::unit_test::timeou
         BOOST_CHECK_EQUAL(ops.call({"COMMAND", "COUNT"}), ":" + std::to_string(shipped) + "\r\n");
         BOOST_CHECK(ops.call({"COMMAND", "INFO", "incr", "nosuch"})
                         .starts_with("*2\r\n*10\r\n$4\r\nincr\r\n:2\r\n"));
+        // Redis 7.2's tips, bulk strings as Redis sends them: go-redis
+        // routes and aggregates by them.
+        BOOST_CHECK(ops.call({"COMMAND", "INFO", "touch"})
+                        .find("*2\r\n$26\r\nrequest_policy:multi_shard\r\n"
+                              "$23\r\nresponse_policy:agg_sum\r\n") != std::string::npos);
     }
 }
 
@@ -2050,6 +2064,10 @@ BOOST_AUTO_TEST_CASE(hello_and_info_identify_kythira, *boost::unit_test::timeout
     BOOST_CHECK(info.find("\r\nkythira_version:9.8.7+gabc1234\r\n") != std::string::npos);
     BOOST_CHECK(info.find("\r\nredis_mode:standalone\r\n") != std::string::npos);
     BOOST_CHECK(info.find("-kythira") == std::string::npos);
+    // Read unconditionally by client test suites (redis-py's conftest).
+    BOOST_CHECK(info.find("\r\narch_bits:" + std::to_string(sizeof(void*) * 8) + "\r\n") !=
+                std::string::npos);
+    BOOST_CHECK(info.find("\r\n# Cluster\r\ncluster_enabled:0\r\n") != std::string::npos);
 }
 
 // The Cluster compatibility mode (phase 2) is the only thing that makes the
@@ -2065,7 +2083,47 @@ BOOST_AUTO_TEST_CASE(cluster_mode_only_with_the_compatibility_mode,
     BOOST_REQUIRE_EQUAL(ops.auth("ops", "ops-secret"), "+OK\r\n");
     BOOST_CHECK(ops.call({"HELLO", "2"}).find("$4\r\nmode\r\n$7\r\ncluster\r\n") !=
                 std::string::npos);
-    BOOST_CHECK(ops.call({"INFO"}).find("\r\nredis_mode:cluster\r\n") != std::string::npos);
+    const auto info = ops.call({"INFO"});
+    BOOST_CHECK(info.find("\r\nredis_mode:cluster\r\n") != std::string::npos);
+    BOOST_CHECK(info.find("\r\ncluster_enabled:1\r\n") != std::string::npos);
+}
+
+// CONFIG_REDIS_GATEWAY_DATA_TYPES=n (redis-general-data-types Requirement
+// 37.1): the phase 1 commands answer unknown command, the earlier ones work
+// as before with KYTHIRA.FORMAT, COMMAND lists only those, and the node
+// reports format level 2, so the typed-values gate cannot pass.
+BOOST_AUTO_TEST_CASE(without_data_types_only_the_earlier_commands_are_served,
+                     *boost::unit_test::timeout(120)) {
+    redis_gateway_config cfg;
+    cfg._data_types = false;
+    cluster c(cfg);
+    BOOST_REQUIRE(c.await_all_leaders(std::chrono::seconds{20}));
+    resp_client ops(c.port(c.leader_of(k_sccache_group)));
+    BOOST_REQUIRE_EQUAL(ops.auth("ops", "ops-secret"), "+OK\r\n");
+    BOOST_CHECK_EQUAL(ops.call({"SET", "sccache/dt", "v"}), "+OK\r\n");
+    BOOST_CHECK_EQUAL(ops.call({"GET", "sccache/dt"}), "$1\r\nv\r\n");
+    for (const std::vector<std::string>& argv :
+         {std::vector<std::string>{"HSET", "sccache/h", "f", "v"},
+          std::vector<std::string>{"SADD", "sccache/s", "m"}, std::vector<std::string>{"SCAN", "0"},
+          std::vector<std::string>{"APPEND", "sccache/dt", "x"}}) {
+        BOOST_CHECK_MESSAGE(ops.call(argv).rfind("-ERR unknown command '" + argv[0], 0) == 0,
+                            argv[0]);
+    }
+    // Transactions are off by default, and COMMAND leaves their seven
+    // commands out then.
+    const std::set<std::string_view> txn{
+        "MULTI", "EXEC", "DISCARD", "WATCH", "UNWATCH", "KYTHIRA.ISOLATION", "KYTHIRA.TXN"};
+    std::size_t earlier = 0;
+    for (const auto& info : kythira::k_redis_commands) {
+        earlier += info.status == kythira::redis_command_status::shipped &&
+                           info.task <= kythira::k_redis_format_gate_task &&
+                           !txn.contains(info.name)
+                       ? 1
+                       : 0;
+    }
+    BOOST_CHECK_EQUAL(ops.call({"COMMAND", "COUNT"}), ":" + std::to_string(earlier) + "\r\n");
+    BOOST_CHECK_EQUAL(ops.call({"KYTHIRA.FORMAT", "LEVEL"}), ":2\r\n");
+    BOOST_CHECK(ops.call({"KYTHIRA.FORMAT", "UPGRADE", "3"}).starts_with("-"));
 }
 
 // A compatibility level with a vendor suffix, or not three numbers, would
@@ -2736,7 +2794,7 @@ BOOST_AUTO_TEST_CASE(set_commands, *boost::unit_test::timeout(120)) {
     BOOST_CHECK_EQUAL(call({"SMOVE", "sccache/u", "sccache/v", "d"}), ":1\r\n");
     BOOST_CHECK_EQUAL(call({"SMEMBERS", "sccache/v"}), "*1\r\n$1\r\nd\r\n");
     BOOST_CHECK_EQUAL(call({"TYPE", "sccache/v"}), "+set\r\n");
-    BOOST_CHECK_EQUAL(call({"OBJECT", "ENCODING", "sccache/v"}), bulk("hashtable"));
+    BOOST_CHECK_EQUAL(call({"OBJECT", "ENCODING", "sccache/v"}), bulk("listpack"));
 
     // SPOP: every pop is a member that was there, and they run out.
     std::set<std::string> popped;
@@ -2808,7 +2866,7 @@ BOOST_AUTO_TEST_CASE(list_commands, *boost::unit_test::timeout(120)) {
     BOOST_CHECK_EQUAL(call({"LPOP", "sccache/l", "2"}), "*-1\r\n");
     BOOST_CHECK_EQUAL(call({"RPUSH", "sccache/t", "x"}), ":1\r\n");
     BOOST_CHECK_EQUAL(call({"TYPE", "sccache/t"}), "+list\r\n");
-    BOOST_CHECK_EQUAL(call({"OBJECT", "ENCODING", "sccache/t"}), bulk("quicklist"));
+    BOOST_CHECK_EQUAL(call({"OBJECT", "ENCODING", "sccache/t"}), bulk("listpack"));
     BOOST_CHECK_EQUAL(call({"GET", "sccache/t"}),
                       "-WRONGTYPE Operation against a key holding the wrong kind of value\r\n");
     BOOST_CHECK_EQUAL(call({"RPUSH", "a/t", "y"}), ":1\r\n");

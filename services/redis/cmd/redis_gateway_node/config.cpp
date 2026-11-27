@@ -535,6 +535,11 @@ auto from_env() -> node_options {
         to_u64("KYTHIRA_REDIS_SLOWLOG_MAX_LEN", get_opt("KYTHIRA_REDIS_SLOWLOG_MAX_LEN", "128"));
     g._allow_flush =
         to_bool("KYTHIRA_REDIS_ALLOW_FLUSH", get_opt("KYTHIRA_REDIS_ALLOW_FLUSH", "false"));
+#if defined(KYTHIRA_REDIS_GATEWAY_NO_DATA_TYPES)
+    // CONFIG_REDIS_GATEWAY_DATA_TYPES=n: the commands from before the
+    // redis-general-data-types spec only, at format level 2.
+    g._data_types = false;
+#endif
     {
         const auto keys = to_u64("KYTHIRA_REDIS_RANGE_DELETE_KEYS",
                                  get_opt("KYTHIRA_REDIS_RANGE_DELETE_KEYS", "1000"));

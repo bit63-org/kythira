@@ -50,6 +50,9 @@ inline constexpr std::uint16_t k_redis_typed_values_level = 3;
 /// The level before any gate: records `0x01`-`0x07`, which every binary
 /// since the redis-compatible-kv spec reads.
 inline constexpr std::uint16_t k_redis_base_format_level = 2;
+/// The phase 1 task that shipped `KYTHIRA.FORMAT`: commands of this task
+/// and earlier are served also by a node built without the data types.
+inline constexpr std::uint8_t k_redis_format_gate_task = 2;
 
 /// The reply a front end gives a command that needs a level the cluster has
 /// not reached (Requirement 14.3).

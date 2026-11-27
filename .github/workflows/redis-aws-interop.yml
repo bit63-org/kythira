@@ -1,0 +1,122 @@
+# Copyright (c) 2026 Clark Rawlins
+# SPDX-License-Identifier: Apache-2.0
+
+name: Redis AWS Interop
+
+# The Redis gateway against AWS's managed Redis
+# (.kiro/specs/redis-general-data-types/ Requirement 25.2): the smallest
+# ElastiCache Serverless caches (Valkey, Redis OSS) and MemoryDB cluster
+# with a runner inside their VPC, which re-records the differential
+# streams, runs the client library suites and checks an ElastiCache IAM
+# auth token; then the suites are compared with Kythira's last run on main,
+# the cost is estimated and everything is deleted, including on failure.
+# services/redis/aws-interop/README.md has the details.
+#
+# Dispatch only, never scheduled, and it spends money: each run needs
+# Clark's go in his own words. Three switches: the REDIS_AWS_INTEROP_ENABLED
+# repository variable, the redis-aws-interop environment (Clark is its
+# required reviewer) and the role it assumes, AWS_REDIS_INTEROP_ROLE_ARN
+# (scripts/ci-cloud-credentials/aws/redis-interop/provision-role.sh).
+# Estimated cost per run: well under $1 (the job writes cost.md).
+
+on:
+  workflow_dispatch:
+    inputs:
+      approved_by:
+        description: "Whose go this run has, and where it was given"
+        type: string
+        required: true
+
+permissions:
+  contents: read
+  actions: read
+  id-token: write
+
+concurrency:
+  group: redis-aws-interop
+  cancel-in-progress: false
+
+jobs:
+  interop:
+    if: vars.REDIS_AWS_INTEROP_ENABLED == 'true'
+    runs-on: ubuntu-24.04
+    environment: redis-aws-interop
+    timeout-minutes: 180
+    env:
+      OUT: ${{ github.workspace }}/redis-aws-interop-out
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Record the approval
+        env:
+          APPROVED_BY: ${{ inputs.approved_by }}
+        run: |
+          mkdir -p "$OUT"
+          printf 'Approved by: %s\nDispatched by: %s\n' "$APPROVED_BY" "$GITHUB_ACTOR" \
+            | tee "$OUT/approval.txt"
+
+      - name: Build the client and recorder images
+        run: |
+          docker build -f services/redis/docker/clients/Dockerfile \
+            -t kythira-redis-clients:interop .
+          docker build -f services/redis/aws-interop/Dockerfile.recorder \
+            -t kythira-redis-recorder:interop .
+          docker save kythira-redis-clients:interop kythira-redis-recorder:interop \
+            | gzip -1 > "$RUNNER_TEMP/images.tar.gz"
+          ls -lh "$RUNNER_TEMP/images.tar.gz"
+
+      # Kythira's client suite reports from the latest redis-module.yml run
+      # on main, to compare with. Missing reports skip the comparison only.
+      - name: Fetch Kythira's client suite reports
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/kythira-reports"
+          run_id=$(gh run list --workflow redis-module.yml --branch main --status success \
+            --limit 1 --json databaseId --jq '.[0].databaseId' || true)
+          if [ -n "$run_id" ]; then
+            gh run download "$run_id" --name redis-client-suites-docker \
+              --dir "$RUNNER_TEMP/kythira-reports" || echo "no client suite reports in run $run_id"
+          fi
+          ls "$RUNNER_TEMP/kythira-reports"
+
+      - name: Install botocore and boto3
+        run: python3 -m pip install --user --quiet boto3==1.35.0 botocore==1.35.0
+
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars.AWS_REDIS_INTEROP_ROLE_ARN }}
+          role-duration-seconds: 10800
+          aws-region: ${{ vars.REDIS_AWS_INTEROP_REGION || 'us-east-1' }}
+
+      - name: Run the interop bundle
+        env:
+          RUN_TAG: ${{ github.run_id }}
+          IMAGES_TAR: ${{ runner.temp }}/images.tar.gz
+          KYTHIRA_CLIENT_REPORTS: ${{ runner.temp }}/kythira-reports
+        run: services/redis/aws-interop/run.sh
+
+      - name: Summary
+        if: always()
+        run: |
+          for f in report.md cost.md leftovers.txt; do
+            [ -s "$OUT/$f" ] && cat "$OUT/$f" >> "$GITHUB_STEP_SUMMARY"
+          done
+          true
+
+      # The recordings go under services/redis/tests/differential/recs/aws/
+      # in a PR of their own; the passwords and tokens never leave the run.
+      - name: Upload the recordings and reports
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: redis-aws-interop-${{ github.run_id }}
+          path: |
+            ${{ env.OUT }}/recs/
+            ${{ env.OUT }}/clients/
+            ${{ env.OUT }}/iam/
+            ${{ env.OUT }}/*.md
+            ${{ env.OUT }}/*.txt
+          if-no-files-found: ignore

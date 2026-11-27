@@ -8,16 +8,19 @@ layer, with a state machine that splits with its shard
 (`services/redis/include/kythira/redis/redis_kv_state_machine.hpp`) and an ACL with PBKDF2-hashed
 secrets (`services/redis/include/kythira/redis/redis_acl.hpp`).
 
-It is deliberately not a Redis. The command set is exactly the closure sccache
-puts on the wire through OpenDAL and redis-rs — `GET SET SETEX DEL EXISTS
-STRLEN GETRANGE PING AUTH HELLO SELECT CLIENT SETINFO QUIT RESET` — plus the
+It is deliberately not a Redis. It began as exactly the closure sccache
+puts on the wire through OpenDAL and redis-rs (`GET SET SETEX DEL EXISTS
+STRLEN GETRANGE PING AUTH HELLO SELECT CLIENT SETINFO QUIT RESET`) plus the
 diagnostics an operator reaches for (`COMMAND`, `INFO`, `DBSIZE`, `TTL`,
-`ECHO`). Everything else is refused with Redis's own `unknown command` error.
-A build with the transaction adapter adds the multi-key commands of
-*Transactions* below, off unless asked for. The string commands of
-*Strings* below (`.kiro/specs/redis-general-data-types/`) answer once the
-cluster has passed the format gate (*Format level and the rolling
-upgrade*).
+`ECHO`). Phase 1 of `.kiro/specs/redis-general-data-types/` adds the rest
+of the string commands, expiry, the multi-key commands, hashes, sets,
+lists, the `SCAN` family and admin tools: *Command tables* below lists
+them all, and *Differences from Redis* lists where they answer otherwise
+than Redis does. They answer once the cluster has passed the format gate
+(*Format level and the rolling upgrade*). Every other command is refused
+with Redis's own `unknown command` error. A build with the transaction
+adapter adds the cross-shard forms of *Transactions* below, off unless
+asked for.
 The design, its requirements and its acceptance tests are in
 `.kiro/specs/redis-compatible-kv/`.
 
@@ -44,6 +47,23 @@ plugs into. Specs written before the move name the old paths
 the files kept their basenames, so `git log --follow` reaches their history.
 `.github/workflows/redis-module.yml` runs the module's tests and container
 scenarios on the pull requests that touch it.
+
+### Build options
+
+The module's Kconfig symbols (`services/redis/Kconfig`; pick them with a
+defconfig under `configs/`):
+
+| Symbol | Default | What |
+|---|---|---|
+| `CONFIG_REDIS_GATEWAY` | `y` | The module and `redis_gateway_node`. Off (`configs/ci_no_redis_defconfig`), nothing under `services/redis/` is built |
+| `CONFIG_REDIS_GATEWAY_DATA_TYPES` | `y` | The phase 1 commands of `.kiro/specs/redis-general-data-types/` (the commands marked † in *Command tables*). Off, they answer `unknown command` as they did before the spec, `COMMAND` leaves them out, and the node reports format level 2, so `KYTHIRA.FORMAT UPGRADE 3` refuses while such a node holds a replica |
+| `CONFIG_REDIS_GATEWAY_TRANSACTIONS` | `n` | Cross-shard transactions (*Transactions*) |
+| `CONFIG_REDIS_GATEWAY_SNAPSHOT_ISOLATION` | `n` | Snapshot isolation on top of transactions (*Snapshot isolation*) |
+| `CONFIG_REDIS_GATEWAY_IAM` | `y` | `AUTH` with IAM tokens (*IAM authentication*); needs `CONFIG_IAM` |
+| `CONFIG_REDIS_GATEWAY_ENGINE` | `n` | `KYTHIRA_CACHE_PERSISTENCE=engine` on RocksDB (*Engine storage*) |
+
+The layer roles (*Layers*) are not a build option: every build has all
+three, and a node that sets none runs them all, as it always has.
 
 ## Running a cluster
 
@@ -192,8 +212,12 @@ user <name> <secret-record|nopass|disabled> <role> [rule or scope ...] [cert=<su
   connection commands, `COMMAND`, `MULTI`/`EXEC`), `read_write` is
   `+@all -@admin -@dangerous` (adds `SET`, `DEL` and every write) and
   `admin` is `+@all` (adds `INFO` and `KYTHIRA.FORMAT`). `ro` and `rw` are
-  accepted abbreviations. A command's categories are the ones `COMMAND
-  INFO` reports.
+  accepted abbreviations. `none` starts from no commands, as a Redis or
+  ElastiCache user does, so an access string can follow it verbatim (see
+  *ElastiCache access strings* below). A command's categories are the ones
+  `COMMAND INFO` reports; a subcommand is matched by its own, as in Redis
+  (`OBJECT ENCODING` is `@read`, `CLIENT LIST` and `CLIENT KILL` are
+  `@admin @dangerous`).
 - Rules after the role edit that set, left to right, the later rule
   winning as in Redis: `+@<category>` / `-@<category>` (`@string`, `@hash`,
   `@set`, `@list`, `@keyspace`, `@read`, `@write`, `@admin`,
@@ -201,14 +225,23 @@ user <name> <secret-record|nopass|disabled> <role> [rule or scope ...] [cert=<su
   categories with no command in this build yet, like `@sortedset`, are
   accepted and match nothing), `+<command>` / `-<command>`, and
   `allcommands` / `nocommands`. A rule never reaches a command the build
-  does not ship. Subcommand rules (`+client|list`) are refused.
+  does not ship; one naming a command Redis 7.2 or Valkey 8 knows that this
+  build does not ship (`-setbit`) is accepted and matches nothing, and a
+  name neither knows rejects the file. Subcommand rules (`+client|list`)
+  are refused for a command this build ships.
 - Key scopes are prefixes. A bare word, or `~prefix`, lets the user read and
   write keys under it; `*`, `~*` and `allkeys` mean every key.
   `%R~prefix` grants reads only and `%W~prefix` writes only (`%RW~` is
-  `~`). A command that only looks at a key's metadata (`EXISTS`, `TYPE`,
-  the TTL family, `STRLEN`, `TOUCH`, `OBJECT`) accepts either scope; one
-  that both writes and returns or uses the old value (`INCR`, `GETDEL`,
-  `GETEX`, `GETSET`, `SET ... GET`) needs both. A trailing `*` is
+  `~`). What a command needs of each key follows Redis's key specs. One
+  that only looks at a key's metadata (`EXISTS`, `TYPE`, `STRLEN`,
+  `TOUCH`, `OBJECT`, `MEMORY USAGE`) accepts either scope; the TTL family
+  reads. One that both writes and returns or uses the old value (`INCR`,
+  `GETDEL`, `GETEX`, `GETSET`, `SET ... GET`) needs a scope granting both,
+  as in Redis: `%R~*` with `%W~app:` does not let `INCR app:n` through.
+  Sources and destinations differ: `COPY` and the `*STORE` set commands
+  read their sources and only write the destination, and `RENAME`,
+  `SMOVE`, `LMOVE` and `RPOPLPUSH` read and write the source but only
+  write the destination. A trailing `*` is
   optional (`~app:*` is `~app:`); any other glob character rejects the
   file. A user with no scope can run `PING` and nothing that names a key:
   scope is granted, never assumed.
@@ -246,6 +279,28 @@ beginning with `+`, `-`, `~` or `%`, or spelled `allkeys`, `allcommands`,
 `nocommands` or `mutable~...`, is now syntax: write such a prefix as
 `~<prefix>`. `services/redis/tests/golden/redis/acl_permissions.txt` pins
 what the original lines grant.
+
+**ElastiCache access strings** (redis-general-data-types Requirement
+25.3). After the `none` role, a line reads an ElastiCache or Redis access
+string as ElastiCache does:
+
+```
+user app pbkdf2-sha256$600000$...$...  none on ~app:* &* +@string -@dangerous
+```
+
+`on` and `off` enable and disable the user (`on` never enables one whose
+secret is `disabled`); `&<pattern>`, `allchannels` and `resetchannels` are
+accepted and grant nothing until pub/sub ships; `resetkeys` drops the key
+scopes before it and `reset` starts the user over (disabled, no commands,
+no keys). A bare word is an error rather than a key prefix, and so is a
+password word (`>secret`, `nopass`): the secret is the line's third word.
+Key patterns are prefixes here as everywhere (`~app:*`), so a pattern
+with a glob in the middle (`~user:*:profile`) rejects the file. To the
+cache's HTTP front end, which knows roles and not rules, a `none` user is
+`read_only`. The replay test logs in with 22 such strings (ElastiCache's
+own examples and one per kind of word) and sends a probe for every
+command: the gateway grants exactly what Redis 7.2 and Valkey 8's
+`ACL DRYRUN` grant (`services/redis/tests/differential/recs/acl/`).
 
 Example, the shape of a build farm:
 
@@ -696,6 +751,88 @@ and `docker-engine-chaos-tests` SIGKILLs and restarts them under load
 and kills a follower in the middle of a snapshot transfer (it must still
 catch up), under Docker and rootless Podman.
 
+## Command tables
+
+The commands this build serves, by Redis's command group. † marks a
+phase 1 command (`.kiro/specs/redis-general-data-types/`), served by a
+build with `CONFIG_REDIS_GATEWAY_DATA_TYPES=y` once the cluster has passed
+the format gate; the rest predate that spec. `COMMAND LIST` on a node is
+the authoritative list, and `COMMAND INFO` and `COMMAND DOCS` give each
+command's arity, flags, key positions and ACL categories as Redis 7.2 does.
+The sections after this one describe each group.
+
+| Group | Commands |
+|---|---|
+| string | `GET` `SET` `SETEX` `STRLEN` `GETRANGE` `MGET` `MSET`, and † `APPEND` `DECR` `DECRBY` `GETDEL` `GETEX` `GETSET` `INCR` `INCRBY` `INCRBYFLOAT` `MSETNX` `PSETEX` `SETNX` `SETRANGE` |
+| generic | `DEL` `EXISTS` `TTL`, and † `COPY` `EXPIRE` `EXPIREAT` `EXPIRETIME` `KEYS` `OBJECT` `PERSIST` `PEXPIRE` `PEXPIREAT` `PEXPIRETIME` `PTTL` `RANDOMKEY` `RENAME` `RENAMENX` `SCAN` `TOUCH` `TYPE` `UNLINK` |
+| hash | † `HSET` `HSETNX` `HMSET` `HGET` `HMGET` `HDEL` `HEXISTS` `HLEN` `HSTRLEN` `HKEYS` `HVALS` `HGETALL` `HINCRBY` `HINCRBYFLOAT` `HRANDFIELD` `HSCAN` |
+| set | † `SADD` `SREM` `SISMEMBER` `SMISMEMBER` `SMEMBERS` `SCARD` `SPOP` `SRANDMEMBER` `SMOVE` `SINTER` `SUNION` `SDIFF` `SINTERCARD` `SINTERSTORE` `SUNIONSTORE` `SDIFFSTORE` `SSCAN` |
+| list | † `LPUSH` `RPUSH` `LPUSHX` `RPUSHX` `LPOP` `RPOP` `LLEN` `LINDEX` `LRANGE` `LSET` `LINSERT` `LREM` `LTRIM` `LPOS` `LMOVE` `RPOPLPUSH` `LMPOP` |
+| transactions | `MULTI` `EXEC` `DISCARD` `WATCH` `UNWATCH` (with `KYTHIRA_REDIS_TRANSACTIONS=on`) |
+| connection | `AUTH` `HELLO` `CLIENT` `ECHO` `PING` `QUIT` `RESET` `SELECT` |
+| server | `COMMAND` `DBSIZE` `INFO`, and † `FLUSHDB` `FLUSHALL` `MEMORY USAGE` `SLOWLOG` |
+| Kythira | `KYTHIRA.FORMAT` (*Format level and the rolling upgrade*), `KYTHIRA.ADVISE`, `KYTHIRA.ISOLATION` and `KYTHIRA.TXN` (*Transactions*), and † `KYTHIRA.USAGE` `KYTHIRA.DELPREFIX` (*Admin tools and introspection*) |
+
+The blocking list commands, scripting, functions, pub/sub, sorted sets,
+streams and the rest of Redis are phase 2 and phase 3 of the spec; until
+they ship they answer `unknown command`, exactly as a command Redis does
+not know.
+
+### Differences from Redis
+
+Where a phase 1 command answers otherwise than Redis 7.2 and Valkey 8, on
+purpose. The ids are the design's
+(`.kiro/specs/redis-general-data-types/design.md`, *Differences from the
+reference servers*), which also lists the later phases' rows. The
+differential suite (*Conformance suites*) compares every other reply byte
+for byte.
+
+| Id | Difference | Why |
+|---|---|---|
+| D1 | `INCRBYFLOAT` and `HINCRBYFLOAT` compute in IEEE binary128 everywhere. amd64 Redis uses 80-bit `long double`, so in rare cases its 17th decimal differs; arm64 Redis matches exactly | replicas on amd64 and arm64 must agree byte for byte |
+| D2 | `HGETALL`, `HKEYS`, `HVALS`, `SMEMBERS` and `SCAN` return byte order | every replica answers the same; Redis promises no order, so clients cannot depend on one |
+| D3 | `SCAN` never returns a key twice, and survives shard splits | the cursor is a key position, not a hash-table bucket |
+| D4 | `SCAN`, `HSCAN` and `SSCAN` cursors expire (`-ERR invalid cursor`, `KYTHIRA_REDIS_CURSOR_IDLE_MS`) | the cursor's state lives on the node that issued it |
+| D6 | `FLUSHDB` and `FLUSHALL` need `KYTHIRA_REDIS_ALLOW_FLUSH=true`, and a flush or prefix delete is atomic per shard only | safety on a shared cluster; shards commit independently |
+| D7 | `KEYS` is admin-only and bounded by `KYTHIRA_REDIS_KEYS_LIMIT` | a full listing of a large cluster is an outage |
+| D9 | ACL lines take only `pbkdf2-sha256$...` secrets; Redis's `>password` and `#<sha256>` words are refused | an unsalted SHA-256 is weaker than the stored PBKDF2 format, and a cleartext password does not belong in the file |
+| D11 | the immutable-value rule refuses a change to an existing key outside the user's `mutable~` prefixes (*Mutability and categories*) | the compile-cache poisoning defence of `.kiro/specs/redis-compatible-kv/` Requirement 11 |
+| D16 | `OBJECT ENCODING` reports the encoding Redis would choose, not Kythira's layout | tools branch on Redis's names |
+
+A key's commands also refuse a cross-shard pair without transactions with
+`-CROSSSLOT`, as a Redis Cluster does, and `SELECT` takes only database 0.
+
+### Mutability and categories
+
+Two rules decide whether a user may run a command, both in the ACL file
+(*The ACL file*):
+
+- **ACL categories.** Each command carries Redis 7.2's categories
+  (`@read`, `@write`, `@string`, `@hash`, `@set`, `@list`, `@keyspace`,
+  `@admin`, `@dangerous` and the rest, as `COMMAND INFO` shows them), and
+  a subcommand carries its own (`OBJECT ENCODING` is `@read`, `CLIENT
+  KILL` is `@admin`). A user's role is a starting set of categories, and
+  `+@category` / `-@category` / `+command` / `-command` rules adjust it,
+  last rule winning, as in Redis. Key patterns (`~`, `%R~`, `%W~`) are
+  checked per key position: `COPY`'s source needs read and its
+  destination write, `RENAME`'s source needs read and write. The
+  ElastiCache access-string syntax is accepted too (*ElastiCache access
+  strings*).
+- **Mutability.** With `KYTHIRA_REDIS_IMMUTABLE_VALUES=true` (the
+  default) a command that would change a live key's bytes or deadline, or
+  take it away as `GETDEL` does, answers `-ERR value conflict for an
+  existing key`, unless the key is under one of the user's `mutable~`
+  prefixes. That covers a `SET` of other bytes, `APPEND`, `INCR`, any
+  change to an existing hash, set or list, and `RENAME` or `COPY REPLACE`
+  onto an existing key. Creating a key, rewriting the same bytes and `DEL`
+  are always allowed. The decision is made where the write applies,
+  against the stored value, so two writers racing to create a key cannot
+  both pass. With the rule off every key is mutable. Refusals count in
+  `INFO`'s `kythira_value_conflicts` and the `redis.value_conflicts`
+  metric.
+
+The per-group sections below give each command's mutability case.
+
 ## Strings
 
 After the format gate the gateway also answers the tier 1 string commands
@@ -837,8 +974,9 @@ deadlines, chunking and immutable-value rule. `SSCAN` is described with
 `SCAN` below.
 
 - Members come back in byte order on every replica; Redis promises no
-  order. `OBJECT ENCODING` reports `intset` (every member an integer, at
-  most 512) or `hashtable`.
+  order. `OBJECT ENCODING` reports what Redis 7.2 would choose: `intset`
+  (every member an integer, at most 512), else `listpack` (at most 128
+  members of at most 64 bytes), else `hashtable`.
 - Random picks never happen in the log. `SRANDMEMBER` picks on the node
   that serves the read. `SPOP` picks on the node that serves the read of
   the set and proposes the removal of exactly those members; each is
@@ -871,7 +1009,9 @@ immutable-value rule. The blocking forms (`BLPOP`, `BRPOP`, `BLMOVE`,
 - `LMOVE`, `RPOPLPUSH` and `LMPOP` are multi-key writes: their keys in one
   shard make one log entry; keys in several shards run as one transaction
   where transactions are on, and answer `-CROSSSLOT` elsewhere.
-- `OBJECT ENCODING` reports `quicklist`, as Redis 7.0 does for every list.
+- `OBJECT ENCODING` reports `listpack` while the list would fit Redis 7.2's
+  default 8 KiB listpack, else `quicklist`. Redis converts a quicklist back
+  only once it shrinks to half that, a history Kythira does not keep.
 
 ## Iterating the keyspace
 
@@ -948,8 +1088,11 @@ watch the gateway, without a client walking the keyspace.
 - `DBSIZE` counts every live key across the cluster exactly, by walking
   the shards; it is not an estimate.
 - `INFO [section ...]` offers `server`, `clients`, `memory`, `stats`,
-  `commandstats`, `errorstats` and `keyspace`, plus `default`, `all` and
-  `everything`. `keyspace` shows the cluster-wide `db0:keys=N,expires=M`
+  `commandstats`, `errorstats`, `cluster` and `keyspace`, plus `default`,
+  `all` and `everything`. `server` carries `arch_bits` and `cluster` carries
+  `cluster_enabled` (1 only in the Cluster compatibility mode), because
+  client libraries and their test suites read both without checking.
+  `keyspace` shows the cluster-wide `db0:keys=N,expires=M`
   and this node's own counts as `local_*` lines. When a shard cannot be
   paged (no leader, or a peer too old to page during a rolling upgrade),
   `db0` falls back to this node's own counts and `kythira_keyspace_scope`
@@ -986,7 +1129,7 @@ command`, and `DEL` takes one key, as before.
 | `MSET k v [k v ...]` | Every pair, all or none. Under `KYTHIRA_REDIS_IMMUTABLE_VALUES` a key that already holds the same bytes is left out, and one holding other bytes refuses the whole command |
 | `MGET k [k ...]` | Each key's committed value at the connection's isolation, or a null |
 | `DEL k [k ...]` | Deletes, in one transaction, every key that was present; replies with how many. `DEL` with one key is the plain single-key command |
-| `MULTI` ... `EXEC` | Queues every string, keyspace, hash, set and list command that names its keys (not `SCAN`, `KEYS`, `RANDOMKEY`, server, connection or `KYTHIRA.*` commands), then runs them as one transaction. Each runs at `EXEC` and sees the transaction's own earlier writes. A command's runtime error (`WRONGTYPE`, a value conflict, a bad option) is its element of the reply and writes nothing, as in Redis. If the commit does not commit, `EXEC` answers with that error and nothing applied. A command refused while queuing (one `EXEC` cannot run, the wrong number of arguments, not permitted) makes `EXEC` answer `EXECABORT`, as in Redis |
+| `MULTI` ... `EXEC` | Queues every string, keyspace, hash, set and list command that names its keys (not `SCAN`, `KEYS`, `RANDOMKEY`, server, connection or `KYTHIRA.*` commands), plus `PING` and `ECHO`, then runs them as one transaction. Each runs at `EXEC` and sees the transaction's own earlier writes. A command's runtime error (`WRONGTYPE`, a value conflict, a bad option) is its element of the reply and writes nothing, as in Redis. If the commit does not commit, `EXEC` answers with that error and nothing applied. A command refused while queuing (one `EXEC` cannot run, the wrong number of arguments, not permitted) makes `EXEC` answer `EXECABORT`, as in Redis |
 | `DISCARD` | Drops the queue |
 | `KYTHIRA.ISOLATION [level]` | Shows or sets this connection's isolation |
 | `WATCH k [k ...]`, `UNWATCH` | Snapshot build only (refused on the tier-1 build). The next `EXEC` commits only if no watched key changed since the first `WATCH`; otherwise it answers a null array and applies nothing. `EXEC`, `DISCARD` and `UNWATCH` clear the watch. See below |
@@ -1085,8 +1228,11 @@ What changes with the build:
   watched key validated. Unlike Redis, a key changed between two `WATCH`
   commands also aborts the `EXEC` (they share the first timestamp), and the
   reads queued in the `MULTI` see the data as of the `WATCH`, not as of the
-  `EXEC`. An `EXEC` with no writes therefore never aborts: its reads are
-  one consistent snapshot taken at the `WATCH`.
+  `EXEC`. An `EXEC` with no writes, or none at all, still answers a null
+  array if a watched key changed, as in Redis: each shard checks its
+  watched keys as a prepare would and is released at once, so it costs two
+  log entries per shard watched. Unchanged, its reads are one consistent
+  snapshot taken at the `WATCH`.
 
 ### Isolation levels
 
@@ -1104,6 +1250,65 @@ are on different shards.
 Asking for a level the build does not offer is an error, at startup for
 `KYTHIRA_REDIS_TXN_ISOLATION` and from `KYTHIRA.ISOLATION` for a connection.
 It is never silently downgraded.
+
+## Layers
+
+A node runs three layers, which can later be split onto separate
+processes (`.kiro/specs/redis-general-data-types/` Requirements 16 to 21,
+design Component 9). [redis-layers.md](redis-layers.md) has how the code is
+layered, the co-located baseline and, with the spec's task 19, the split
+and merge runbook. Every feature works on an all-co-located cluster, and a
+node that sets no roles is the node as it has always been; this build
+serves only that layout.
+
+| Layer | Runs | Secrets and state it holds | Scale it on |
+|---|---|---|---|
+| `gateway` | RESP2/RESP3, TLS, `AUTH`/`HELLO`, connection limits, per-connection state (protocol, identity, `MULTI` queue, isolation) | the client TLS certificate and key, the ACL file's secret hashes, the IAM verification settings | connections: memory per connection and TLS handshakes, so scale on `KYTHIRA_REDIS_MAX_CLIENTS` and CPU |
+| `front_end` | authorization, planning (one shard, fan-out or transaction), the transaction coordinator, `SCAN` cursors | the ACL rules (categories, key patterns, `mutable~` prefixes), a layer identity certificate for calls to data nodes | commands per second and open cursors (`KYTHIRA_REDIS_MAX_CURSORS`); stateless apart from cursors and in-flight transactions |
+| `data` | the multi-Raft host, the state machines, expiry sweeps and evictions | the Raft log and store (values at rest), the Raft TLS material, `KYTHIRA_REDIS_INTERNAL_SECRET` for the co-located forward link | stored bytes and write rate: disk, `KYTHIRA_REDIS_MAX_SHARD_BYTES` per shard, and an odd number of nodes per replica set |
+
+On a co-located node all of these are in one process, as before. Which
+layer holds which secret matters once the layers split (tasks 16 to 19):
+a gateway will never hold the data or the internal secret, and a data node
+will never see a client's password or token, only the front end's
+authenticated call. Calls between layers on different nodes will use
+mutual TLS with layer identities naming the roles (Requirement 19), and
+the internal user and secret will stay valid only between co-located
+nodes. The sizing column is where each layer's load lands; measure before
+splitting, since the co-located node pays no hop at all (*Co-located
+baseline* in redis-layers.md).
+
+## Conformance suites
+
+Three container suites check the gateway against what Redis clients
+expect (`.kiro/specs/redis-general-data-types/` Requirement 23):
+
+- `docker-redis-differential-tests` sends one generated command stream to
+  Redis 7.2, Valkey 8 and a Kythira cluster and compares every reply
+  (`services/redis/tests/differential/README.md`).
+- `docker-redis-client-suites-tests` runs the parts of redis-py's,
+  go-redis's and ioredis's own test suites that cover the shipped commands,
+  unmodified, at pinned releases, against a three-node cluster
+  (`services/redis/docker/clients/`). Each library's selection is a list
+  of its test names (`redis-py.txt`, `go-redis.txt`, `ioredis.txt`), and
+  each test left out is listed there with the reason: a command a later
+  task ships (`TIME`, `CONFIG`, `MONITOR`, scripting, blocking pops, sorted
+  sets, GEO, pub/sub), a database other than 0, or one limit Kythira keeps
+  on purpose: at most half the worker pool derives `AUTH` keys at once, so
+  go-redis's test that opens 100 connections together is refused. redis-py
+  runs in RESP2 and RESP3.
+- `docker-redis-rolling-upgrade-tests` rolls an engine cluster through the
+  format gate (*Format level and the rolling upgrade*).
+
+AWS's managed Redis (Requirement 25) is covered without an AWS account on
+every run: `redis_differential_replay_test` replays what ElastiCache
+Serverless (Valkey and Redis OSS) and MemoryDB answered to the
+differential streams (`recs/aws/`) and checks the ElastiCache access
+strings above. Those recordings come from a dispatch-only workflow,
+`redis-aws-interop.yml`, which also runs the three client suites against
+AWS and compares them with Kythira's, checks an ElastiCache IAM auth token,
+reports the cost and deletes what it made; every run needs Clark's go
+(`services/redis/aws-interop/README.md`).
 
 ## Serializer
 
@@ -1141,7 +1346,8 @@ records, level 3 adds the typed-value records. Each node reports its level
 as `kythira_format_level` in `INFO`, as the module's `format_level` health
 metric, and to `KYTHIRA.FORMAT LEVEL`. A node whose store does not read the
 newer formats (the disk-backed cache, and the multi-version store until its
-task lands) reports level 2.
+task lands) reports level 2, as does a build with
+`CONFIG_REDIS_GATEWAY_DATA_TYPES=n`.
 
 A group writes the newer formats only after a **format gate** has applied
 on it. To enable them on a running cluster:
@@ -1168,6 +1374,18 @@ an older binary cannot read, so a downgrade needs a restore from a snapshot
 taken before the gate. An older binary that meets a gate, a record or a
 snapshot above its level does not skip it: the group stops applying its log
 and logs `this log needs Redis format level N; run a newer build`.
+A binary from before format levels existed stops with the error of whichever
+reader meets the new data first: `persistent_kv_state_machine: meta record
+has the wrong size` when the engine store opens, or `unknown redis kv
+command format version 3` when a log entry replays. Either way it serves
+nothing from the gated data, and the nodes still on level 3 carry on.
+
+`docker-redis-rolling-upgrade-tests` runs this whole sequence in containers
+(`services/redis/tests/docker/rolling_upgrade_test.cpp`): three engine nodes
+start on the last build before the gate, are rolled one at a time onto this
+tree's build, pass the gate, and then one node is rolled back to show the
+refusal. CI builds the old binary from a pinned commit in the engine
+storage job.
 
 `INFO` (admin) reports the shards this node holds and leads, key and expiring
 key counts, approximate bytes, and counters for writes, deletes, value

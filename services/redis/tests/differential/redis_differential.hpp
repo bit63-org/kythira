@@ -40,6 +40,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -337,7 +338,7 @@ inline auto encode_command(std::span<const std::string> argv) -> std::string {
 
 /// Bumped whenever a seed's output changes; recordings carry it, and the
 /// unit test refuses recordings from another version.
-inline constexpr int k_generator_version = 1;
+inline constexpr int k_generator_version = 2;
 
 /// splitmix64: tiny, fast, and specified bit for bit.
 class rng {
@@ -371,7 +372,7 @@ struct command {
 struct generator_options {
     /// Commands to produce (a shape may emit a few at once, so the stream
     /// can run a little past this; it is never cut inside a MULTI block).
-    std::size_t length = 400;
+    std::size_t length = 600;
     /// Keys are `<letter>:<tag>`; letters a.. for `key_space` keys. The
     /// scenario's gateways cut the key space at "e", so a..d and e..h land
     /// on different shards and multi-key commands cross shards.
@@ -416,6 +417,46 @@ public:
     auto small_int(std::int64_t lo, std::int64_t hi) -> std::string {
         return std::to_string(_rng.between(lo, hi));
     }
+    /// A key of one type family: `<letter>:<kind>:<tag>`, kind `h` (hash),
+    /// `s` (set) or `l` (list); strings keep the plain `<letter>:<tag>`.
+    /// One time in twelve the key comes from another family, so WRONGTYPE
+    /// replies are compared too.
+    auto typed_key(char kind) -> std::string {
+        static constexpr std::array<char, 4> kinds{'h', 's', 'l', 0};
+        if (_rng.below(12) == 0) {
+            kind = kinds[_rng.below(kinds.size())];
+        }
+        const auto n = std::max<std::size_t>(1, std::min<std::size_t>(_opt.key_space, 26));
+        const char letter = static_cast<char>('a' + _rng.below(n));
+        if (kind == 0) {
+            return std::string(1, letter) + ":" + _opt.tag;
+        }
+        return std::string(1, letter) + ":" + std::string(1, kind) + ":" + _opt.tag;
+    }
+    /// Distinct keys of one family (no family switching), for commands
+    /// that combine several collections.
+    auto distinct_typed_keys(char kind, std::size_t n) -> std::vector<std::string> {
+        std::vector<std::string> out;
+        const auto space = std::max<std::size_t>(1, std::min<std::size_t>(_opt.key_space, 26));
+        while (out.size() < n && out.size() < space) {
+            auto k = std::string(1, static_cast<char>('a' + _rng.below(space))) + ":" +
+                     std::string(1, kind) + ":" + _opt.tag;
+            if (std::find(out.begin(), out.end(), k) == out.end()) {
+                out.push_back(std::move(k));
+            }
+        }
+        return out;
+    }
+    /// Hash fields f0..f5.
+    auto field() -> std::string { return "f" + std::to_string(_rng.below(6)); }
+    /// Set members: small integers half the time (Redis keeps an all-integer
+    /// set as an intset), else m0..m7.
+    auto member() -> std::string {
+        return _rng.chance(50) ? std::to_string(_rng.below(10))
+                               : "m" + std::to_string(_rng.below(8));
+    }
+    /// List elements: few distinct values, so LREM, LPOS and LINSERT find them.
+    auto element() -> std::string { return "e" + std::to_string(_rng.below(5)); }
     auto random() -> rng& { return _rng; }
     [[nodiscard]] auto options() const -> const generator_options& { return _opt; }
 
@@ -435,13 +476,22 @@ struct shape {
 
 namespace detail {
 
-/// A single-key command for a MULTI block. STRLEN is left out: the gateway
-/// refuses it inside MULTI today (gap G1), which aborts the whole EXEC and
-/// would make every later reply in the stream differ for that one reason.
-/// The `multi_unsupported` shape exercises it on its own instead; when G1
-/// closes, put STRLEN back here.
+/// A single-key command for a MULTI block: strings, counters and each
+/// collection type, so a transaction mixes typed writes and reads.
 inline auto simple_command(stream_builder& b) -> std::vector<std::string> {
-    switch (b.random().below(5)) {
+    switch (b.random().below(11)) {
+        case 5:
+            return {"STRLEN", b.key()};
+        case 6:
+            return {"INCR", b.key()};
+        case 7:
+            return {"HSET", b.typed_key('h'), b.field(), b.value()};
+        case 8:
+            return {"SADD", b.typed_key('s'), b.member()};
+        case 9:
+            return {"RPUSH", b.typed_key('l'), b.element()};
+        case 10:
+            return {"LPOP", b.typed_key('l')};
         case 0:
             return {"SET", b.key(), b.value()};
         case 1:
@@ -457,11 +507,37 @@ inline auto simple_command(stream_builder& b) -> std::vector<std::string> {
 
 }  // namespace detail
 
-/// The command shapes the gateway serves today (redis_gateway_impl.hpp's
-/// dispatch). Identity and local commands (HELLO, INFO, CLIENT, COMMAND,
-/// DBSIZE, AUTH, QUIT, RESET) are left out on purpose: their replies differ
-/// by design (Requirement 1.5) or depend on the whole server, not the
-/// stream. SELECT is generated only for database 0 until multi-db lands
+/// Shipped commands the generator leaves out, each with the reason. The
+/// unit test checks that every shipped command in the registry has a shape
+/// or a line here, so a new command cannot slip past the suite unnoticed.
+inline auto excluded_commands() -> const std::map<std::string, std::string, std::less<>>& {
+    static const std::map<std::string, std::string, std::less<>> table{
+        {"AUTH", "identity: HELLO authenticates each session; replies differ by design (Req 1.5)"},
+        {"HELLO", "identity: server name and version differ by design (Req 1.5)"},
+        {"CLIENT", "connection-local state, ids differ per server"},
+        {"QUIT", "closes the session"},
+        {"RESET", "connection-local state"},
+        {"COMMAND", "describes the whole server; checked by the registry golden"},
+        {"INFO", "describes the whole server"},
+        {"DBSIZE", "counts the whole server, which other streams share"},
+        {"MEMORY", "byte counts differ by design (Requirement 8.5)"},
+        {"SLOWLOG", "timing-dependent"},
+        {"RANDOMKEY", "random by definition"},
+        {"FLUSHDB", "refused by default (D6), and would empty every stream"},
+        {"FLUSHALL", "refused by default (D6), and would empty every stream"},
+        {"KYTHIRA.ADVISE", "Kythira only"},
+        {"KYTHIRA.ISOLATION", "Kythira only"},
+        {"KYTHIRA.TXN", "Kythira only, internal"},
+        {"KYTHIRA.FORMAT", "Kythira only; the harness raises the gate before streaming"},
+        {"KYTHIRA.DELPREFIX", "Kythira only"},
+        {"KYTHIRA.USAGE", "Kythira only"},
+        {"KYTHIRA.INSTALL", "Kythira only, internal"},
+    };
+    return table;
+}
+
+/// The command shapes for every shipped command the gateway serves (see
+/// excluded_commands() for the rest). SELECT is generated only for database 0 until multi-db lands
 /// (phase 3), because a reference server switches database on SELECT 1 and
 /// the rest of the stream would then diverge for an uninteresting reason.
 /// Order matters: appending keeps every existing seed's output stable only
@@ -576,12 +652,6 @@ inline auto shapes() -> const std::vector<shape>& {
              out.push_back({"EXEC"});
              return out;
          }},
-        {"multi_unsupported", 1, true,
-         [](stream_builder& b) -> cmds {
-             // A command the gateway cannot queue yet (G1), discarded so the
-             // stream's state stays the same on every server.
-             return {{"MULTI"}, {"STRLEN", b.key()}, {"DISCARD"}};
-         }},
         {"watch_unwatch", 1, true,
          [](stream_builder& b) -> cmds { return {{"WATCH", b.key()}, {"UNWATCH"}}; }},
         {"txn_errors", 1, true,
@@ -610,6 +680,438 @@ inline auto shapes() -> const std::vector<shape>& {
          [](stream_builder& b) -> cmds {
              // Command names are case-insensitive.
              return {{"set", b.key(), b.value()}, {"get", b.key()}};
+         }},
+        // ── generator version 2: the phase 1 typed commands ──────────────
+        {"counter", 8, false,
+         [](stream_builder& b) -> cmds {
+             auto k = b.key();
+             switch (b.random().below(4)) {
+                 case 0:
+                     return {{"INCR", k}};
+                 case 1:
+                     return {{"DECR", k}};
+                 case 2:
+                     return {{"INCRBY", k, b.small_int(-50, 50)}};
+                 default:
+                     return {{"DECRBY", k, b.small_int(-50, 50)}};
+             }
+         }},
+        {"counter_overflow", 1, false,
+         [](stream_builder& b) -> cmds {
+             auto k = b.key();
+             return {{"SET", k, "9223372036854775806"},
+                     {"INCRBY", k, "2"},
+                     {"DECR", k},
+                     {"INCRBY", k, "x"}};
+         }},
+        {"incrbyfloat", 3, false,
+         [](stream_builder& b) -> cmds {
+             static constexpr std::array<std::string_view, 7> deltas{"1.5", "-0.25", "3e2", "10",
+                                                                     "0.1", "abc",   "inf"};
+             return {
+                 {"INCRBYFLOAT", b.key(), std::string(deltas[b.random().below(deltas.size())])}};
+         }},
+        {"string_rw", 8, false,
+         [](stream_builder& b) -> cmds {
+             auto k = b.key();
+             switch (b.random().below(6)) {
+                 case 0:
+                     return {{"SETNX", k, b.value()}};
+                 case 1:
+                     return {{"GETSET", k, b.value()}};
+                 case 2:
+                     return {{"GETDEL", k}};
+                 case 3:
+                     return {{"APPEND", k, b.value()}};
+                 case 4:
+                     return {{"SETRANGE", k, b.small_int(0, 20), b.value()}};
+                 default:
+                     return {{"PSETEX", k, b.small_int(100000, 1000000), b.value()}};
+             }
+         }},
+        {"set_options", 5, false,
+         [](stream_builder& b) -> cmds {
+             auto& r = b.random();
+             std::vector<std::string> argv{"SET", b.key(), b.value()};
+             switch (r.below(3)) {
+                 case 0:
+                     argv.emplace_back("NX");
+                     break;
+                 case 1:
+                     argv.emplace_back("XX");
+                     break;
+                 default:
+                     break;
+             }
+             if (r.chance(40)) {
+                 argv.emplace_back("GET");
+             }
+             switch (r.below(4)) {
+                 case 0:
+                     argv.emplace_back("EX");
+                     argv.push_back(b.small_int(100, 10000));
+                     break;
+                 case 1:
+                     argv.emplace_back("PX");
+                     argv.push_back(b.small_int(100000, 1000000));
+                     break;
+                 case 2:
+                     argv.emplace_back("KEEPTTL");
+                     break;
+                 default:
+                     break;
+             }
+             if (r.chance(4)) {
+                 argv.emplace_back(r.chance(50) ? "EX" : "NX");  // a syntax error
+                 argv.emplace_back("XX");
+             }
+             return {argv};
+         }},
+        {"getex", 3, false,
+         [](stream_builder& b) -> cmds {
+             auto k = b.key();
+             switch (b.random().below(4)) {
+                 case 0:
+                     return {{"GETEX", k}};
+                 case 1:
+                     return {{"GETEX", k, "EX", b.small_int(100, 10000)}};
+                 case 2:
+                     return {{"GETEX", k, "PX", b.small_int(100000, 1000000)}};
+                 default:
+                     return {{"GETEX", k, "PERSIST"}};
+             }
+         }},
+        {"msetnx", 2, true,
+         [](stream_builder& b) -> cmds {
+             std::vector<std::string> argv{"MSETNX"};
+             for (auto& k : b.distinct_keys(1 + b.random().below(3))) {
+                 argv.push_back(std::move(k));
+                 argv.push_back(b.value());
+             }
+             return {argv};
+         }},
+        {"type_of", 4, false,
+         [](stream_builder& b) -> cmds {
+             static constexpr std::array<char, 4> kinds{'h', 's', 'l', 0};
+             return {{"TYPE", b.typed_key(kinds[b.random().below(kinds.size())])}};
+         }},
+        {"object_encoding", 2, false,
+         [](stream_builder& b) -> cmds {
+             static constexpr std::array<char, 4> kinds{'h', 's', 'l', 0};
+             return {{"OBJECT", "ENCODING", b.typed_key(kinds[b.random().below(kinds.size())])}};
+         }},
+        {"unlink_touch", 2, true,
+         [](stream_builder& b) -> cmds {
+             std::vector<std::string> argv{b.random().chance(50) ? "UNLINK" : "TOUCH"};
+             for (auto& k : b.distinct_keys(1 + b.random().below(3))) {
+                 argv.push_back(std::move(k));
+             }
+             return {argv};
+         }},
+        {"expiry", 6, false,
+         [](stream_builder& b) -> cmds {
+             static constexpr std::array<char, 4> kinds{'h', 's', 'l', 0};
+             auto& r = b.random();
+             auto k = b.typed_key(kinds[r.below(kinds.size())]);
+             switch (r.below(7)) {
+                 case 0: {
+                     std::vector<std::string> argv{"EXPIRE", k, b.small_int(100, 10000)};
+                     static constexpr std::array<std::string_view, 5> flags{"", "NX", "XX", "GT",
+                                                                            "LT"};
+                     const auto f = flags[r.below(flags.size())];
+                     if (!f.empty()) {
+                         argv.emplace_back(f);
+                     }
+                     return {argv};
+                 }
+                 case 1:
+                     return {{"PEXPIRE", k, b.small_int(100000, 1000000)}};
+                 case 2:
+                     return {{"PERSIST", k}};
+                 case 3:
+                     return {{"PTTL", k}};
+                 case 4:
+                     // A time in the past deletes the key at once.
+                     return {{"EXPIREAT", k, b.small_int(1, 1000000)}};
+                 case 5:
+                     return {{"PEXPIREAT", k, b.small_int(1, 1000000)}};
+                 default:
+                     return {{r.chance(50) ? "EXPIRETIME" : "PEXPIRETIME", k}};
+             }
+         }},
+        {"expire_errors", 1, false,
+         [](stream_builder& b) -> cmds {
+             switch (b.random().below(3)) {
+                 case 0:
+                     return {{"EXPIRE", b.key(), "ten"}};
+                 case 1:
+                     return {{"EXPIRE", b.key(), "100", "NX", "XX"}};
+                 default:
+                     return {{"EXPIRE", b.key(), "100", "GT", "LT"}};
+             }
+         }},
+        {"rename_copy", 4, true,
+         [](stream_builder& b) -> cmds {
+             static constexpr std::array<char, 4> kinds{'h', 's', 'l', 0};
+             auto& r = b.random();
+             const char kind = kinds[r.below(kinds.size())];
+             auto keys = kind == 0 ? b.distinct_keys(2) : b.distinct_typed_keys(kind, 2);
+             if (keys.size() < 2) {
+                 return {{"PING"}};
+             }
+             switch (r.below(4)) {
+                 case 0:
+                     return {{"RENAME", keys[0], keys[1]}};
+                 case 1:
+                     return {{"RENAMENX", keys[0], keys[1]}};
+                 case 2:
+                     return {{"COPY", keys[0], keys[1]}};
+                 default:
+                     return {{"COPY", keys[0], keys[1], "REPLACE"}};
+             }
+         }},
+        {"hash_write", 12, false,
+         [](stream_builder& b) -> cmds {
+             auto& r = b.random();
+             auto k = b.typed_key('h');
+             switch (r.below(7)) {
+                 case 0:
+                 case 1: {
+                     std::vector<std::string> argv{"HSET", k};
+                     const auto n = 1 + r.below(3);
+                     for (std::uint64_t i = 0; i < n; ++i) {
+                         argv.push_back(b.field());
+                         argv.push_back(b.value());
+                     }
+                     return {argv};
+                 }
+                 case 2:
+                     return {{"HSETNX", k, b.field(), b.value()}};
+                 case 3:
+                     return {{"HMSET", k, b.field(), b.value(), b.field(), b.value()}};
+                 case 4:
+                     return {{"HDEL", k, b.field(), b.field()}};
+                 case 5:
+                     return {{"HINCRBY", k, b.field(), b.small_int(-20, 20)}};
+                 default:
+                     return {{"HINCRBYFLOAT", k, b.field(),
+                              r.chance(80) ? "1.25" : (r.chance(50) ? "x" : "inf")}};
+             }
+         }},
+        {"hash_read", 12, false,
+         [](stream_builder& b) -> cmds {
+             auto& r = b.random();
+             auto k = b.typed_key('h');
+             switch (r.below(10)) {
+                 case 0:
+                 case 1:
+                     return {{"HGET", k, b.field()}};
+                 case 2:
+                     return {{"HMGET", k, b.field(), b.field(), b.field()}};
+                 case 3:
+                     return {{"HEXISTS", k, b.field()}};
+                 case 4:
+                     return {{"HLEN", k}};
+                 case 5:
+                     return {{"HSTRLEN", k, b.field()}};
+                 case 6:
+                     return {{"HKEYS", k}};
+                 case 7:
+                     return {{"HVALS", k}};
+                 case 8:
+                     return {{"HGETALL", k}};
+                 default:
+                     // A count past the size returns every field once.
+                     return {{"HRANDFIELD", k, "100"}};
+             }
+         }},
+        {"set_write", 10, false,
+         [](stream_builder& b) -> cmds {
+             auto& r = b.random();
+             auto k = b.typed_key('s');
+             switch (r.below(4)) {
+                 case 0:
+                 case 1: {
+                     std::vector<std::string> argv{"SADD", k};
+                     const auto n = 1 + r.below(4);
+                     for (std::uint64_t i = 0; i < n; ++i) {
+                         argv.push_back(b.member());
+                     }
+                     return {argv};
+                 }
+                 case 2:
+                     return {{"SREM", k, b.member(), b.member()}};
+                 default:
+                     // A count past the size pops every member.
+                     return {r.chance(70) ? std::vector<std::string>{"SPOP", k, "100"}
+                                          : std::vector<std::string>{"SPOP", k, "-1"}};
+             }
+         }},
+        {"set_read", 10, false,
+         [](stream_builder& b) -> cmds {
+             auto& r = b.random();
+             auto k = b.typed_key('s');
+             switch (r.below(6)) {
+                 case 0:
+                 case 1:
+                     return {{"SISMEMBER", k, b.member()}};
+                 case 2:
+                     return {{"SMISMEMBER", k, b.member(), b.member(), b.member()}};
+                 case 3:
+                     return {{"SMEMBERS", k}};
+                 case 4:
+                     return {{"SCARD", k}};
+                 default:
+                     return {{"SRANDMEMBER", k, "100"}};
+             }
+         }},
+        {"set_algebra", 6, true,
+         [](stream_builder& b) -> cmds {
+             auto& r = b.random();
+             auto keys = b.distinct_typed_keys('s', 2 + r.below(2));
+             static constexpr std::array<std::string_view, 7> ops{
+                 "SINTER",      "SUNION",      "SDIFF",     "SINTERCARD",
+                 "SINTERSTORE", "SUNIONSTORE", "SDIFFSTORE"};
+             const auto op = std::string(ops[r.below(ops.size())]);
+             std::vector<std::string> argv{op};
+             if (op == "SINTERCARD") {
+                 argv.push_back(std::to_string(keys.size()));
+             } else if (op.ends_with("STORE")) {
+                 argv.push_back(b.distinct_typed_keys('s', 1).front());
+             }
+             for (auto& k : keys) {
+                 argv.push_back(std::move(k));
+             }
+             if (op == "SINTERCARD" && r.chance(30)) {
+                 argv.emplace_back("LIMIT");
+                 argv.push_back(b.small_int(0, 3));
+             }
+             return {argv};
+         }},
+        {"smove", 2, true,
+         [](stream_builder& b) -> cmds {
+             auto keys = b.distinct_typed_keys('s', 2);
+             if (keys.size() < 2) {
+                 return {{"PING"}};
+             }
+             return {{"SMOVE", keys[0], keys[1], b.member()}};
+         }},
+        {"list_write", 12, false,
+         [](stream_builder& b) -> cmds {
+             auto& r = b.random();
+             auto k = b.typed_key('l');
+             switch (r.below(10)) {
+                 case 0:
+                 case 1:
+                     return {{"LPUSH", k, b.element(), b.element()}};
+                 case 2:
+                 case 3:
+                     return {{"RPUSH", k, b.element()}};
+                 case 4:
+                     return {{r.chance(50) ? "LPUSHX" : "RPUSHX", k, b.element()}};
+                 case 5:
+                     return {r.chance(50) ? std::vector<std::string>{"LPOP", k}
+                                          : std::vector<std::string>{"RPOP", k, b.small_int(0, 3)}};
+                 case 6:
+                     return {{"LSET", k, b.small_int(-3, 3), b.element()}};
+                 case 7:
+                     return {{"LINSERT", k, r.chance(50) ? "BEFORE" : "AFTER", b.element(),
+                              b.element()}};
+                 case 8:
+                     return {{"LREM", k, b.small_int(-2, 2), b.element()}};
+                 default:
+                     return {{"LTRIM", k, b.small_int(-4, 2), b.small_int(-2, 8)}};
+             }
+         }},
+        {"list_read", 10, false,
+         [](stream_builder& b) -> cmds {
+             auto& r = b.random();
+             auto k = b.typed_key('l');
+             switch (r.below(5)) {
+                 case 0:
+                     return {{"LLEN", k}};
+                 case 1:
+                     return {{"LINDEX", k, b.small_int(-4, 4)}};
+                 case 2:
+                 case 3:
+                     return {{"LRANGE", k, b.small_int(-5, 3), b.small_int(-3, 10)}};
+                 default: {
+                     std::vector<std::string> argv{"LPOS", k, b.element()};
+                     if (r.chance(40)) {
+                         argv.emplace_back("RANK");
+                         argv.push_back(r.chance(50) ? b.small_int(-2, -1) : b.small_int(1, 2));
+                     }
+                     if (r.chance(40)) {
+                         argv.emplace_back("COUNT");
+                         argv.push_back(b.small_int(0, 3));
+                     }
+                     return {argv};
+                 }
+             }
+         }},
+        {"list_move", 4, true,
+         [](stream_builder& b) -> cmds {
+             auto& r = b.random();
+             auto keys = b.distinct_typed_keys('l', 2);
+             if (keys.size() < 2) {
+                 return {{"PING"}};
+             }
+             auto side = [&] { return std::string(r.chance(50) ? "LEFT" : "RIGHT"); };
+             switch (r.below(3)) {
+                 case 0:
+                     return {{"LMOVE", keys[0], keys[1], side(), side()}};
+                 case 1:
+                     return {{"RPOPLPUSH", keys[0], keys[1]}};
+                 default: {
+                     std::vector<std::string> argv{"LMPOP", "2", keys[0], keys[1], side()};
+                     if (r.chance(50)) {
+                         argv.emplace_back("COUNT");
+                         argv.push_back(b.small_int(1, 3));
+                     }
+                     return {argv};
+                 }
+             }
+         }},
+        {"scan_all", 3, false,
+         [](stream_builder& b) -> cmds {
+             // One call that covers this stream's whole key space: a COUNT
+             // far past its size, so every server answers cursor 0. The
+             // order differs by design (D2), the rule compares sets.
+             auto& r = b.random();
+             const auto pattern = "*:" + b.options().tag;
+             switch (r.below(4)) {
+                 case 0:
+                     return {{"SCAN", "0", "MATCH", pattern, "COUNT", "10000"}};
+                 case 1: {
+                     static constexpr std::array<std::string_view, 4> types{"string", "hash", "set",
+                                                                            "list"};
+                     return {{"SCAN", "0", "MATCH", pattern, "COUNT", "10000", "TYPE",
+                              std::string(types[r.below(types.size())])}};
+                 }
+                 case 2:
+                     return {{"KEYS", pattern}};
+                 default:
+                     return {{r.chance(50) ? "HSCAN" : "SSCAN",
+                              r.chance(50) ? b.typed_key('h') : b.typed_key('s'), "0", "COUNT",
+                              "10000"}};
+             }
+         }},
+        {"typed_errors", 2, false,
+         [](stream_builder& b) -> cmds {
+             switch (b.random().below(6)) {
+                 case 0:
+                     return {{"HSET", b.typed_key('h'), "f"}};
+                 case 1:
+                     return {{"SADD", b.typed_key('s')}};
+                 case 2:
+                     return {{"LPOP", b.typed_key('l'), "-1"}};
+                 case 3:
+                     return {{"LINDEX", b.typed_key('l'), "x"}};
+                 case 4:
+                     return {{"HINCRBY", b.typed_key('h'), b.field(), "1.5"}};
+                 default:
+                     return {{"SCAN", "x"}};
+             }
          }},
     };
     return table;
@@ -641,6 +1143,22 @@ inline auto generate(std::uint64_t seed, const generator_options& opt) -> std::v
         }
         for (auto& argv : chosen->emit(b)) {
             out.push_back(command{std::move(argv), std::string(chosen->name)});
+        }
+    }
+    return out;
+}
+
+/// Every key a stream generated with `opt` can name, so each run can start
+/// from an empty key space without FLUSHALL (refused by Kythira by default,
+/// D6).
+inline auto stream_keys(const generator_options& opt) -> std::vector<std::string> {
+    std::vector<std::string> out;
+    const auto n = std::max<std::size_t>(1, std::min<std::size_t>(opt.key_space, 26));
+    for (std::size_t i = 0; i < n; ++i) {
+        const std::string letter(1, static_cast<char>('a' + i));
+        out.push_back(letter + ":" + opt.tag);
+        for (const char* kind : {"h", "s", "l"}) {
+            out.push_back(letter + ":" + kind + ":" + opt.tag);
         }
     }
     return out;
@@ -719,6 +1237,44 @@ inline auto unordered(const reply& r) -> reply {
     return out;
 }
 
+/// A flat [k1, v1, k2, v2, ...] array (or a map) with its pairs sorted by
+/// key, pairs kept together.
+inline auto unordered_pairs(const reply& r) -> reply {
+    reply out = r;
+    std::vector<std::pair<reply, reply>> pairs;
+    for (std::size_t i = 0; i + 1 < r.items.size(); i += 2) {
+        pairs.emplace_back(r.items[i], r.items[i + 1]);
+    }
+    std::sort(pairs.begin(), pairs.end(),
+              [](const auto& x, const auto& y) { return display(x.first) < display(y.first); });
+    out.items.clear();
+    for (auto& [k, v] : pairs) {
+        out.items.push_back(std::move(k));
+        out.items.push_back(std::move(v));
+    }
+    return out;
+}
+
+/// Two decimal renderings within a relative 1e-15 of each other (or equal).
+inline auto close_decimals(const std::string& x, const std::string& y) -> bool {
+    if (x == y) {
+        return true;
+    }
+    try {
+        std::size_t ux = 0;
+        std::size_t uy = 0;
+        const long double a = std::stold(x, &ux);
+        const long double b = std::stold(y, &uy);
+        if (ux != x.size() || uy != y.size()) {
+            return false;
+        }
+        const long double scale = std::max<long double>(std::fabs(a), 1.0L);
+        return std::fabs(a - b) <= scale * 1e-15L;
+    } catch (const std::exception&) {
+        return false;
+    }
+}
+
 /// GETRANGE as Redis 7.2 and Valkey 8 compute it (getrangeCommand): a
 /// negative end past the start of the string clamps to 0 and so still
 /// returns the first byte.
@@ -754,40 +1310,62 @@ inline auto redis_getrange(std::string_view v, std::int64_t start, std::int64_t 
 inline auto rules() -> const std::vector<rule>& {
     static const std::vector<rule> table{
         {"clock", "harness",
-         "TTL is read a few milliseconds apart on each server, and Kythira rounds the "
-         "remaining time up where Redis rounds to nearest, so positive TTLs may differ by "
-         "up to 2 s",
+         "TTL and PTTL are read a few milliseconds apart on each server, and Kythira rounds "
+         "the remaining time up where Redis rounds to nearest, so positive TTLs may differ "
+         "by up to 2 s (PTTL 2000 ms); an absolute expiry (EXPIRETIME, PEXPIRETIME) depends "
+         "on when the stream ran, so positive ones may differ by any amount",
          [](const command& c, const reply& e, const reply& a) {
-             return detail::upper(c.argv.front()) == "TTL" && e.kind == reply_kind::integer &&
-                    a.kind == reply_kind::integer && e.integer >= 0 && a.integer >= 0 &&
-                    (e.integer > a.integer ? e.integer - a.integer : a.integer - e.integer) <= 2;
+             const auto name = detail::upper(c.argv.front());
+             if (e.kind != reply_kind::integer || a.kind != reply_kind::integer || e.integer < 0 ||
+                 a.integer < 0) {
+                 return false;
+             }
+             if (name == "TTL") {
+                 return (e.integer > a.integer ? e.integer - a.integer : a.integer - e.integer) <=
+                        2;
+             }
+             if (name == "PTTL") {
+                 return (e.integer > a.integer ? e.integer - a.integer : a.integer - e.integer) <=
+                        2000;
+             }
+             return name == "EXPIRETIME" || name == "PEXPIRETIME";
+         }},
+        {"D1", "design.md difference table D1",
+         "INCRBYFLOAT and HINCRBYFLOAT compute in binary128; amd64 Redis uses 80-bit long "
+         "double, so the last digits may differ",
+         [](const command& c, const reply& e, const reply& a) {
+             const auto name = detail::upper(c.argv.front());
+             if ((name != "INCRBYFLOAT" && name != "HINCRBYFLOAT") || e.kind != a.kind ||
+                 (e.kind != reply_kind::bulk && e.kind != reply_kind::simple)) {
+                 return false;
+             }
+             return detail::close_decimals(e.text, a.text);
          }},
         {"D2", "design.md difference table D2",
          "collections come back in byte order; Redis promises no order",
          [](const command& c, const reply& e, const reply& a) {
              static const std::vector<std::string> unordered_cmds{
-                 "HGETALL", "HKEYS", "HVALS", "SMEMBERS", "SINTER", "SUNION", "SDIFF", "KEYS"};
+                 "HKEYS", "HVALS", "SMEMBERS", "SINTER",      "SUNION",
+                 "SDIFF", "KEYS",  "SPOP",     "SRANDMEMBER", "HRANDFIELD"};
              const auto name = detail::upper(c.argv.front());
+             if (name == "HGETALL") {
+                 return detail::unordered_pairs(e) == detail::unordered_pairs(a);
+             }
+             if (name == "SCAN" || name == "SSCAN" || name == "HSCAN") {
+                 // [cursor, items]: the same cursor and the same items.
+                 if (e.items.size() != 2 || a.items.size() != 2 || e.items[0] != a.items[0]) {
+                     return false;
+                 }
+                 return name == "HSCAN"
+                            ? detail::unordered_pairs(e.items[1]) ==
+                                  detail::unordered_pairs(a.items[1])
+                            : detail::unordered(e.items[1]) == detail::unordered(a.items[1]);
+             }
              if (std::find(unordered_cmds.begin(), unordered_cmds.end(), name) ==
                  unordered_cmds.end()) {
                  return false;
              }
              return detail::unordered(e) == detail::unordered(a);
-         }},
-        {"G1", "redis-general-data-types task 11 (typed commands in MULTI)",
-         "the gateway refuses to queue STRLEN inside MULTI; Redis queues it",
-         [](const command& c, const reply& e, const reply& a) {
-             return detail::upper(c.argv.front()) == "STRLEN" && e.kind == reply_kind::simple &&
-                    e.text == "QUEUED" && a.kind == reply_kind::error &&
-                    a.text.find("not supported inside MULTI") != std::string::npos;
-         }},
-        {"G2", "redis-general-data-types task 3 (tier 1 strings)",
-         "GETRANGE with an end index before the start of the string returns \"\"; Redis "
-         "clamps the end to 0 and returns the first byte",
-         [](const command& c, const reply& e, const reply& a) {
-             return detail::upper(c.argv.front()) == "GETRANGE" && c.argv.size() == 4 &&
-                    e.kind == reply_kind::bulk && e.text.size() == 1 &&
-                    a.kind == reply_kind::bulk && a.text.empty() && c.argv[3].starts_with('-');
          }},
     };
     return table;
@@ -831,13 +1409,25 @@ struct recording_entry {
 };
 
 struct recording {
-    std::string server;   // "redis", "valkey", "kythira"
+    /// "redis", "valkey", "kythira", or for the AWS recordings in recs/aws/
+    /// (Requirement 25.1) "elasticache-valkey", "elasticache-redis",
+    /// "memorydb".
+    std::string server;
     std::string version;  // as the server reports it
     std::string date;     // YYYY-MM-DD
     std::uint64_t seed = 0;
     std::size_t length = 0;
     int generator_version = k_generator_version;
+    /// The generator's key tag when it is not `s<seed>`. The AWS streams
+    /// use `{s<seed>}`, a hash tag, so every key of a stream is in one
+    /// cluster slot and a multi-key command is not refused as CROSSSLOT
+    /// by ElastiCache Serverless or MemoryDB, which are always clustered.
+    std::string tag;
     std::vector<recording_entry> entries;
+
+    [[nodiscard]] auto key_tag() const -> std::string {
+        return tag.empty() ? "s" + std::to_string(seed) : tag;
+    }
 };
 
 inline auto to_json(const recording& r) -> boost::json::object {
@@ -854,7 +1444,7 @@ inline auto to_json(const recording& r) -> boost::json::object {
             {"resp3", e.resp3},
         });
     }
-    return boost::json::object{
+    boost::json::object o{
         {"format", 1},
         {"server", r.server},
         {"version", r.version},
@@ -864,6 +1454,10 @@ inline auto to_json(const recording& r) -> boost::json::object {
         {"generator_version", r.generator_version},
         {"entries", std::move(entries)},
     };
+    if (!r.tag.empty()) {
+        o["tag"] = r.tag;
+    }
+    return o;
 }
 
 inline auto recording_from_json(const boost::json::value& v) -> recording {
@@ -878,6 +1472,9 @@ inline auto recording_from_json(const boost::json::value& v) -> recording {
     r.seed = o.at("seed").to_number<std::uint64_t>();
     r.length = o.at("length").to_number<std::size_t>();
     r.generator_version = o.at("generator_version").to_number<int>();
+    if (const auto* tag = o.if_contains("tag")) {
+        r.tag = std::string(tag->as_string());
+    }
     for (const auto& ev : o.at("entries").as_array()) {
         const auto& eo = ev.as_object();
         recording_entry e;
@@ -898,8 +1495,10 @@ inline auto serialize(const recording& r) -> std::string {
     auto o = to_json(r);
     std::string out = "{\n";
     for (const auto* key :
-         {"format", "server", "version", "date", "seed", "length", "generator_version"}) {
-        out += "  \"" + std::string(key) + "\": " + boost::json::serialize(o.at(key)) + ",\n";
+         {"format", "server", "version", "date", "seed", "length", "generator_version", "tag"}) {
+        if (o.contains(key)) {
+            out += "  \"" + std::string(key) + "\": " + boost::json::serialize(o.at(key)) + ",\n";
+        }
     }
     out += "  \"entries\": [\n";
     const auto& entries = o.at("entries").as_array();

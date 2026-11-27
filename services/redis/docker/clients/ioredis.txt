@@ -1,0 +1,146 @@
+# Copyright (c) 2026 Clark Rawlins
+# SPDX-License-Identifier: Apache-2.0
+
+# ioredis's own functional tests that the client-suite run selects
+# (.kiro/specs/redis-general-data-types Requirement 23.3): the tests in
+# test/functional/{transaction,pipeline,watch-exec,hgetall,scan_stream,string_numbers,send_command,autopipelining,connection,duplicate,lazy_connect,ready_check,transformer}.ts
+# that exercise what Kythira ships, at the ioredis release
+# services/redis/docker/clients/Dockerfile pins. One mocha full title
+# per line; kythira-setup.ts skips every test not listed. The whole of
+# select.ts is left out (Kythira has only database 0); the other tests
+# left out are listed at the end with the reason.
+
+transaction should works like pipeline by default
+transaction should handle runtime errors correctly
+transaction should handle compile-time errors correctly
+transaction should also support command callbacks
+transaction should also handle errors in command callbacks
+transaction should work without pipeline
+transaction transformer should trigger transformer
+transaction transformer should trigger transformer inside pipeline
+transaction transformer should handle custom transformer exception
+transaction #addBatch should accept commands in constructor
+pipeline should return correct result
+pipeline should return an empty array on empty pipeline
+pipeline should support mix string command and buffer command
+pipeline should handle error correctly
+pipeline should also invoke the command's callback
+pipeline should support inline transaction
+pipeline should have the same options as its container
+pipeline should support key prefixing
+pipeline should include added built in commands
+pipeline #addBatch should accept commands in constructor
+pipeline exec should group results
+pipeline exec should allow omitting callback
+pipeline #length return the command count
+watch-exec should support watch/exec transactions
+watch-exec should support watch/exec transaction rollback
+hgetall should handle special field names
+*scanStream scanStream should return a readable stream
+*scanStream scanStream should iterate all keys
+*scanStream scanStream should recognize `MATCH`
+*scanStream scanStream should recognize `TYPE`
+*scanStream scanStream should recognize `COUNT`
+*scanStream scanStream should emit an error when connection is down
+*scanStream scanBufferStream should return buffer
+*scanStream sscanStream should iterate all values in the set
+*scanStream Cluster should work in cluster mode
+stringNumbers enabled returns numbers as strings
+stringNumbers disabled returns numbers
+send command should support callback
+send command should support promise
+send command should keep the response order when mix using callback & promise
+send command should support get & set buffer
+send command should support get & set buffer via `call`
+send command should handle empty buffer
+send command should support utf8
+send command should consider null as empty str
+send command should support return int value
+send command should reject when disconnected
+send command should reject when enableOfflineQueue is disabled
+send command should support key prefixing
+send command should support prefixing buffer keys
+send command should support buffer as keyPrefix
+autoPipelining for single node should automatic add commands to auto pipelines
+autoPipelining for single node should not add non-compatible commands to auto pipelines
+autoPipelining for single node should work with db parameter
+autoPipelining for single node should not add blacklisted commands to auto pipelines
+autoPipelining for single node should support buffer commands
+autoPipelining for single node should support call()
+autoPipelining for single node should support multiple commands
+autoPipelining for single node should support commands queued after a pipeline is already queued for execution
+autoPipelining for single node should correctly track pipeline length
+autoPipelining for single node should handle rejections
+autoPipelining for single node should support callbacks in the happy case
+autoPipelining for single node should support callbacks in the failure case
+autoPipelining for single node should handle callbacks failures
+connection should emit "connect" when connected
+connection should emit "close" when disconnected
+connection should send AUTH command before any other commands
+connection should receive replies after connection is disconnected
+connection connects successfully immediately after end
+connection connects successfully immediately after quit
+connection connectTimeout should clear the timeout when connected
+connection connectTimeout should ignore timeout if connect
+connection #connect should return a promise
+connection #connect should stop reconnecting when disconnected
+connection #connect should reject when connected
+connection #connect should resolve when the status become ready
+connection #connect should reject when closed (reconnecting)
+connection #connect should reject when closed (end)
+connection #connect should close if socket destroyed before being returned
+connection retryStrategy should pass the correct retry times
+connection retryStrategy should skip reconnecting when retryStrategy doesn't return a number
+connection retryStrategy should skip reconnecting if quitting before connecting
+connection retryStrategy should skip reconnecting if quitting before connecting (buffer)
+connection connectionName should name the connection if options.connectionName is not null
+connection connectionName should set the name before any subscribe command if reconnected
+connection readOnly should send readonly command before other commands
+lazy connect should not call `connect` when init
+lazy connect should connect when calling a command
+lazy connect should not try to reconnect when disconnected manually
+lazy connect should be able to disconnect
+lazy connect Cluster should not call `connect` when init
+lazy connect Cluster should call connect when pipeline exec
+lazy connect Cluster should call connect when transction exec
+lazy connect Cluster should quit before "close" being emited
+lazy connect Cluster should disconnect before "close" being emited
+lazy connect Cluster should support disconnecting with reconnect
+ready_check should retry when redis is not ready
+ready_check should reconnect when info return a error
+ready_check warns for NOPERM error
+transformer default transformer hmset should support object
+transformer default transformer hmset should support Map with string keys
+transformer default transformer hmset should not affect the old way
+transformer default transformer mset should support object
+transformer default transformer mset should support Map
+transformer default transformer mset should not affect the old way
+transformer default transformer mset should work with keyPrefix option
+transformer default transformer msetnx should support object
+transformer default transformer msetnx should support Map
+transformer default transformer msetnx should not affect the old way
+transformer default transformer msetnx should work with keyPrefix option
+transformer default transformer hgetall should return an object
+transformer default transformer hgetall should return {} when key not exists
+transformer default transformer hset should support object
+transformer default transformer hset should support Map
+transformer default transformer hset should affect the old way
+transformer default transformer call keyPrefix should be case insensitive for command name
+
+# Left out:
+# transaction #exec should batch all commands before ready event: queues CONFIG GET in the MULTI; CONFIG is not offered
+# pipeline custom commands should work: defineCommand runs Lua (EVALSHA/EVAL); scripting is not shipped
+# pipeline custom commands should support callbacks: defineCommand runs Lua; scripting is not shipped
+# pipeline custom commands should be supported in transaction blocks: defineCommand runs Lua; scripting is not shipped
+# pipeline exec should batch all commands before ready event: needs CONFIG GET, which Kythira does not offer
+# pipeline exec should check and load uniq scripts only: needs Lua scripting and MONITOR
+# pipeline exec should support parallel script execution: defineCommand runs Lua; scripting is not shipped
+# pipeline exec should reload scripts on redis restart (reconnect): defineCommand runs Lua; scripting is not shipped
+# *scanStream hscanStream should recognize `NOVALUES`: HSCAN NOVALUES is Redis 7.4; Kythira answers as Redis 7.2 does
+# send command should support key prefixing with multiple keys: needs BLPOP; blocking commands are not shipped
+# send command should support key prefixing for zunionstore: needs ZADD; sorted sets are not shipped
+# autoPipelining for single node should support custom commands: defineCommand runs Lua; scripting is not shipped
+# autoPipelining for single node should handle large pipelines without RangeError: a throughput check: 600 MiB written and read back through Raft within mocha's 8 s budget, sized for a local in-memory server
+# connection autoResendUnfulfilledCommands should resend unfulfilled commands to the correct db when reconnected: needs a database other than 0
+# connection autoResendUnfulfilledCommands should resend previous subscribes before sending unfulfilled commands: needs SUBSCRIBE; pub/sub is not shipped
+# duplicate clone the options: asserts the default port 6379; the run points ioredis's defaults at the cluster instead
