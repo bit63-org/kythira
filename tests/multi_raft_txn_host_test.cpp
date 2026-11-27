@@ -418,6 +418,35 @@ BOOST_AUTO_TEST_CASE(submit_txn_refuses_keys_outside_the_shard_with_their_descri
         true})));
 }
 
+// redis-general-data-types task 6: an ordinary command naming several keys
+// goes to the shard owning all of them, and one planned against a moved
+// routing table (a key now elsewhere) is refused before it is proposed.
+BOOST_AUTO_TEST_CASE(submit_multi_key_command_checks_every_key, *boost::unit_test::timeout(60)) {
+    two_shard_host<txn_sm> env;
+    BOOST_REQUIRE(env.lead_all());
+    const auto ok = settle(env._host->submit_multi_key_command(
+        {"apple", "banana"}, kv_put("apple", "m"), std::chrono::seconds{2}));
+    BOOST_REQUIRE(ok.second == nullptr);
+    BOOST_TEST((kv_value(env, 1, "apple") == std::optional<std::string>("m")));
+
+    const auto stray = settle(env._host->submit_multi_key_command(
+        {"apple", "zebra"}, kv_put("apple", "n"), std::chrono::seconds{2}));
+    BOOST_REQUIRE(stray.second != nullptr);
+    using epoch_error = kythira::shard_epoch_mismatch_exception<group_id_type, key_type>;
+    try {
+        std::rethrow_exception(stray.second);
+    } catch (const epoch_error& e) {
+        BOOST_REQUIRE_EQUAL(e.current_descriptors().size(), 2U);
+        BOOST_TEST(e.current_descriptors()[1]._group_id == 2U);
+    } catch (...) {
+        BOOST_FAIL("expected shard_epoch_mismatch_exception");
+    }
+    BOOST_TEST((kv_value(env, 1, "apple") == std::optional<std::string>("m")));
+    const auto none = settle(
+        env._host->submit_multi_key_command({}, kv_put("apple", "o"), std::chrono::seconds{2}));
+    BOOST_CHECK(none.second != nullptr);
+}
+
 BOOST_AUTO_TEST_CASE(submit_txn_with_no_keys_is_refused, *boost::unit_test::timeout(60)) {
     two_shard_host<txn_sm> env;
     BOOST_REQUIRE(env.lead_all());

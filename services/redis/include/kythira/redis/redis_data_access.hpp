@@ -202,6 +202,13 @@ public:
                  std::chrono::milliseconds timeout) {
         return _host.submit_command(key, entry, timeout);
     }
+    /// Proposes `entry`, which names every key in `keys`, to the group
+    /// owning all of them; a key a split moved away refuses it with
+    /// `shard_epoch_mismatch_exception` (redis_multi_key_exec.hpp).
+    auto propose_keys(const std::vector<std::string>& keys, const std::vector<std::byte>& entry,
+                      std::chrono::milliseconds timeout) {
+        return _host.submit_multi_key_command(keys, entry, timeout);
+    }
     /// Proposes `entry` to `group` at `epoch` (a leader's own maintenance).
     template<typename Epoch>
     auto propose_to(const group_id_type& group, const Epoch& epoch,

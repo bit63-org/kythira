@@ -92,7 +92,7 @@ is extended as the rest land.
   - Rolling-upgrade note in the docs
   - _Requirements: 5.1-5.4, 15.1-15.4_
 
-- [ ] 6. Multi-key commands
+- [x] 6. Multi-key commands
   - Planner: one group → one `exec`; several → transaction; else
     `-CROSSSLOT`; stale-epoch re-plan
   - `RENAME`, `RENAMENX`, `COPY [REPLACE]`, `MSETNX`, multi-key

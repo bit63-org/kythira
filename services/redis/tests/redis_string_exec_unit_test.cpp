@@ -224,3 +224,78 @@ BOOST_FIXTURE_TEST_CASE(sweep_racing_expire_and_persist, fixture) {
     BOOST_CHECK(exec(id::pexpireat, {"late", "9000"}, 4995) == redis_reply::integer(0));
     BOOST_CHECK(exec(id::persist, {"late"}, 4996) == redis_reply::integer(0));
 }
+
+// Task 6: multi-key writes whose keys share a group, as one record.
+BOOST_FIXTURE_TEST_CASE(multi_key_records_in_one_group, fixture) {
+    using id = redis_command_id;
+    BOOST_CHECK(exec(id::msetnx, {"a", "1", "b", "2"}) == redis_reply::integer(1));
+    BOOST_CHECK(exec(id::msetnx, {"b", "x", "c", "3"}) == redis_reply::integer(0));
+    BOOST_CHECK(read(id::exists, "c") == redis_reply::integer(0));
+    BOOST_CHECK(exec(id::set, {"t", "v", "PXAT", "9000"}) == redis_reply::simple("OK"));
+    // RENAME carries the deadline and replaces the destination.
+    BOOST_CHECK(exec(id::rename, {"t", "a"}) == redis_reply::simple("OK"));
+    BOOST_CHECK(read(id::get, "a") == redis_reply::bulk("v"));
+    BOOST_CHECK(read(id::pexpiretime, "a") == redis_reply::integer(9000));
+    BOOST_CHECK(read(id::exists, "t") == redis_reply::integer(0));
+    BOOST_CHECK(exec(id::rename, {"t", "a"}) == redis_reply::error("ERR no such key"));
+    BOOST_CHECK(exec(id::rename, {"a", "a"}) == redis_reply::simple("OK"));
+    BOOST_CHECK(exec(id::renamenx, {"a", "b"}) == redis_reply::integer(0));
+    BOOST_CHECK(exec(id::renamenx, {"a", "n"}) == redis_reply::integer(1));
+    // COPY keeps the source and refuses an existing destination without
+    // REPLACE.
+    BOOST_CHECK(exec(id::copy, {"n", "b"}) == redis_reply::integer(0));
+    BOOST_CHECK(exec(id::copy, {"n", "b", "REPLACE"}) == redis_reply::integer(1));
+    BOOST_CHECK(read(id::get, "b") == redis_reply::bulk("v"));
+    BOOST_CHECK(read(id::pexpiretime, "b") == redis_reply::integer(9000));
+    BOOST_CHECK(exec(id::copy, {"n", "n"}) ==
+                redis_reply::error("ERR source and destination objects are the same"));
+    BOOST_CHECK(exec(id::copy, {"missing", "z"}) == redis_reply::integer(0));
+    // DEL counts live keys only; an expired entry goes uncounted.
+    BOOST_CHECK(exec(id::set, {"old", "v", "PXAT", "1500"}) == redis_reply::simple("OK"));
+    BOOST_CHECK(exec(id::del, {"n", "b", "missing", "old"}, 2000) == redis_reply::integer(2));
+    BOOST_CHECK_EQUAL(sm.approximate_key_count(), 0U);
+}
+
+BOOST_FIXTURE_TEST_CASE(multi_key_records_under_the_immutable_rule, fixture) {
+    using id = redis_command_id;
+    const auto rule = redis_kv_exec_policy::immutable_rule;
+    const auto conflict = redis_reply::error("ERR value conflict for an existing key");
+    const auto run = [&](id cmd, std::vector<std::string> args, std::vector<std::byte> bits) {
+        redis_kv_exec_command c;
+        c._key = args[0];
+        c._command_id = static_cast<std::uint16_t>(cmd);
+        c._now_ms = 1000;
+        c._policy = rule;
+        c._args = std::move(args);
+        c._mutable_keys = std::move(bits);
+        return decode_redis_reply(sm.apply(encode_redis_kv_command(c), ++index));
+    };
+    BOOST_CHECK(run(id::msetnx, {"s", "1", "d", "2"}, {}) == redis_reply::integer(1));
+    // RENAME takes the source away: it needs the source's bit, and the
+    // destination's when that exists.
+    BOOST_CHECK(run(id::rename, {"s", "new"}, {}) == conflict);
+    BOOST_CHECK(run(id::rename, {"s", "d"}, {std::byte{0x01}}) == conflict);
+    BOOST_CHECK(run(id::rename, {"s", "new"}, {std::byte{0x01}}) == redis_reply::simple("OK"));
+    // COPY to a new key creates; COPY REPLACE over an existing one needs the
+    // destination's bit.
+    BOOST_CHECK(run(id::copy, {"new", "c"}, {}) == redis_reply::integer(1));
+    BOOST_CHECK(run(id::copy, {"new", "d", "REPLACE"}, {}) == conflict);
+    BOOST_CHECK(run(id::copy, {"new", "d", "REPLACE"}, {std::byte{0x02}}) ==
+                redis_reply::integer(1));
+    // DEL stays allowed.
+    BOOST_CHECK(run(id::del, {"new", "c", "d"}, {}) == redis_reply::integer(3));
+}
+
+BOOST_AUTO_TEST_CASE(exec_key_positions) {
+    using id = redis_command_id;
+    BOOST_CHECK(redis_exec_keys(id::msetnx, {"a", "1", "b", "2"}) ==
+                (std::vector<std::string>{"a", "b"}));
+    BOOST_CHECK(redis_exec_keys(id::copy, {"a", "b", "REPLACE"}) ==
+                (std::vector<std::string>{"a", "b"}));
+    BOOST_CHECK(redis_exec_keys(id::del, {"a", "b", "c"}) ==
+                (std::vector<std::string>{"a", "b", "c"}));
+    BOOST_CHECK(redis_exec_keys(id::set, {"a", "v", "PXAT", "1"}) ==
+                (std::vector<std::string>{"a"}));
+    const auto c = make_redis_exec_record("a", 1, {"a"}, 0, true, std::string_view("0000000001"));
+    BOOST_CHECK(c._mutable_keys == (std::vector<std::byte>{std::byte{0x00}, std::byte{0x02}}));
+}

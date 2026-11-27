@@ -449,6 +449,52 @@ BOOST_AUTO_TEST_CASE(mset_mget_and_multi_key_del_span_shards, *boost::unit_test:
     BOOST_CHECK_EQUAL(farm.call({"GET", "a/1"}), "$-1\r\n");
 }
 
+// redis-general-data-types task 6: keys in one group make one record with
+// no transaction (Requirement 6.1); keys in two groups run as a multi-Raft
+// transaction (6.2), RENAME and COPY carrying the source's deadline.
+BOOST_AUTO_TEST_CASE(multi_key_commands_plan_by_group, *boost::unit_test::timeout(180)) {
+    redis_gateway_config cfg;
+    cfg._immutable_values = false;
+    cluster c(cfg);
+    BOOST_REQUIRE(c.await_all_leaders(std::chrono::seconds{20}));
+    resp_client r(c.port(1));
+    BOOST_REQUIRE_EQUAL(r.call({"AUTH", "ops", "ops-secret"}), "+OK\r\n");
+    BOOST_REQUIRE_EQUAL(r.call({"KYTHIRA.FORMAT", "UPGRADE", "3"}), "+OK\r\n");
+    const auto committed = [&] {
+        std::uint64_t n = 0;
+        for (node_id_t id = 1; id <= k_node_count; ++id) {
+            n += c.gateway(id).stats()._txn_committed.load();
+        }
+        return n;
+    };
+
+    // One group: no transaction.
+    const auto before = committed();
+    BOOST_CHECK_EQUAL(r.call({"MSETNX", "z/a", "1", "z/b", "2"}), ":1\r\n");
+    BOOST_CHECK_EQUAL(r.call({"RENAME", "z/a", "z/c"}), "+OK\r\n");
+    BOOST_CHECK_EQUAL(r.call({"DEL", "z/b", "z/c", "z/none"}), ":2\r\n");
+    BOOST_CHECK_EQUAL(committed(), before);
+
+    // Two groups: one transaction each.
+    BOOST_CHECK_EQUAL(r.call({"MSETNX", "a/1", "x", "z/1", "y"}), ":1\r\n");
+    BOOST_CHECK_EQUAL(r.call({"MSETNX", "a/2", "x", "z/1", "y"}), ":0\r\n");
+    BOOST_CHECK_EQUAL(r.call({"GET", "a/2"}), "$-1\r\n");
+    BOOST_CHECK_EQUAL(r.call({"SET", "a/t", "v", "PX", "100000"}), "+OK\r\n");
+    BOOST_CHECK_EQUAL(r.call({"RENAME", "a/t", "z/t"}), "+OK\r\n");
+    BOOST_CHECK_EQUAL(r.call({"GET", "z/t"}), bulk("v"));
+    BOOST_CHECK_EQUAL(r.call({"EXISTS", "a/t"}), ":0\r\n");
+    const auto pttl = r.call({"PTTL", "z/t"});
+    BOOST_CHECK_MESSAGE(pttl.starts_with(':') && pttl != ":-1\r\n" && pttl != ":-2\r\n",
+                        "PTTL " << pttl);
+    BOOST_CHECK_EQUAL(r.call({"RENAME", "a/t", "z/t"}), "-ERR no such key\r\n");
+    BOOST_CHECK_EQUAL(r.call({"RENAMENX", "z/t", "a/1"}), ":0\r\n");
+    BOOST_CHECK_EQUAL(r.call({"COPY", "z/t", "a/1"}), ":0\r\n");
+    BOOST_CHECK_EQUAL(r.call({"COPY", "z/t", "a/1", "REPLACE"}), ":1\r\n");
+    BOOST_CHECK_EQUAL(r.call({"GET", "a/1"}), bulk("v"));
+    BOOST_CHECK_EQUAL(r.call({"DEL", "a/1", "z/1", "z/t", "a/none"}), ":3\r\n");
+    BOOST_CHECK_GE(committed(), before + 4);
+}
+
 BOOST_AUTO_TEST_CASE(mset_keeps_values_immutable, *boost::unit_test::timeout(120)) {
     cluster c;
     BOOST_REQUIRE(c.await_all_leaders(std::chrono::seconds{20}));

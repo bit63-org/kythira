@@ -29,6 +29,7 @@
 #include <kythira/redis/redis_expiry_exec.hpp>
 #include <kythira/redis/redis_format_level.hpp>
 #include <kythira/redis/redis_kv_commands.hpp>
+#include <kythira/redis/redis_multi_key_exec.hpp>
 #include <kythira/redis/redis_string_exec.hpp>
 #include <kythira/redis/redis_string_read.hpp>
 #include <raft/shard_types.hpp>
@@ -441,6 +442,9 @@ private:
         auto reply = apply_redis_string_exec(ops, c, t);
         if (!reply) {
             reply = apply_redis_expiry_exec(ops, c, t);
+        }
+        if (!reply) {
+            reply = apply_redis_multi_key_exec(ops, c, t);
         }
         if (!reply) {
             throw redis_unknown_command_id(c._command_id);
