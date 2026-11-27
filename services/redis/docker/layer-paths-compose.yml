@@ -1,0 +1,162 @@
+# Copyright (c) 2026 Clark Rawlins
+# SPDX-License-Identifier: Apache-2.0
+
+# Six redis_gateway_node slots for
+# services/redis/tests/docker/layer_paths_chaos_test.cpp
+# (.kiro/specs/redis-general-data-types/ task 20, Requirement 24.3): one
+# cluster walked from co-located (every layer on lp-1..lp-3) to a three-way
+# split (gateway on lp-1, front ends on lp-2 and lp-3, data on lp-4..lp-6)
+# and back, under writes, killing one node of each layer on the way.
+#
+# The test starts lp-1..lp-3 first and the joining data nodes lp-4..lp-6
+# later. It changes a node's layers by recreating its container with new
+# values for the LPn_* variables below (`up -d --force-recreate --no-deps`).
+# Recreating wipes the node: the store is in memory, which is why a node
+# leaves the data layer by evacuation before it is recreated, and why it
+# comes back to the data layer as a joining node (KYTHIRA_REDIS_JOIN) that a
+# KYTHIRA.EVACUATE adds to each group.
+#
+# CLAUDE.md's container rules, as they apply here:
+#
+#   * **No static IPs.** Raft peers, gateway forwarding, front-end and data
+#     node lists name each other by **service name**; the daemon resolves
+#     names when it connects.
+#   * **No fixed host ports.** Each slot publishes RESP on the loopback port
+#     the test picked with tests/test_ports.hpp and passed in as
+#     KYTHIRA_LP_PORT_<n>.
+#   * **No runtime named anywhere.** The test drives this file through
+#     `container_runtime()` / `compose_prefix()`
+#     (tests/docker_chaos/os_faults.hpp).
+#   * **No capabilities, no privileged or host networking.** Faults are
+#     `kill` and `start`.
+#
+# The image is the snapshot-isolation build the transaction chaos scenario
+# uses (docker-txn-chaos-image): the workload's MSET and MULTI need the
+# transactional build.
+
+x-node: &node
+  image: kythira-txn-chaos:dev
+  networks:
+    layer_paths_net: {}
+  volumes:
+    - ./txn-chaos/acl.txt:/etc/kythira/acl.txt:ro
+
+x-node-env: &node-env
+  KYTHIRA_RAFT_PORT: "7000"
+  KYTHIRA_ALLOW_PLAINTEXT_RAFT: "true"
+  # Two shards, so MSET and MULTI cross them.
+  KYTHIRA_SHARD_CUTS: "m"
+  KYTHIRA_ELECTION_TIMEOUT_MIN_MS: "300"
+  KYTHIRA_ELECTION_TIMEOUT_MAX_MS: "600"
+  KYTHIRA_HEARTBEAT_INTERVAL_MS: "75"
+  KYTHIRA_REDIS_LISTEN: "0.0.0.0:6379"
+  KYTHIRA_REDIS_ACL_FILE: "/etc/kythira/acl.txt"
+  KYTHIRA_REDIS_INTERNAL_SECRET: "layer-paths-internal"
+  KYTHIRA_REDIS_ALLOW_PLAINTEXT_FORWARDING: "true"
+  # Layers apart call each other in plaintext on this isolated network.
+  KYTHIRA_NODE_INSECURE_PLAINTEXT: "1"
+  # Every slot, running or not: the evacuation controller asks each for
+  # its view, and one that is not running counts only if it is a member.
+  KYTHIRA_REDIS_PEER_GATEWAYS: "1=lp-1:6379,2=lp-2:6379,3=lp-3:6379,4=lp-4:6379,5=lp-5:6379,6=lp-6:6379"
+  KYTHIRA_CACHE_PERSISTENCE: "memory"
+  KYTHIRA_REDIS_TRANSACTIONS: "on"
+  KYTHIRA_REDIS_TXN_ISOLATION: "snapshot"
+  KYTHIRA_REDIS_IMMUTABLE_VALUES: "false"
+  KYTHIRA_REDIS_COMMAND_TIMEOUT_MS: "5000"
+  KYTHIRA_REDIS_DRAIN_TIMEOUT_MS: "3000"
+
+# lp-1..lp-3 found the groups over themselves (their LPn_PEERS default);
+# a joining node founds nothing and only needs every address.
+x-everyone: &everyone "1=http://lp-1:7000,2=http://lp-2:7000,3=http://lp-3:7000,4=http://lp-4:7000,5=http://lp-5:7000,6=http://lp-6:7000"
+
+services:
+  lp-1:
+    <<: *node
+    container_name: layer-paths-1
+    hostname: lp-1
+    environment:
+      <<: *node-env
+      KYTHIRA_NODE_ID: "1"
+      KYTHIRA_PEERS: "${LP1_PEERS:-1=http://lp-1:7000,2=http://lp-2:7000,3=http://lp-3:7000}"
+      KYTHIRA_REDIS_ROLES: "${LP1_ROLES:-gateway,front_end,data}"
+      KYTHIRA_REDIS_JOIN: "${LP1_JOIN:-false}"
+      KYTHIRA_REDIS_DATA_NODES: "${LP1_DATA_NODES:-}"
+      KYTHIRA_REDIS_FRONT_ENDS: "${LP1_FRONT_ENDS:-}"
+    ports:
+      - "127.0.0.1:${KYTHIRA_LP_PORT_1:?set by the test}:6379"
+
+  lp-2:
+    <<: *node
+    container_name: layer-paths-2
+    hostname: lp-2
+    environment:
+      <<: *node-env
+      KYTHIRA_NODE_ID: "2"
+      KYTHIRA_PEERS: "${LP2_PEERS:-1=http://lp-1:7000,2=http://lp-2:7000,3=http://lp-3:7000}"
+      KYTHIRA_REDIS_ROLES: "${LP2_ROLES:-gateway,front_end,data}"
+      KYTHIRA_REDIS_JOIN: "${LP2_JOIN:-false}"
+      KYTHIRA_REDIS_DATA_NODES: "${LP2_DATA_NODES:-}"
+      KYTHIRA_REDIS_FRONT_ENDS: "${LP2_FRONT_ENDS:-}"
+    ports:
+      - "127.0.0.1:${KYTHIRA_LP_PORT_2:?set by the test}:6379"
+
+  lp-3:
+    <<: *node
+    container_name: layer-paths-3
+    hostname: lp-3
+    environment:
+      <<: *node-env
+      KYTHIRA_NODE_ID: "3"
+      KYTHIRA_PEERS: "${LP3_PEERS:-1=http://lp-1:7000,2=http://lp-2:7000,3=http://lp-3:7000}"
+      KYTHIRA_REDIS_ROLES: "${LP3_ROLES:-gateway,front_end,data}"
+      KYTHIRA_REDIS_JOIN: "${LP3_JOIN:-false}"
+      KYTHIRA_REDIS_DATA_NODES: "${LP3_DATA_NODES:-}"
+      KYTHIRA_REDIS_FRONT_ENDS: "${LP3_FRONT_ENDS:-}"
+    ports:
+      - "127.0.0.1:${KYTHIRA_LP_PORT_3:?set by the test}:6379"
+
+  # The joining data nodes: data only, so they refuse client connections;
+  # the published port is for diagnostics.
+  lp-4:
+    <<: *node
+    container_name: layer-paths-4
+    hostname: lp-4
+    environment:
+      <<: *node-env
+      KYTHIRA_NODE_ID: "4"
+      KYTHIRA_PEERS: *everyone
+      KYTHIRA_REDIS_ROLES: "data"
+      KYTHIRA_REDIS_JOIN: "true"
+    ports:
+      - "127.0.0.1:${KYTHIRA_LP_PORT_4:?set by the test}:6379"
+
+  lp-5:
+    <<: *node
+    container_name: layer-paths-5
+    hostname: lp-5
+    environment:
+      <<: *node-env
+      KYTHIRA_NODE_ID: "5"
+      KYTHIRA_PEERS: *everyone
+      KYTHIRA_REDIS_ROLES: "data"
+      KYTHIRA_REDIS_JOIN: "true"
+    ports:
+      - "127.0.0.1:${KYTHIRA_LP_PORT_5:?set by the test}:6379"
+
+  lp-6:
+    <<: *node
+    container_name: layer-paths-6
+    hostname: lp-6
+    environment:
+      <<: *node-env
+      KYTHIRA_NODE_ID: "6"
+      KYTHIRA_PEERS: *everyone
+      KYTHIRA_REDIS_ROLES: "data"
+      KYTHIRA_REDIS_JOIN: "true"
+    ports:
+      - "127.0.0.1:${KYTHIRA_LP_PORT_6:?set by the test}:6379"
+
+networks:
+  layer_paths_net:
+    name: kythira_layer_paths_net
+    driver: bridge

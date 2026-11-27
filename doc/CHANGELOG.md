@@ -5,6 +5,54 @@ current list of outstanding work, see [TODO.md](TODO.md).
 
 ### What Changed (November 26, 2026)
 
+- **`KYTHIRA.EVACUATE` asks the other data nodes at once.** START,
+  STATUS and CANCEL used to ask them one after another, and a peer that
+  does not answer costs a whole forward deadline. A joining node, a
+  restarting one and the evacuee are often silent together, so START
+  could take three deadlines: past the deadline of a gateway without
+  data that relayed it, which then sent the same START to the next data
+  node, and past the admin's client. A gateway now waits three forward
+  deadlines for a relayed `KYTHIRA.EVACUATE`.
+- **A gateway apart from its front ends ends a transaction at EXEC even
+  when the front end is lost under it.** It answered the client's EXEC
+  with `-ERR outcome unknown` but kept the connection in `MULTI`, so
+  every later command on it answered `+QUEUED` and never ran. EXEC or
+  DISCARD the gateway answers itself now drops the queue and the watch,
+  and an EXEC no front end could take answers `EXECABORT` rather than
+  `TRYAGAIN`, since a retried EXEC would find no transaction.
+- **Every Redis layer migration path is tested both ways, and the bugs
+  the tests found are fixed.** `redis_layer_paths_test` walks one
+  in-process cluster from co-located to a three-way split and back under
+  writes, including a data split that is stopped and reversed midway.
+  The container scenario `layer_paths_chaos_test`
+  (`docker-layer-paths-tests`, Docker and rootless Podman) walks the
+  same path with real daemons, and kills a gateway, a front end and a
+  data node on the way. The fixes:
+  - A node without `data` answered `KYTHIRA.DATA ROUTES` with an empty
+    table, which replaced good routes in front ends that used it as a
+    seed. It now answers `TRYAGAIN`, and so does a data node with no
+    route for the range yet.
+  - An evacuation off a node that was down never reported done, because
+    `STATUS` waited for every data node. Each node's view now lists the
+    members of the groups it leads, and an unreachable node holds the
+    job back only while it is still a member. For the same reason
+    `START` no longer refuses when a peer does not answer, and a node
+    without `data` answers another node's internal `KYTHIRA.EVACUATE`
+    itself (`NODATA`) instead of passing it on to a data node, which
+    restarted that node's job.
+  - `STATUS` took whatever answered at a peer's address for that peer's
+    view. In containers a dead node's address passes to the next one
+    started, and over plaintext nothing checks who answers, so a view
+    was counted twice under two names. Each view's node id is now
+    checked against the peer asked.
+
+  A joining node, which founded nothing, no longer takes its voter count
+  from `KYTHIRA_PEERS`: `START` there uses the groups' own count, or
+  asks for `REPLICAS`. Co-located latency and throughput before task 16b
+  and after task 20 differ by less than run-to-run noise
+  (`doc/redis-layers.md`). The workloads cover the commands that have
+  shipped; the string, multi-key, hash, list and `SCAN` tasks add theirs
+  (`.kiro/specs/redis-general-data-types/` task 20).
 - **A Redis data node's replicas move to other data nodes, and back.**
   `KYTHIRA.EVACUATE START <node>` (admin) fans out to every data node,
   and each moves the groups it leads off the evacuee with the shared

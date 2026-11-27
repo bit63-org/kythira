@@ -1507,6 +1507,19 @@ auto redis_gateway<Host, Logger, Metrics>::call_front_end(session& s, std::strin
     argv.push_back(redis_call_wire::encode_state(state));
     argv.insert(argv.end(), cmd._argv.begin(), cmd._argv.end());
 
+    // EXEC and DISCARD end the transaction whatever becomes of them, as in
+    // Redis. When the gateway answers one itself (the front end was lost
+    // or never reached), it must drop the MULTI state too: kept, every
+    // later command on the connection answered +QUEUED, and a client that
+    // read the error as the end of its transaction never found out.
+    const bool ends_transaction = upper == "EXEC" || upper == "DISCARD";
+    auto end_transaction = [&s] {
+        s._in_multi = false;
+        s._multi_failed = false;
+        s._queued.clear();
+        s._watched.clear();
+        s._watch_ts = 0;
+    };
     const auto attempts = std::max<std::size_t>(1, front_end_candidates().size());
     for (std::size_t attempt = 0; attempt < attempts; ++attempt) {
         auto fe = pick_front_end(s);
@@ -1542,12 +1555,17 @@ auto redis_gateway<Host, Logger, Metrics>::call_front_end(session& s, std::strin
                         {{"front_end", *fe}, {"error", r._error}});
             mark_front_end_down(*fe);
             ++_stats._front_end_lost;
-            if (s._in_multi) {
+            if (ends_transaction) {
+                end_transaction();
+            } else if (s._in_multi) {
                 s._multi_failed = true;
             }
             return s._writer.error("ERR outcome unknown, front end lost; it may have applied");
         }
         if (!r._reply.empty() && r._reply.front() == '-') {
+            if (ends_transaction) {
+                end_transaction();
+            }
             return std::move(r._reply);  // the front end refused the call itself
         }
         const auto payload = redis_gateway_detail::bulk_payload(r._reply);
@@ -1555,6 +1573,9 @@ auto redis_gateway<Host, Logger, Metrics>::call_front_end(session& s, std::strin
         if (!answer) {
             _logger.log(log_level::warning, "redis gateway: malformed answer from front end",
                         {{"front_end", *fe}});
+            if (ends_transaction) {
+                end_transaction();
+            }
             return s._writer.error("ERR malformed answer from front end " + *fe);
         }
         if (answer->state.isolation) {
@@ -1574,6 +1595,14 @@ auto redis_gateway<Host, Logger, Metrics>::call_front_end(session& s, std::strin
             s._queued.clear();
         }
         return std::move(answer->reply);
+    }
+    if (upper == "EXEC" && s._in_multi) {
+        // Nothing ran, but a retried EXEC would find no transaction.
+        end_transaction();
+        return s._writer.error("EXECABORT Transaction discarded, no front end reachable");
+    }
+    if (ends_transaction) {
+        end_transaction();
     }
     return s._writer.error("TRYAGAIN no front end reachable, retry");
 }
@@ -2039,13 +2068,26 @@ auto redis_gateway<Host, Logger, Metrics>::handle_evacuate(session& s, const res
             }
         }
     }
-    // No data here: the next layer down takes it, the first that answers.
-    // The reply passes through as it came; every form it can take (an
+    // No data here. Another node's controller asking for this node's own
+    // part (START/STATUS/CANCEL ... LOCAL) gets that answer, not a data
+    // node's: forwarding it would restart a data node's job, or report its
+    // view twice.
+    if (s._internal) {
+        return s._writer.error(std::string{k_evacuate_no_data});
+    }
+    // An admin's command: the next layer down takes it, the first that
+    // answers. The reply passes through as it came; every form it can take (an
     // error, +OK, a bulk string, an array of bulk strings) reads the same
     // in RESP2 and RESP3.
+    //
+    // A data node answers START only after asking every other data node,
+    // and a silent one costs it a whole forward deadline. Waiting just one
+    // deadline here gave up on a START that had begun and sent it to the
+    // next node as well, so the wait covers the fan-out and a margin.
     const auto next = this->remote_front_ends() ? front_end_candidates() : _config._data_nodes;
+    const auto budget = 3 * _config._command_timeout;
     for (const auto& endpoint : next) {
-        auto r = this->exchange(cmd._argv, endpoint);
+        auto r = this->exchange(cmd._argv, endpoint, budget);
         if (r._kind == front_end::exchange_result::kind::answered) {
             return std::move(r._reply);
         }

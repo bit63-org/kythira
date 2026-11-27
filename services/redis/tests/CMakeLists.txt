@@ -149,6 +149,13 @@ kythira_redis_test(redis_layer_migration_test redis_layer_migration_test.cpp)
 target_link_libraries(redis_layer_migration_test PRIVATE OpenSSL::SSL OpenSSL::Crypto)
 set_tests_properties(redis_layer_migration_test PROPERTIES
     LABELS "multi-raft;redis" TIMEOUT 600)
+# redis-general-data-types task 20: one cluster walked from co-located
+# to three-way split and back under a write workload, checking every
+# acknowledged write after each step.
+kythira_redis_test(redis_layer_paths_test redis_layer_paths_test.cpp)
+target_link_libraries(redis_layer_paths_test PRIVATE OpenSSL::SSL OpenSSL::Crypto)
+set_tests_properties(redis_layer_paths_test PROPERTIES
+    LABELS "multi-raft;redis" TIMEOUT 900)
 # The same cases over the disk-backed cache_kv_state_machine
 # (.kiro/specs/disk-backed-build-cache/ Requirement 2.7).
 kythira_redis_test(redis_gateway_disk_store_integration_test
@@ -231,7 +238,8 @@ foreach(_redis_gateway_heavy_test IN ITEMS
         redis_gateway_txn_test
         redis_gateway_snapshot_test
         redis_differential_replay_test
-        redis_layer_migration_test)
+        redis_layer_migration_test
+        redis_layer_paths_test)
     set_target_properties(${_redis_gateway_heavy_test} PROPERTIES
         JOB_POOL_COMPILE heavy_tu)
 endforeach()

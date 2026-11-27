@@ -741,8 +741,12 @@ private:
             }
         };
         h._log = [this](const std::string& line) { _logger.log(kythira::log_level::info, line); };
-        const auto replicas =
-            _opt._replicas != 0 ? _opt._replicas : std::max<std::size_t>(_voters.size(), 1);
+        // A joining node founded nothing, so KYTHIRA_PEERS is only an
+        // address book there, not a voter count: 0 lets START take the
+        // count from the groups it holds, or ask for REPLICAS.
+        const auto replicas = _opt._replicas != 0 ? _opt._replicas
+                              : _join             ? std::size_t{0}
+                                                  : std::max<std::size_t>(_voters.size(), 1);
         _evacuation = std::make_unique<evacuation_type>(*_host, replicas, std::move(h));
         _evacuation_ptr.store(_evacuation.get(), std::memory_order_release);
     }

@@ -261,7 +261,7 @@ jobs:
             exit 1
           fi
           leaked=$(ninja -C build -t targets all | sed 's/:.*$//' | grep -v / |
-                   grep -E '^(redis_|resp_protocol|cache_|lua_sandbox_|kythira_redis$|kythira_redis_lua$|docker-(sccache-e2e|cache-cluster|txn-chaos|engine-chaos))' || true)
+                   grep -E '^(redis_|resp_protocol|cache_|lua_sandbox_|kythira_redis$|kythira_redis_lua$|docker-(sccache-e2e|cache-cluster|txn-chaos|engine-chaos|layer-paths))' || true)
           if [ -n "$leaked" ]; then
             echo "::error::module targets present with the module off:"
             echo "$leaked"
@@ -540,6 +540,14 @@ jobs:
       - name: docker-txn-chaos-tests
         if: success() || failure()
         run: cmake --build build --target docker-txn-chaos-tests -j"$(nproc)"
+
+      # The layer migration path both ways (redis-general-data-types task
+      # 20): the same image, one cluster walked co-located -> three-way ->
+      # co-located under writes, killing a gateway, a front end and a data
+      # node.
+      - name: docker-layer-paths-tests
+        if: success() || failure()
+        run: cmake --build build --target docker-layer-paths-tests -j"$(nproc)"
 
       # The differential suite (redis-general-data-types task 14's
       # scaffold): the same image as the step above, against Redis 7.2 and

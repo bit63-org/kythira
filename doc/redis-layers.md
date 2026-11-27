@@ -108,7 +108,10 @@ data layer for each key:
 
 - Routes come from `KYTHIRA.DATA ROUTES`, asked of the data nodes in
   `KYTHIRA_REDIS_DATA_NODES` at first and then of any node a route names.
-  Each refusal corrects the cached route.
+  Each refusal corrects the cached route. A node without `data`, such as
+  one that left the data layer, answers `TRYAGAIN` instead of a route
+  table, and so does a data node that knows no route for the range yet,
+  so a stale seed never replaces good routes with an empty table.
 - `GET`, `EXISTS`, `STRLEN`, `GETRANGE` and `TTL` read with `KYTHIRA.DATA
   READ` at the node's `KYTHIRA_REDIS_READ_CONSISTENCY`. `SET`, `SETEX` and
   `DEL` read the leader's entry the same way where they check it (immutable
@@ -433,11 +436,17 @@ discard them (Requirement 21.3). `KYTHIRA.EVACUATE` moves them first:
    Without `TO`, every other data node the node knows
    (`KYTHIRA_REDIS_PEER_GATEWAYS`) is a target. The node fans the job out
    to each of them; `TRYAGAIN started here, not on ...` means a peer
-   missed it, and running the same `START` again is safe. Each data node
+   refused it, and running the same `START` again is safe. A peer that
+   does not answer at all (down, or not started yet) is only logged, and
+   a node without `data` answers that it has no part, so neither holds
+   the start back; if a silent peer still leads a group, `STATUS` stays
+   short of done until `START` runs again. Each data node
    then works on the groups it leads: it adds a target as a learner, lets
    it catch up, promotes it, hands leadership away when the evacuee leads,
    and removes the evacuee. `REPLICAS` is the voter count to keep
-   (`KYTHIRA_REDIS_REPLICAS`, else the number of founding voters).
+   (`KYTHIRA_REDIS_REPLICAS`, else the number of founding voters; on a
+   node that joined, which founded nothing, the most voters a group it
+   holds has, and `START` asks for `REPLICAS` if it holds none).
 2. Poll `KYTHIRA.EVACUATE STATUS` until its first line is `done 1`. Each
    node's lines show what it holds, what it leads, the action on each led
    group and any error. Writes and reads keep working throughout.
@@ -452,6 +461,14 @@ whatever voters they have, all valid) and, if replicas already moved, the
 merge below with the evacuee as the target; `START` with the evacuee as a
 target also withdraws its release. After step 4 the node has no data
 left, so reversing it is the merge below.
+
+A node that is down can be evacuated too: start the evacuation on any
+live data node, as above. `STATUS` counts a data node it cannot reach as
+not done only while that node is still a voter or learner of a group
+some live node leads, so the job finishes once the dead node is removed
+from every group. Skip `RELEASE`; the node is gone, and if it comes back
+it must come back as a new node (a memory store) or with
+`KYTHIRA_REDIS_DISCARD_REPLICAS=true`.
 
 If a node lost its replicas some other way (a replaced disk, a group
 re-seeded elsewhere), `KYTHIRA_REDIS_DISCARD_REPLICAS=true` lets it start
@@ -479,6 +496,11 @@ ones (Requirement 21.4):
 3. `KYTHIRA.EVACUATE STATUS` until `done 1`, then
    `KYTHIRA.EVACUATE CANCEL` to end the job.
 
+A joining node that also runs `gateway` and `front_end` serves clients
+only once it holds the groups: a node with `data` reaches no data
+remotely, so until then its commands fail or time out. Keep it out of
+the client rotation from step 1 until step 3.
+
 To reverse, evacuate the node again.
 
 ### Whole layouts
@@ -495,6 +517,15 @@ Each layout change is a sequence of the steps above, checked between each:
 
 The in-process test `redis_layer_migration_test` evacuates a founding data
 node onto a joined one under writes, releases it, and brings it back.
+
+`redis_layer_paths_test` walks one in-process cluster through every row of
+the table both ways, under writes: co-located, a data split stopped and
+reversed midway, gateway and front end apart from data, three-way, and
+back. It checks every acknowledged write after each step. The container
+scenario `layer_paths_chaos_test` (`docker-layer-paths-tests`, on Docker
+and rootless Podman) walks the same path with the real daemon. On the way
+it kills a data node for good and evacuates it while it is down, and it
+kills and restarts the only gateway and a front end.
 
 ## Co-located baseline
 
@@ -553,3 +584,28 @@ per data access to learn that no remote half is attached:
 | follower | 8 clients | 35,602 ops/s [25,059-45,981] | 33,775 ops/s [21,977-43,866] | -5.1% |
 
 Every change is again inside the range of rounds of the same build.
+
+### Task 20: the layer work as a whole
+
+Measured on 2026-11-26 the same way, with the build before task 16b
+against the build with tasks 16b to 20 (every layer split, the
+evacuation and the fixes the migration path tests found). Each build ran
+12 times, alternating, three rounds each, so 36 rounds:
+
+| Entry | Metric | Before | After | Change |
+|---|---|---|---|---|
+| leader | `SET` p50 | 663 µs [611-720] | 653 µs [593-725] | -1.6% |
+| leader | `SET` p99 | 992 µs [848-1316] | 990 µs [810-1311] | -0.3% |
+| leader | `GET` p50 | 81 µs [65-103] | 83 µs [65-103] | +2.5% |
+| leader | `GET` p99 | 233 µs [172-303] | 232 µs [167-335] | -0.4% |
+| leader | 8 clients | 33,478 ops/s [25,623-39,442] | 32,978 ops/s [27,514-39,481] | -1.5% |
+| follower | `SET` p50 | 732 µs [607-846] | 742 µs [672-809] | +1.4% |
+| follower | `SET` p99 | 1108 µs [938-1727] | 1122 µs [930-2030] | +1.3% |
+| follower | `GET` p50 | 161 µs [137-205] | 172 µs [137-199] | +6.5% |
+| follower | `GET` p99 | 417 µs [317-561] | 443 µs [357-549] | +6.2% |
+| follower | 8 clients | 35,629 ops/s [22,340-42,114] | 34,513 ops/s [26,391-44,750] | -3.1% |
+
+Every change is inside the range of rounds of the same build. The
+largest, a follower's forwarded `GET`, is +6.5% on the median with the
+two ranges almost the same; it is the row to watch if a later task adds
+work to the forward path.

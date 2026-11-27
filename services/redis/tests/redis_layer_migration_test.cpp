@@ -106,6 +106,7 @@ BOOST_AUTO_TEST_CASE(a_node_view_round_trips_with_an_error_that_has_spaces) {
     v._running = true;
     v._evacuee = "1";
     v._held = {"1", "2", "9"};
+    v._members = {"2", "3", "4"};
     v._led = {{"1", "add_replica", "4", "not caught up\nyet"}, {"2", "done", "", ""}};
     const auto back = ev::decode_node_view(ev::encode_node_view(v));
     BOOST_REQUIRE(back);
@@ -113,6 +114,7 @@ BOOST_AUTO_TEST_CASE(a_node_view_round_trips_with_an_error_that_has_spaces) {
     BOOST_TEST(back->_running);
     BOOST_TEST(back->_evacuee == "1");
     BOOST_TEST((back->_held == v._held));
+    BOOST_TEST((back->_members == v._members));
     BOOST_REQUIRE_EQUAL(back->_led.size(), 2U);
     BOOST_TEST(back->_led[0]._error == "not caught up yet");
     BOOST_TEST(back->_led[0]._node == "4");
@@ -126,6 +128,10 @@ BOOST_AUTO_TEST_CASE(a_node_view_round_trips_with_an_error_that_has_spaces) {
     BOOST_TEST(!idle_back->_running);
     BOOST_TEST(idle_back->_evacuee.empty());
     BOOST_TEST(idle_back->_held.empty());
+    BOOST_TEST(idle_back->_members.empty());
+    // A view without the members line (an older node) still reads.
+    BOOST_TEST(
+        ev::decode_node_view("node 1 running 1 evacuee -\nheld 1\nled 1 done -").has_value());
 
     BOOST_TEST(!ev::decode_node_view("node 1 running 2 evacuee -\nheld"));
     BOOST_TEST(!ev::decode_node_view("node 1 running 1 evacuee -"));
@@ -156,15 +162,24 @@ BOOST_AUTO_TEST_CASE(the_merge_is_done_only_when_every_held_group_is_led_and_don
     // A group nobody reports leading is not done.
     c = ev::merge({view("2", {"1", "2"}, {{"1", "done", "", ""}})});
     BOOST_TEST(!c._done);
-    // A node that did not answer keeps it open.
+    // A node that did not answer keeps it open while a group counts it...
     ev::node_view gone;
     gone._unreachable = "4@n4:6379";
-    c = ev::merge({view("2", {"1"}, {{"1", "done", "", ""}}), gone});
+    auto led_by_2 = view("2", {"1"}, {{"1", "done", "", ""}});
+    led_by_2._members = {"2", "3", "4"};
+    c = ev::merge({led_by_2, gone});
     BOOST_TEST(!c._done);
     const auto lines = ev::status_lines(c);
     BOOST_TEST(lines.front() == "done 0");
     BOOST_TEST(std::any_of(lines.begin(), lines.end(),
                            [](const std::string& l) { return l == "node 4@n4:6379 unreachable"; }));
+    // ...and not once no group does: a failed evacuee, removed everywhere,
+    // never answers again, and the job is still done. It has no say in a
+    // release either.
+    led_by_2._members = {"2", "3", "5"};
+    c = ev::merge({led_by_2, gone});
+    BOOST_TEST(c._done);
+    BOOST_TEST(ev::released(c, "1"));
 }
 
 BOOST_AUTO_TEST_SUITE_END()
@@ -274,9 +289,12 @@ auto bulk(const std::string& s) -> std::string {
 /// Nodes 1-3 found two groups split at "m"; node 4 is a data node that
 /// joined: it founds nothing and takes groups only when they add it. Every
 /// node runs a co-located gateway and an evacuation controller.
+/// `silent_peer` adds a peer gateway that never answers (a node that is
+/// down, or not started yet) and one whose address another node answers
+/// on to every controller's peers.
 class data_cluster {
 public:
-    data_cluster() {
+    explicit data_cluster(bool silent_peer = false) {
         _acl.reload(acl_text());
         for (node_id_t id = 1; id <= k_nodes; ++id) {
             _hosts.push_back(std::make_unique<host_type>(make_config(id)));
@@ -314,12 +332,19 @@ public:
             h._call = [this, id](const std::string& ep, const std::vector<std::string>& argv) {
                 return _gateways.at(id - 1)->data_call(ep, argv);
             };
-            h._peers = [this, id] {
+            h._peers = [this, id, silent_peer] {
                 std::vector<std::pair<node_id_t, std::string>> out;
                 for (node_id_t other = 1; other <= k_nodes; ++other) {
                     if (other != id) {
                         out.emplace_back(other, endpoint(other));
                     }
+                }
+                if (silent_peer) {
+                    // Port 1 on loopback refuses at once.
+                    out.emplace_back(k_nodes + 1, "127.0.0.1:1");
+                    // And an address that now belongs to another node:
+                    // node 3 answers there, as itself.
+                    out.emplace_back(k_nodes + 2, endpoint(3));
                 }
                 return out;
             };
@@ -328,7 +353,10 @@ public:
                 return true;
             };
             h._unrelease = [this, id] { _released[id - 1] = false; };
-            _controllers.push_back(std::make_unique<controller_type>(*_hosts[id - 1], 3, h));
+            // Node 4 joined: like the daemon, it knows no founding voter
+            // count (0) and takes one from the groups it holds.
+            _controllers.push_back(
+                std::make_unique<controller_type>(*_hosts[id - 1], id <= 3 ? 3 : 0, h));
         }
         for (auto& g : _gateways) {
             g->start();
@@ -544,6 +572,45 @@ BOOST_AUTO_TEST_CASE(a_founding_data_node_moves_to_a_joined_one_and_back_under_w
     BOOST_TEST(ops.call({"KYTHIRA.EVACUATE", "CANCEL"}) == "+OK\r\n");
     const auto status = ops.call({"KYTHIRA.EVACUATE", "STATUS"});
     BOOST_TEST(status.find("running 1") == std::string::npos, status);
+}
+
+// A data node that does not answer (down for good, or not started yet)
+// and is no member of any group neither refuses the START nor keeps STATUS
+// short of done. Before, START answered TRYAGAIN naming it for as long as
+// it stayed silent, and STATUS never finished.
+BOOST_AUTO_TEST_CASE(a_silent_peer_that_is_no_member_holds_nothing_back,
+                     *boost::unit_test::timeout(240)) {
+    data_cluster c(true);
+    BOOST_REQUIRE(c.await([&] { return !c.voters_of(1).empty() && !c.voters_of(2).empty(); }, 20s));
+    resp_client ops(c.port(2));
+    BOOST_REQUIRE_EQUAL(ops.call({"AUTH", "ops", "ops-secret"}), "+OK\r\n");
+    // The joined node holds nothing yet, so it knows no voter count.
+    resp_client ops4(c.port(4));
+    BOOST_REQUIRE_EQUAL(ops4.call({"AUTH", "ops", "ops-secret"}), "+OK\r\n");
+    BOOST_TEST(ops4.call({"KYTHIRA.EVACUATE", "START", "1", "TO", "4"})
+                   .rfind("-ERR this node holds no group", 0) == 0);
+    BOOST_REQUIRE_EQUAL(ops.call({"KYTHIRA.EVACUATE", "START", "1", "TO", "4"}), "+OK\r\n");
+    BOOST_TEST(await_done(c, ops));
+    for (group_id_type g : {1, 2}) {
+        BOOST_TEST((c.voters_of(g) == std::vector<node_id_t>{2, 3, 4}));
+    }
+    // Neither counts: the silent one is no member, and node 3's answer at
+    // node 6's address is not taken for node 6's view.
+    const auto status = ops.call({"KYTHIRA.EVACUATE", "STATUS"});
+    BOOST_TEST(status.find("node 5@127.0.0.1:1 unreachable") != std::string::npos, status);
+    const auto six = status.find("node 6@127.0.0.1:");
+    BOOST_TEST((six != std::string::npos &&
+                status.substr(six, status.find('\r', six) - six).ends_with(" unreachable")),
+               status);
+    BOOST_TEST(ops.call({"KYTHIRA.EVACUATE", "CANCEL"}) == "+OK\r\n");
+
+    // Now it holds groups of three voters, and START there keeps three.
+    BOOST_REQUIRE_EQUAL(ops4.call({"KYTHIRA.EVACUATE", "START", "4", "TO", "1"}), "+OK\r\n");
+    BOOST_TEST(await_done(c, ops));
+    for (group_id_type g : {1, 2}) {
+        BOOST_TEST((c.voters_of(g) == std::vector<node_id_t>{1, 2, 3}));
+    }
+    BOOST_TEST(ops.call({"KYTHIRA.EVACUATE", "CANCEL"}) == "+OK\r\n");
 }
 
 BOOST_AUTO_TEST_SUITE_END()

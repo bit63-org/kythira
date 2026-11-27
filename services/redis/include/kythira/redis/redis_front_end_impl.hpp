@@ -2794,21 +2794,35 @@ auto redis_front_end<Host, Logger, Metrics>::handle_data(session& s, const resp_
     if (!_data.running()) {
         return s._writer.error("LOADING Kythira is loading the dataset in memory");
     }
+    // A node without `data` answers for no group: one that left the data
+    // layer (task 19) has an empty host, and its empty route table would
+    // replace a caller's good routes. The caller asks another data node.
+    if (!_config._layer_roles.has(layers::role::data)) {
+        return s._writer.error("TRYAGAIN this node holds no data; ask a data node");
+    }
     const auto sub = resp_to_upper(cmd._argv[1]);
     if (sub == "ROUTE" || sub == "ROUTES") {
         if (cmd._argv.size() != 3) {
             return s._writer.error("ERR wrong number of arguments for 'kythira.data' command");
         }
-        if (sub == "ROUTE") {
+        // Groups cover the whole keyspace, so no row means this node knows
+        // none yet (a data node that joined and was not added to a group):
+        // the same refusal as above, not an answer that no group owns it.
+        auto answer = [&](auto rows) {
+            if (rows.empty()) {
+                return s._writer.error("TRYAGAIN this node knows no route for that range yet");
+            }
             return s._writer.bulk(
-                redis_data_wire::encode_routes(data_routes_payload(_data.route_row(cmd._argv[2]))));
+                redis_data_wire::encode_routes(data_routes_payload(std::move(rows))));
+        };
+        if (sub == "ROUTE") {
+            return answer(_data.route_row(cmd._argv[2]));
         }
         auto range = redis_data_wire::decode_range(cmd._argv[2]);
         if (!range) {
             return s._writer.error("ERR malformed range for 'kythira.data routes'");
         }
-        return s._writer.bulk(
-            redis_data_wire::encode_routes(data_routes_payload(_data.routes(*range))));
+        return answer(_data.routes(*range));
     }
     if (sub == "PROPOSE") {
         if (cmd._argv.size() != 6) {

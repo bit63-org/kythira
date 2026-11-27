@@ -39,6 +39,13 @@ target_include_directories(docker_cache_cluster_test PRIVATE "${KYTHIRA_REDIS_IN
 add_docker_chaos_scenario_test(docker_txn_bank_chaos_test
     "${CMAKE_CURRENT_SOURCE_DIR}/txn_bank_chaos_test.cpp")
 target_include_directories(docker_txn_bank_chaos_test PRIVATE "${KYTHIRA_REDIS_INCLUDE_DIR}")
+# The layer migration path both ways in containers
+# (.kiro/specs/redis-general-data-types/ task 20): same RESP framing need,
+# and test_ports.hpp for its published ports.
+add_docker_chaos_scenario_test(docker_layer_paths_chaos_test
+    "${CMAKE_CURRENT_SOURCE_DIR}/layer_paths_chaos_test.cpp")
+target_include_directories(docker_layer_paths_chaos_test PRIVATE "${KYTHIRA_REDIS_INCLUDE_DIR}")
+target_link_libraries(docker_layer_paths_chaos_test PRIVATE kythira_test_support)
 # Engine storage under SIGKILL, and a format-1 snapshot transfer under
 # faults (.kiro/specs/persistent-state-machine/ task 8,
 # .kiro/specs/file-install-snapshot/ task 8): same RESP framing need.
@@ -55,7 +62,7 @@ target_include_directories(docker_redis_differential_test PRIVATE
 target_link_libraries(docker_redis_differential_test PRIVATE kythira_test_support)
 # Where they were built before the move.
 set_target_properties(docker_sccache_e2e_test docker_cache_cluster_test docker_txn_bank_chaos_test
-    docker_engine_chaos_test docker_redis_differential_test
+    docker_engine_chaos_test docker_redis_differential_test docker_layer_paths_chaos_test
     PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests/docker_chaos")
 
 if(_RUNTIME_EXE)
@@ -71,6 +78,7 @@ if(_RUNTIME_EXE)
     set(_ENGINE_CHAOS_DOCKERFILE         "${KYTHIRA_REDIS_DOCKER_DIR}/engine-chaos/Dockerfile")
     set(_ENGINE_CHAOS_COMPOSE_FILE       "${KYTHIRA_REDIS_DOCKER_DIR}/engine-chaos-compose.yml")
     set(_REDIS_DIFF_COMPOSE_FILE         "${KYTHIRA_REDIS_DOCKER_DIR}/differential/compose.yml")
+    set(_LAYER_PATHS_COMPOSE_FILE        "${KYTHIRA_REDIS_DOCKER_DIR}/layer-paths-compose.yml")
 
     # The redis-compatible-kv acceptance tests (tasks 12 and 13). Two images:
     # the gateway daemon, staged from the host build exactly like
@@ -253,6 +261,20 @@ if(_RUNTIME_EXE)
         WORKING_DIRECTORY "${KYTHIRA_IMAGE_CONTEXT}"
     )
 
+    # The layer migration path both ways (redis-general-data-types task
+    # 20), on the transaction chaos image: the workload's MSET and MULTI
+    # need the transactional build.
+    add_custom_target(docker-layer-paths-tests
+        COMMAND ${CMAKE_COMMAND} -E env
+                ${_RT_ENV}
+                KYTHIRA_LAYER_PATHS_COMPOSE_FILE=${_LAYER_PATHS_COMPOSE_FILE}
+                $<TARGET_FILE:docker_layer_paths_chaos_test>
+                --log_level=message
+        DEPENDS docker-txn-chaos-image docker_layer_paths_chaos_test
+        COMMENT "Running the Redis layer migration path container test (runtime: ${CONTAINER_RUNTIME})"
+        WORKING_DIRECTORY "${KYTHIRA_IMAGE_CONTEXT}"
+    )
+
     # The differential suite (redis-general-data-types task 14's scaffold).
     # The Kythira side is the transaction chaos image, because the stream
     # runs MULTI/EXEC and multi-key commands, which need the transactional
@@ -314,6 +336,7 @@ if(_RUNTIME_EXE)
         "docker-sccache-e2e-tests, docker-cache-cluster-image, docker-cache-client-image, "
         "docker-cache-cluster-tests, docker-cache-cluster-old-image, "
         "docker-cache-rolling-upgrade-tests, docker-txn-chaos-image, docker-txn-chaos-tests, "
+        "docker-layer-paths-tests, "
         "docker-engine-chaos-image, docker-engine-chaos-tests, "
         "docker-redis-differential-tests targets available")
 else()
@@ -321,7 +344,7 @@ else()
         docker-redis-gateway-image docker-sccache-runner-image docker-sccache-e2e-tests
         docker-cache-cluster-image docker-cache-client-image docker-cache-cluster-tests
         docker-cache-cluster-old-image docker-cache-rolling-upgrade-tests
-        docker-txn-chaos-image docker-txn-chaos-tests
+        docker-txn-chaos-image docker-txn-chaos-tests docker-layer-paths-tests
         docker-engine-chaos-image docker-engine-chaos-tests
         docker-redis-differential-tests)
         add_custom_target(${_t}

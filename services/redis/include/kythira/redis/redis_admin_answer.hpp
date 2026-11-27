@@ -9,6 +9,7 @@
 
 #include <cstdint>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -30,5 +31,10 @@ struct redis_admin_answer {
     static auto bulk(std::string b) -> redis_admin_answer { return {kind::bulk, {std::move(b)}}; }
     static auto ok() -> redis_admin_answer { return {kind::ok, {}}; }
 };
+
+/// What a node without `data` answers another node's internal
+/// `KYTHIRA.EVACUATE ... LOCAL`: it holds no replica, so it has no part in
+/// an evacuation and must not hold one back.
+inline constexpr std::string_view k_evacuate_no_data = "NODATA this node holds no data";
 
 }  // namespace kythira

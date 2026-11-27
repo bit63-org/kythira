@@ -49,6 +49,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <future>
 #include <map>
 #include <mutex>
 #include <optional>
@@ -234,7 +235,13 @@ struct node_view {
     std::string _evacuee;
     std::vector<std::string> _held;
     std::vector<led_group> _led;
-    /// Set by the merge for a peer that did not answer.
+    /// The voters and learners of the groups this node leads: the nodes
+    /// the job still depends on. A node in none of them may be down (a
+    /// failed evacuee once removed, a data node never added) without
+    /// holding the merge back.
+    std::vector<std::string> _members;
+    /// Set by the merge for a peer that did not answer: its id and
+    /// gateway, as `id@host:port`.
     std::string _unreachable;
 
     [[nodiscard]] auto done() const -> bool {
@@ -244,14 +251,18 @@ struct node_view {
     [[nodiscard]] auto operator==(const node_view&) const -> bool = default;
 };
 
-/// `STATUS LOCAL`'s bulk string: a header line, the held groups, then one
-/// line per led group. Ids, group numbers and action names have no spaces;
-/// an error, last on its line, may.
+/// `STATUS LOCAL`'s bulk string: a header line, the held groups, the
+/// members of the led groups, then one line per led group. Ids, group numbers and action names have
+/// no spaces; an error, last on its line, may.
 [[nodiscard]] inline auto encode_node_view(const node_view& v) -> std::string {
     std::string out = "node " + v._node + " running " + (v._running ? "1" : "0") + " evacuee " +
                       (v._evacuee.empty() ? "-" : v._evacuee) + "\nheld";
     for (const auto& g : v._held) {
         out += " " + g;
+    }
+    out += "\nmembers";
+    for (const auto& m : v._members) {
+        out += " " + m;
     }
     for (const auto& g : v._led) {
         out += "\nled " + g._group + " " + g._action + " " + (g._node.empty() ? "-" : g._node);
@@ -292,6 +303,8 @@ struct node_view {
                 return std::nullopt;
             }
             v._held.assign(w.begin() + 1, w.end());
+        } else if (!w.empty() && w[0] == "members") {
+            v._members.assign(w.begin() + 1, w.end());
         } else {
             if (w.size() < 4 || w[0] != "led") {
                 return std::nullopt;
@@ -318,23 +331,35 @@ struct cluster_view {
     std::vector<node_view> _nodes;
 };
 
-/// Done once every node answered, some node holds a group, and every group
-/// any node holds is led by a node that reports it done.
+/// The id half of an unreachable peer's `id@host:port`.
+[[nodiscard]] inline auto unreachable_id(const node_view& v) -> std::string {
+    return v._unreachable.substr(0, v._unreachable.find('@'));
+}
+
+/// Done once some node holds a group, every group any node holds is led by
+/// a node that reports it done, and every node that did not answer is a
+/// member of no led group. That last part lets a failed node be evacuated:
+/// it never answers, and once the groups have removed it nothing waits on
+/// it. A node that did not answer and is still a member may still lead
+/// or hold something nobody else reports, so the merge is not done.
 [[nodiscard]] inline auto merge(std::vector<node_view> views) -> cluster_view {
     cluster_view out;
     std::set<std::string> held;
+    std::set<std::string> members;
     std::map<std::string, bool> led_done;
-    bool reachable = true;
     for (const auto& v : views) {
         if (!v._unreachable.empty()) {
-            reachable = false;
             continue;
         }
         held.insert(v._held.begin(), v._held.end());
+        members.insert(v._members.begin(), v._members.end());
         for (const auto& g : v._led) {
             led_done[g._group] = g._action == "done";
         }
     }
+    const bool reachable = std::none_of(views.begin(), views.end(), [&](const node_view& v) {
+        return !v._unreachable.empty() && members.contains(unreachable_id(v));
+    });
     out._done = reachable && !held.empty();
     for (const auto& g : held) {
         const auto it = led_done.find(g);
@@ -350,8 +375,10 @@ struct cluster_view {
     if (!c._done) {
         return false;
     }
-    return std::all_of(c._nodes.begin(), c._nodes.end(),
-                       [&](const node_view& v) { return v._running && v._evacuee == self; });
+    // A node the merge let be down (a member of no group) has no say.
+    return std::all_of(c._nodes.begin(), c._nodes.end(), [&](const node_view& v) {
+        return !v._unreachable.empty() || (v._running && v._evacuee == self);
+    });
 }
 
 /// The operator's `STATUS`: one line per node and per led group.
@@ -446,9 +473,7 @@ public:
             _evacuator.cancel();
             log("redis evacuation: cancelled");
             if (!local) {
-                for (const auto& [id, gw] : _hooks._peers()) {
-                    (void)_hooks._call(gw, {"KYTHIRA.EVACUATE", "CANCEL", "LOCAL"});
-                }
+                (void)ask_peers({"KYTHIRA.EVACUATE", "CANCEL", "LOCAL"});
             }
             return answer::ok();
         }
@@ -508,9 +533,21 @@ public:
         if (job) {
             v._evacuee = text(job->_evacuee);
         }
+        std::set<std::string> members;
         for (const auto& g : _host.group_ids()) {
             v._held.push_back(std::to_string(g));
+            auto* n = _host.group_node(g);
+            if (n == nullptr || !n->is_leader()) {
+                continue;
+            }
+            const auto m = n->current_membership();
+            for (const auto* ids : {&m.voters, &m.learners}) {
+                for (const auto& id : *ids) {
+                    members.insert(text(id));
+                }
+            }
         }
+        v._members.assign(members.begin(), members.end());
         const std::scoped_lock lock(_mu);
         for (const auto& g : _last._led) {
             v._led.push_back(led_group{std::to_string(g._group), kythira::to_string(g._action),
@@ -522,10 +559,23 @@ public:
     /// Every data node's view, merged.
     [[nodiscard]] auto cluster_status() -> cluster_view {
         std::vector<node_view> views{local_view()};
-        for (const auto& [id, gw] : _hooks._peers()) {
-            const auto reply = _hooks._call(gw, {"KYTHIRA.EVACUATE", "STATUS", "LOCAL"});
+        const auto no_data = "-" + std::string{k_evacuate_no_data};
+        for (const auto& [peer, reply] : ask_peers({"KYTHIRA.EVACUATE", "STATUS", "LOCAL"})) {
+            const auto& [id, gw] = peer;
+            if (reply && reply->rfind(no_data, 0) == 0) {
+                continue;  // no data there, so no part in the job
+            }
             const auto payload = reply ? detail::bulk_payload(*reply) : std::nullopt;
             auto v = payload ? decode_node_view(*payload) : std::nullopt;
+            // A view from another node than the one asked: the address now
+            // belongs to someone else (a container's address handed on
+            // after it died, over plaintext, where no certificate names
+            // the peer). Its view is counted where it answers for itself.
+            if (v && v->_node != text(id)) {
+                log("redis evacuation: " + gw + " answered as node " + v->_node + ", not " +
+                    text(id) + "; counting it unreachable");
+                v.reset();
+            }
             if (!v) {
                 node_view miss;
                 miss._unreachable = text(id) + "@" + gw;
@@ -552,10 +602,61 @@ private:
         return node_id_traits<node_id_type>::from_text(s);
     }
 
+    /// The most voters any group this node holds a replica of keeps once
+    /// `evacuee` has left it. A group that already holds a target beside
+    /// the evacuee is in the middle of a move (the target is added before
+    /// the evacuee is removed), so the evacuee is not counted there:
+    /// counting it made a START run again mid-move ask for one voter more
+    /// than the group had, and the evacuee could then never be removed.
+    auto held_voter_count(const node_id_type& evacuee, const std::vector<node_id_type>& targets)
+        -> std::size_t {
+        std::size_t most = 0;
+        for (const auto& g : _host.group_ids()) {
+            if (auto* n = _host.group_node(g)) {
+                const auto voters = n->current_membership().voters;
+                auto count = voters.size();
+                const auto holds = [&](const node_id_type& id) {
+                    return std::find(voters.begin(), voters.end(), id) != voters.end();
+                };
+                if (holds(evacuee) && std::any_of(targets.begin(), targets.end(), holds)) {
+                    --count;
+                }
+                most = std::max(most, count);
+            }
+        }
+        return most;
+    }
+
     void log(const std::string& line) {
         if (_hooks._log) {
             _hooks._log(line);
         }
+    }
+
+    /// Sends `argv` to every other data node at once and returns each
+    /// peer with its reply (nullopt when it did not answer), in the order
+    /// `_peers` lists them. A peer that does not answer costs a whole
+    /// forward deadline, and a joining node, a restarting one and the
+    /// evacuee are often silent together: asked in turn, three of them
+    /// held START past the deadline of the gateway that relayed it and of
+    /// the admin's client. Asked at once, the slowest one sets the wait.
+    auto ask_peers(const std::vector<std::string>& argv) -> std::vector<
+        std::pair<std::pair<node_id_type, std::string>, std::optional<std::string>>> {
+        auto peers = _hooks._peers();
+        std::vector<std::future<std::optional<std::string>>> pending;
+        pending.reserve(peers.size());
+        for (const auto& p : peers) {
+            pending.push_back(std::async(std::launch::async, [this, &argv, gw = p.second] {
+                return _hooks._call(gw, argv);
+            }));
+        }
+        std::vector<std::pair<std::pair<node_id_type, std::string>, std::optional<std::string>>>
+            out;
+        out.reserve(peers.size());
+        for (std::size_t i = 0; i < peers.size(); ++i) {
+            out.emplace_back(std::move(peers[i]), pending[i].get());
+        }
+        return out;
     }
 
     auto start(const std::vector<std::string>& rest) -> answer {
@@ -590,23 +691,39 @@ private:
                 }
             }
         }
-        typename evacuator_type::job job;
-        job._evacuee = *evacuee;
+        std::vector<node_id_type> target_ids;
         for (const auto& t : r->_targets) {
             const auto id = parse_id(t);
             if (!id) {
                 return answer::error("ERR '" + t + "' is not a node id");
             }
-            if (*id == _host.node_id() && _hooks._unrelease) {
+            target_ids.push_back(*id);
+        }
+        // The voters each group keeps: REPLICAS, else this node's setting,
+        // else (a node that joined, which founded nothing and so knows no
+        // founding count) the most voters a group it holds keeps once the
+        // evacuee has left. Settled before anything changes, and fanned
+        // out, so every node uses one number.
+        if (r->_replicas == 0) {
+            r->_replicas = _replicas != 0 ? _replicas : held_voter_count(*evacuee, target_ids);
+        }
+        if (r->_replicas == 0) {
+            return answer::error(
+                "ERR this node holds no group, so it knows no voter count; pass REPLICAS <n>, "
+                "or run START on a node that holds groups");
+        }
+        typename evacuator_type::job job;
+        job._evacuee = *evacuee;
+        for (const auto& id : target_ids) {
+            if (id == _host.node_id() && _hooks._unrelease) {
                 _hooks._unrelease();
             }
-            job._targets.push_back(*id);
+            job._targets.push_back(id);
         }
         if (job._targets.empty()) {
             return answer::error("ERR no data node can take the replicas");
         }
-        job._replicas = r->_replicas != 0 ? r->_replicas : _replicas;
-        r->_replicas = job._replicas;
+        job._replicas = r->_replicas;
         _evacuator.start(job);
         {
             const std::scoped_lock lock(_mu);
@@ -618,12 +735,30 @@ private:
         ensure_thread();
         if (!r->_local) {
             const auto argv = to_argv(*r);
+            // A peer that refused holds the start back. One that did not
+            // answer does not: it may be the evacuee, down for good, or a
+            // node that is not running, and if it still leads a group,
+            // STATUS stays short of done (that group has no live leader's
+            // view) until START runs again. A node without data has no
+            // part in the job.
             std::vector<std::string> missed;
-            for (const auto& [id, gw] : _hooks._peers()) {
-                const auto reply = _hooks._call(gw, argv);
-                if (!reply || reply->rfind("+OK", 0) != 0) {
+            std::vector<std::string> silent;
+            const auto no_data = "-" + std::string{k_evacuate_no_data};
+            for (const auto& [peer, reply] : ask_peers(argv)) {
+                const auto& [id, gw] = peer;
+                if (!reply) {
+                    silent.push_back(text(id) + "@" + gw);
+                } else if (reply->rfind("+OK", 0) != 0 && reply->rfind(no_data, 0) != 0) {
                     missed.push_back(text(id) + "@" + gw);
                 }
+            }
+            if (!silent.empty()) {
+                std::string list;
+                for (const auto& m : silent) {
+                    list += (list.empty() ? "" : ", ") + m;
+                }
+                log("redis evacuation: no answer from " + list +
+                    "; STATUS waits for any group they still lead");
             }
             if (!missed.empty()) {
                 std::string list;
