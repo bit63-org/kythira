@@ -3497,9 +3497,19 @@ auto redis_front_end<Host, Logger, Metrics>::data_read(redis_data_wire::read_mod
         return redis_data_wire::encode_read_miss();  // as read_local(): unvouched bytes
     }
     const auto view = bytes->view();
-    return redis_data_wire::encode_read_value(
-        outcome._entry->_expire_at_ms,
-        std::string_view(reinterpret_cast<const char*>(view.data()), view.size()));
+    const std::string_view value(reinterpret_cast<const char*>(view.data()), view.size());
+    if constexpr (!k_string_only_store) {
+        // A hash, set or list travels whole, so the front end evaluates the
+        // typed read as a co-located one would.
+        if (const auto type = redis_entry_type(*outcome._entry); type != redis_value_type::string) {
+            std::vector<std::byte> body;
+            redis_kv_detail::put_collection_body(body, *outcome._entry);
+            return redis_data_wire::encode_read_value(
+                outcome._entry->_expire_at_ms, value, static_cast<std::uint8_t>(type),
+                std::string_view(reinterpret_cast<const char*>(body.data()), body.size()));
+        }
+    }
+    return redis_data_wire::encode_read_value(outcome._entry->_expire_at_ms, value);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -4233,24 +4243,32 @@ auto redis_front_end<Host, Logger, Metrics>::propose_exec(
     }
     std::string error;
     std::optional<node_id_type> forward_to;
-    auto* node = locate(key, error, forward_to);
-    if (node != nullptr && !node->is_leader()) {
-        forward_to = node->known_leader();
-        error = s._writer.error("ERR shard has no reachable leader, retry");
-        node = nullptr;
-    }
-    if (node == nullptr) {
-        if (forward_to) {
-            if (auto reply = forward(s, hop, *forward_to)) {
-                return *reply;
-            }
+    // No replica here (a front end without data, task 16): the record goes
+    // to the data node over KYTHIRA.DATA PROPOSE, where apply() refuses it
+    // before the gate as it would locally.
+    const bool remote = _data.remote_for(key);
+    if (!remote) {
+        auto* node = locate(key, error, forward_to);
+        if (node != nullptr && !node->is_leader()) {
+            forward_to = node->known_leader();
+            error = s._writer.error("ERR shard has no reachable leader, retry");
+            node = nullptr;
         }
-        return error;
+        if (node == nullptr) {
+            if (forward_to) {
+                if (auto reply = forward(s, hop, *forward_to)) {
+                    return *reply;
+                }
+            }
+            return error;
+        }
     }
     if (auto refused = format_refusal(s, key, k_redis_typed_values_level)) {
         return *refused;
     }
-    if (may_grow) {
+    // The space hooks belong to the disk-backed store, which a front end
+    // without data cannot run.
+    if (may_grow && !remote) {
         if (auto refused = space_refusal(key)) {
             ++_stats._space_refusals;
             emit("redis.space_refusals", name);

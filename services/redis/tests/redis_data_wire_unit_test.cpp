@@ -202,6 +202,18 @@ BOOST_AUTO_TEST_CASE(every_read_answer_round_trips, *boost::unit_test::timeout(1
     BOOST_CHECK_EQUAL(value->expire_at_ms, 1234u);
     BOOST_CHECK_EQUAL(value->value, std::string("v\0w", 3));
 
+    // A collection carries its type byte and body (redis-general-data-types
+    // tasks 7-9); a string has neither.
+    BOOST_CHECK_EQUAL(value->type, 0u);
+    BOOST_CHECK(value->body.empty());
+    auto typed =
+        wire::decode_read<node_t>(wire::encode_read_value(5, "", 1, std::string("b\0dy", 4)));
+    BOOST_REQUIRE(typed.has_value());
+    BOOST_CHECK(typed->found);
+    BOOST_CHECK_EQUAL(typed->expire_at_ms, 5u);
+    BOOST_CHECK_EQUAL(typed->type, 1u);
+    BOOST_CHECK_EQUAL(typed->body, std::string("b\0dy", 4));
+
     auto empty = wire::decode_read<node_t>(wire::encode_read_value(0, ""));
     BOOST_REQUIRE(empty.has_value());
     BOOST_CHECK(empty->found);
@@ -254,6 +266,20 @@ BOOST_AUTO_TEST_CASE(malformed_read_answers_are_refused, *boost::unit_test::time
         !wire::decode_read<node_t>(wire::encode_read_status(wire::read_status::loading) + "x")
              .has_value());
     BOOST_CHECK(!wire::decode_read<node_t>(std::string{'\1', '\1', '\2', 'x', 'y'}).has_value());
+    // A collection trailer: every truncation is refused, and so is a type
+    // byte of 0 (a string never has a trailer).
+    const auto typed = wire::encode_read_value(99, "", 2, "members");
+    for (std::size_t n = good.size() - 5; n < typed.size(); ++n) {
+        if (n == typed.size() - 9) {
+            continue;  // exactly the string form: a present, empty value
+        }
+        BOOST_TEST_INFO("typed prefix " << n);
+        BOOST_CHECK(!wire::decode_read<node_t>(typed.substr(0, n)).has_value());
+    }
+    BOOST_CHECK(!wire::decode_read<node_t>(typed + "x").has_value());
+    BOOST_CHECK(!wire::decode_read<node_t>(wire::encode_read_value(99, "") + std::string(1, '\0') +
+                                           std::string(1, '\0'))
+                     .has_value());
     // A value length past the end.
     BOOST_CHECK(!wire::decode_read<node_t>(std::string{'\0', '\1', '\0', '\x7f', 'a'}).has_value());
 }
