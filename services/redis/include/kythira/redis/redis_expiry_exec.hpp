@@ -155,7 +155,7 @@ auto apply_redis_expiry_exec(Store& store, const redis_kv_exec_command& c, std::
         if (!may_mutate) {
             return conflict();
         }
-        store.put(key, live->_value, 0);
+        redis_store_put_copy(store, key, *live, 0);
         return redis_reply::integer(1);
     }
 
@@ -186,7 +186,7 @@ auto apply_redis_expiry_exec(Store& store, const redis_kv_exec_command& c, std::
     if (*when <= 0 || static_cast<std::uint64_t>(*when) <= t) {
         (void)store.erase(key);
     } else {
-        store.put(key, live->_value, static_cast<std::uint64_t>(*when));
+        redis_store_put_copy(store, key, *live, static_cast<std::uint64_t>(*when));
     }
     return redis_reply::integer(1);
 }

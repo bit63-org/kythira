@@ -37,6 +37,7 @@
 /// bytes `encode_redis_reply` would write, so two nodes can never read one
 /// buffer differently.
 
+#include <charconv>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
@@ -44,6 +45,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <utility>
 #include <vector>
 
@@ -488,6 +490,97 @@ inline auto decode(reader& in, std::size_t depth) -> redis_reply {
     }
     redis_reply_detail::validate(r, 0);
     return r;
+}
+
+/// Parses one whole RESP2 reply (`+`, `-`, `:`, `$`, `*`), as a peer
+/// gateway's internal hop answers, back into a tree, so a front end can
+/// render a forwarded typed read for a RESP3 connection. `nullopt` for
+/// anything else, truncated or trailing bytes, or nesting past 32 levels.
+[[nodiscard]] inline auto parse_resp2_reply(std::string_view text) -> std::optional<redis_reply> {
+    std::size_t at = 0;
+    const auto line = [&]() -> std::optional<std::string_view> {
+        const auto end = text.find("\r\n", at);
+        if (end == std::string_view::npos) {
+            return std::nullopt;
+        }
+        auto out = text.substr(at, end - at);
+        at = end + 2;
+        return out;
+    };
+    const auto number = [](std::string_view v) -> std::optional<std::int64_t> {
+        if (v.empty() || v.size() > 20) {
+            return std::nullopt;
+        }
+        std::int64_t out = 0;
+        const auto* first = v.data();
+        const auto* last = v.data() + v.size();
+        const auto [ptr, ec] = std::from_chars(first, last, out);
+        if (ec != std::errc{} || ptr != last) {
+            return std::nullopt;
+        }
+        return out;
+    };
+    const auto parse = [&](const auto& self, int depth) -> std::optional<redis_reply> {
+        if (depth > 32 || at >= text.size()) {
+            return std::nullopt;
+        }
+        const char kind = text[at++];
+        auto head = line();
+        if (!head) {
+            return std::nullopt;
+        }
+        switch (kind) {
+            case '+':
+                return redis_reply::simple(std::string(*head));
+            case '-':
+                return redis_reply::error(std::string(*head));
+            case ':': {
+                auto v = number(*head);
+                return v ? std::optional(redis_reply::integer(*v)) : std::nullopt;
+            }
+            case '$': {
+                auto n = number(*head);
+                if (!n || *n < -1) {
+                    return std::nullopt;
+                }
+                if (*n == -1) {
+                    return redis_reply::null();
+                }
+                const auto len = static_cast<std::size_t>(*n);
+                if (text.size() - at < len + 2 || text.substr(at + len, 2) != "\r\n") {
+                    return std::nullopt;
+                }
+                auto out = redis_reply::bulk(std::string(text.substr(at, len)));
+                at += len + 2;
+                return out;
+            }
+            case '*': {
+                auto n = number(*head);
+                if (!n || *n < -1) {
+                    return std::nullopt;
+                }
+                if (*n == -1) {
+                    return redis_reply::null_array();
+                }
+                std::vector<redis_reply> items;
+                for (std::int64_t i = 0; i < *n; ++i) {
+                    auto item = self(self, depth + 1);
+                    if (!item) {
+                        return std::nullopt;
+                    }
+                    items.push_back(std::move(*item));
+                }
+                return redis_reply::array(std::move(items));
+            }
+            default:
+                return std::nullopt;
+        }
+    };
+    auto out = parse(parse, 0);
+    if (!out || at != text.size()) {
+        return std::nullopt;
+    }
+    return out;
 }
 
 /// Why a read could not produce a reply here, for a front end to redirect or

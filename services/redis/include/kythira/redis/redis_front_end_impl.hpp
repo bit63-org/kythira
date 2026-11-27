@@ -1157,6 +1157,16 @@ auto redis_front_end<Host, Logger, Metrics>::execute_command(session& s, std::st
         }
         return handle_set(s, cmd, true);
     }
+    if (const auto* info = find_redis_command(upper);
+        info != nullptr && info->group == "hash" && info->status == redis_command_status::shipped) {
+        const auto argc = static_cast<std::ptrdiff_t>(cmd._argv.size());
+        const bool pairs = upper == "HSET" || upper == "HMSET";
+        if ((info->arity > 0 && argc != info->arity) || (info->arity < 0 && argc < -info->arity) ||
+            (pairs && argc % 2 != 0) || (upper == "HRANDFIELD" && argc > 4)) {
+            return *arity(std::numeric_limits<std::size_t>::max(), 0);
+        }
+        return handle_hash(s, *info, cmd);
+    }
     if (upper == "INFO") {
         if (auto e = authorize(s, upper, {})) {
             return *e;
@@ -1212,6 +1222,9 @@ auto redis_front_end<Host, Logger, Metrics>::handle_get(session& s, const resp_c
         emit("redis.misses", "GET");
         return s._writer.null();
     }
+    if (auto typed = redis_collection_read(r._entry.get(), redis_command_id::get, {}, now_ms())) {
+        return render_redis_reply(*typed, s._writer.version());
+    }
     auto bytes = value_access::read(r._context, *r._entry);
     if (!bytes) {
         // A chunk vanished or failed its hash after the lookup.
@@ -1265,6 +1278,10 @@ auto redis_front_end<Host, Logger, Metrics>::handle_strlen(session& s, const res
         return r._error;
     }
     bool present = r._entry && !is_expired(*r._entry);
+    if (auto typed =
+            redis_collection_read(r._entry.get(), redis_command_id::strlen, {}, now_ms())) {
+        return render_redis_reply(*typed, s._writer.version());
+    }
     return s._writer.integer(present ? static_cast<std::int64_t>(value_access::size(*r._entry))
                                      : 0);
 }
@@ -1302,6 +1319,11 @@ auto redis_front_end<Host, Logger, Metrics>::handle_getrange(session& s, const r
     }
     if (!r._entry || is_expired(*r._entry)) {
         return s._writer.bulk("");
+    }
+    if (auto typed =
+            redis_collection_read(r._entry.get(), redis_command_id::getrange,
+                                  std::span<const std::string>(cmd._argv).subspan(2), now_ms())) {
+        return render_redis_reply(*typed, s._writer.version());
     }
     // Redis 7 (getrangeCommand): negative indexes count from the end, both
     // ends are inclusive, and out-of-range bounds clamp to the string
@@ -4371,6 +4393,14 @@ auto redis_front_end<Host, Logger, Metrics>::cross_group_exec(session& s, redis_
                     if ((!copy && !may_mutate(0)) || (dst_live && !may_mutate(1))) {
                         return stop(conflict());
                     }
+                    const auto plain = source_is_string(s, src);
+                    if (!plain) {
+                        return stop(s._writer.error("ERR shard has no reachable leader, retry"));
+                    }
+                    if (!*plain) {
+                        return stop(s._writer.error(
+                            "CROSSSLOT Keys in request don't hash to the same slot"));
+                    }
                     const auto deadline = source_deadline(s, src);
                     if (!deadline) {
                         return stop(s._writer.error("ERR shard has no reachable leader, retry"));
@@ -4396,6 +4426,24 @@ auto redis_front_end<Host, Logger, Metrics>::cross_group_exec(session& s, redis_
 
 /// The deadline of `src` (0: none), from its group's leader here or through
 /// the internal hop; `nullopt` when no leader answered.
+template<typename Host, typename Logger, typename Metrics>
+auto redis_front_end<Host, Logger, Metrics>::source_is_string(session& s, const std::string& src)
+    -> std::optional<bool> {
+    auto r = read_local(s, src);
+    if (r._error.empty()) {
+        return !r._entry || is_expired(*r._entry) ||
+               redis_entry_type(*r._entry) == redis_value_type::string;
+    }
+    if (!r._forward_to) {
+        return std::nullopt;
+    }
+    auto reply = forward_argv({"TYPE", src}, *r._forward_to, "TYPE");
+    if (!reply || !reply->starts_with('+')) {
+        return std::nullopt;
+    }
+    return *reply == "+string\r\n" || *reply == "+none\r\n";
+}
+
 template<typename Host, typename Logger, typename Metrics>
 auto redis_front_end<Host, Logger, Metrics>::source_deadline(session& s, const std::string& src)
     -> std::optional<std::uint64_t> {
@@ -4473,6 +4521,15 @@ auto redis_front_end<Host, Logger, Metrics>::handle_key_read(session& s, std::st
                 id, present, present ? r._entry->_expire_at_ms : 0, now_ms());
             return render_redis_reply(*reply, s._writer.version());
         }
+        if (upper == "TYPE" || upper == "OBJECT") {
+            const std::vector<std::string> encoding{"ENCODING"};
+            if (auto typed = redis_collection_read(
+                    r._entry.get(),
+                    upper == "TYPE" ? redis_command_id::type : redis_command_id::object, encoding,
+                    now_ms())) {
+                return render_redis_reply(*typed, s._writer.version());
+            }
+        }
         if (upper == "TYPE") {
             return s._writer.simple_string(present ? "string" : "none");
         }
@@ -4503,6 +4560,96 @@ auto redis_front_end<Host, Logger, Metrics>::handle_key_read(session& s, std::st
         }
     }
     return s._writer.integer(touched);
+}
+
+template<typename Host, typename Logger, typename Metrics>
+auto redis_front_end<Host, Logger, Metrics>::handle_hash(session& s, const redis_command_info& info,
+                                                         const resp_command& cmd) -> std::string {
+    const auto id = static_cast<redis_command_id>(info.id);
+    const auto& a = cmd._argv;
+    const auto& key = a[1];
+    const std::string upper(info.name);
+    if (auto e = authorize(s, upper, {key})) {
+        return *e;
+    }
+    if (redis_hash_detail::is_hash_write(id)) {
+        std::vector<std::string> args{key};
+        if (id != redis_command_id::hdel) {
+            args.push_back(std::to_string(_config._max_collection_bytes));
+            args.push_back(std::to_string(_config._max_collection_elements));
+        }
+        if (id == redis_command_id::hincrby && !redis_string_detail::parse_int64(a[3])) {
+            return s._writer.error("ERR value is not an integer or out of range");
+        }
+        if (id == redis_command_id::hincrbyfloat && !parse_redis_float128(a[3])) {
+            return s._writer.error("ERR value is not a valid float");
+        }
+        args.insert(args.end(), a.begin() + 2, a.end());
+        return propose_exec(s, cmd, key, id, std::move(args), id != redis_command_id::hdel);
+    }
+
+    // A read: arguments the data side expects already valid.
+    std::vector<std::string> args(a.begin() + 2, a.end());
+    if (id == redis_command_id::hrandfield && !args.empty()) {
+        if (!redis_string_detail::parse_int64(args[0])) {
+            return s._writer.error("ERR value is not an integer or out of range");
+        }
+        if (args.size() == 2) {
+            if (resp_to_upper(args[1]) != "WITHVALUES") {
+                return s._writer.error("ERR syntax error");
+            }
+            args[1] = "WITHVALUES";
+        }
+    }
+    if (auto refused = format_refusal(s, key, k_redis_typed_values_level)) {
+        return *refused;
+    }
+    auto r = read_local(s, key);
+    if (!r._error.empty()) {
+        if (r._forward_to) {
+            if (auto reply = forward(s, cmd, *r._forward_to)) {
+                if (s._writer.version() < 3) {
+                    return *reply;
+                }
+                // The internal hop answers in RESP2; give a RESP3 client the
+                // shapes it expects (Redis's own RESP2 downgrade, undone).
+                auto tree = parse_resp2_reply(*reply);
+                if (!tree) {
+                    return *reply;
+                }
+                if (id == redis_command_id::hgetall && tree->_kind == redis_reply_kind::array) {
+                    tree = redis_reply::map(std::move(tree->_elements));
+                } else if (id == redis_command_id::hrandfield && args.size() == 2 &&
+                           tree->_kind == redis_reply_kind::array) {
+                    std::vector<redis_reply> pairs;
+                    for (std::size_t i = 0; i + 1 < tree->_elements.size(); i += 2) {
+                        pairs.push_back(redis_reply::array(
+                            {std::move(tree->_elements[i]), std::move(tree->_elements[i + 1])}));
+                    }
+                    tree = redis_reply::array(std::move(pairs));
+                }
+                return render_redis_reply(*tree, s._writer.version());
+            }
+        }
+        return r._error;
+    }
+    if constexpr (requires(const entry_type& e) {
+                      e._value;
+                      e._expire_at_ms;
+                  }) {
+        // The handle keeps the entry, and its immutable hash, alive: the
+        // reply is built here, after the lock (Requirement 10.2).
+        auto reply = evaluate_redis_read(r._entry.get(), id, args, now_ms());
+        if (!reply) {
+            return s._writer.error("ERR unknown command id " + std::to_string(info.id));
+        }
+        if (id == redis_command_id::hrandfield && args.size() == 2 && s._writer.version() < 3) {
+            *reply = redis_flatten_pairs(std::move(*reply));
+        }
+        return render_redis_reply(*reply, s._writer.version());
+    } else {
+        return s._writer.error("ERR this command needs KYTHIRA_CACHE_PERSISTENCE=memory or engine");
+    }
 }
 
 }  // namespace kythira

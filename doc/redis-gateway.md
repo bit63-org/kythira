@@ -132,6 +132,8 @@ The Redis front end:
 | `KYTHIRA_REDIS_ALLOW_ANONYMOUS` | `false` | Run with no ACL at all. Every connection is an admin. The daemon warns at every start |
 | `KYTHIRA_REDIS_READ_CONSISTENCY` | `leader` | `leader` (reads go to the shard leader), `any_replica` (any local replica answers, may lag) or `linearizable` (a read goes through the log) |
 | `KYTHIRA_REDIS_MAX_VALUE_BYTES` | `8388608` | Largest value a `SET` may carry; larger is refused |
+| `KYTHIRA_REDIS_MAX_COLLECTION_BYTES` | `67108864` | Largest total size of one hash, set or list (each element's bytes plus 16); a write past it is refused |
+| `KYTHIRA_REDIS_MAX_COLLECTION_ELEMENTS` | `4194304` | Most elements in one hash, set or list; a write past it is refused |
 | `KYTHIRA_REDIS_MAX_CLIENTS` | `1024` | Connection cap; beyond it new connections are refused |
 | `KYTHIRA_REDIS_IDLE_TIMEOUT_MS` | `300000` | Idle connections are closed after this |
 | `KYTHIRA_REDIS_COMMAND_TIMEOUT_MS` | `5000` | A command that cannot be committed in this time answers with an error |
@@ -759,6 +761,52 @@ mutable prefixes, and `COPY REPLACE` needs an existing destination to be;
 `MSETNX` and `COPY` to a new key only create. Before the typed-values gate a
 multi-key `DEL` keeps its earlier form: a transaction where transactions
 are on, refused elsewhere.
+
+## Hashes
+
+`HSET`, `HSETNX`, `HMSET`, `HGET`, `HMGET`, `HDEL`, `HEXISTS`, `HLEN`,
+`HSTRLEN`, `HKEYS`, `HVALS`, `HGETALL`, `HINCRBY`, `HINCRBYFLOAT` and
+`HRANDFIELD` behave as in Redis 7, with the in-memory store
+(`KYTHIRA_CACHE_PERSISTENCE=memory`) once a shard has passed format level 3;
+the engine store follows with a later release, and the disk-backed cache
+stays string-only. `HSCAN` arrives with `SCAN`.
+
+- A key holds one type. A hash command on a string, or a string command
+  (`GET`, `INCR`, `APPEND`, ...) on a hash, answers `-WRONGTYPE Operation
+  against a key holding the wrong kind of value` and changes nothing.
+  Plain `SET` replaces a key of any type, as in Redis. `TYPE` and
+  `OBJECT ENCODING` (`listpack` or `hashtable`, by Redis's default
+  thresholds) report it.
+- `HDEL` of the last field deletes the key. Field writes keep the key's
+  deadline; `EXPIRE`, `PERSIST`, `RENAME`, `COPY` and `DEL` work on a hash as
+  on a string. A hash does not move between shards yet: a `RENAME` or `COPY`
+  whose keys are in different shards answers `-CROSSSLOT`.
+- Fields come back in byte order of the field, on every replica. Redis
+  promises no order for `HGETALL`, `HKEYS` or `HVALS`; byte order is
+  Kythira's.
+- One hash holds at most `KYTHIRA_REDIS_MAX_COLLECTION_ELEMENTS` fields and
+  `KYTHIRA_REDIS_MAX_COLLECTION_BYTES` (each field and value's bytes plus 16).
+  A write past either answers `-ERR collection exceeds the configured maximum
+  of N elements` (or `bytes`) and changes nothing. The limits travel in the
+  write's log entry, so every replica refuses the same write. A key is never
+  split across shards, so its whole value lands in one shard's snapshots.
+- `HINCRBYFLOAT` uses the same 128-bit arithmetic and formatting as
+  `INCRBYFLOAT`.
+- `HRANDFIELD` picks on the node that serves the read, never in the log.
+  With `WITHVALUES` a RESP3 connection gets `[field, value]` pairs and a
+  RESP2 one a flat array, as from Redis.
+- Under the immutable-value rule, creating a hash is allowed and changing an
+  existing one needs the key in one of the user's mutable prefixes; a write
+  that changes nothing (the same value again, `HDEL` of a missing field)
+  succeeds. ACL key scopes follow Redis's key specs: `HINCRBY` and
+  `HINCRBYFLOAT` need read and write, `HLEN`, `HEXISTS` and `HSTRLEN` only
+  look at metadata.
+
+A hash is stored in chunks of at most 128 fields. A write copies the one
+chunk it changes and shares the rest, so a write to a large hash costs a
+chunk, not the hash; a read takes a handle to the hash under the shard's
+lock and builds its reply after releasing it, so `HGETALL` on a large hash
+never copies it under the lock.
 
 ## Transactions
 

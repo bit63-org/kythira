@@ -47,6 +47,7 @@
 #include <kythira/redis/redis_float128.hpp>
 #include <kythira/redis/redis_kv_commands.hpp>
 #include <kythira/redis/redis_reply.hpp>
+#include <kythira/redis/redis_value.hpp>
 
 #include <algorithm>
 #include <cstddef>
@@ -188,6 +189,26 @@ auto apply_redis_string_exec(Store& store, const redis_kv_exec_command& c, std::
         live = nullptr;
     }
     const bool may_mutate = may_mutate_key(c, 0);
+    // A collection under the key (task 7): plain `SET` replaces it, `SETNX`
+    // sees a live key, and everything else is a type error that changes
+    // nothing (Requirement 9.1).
+    const bool string_family = id == redis_command_id::set || id == redis_command_id::setnx ||
+                               id == redis_command_id::incrby ||
+                               id == redis_command_id::incrbyfloat ||
+                               id == redis_command_id::getdel || id == redis_command_id::getex ||
+                               id == redis_command_id::append || id == redis_command_id::setrange;
+    if (!string_family) {
+        return std::nullopt;
+    }
+    if (live && redis_entry_type(*live) != redis_value_type::string) {
+        const bool replaces = (id == redis_command_id::set &&
+                               std::find(a.begin() + std::min<std::ptrdiff_t>(2, std::ssize(a)),
+                                         a.end(), std::string_view("GET")) == a.end()) ||
+                              id == redis_command_id::setnx;
+        if (!replaces) {
+            return redis_reply::error(std::string(k_redis_wrongtype));
+        }
+    }
     auto old_value = [&]() -> redis_reply {
         return live ? redis_reply::bulk(to_string(live->_value)) : redis_reply::null();
     };
@@ -232,7 +253,8 @@ auto apply_redis_string_exec(Store& store, const redis_kv_exec_command& c, std::
                 return get ? reply : redis_reply::null();
             }
             if (live && !may_mutate) {
-                if (!same_bytes(live->_value, a[1])) {
+                if (redis_entry_type(*live) != redis_value_type::string ||
+                    !same_bytes(live->_value, a[1])) {
                     return redis_reply::error(std::string(k_conflict));
                 }
                 return reply;
@@ -336,7 +358,7 @@ auto apply_redis_string_exec(Store& store, const redis_kv_exec_command& c, std::
                     if (!may_mutate) {
                         return redis_reply::error(std::string(k_conflict));
                     }
-                    store.put(key, live->_value, 0);
+                    redis_store_put_copy(store, key, *live, 0);
                 }
                 return reply;
             }
@@ -351,7 +373,7 @@ auto apply_redis_string_exec(Store& store, const redis_kv_exec_command& c, std::
                 if (*pxat <= t) {
                     (void)store.erase(key);
                 } else {
-                    store.put(key, live->_value, *pxat);
+                    redis_store_put_copy(store, key, *live, *pxat);
                 }
                 return reply;
             }

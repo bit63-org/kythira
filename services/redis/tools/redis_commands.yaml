@@ -676,7 +676,7 @@ commands:
     acl: [write, hash, fast]
     keys: [1, 1, 1]
     path: W
-    status: planned
+    status: shipped
     task: 7
   - name: HSETNX
     id: 60
@@ -687,7 +687,7 @@ commands:
     acl: [write, hash, fast]
     keys: [1, 1, 1]
     path: W
-    status: planned
+    status: shipped
     task: 7
   - name: HMSET
     id: 61
@@ -698,7 +698,7 @@ commands:
     acl: [write, hash, fast]
     keys: [1, 1, 1]
     path: W
-    status: planned
+    status: shipped
     task: 7
   - name: HGET
     id: 62
@@ -709,7 +709,7 @@ commands:
     acl: [read, hash, fast]
     keys: [1, 1, 1]
     path: R
-    status: planned
+    status: shipped
     task: 7
   - name: HMGET
     id: 63
@@ -720,7 +720,7 @@ commands:
     acl: [read, hash, fast]
     keys: [1, 1, 1]
     path: R
-    status: planned
+    status: shipped
     task: 7
   - name: HDEL
     id: 64
@@ -731,7 +731,7 @@ commands:
     acl: [write, hash, fast]
     keys: [1, 1, 1]
     path: W
-    status: planned
+    status: shipped
     task: 7
   - name: HEXISTS
     id: 65
@@ -742,7 +742,7 @@ commands:
     acl: [read, hash, fast]
     keys: [1, 1, 1]
     path: R
-    status: planned
+    status: shipped
     task: 7
   - name: HLEN
     id: 66
@@ -753,7 +753,7 @@ commands:
     acl: [read, hash, fast]
     keys: [1, 1, 1]
     path: R
-    status: planned
+    status: shipped
     task: 7
   - name: HSTRLEN
     id: 67
@@ -764,7 +764,7 @@ commands:
     acl: [read, hash, fast]
     keys: [1, 1, 1]
     path: R
-    status: planned
+    status: shipped
     task: 7
   - name: HKEYS
     id: 68
@@ -775,7 +775,7 @@ commands:
     acl: [read, hash, slow]
     keys: [1, 1, 1]
     path: R
-    status: planned
+    status: shipped
     task: 7
   - name: HVALS
     id: 69
@@ -786,7 +786,7 @@ commands:
     acl: [read, hash, slow]
     keys: [1, 1, 1]
     path: R
-    status: planned
+    status: shipped
     task: 7
   - name: HGETALL
     id: 70
@@ -797,7 +797,7 @@ commands:
     acl: [read, hash, slow]
     keys: [1, 1, 1]
     path: R
-    status: planned
+    status: shipped
     task: 7
   - name: HINCRBY
     id: 71
@@ -808,7 +808,7 @@ commands:
     acl: [write, hash, fast]
     keys: [1, 1, 1]
     path: W
-    status: planned
+    status: shipped
     task: 7
   - name: HINCRBYFLOAT
     id: 72
@@ -819,7 +819,7 @@ commands:
     acl: [write, hash, fast]
     keys: [1, 1, 1]
     path: W
-    status: planned
+    status: shipped
     task: 7
   - name: HRANDFIELD
     id: 73
@@ -830,7 +830,7 @@ commands:
     acl: [read, hash, slow]
     keys: [1, 1, 1]
     path: R
-    status: planned
+    status: shipped
     task: 7
   - name: SADD
     id: 74
