@@ -1047,6 +1047,26 @@ public:
         return it == _log_state->closed.end() ? nullptr : &*it;
     }
 
+    /// Whether `key`, which this group no longer names, is a stream it
+    /// closed with no records and then dropped (`trim_change_log` drops an
+    /// empty closed stream at once). A reader can still hold an iterator
+    /// into one: listed while it was open, then closed by a split before
+    /// the reader got to it. AWS answers such a shard as ended, with no
+    /// records, so this does too rather than "Shard does not exist".
+    ///
+    /// The group holding the key's start continues every stream that
+    /// start opened, so the key names an older epoch than the group's
+    /// own. A reader of an empty stream is always at sequence 1 (its
+    /// TRIM_HORIZON and LATEST); a reader past 1 was in a stream with
+    /// records, trimmed past retention, which stays unknown.
+    [[nodiscard]] auto ended_empty(std::string_view key, std::uint64_t from_seq) const -> bool {
+        if (!_log_state || from_seq != 1) {
+            return false;
+        }
+        const auto parsed = parse_change_stream_key(key);
+        return parsed && _range.contains(parsed->first) && parsed->second < _log_state->epoch;
+    }
+
     /// The group's store streams as shards (task 16): the closed ones it
     /// still keeps, then the open one. A group with no logged write yet
     /// shows the stream its first one will open, so a stream enabled on
@@ -1098,6 +1118,8 @@ public:
             if (!_log_state && key == change_stream_key(_range.start, 0)) {
                 p.known = true;
                 p.open = true;
+            } else if (ended_empty(key, from_seq)) {
+                p.known = true;
             }
             return p;
         }
