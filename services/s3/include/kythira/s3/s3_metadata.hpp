@@ -11,9 +11,10 @@
 /// `metadata_access` is what the handlers need: propose an index entry
 /// and get what applying it produced, and the reads, each answering at or
 /// after every write the caller has seen acknowledged (Requirement 7.2).
-/// The handlers are templates over it, so the deployments of task 16
-/// (local, remote, hybrid, through the multi-Raft host) plug in without
-/// touching them.
+/// The handlers are templates over it, so the other deployments plug in
+/// without touching them: remote and hybrid access are
+/// `s3_remote_metadata.hpp` (task 16), and the multi-Raft host's group is
+/// one more implementation.
 ///
 /// `local_metadata` is the in-process form: one state machine over a
 /// memory engine, entries applied in order under a mutex with the log
@@ -30,12 +31,21 @@
 #include <cstdint>
 #include <mutex>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
 
 namespace kythira::s3 {
+
+/// A `metadata_access` call that no metadata node answered (the remote
+/// implementation, `s3_remote_metadata.hpp`). The pipeline answers it with
+/// `503 ServiceUnavailable`; a worker's pass stops and is tried again.
+class metadata_unavailable : public std::runtime_error {
+public:
+    using std::runtime_error::runtime_error;
+};
 
 template<typename M>
 concept metadata_access =

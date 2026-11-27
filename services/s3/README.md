@@ -64,7 +64,12 @@ module's consumers (Requirement 17.3).
 | `doc/unsupported.md` | every other operation, with its planned task, reason and the exact error it returns (`NotImplemented`, 501) | 1 onward |
 | `tools/check_coverage.py`, `tools/test_check_coverage.py` | the coverage check (Requirement 2.2) and its fixture tests | 1 |
 | `tests/evidence/` | the recording stub, the client scenarios (AWS CLI v2, boto3, Java, Go and JS SDKs, rclone, Mountpoint) and the checked-in wire evidence with what it means for the gateway; `s3_wire_evidence` checks the files | 1 |
-| `cmd/s3_gateway_node/` | the daemon; a placeholder with `--help` and `--self-test` until tasks 5-7 | 1 |
+| `include/kythira/s3/s3_roles.hpp` | `KYTHIRA_S3_ROLES` (gateway, front_end, metadata, blobs, mapped onto the shared layer roles), the layouts that serve today, and who may call the metadata and chunk routes; `s3_layers_test` | 16 |
+| `include/kythira/s3/s3_remote_metadata.hpp` | the metadata layer over the internal transport: the wire, `metadata_server`, `remote_metadata`, the failover `endpoint_transport`, and `hybrid_metadata`, which picks local or remote per call; `s3_layers_test` | 16 |
+| `include/kythira/s3/s3_workers.hpp` | `worker_runner`: the leader-side workers on a schedule, on metadata nodes only, gated by leadership; `s3_layers_test` | 16 |
+| `include/kythira/s3/s3_outbound.hpp` | SigV4-signed requests to KMS, SQS, SNS, Kinesis and S3 (endpoints, credentials, the principal forwarded to a Kythira KMS) behind the module's transport functions; `s3_layers_test` | 16 |
+| `include/kythira/s3/s3_node_config.hpp` | the daemon's `KYTHIRA_S3_*` settings and the checks that stop a node that cannot serve; `s3_layers_test` | 16 |
+| `cmd/s3_gateway_node/` | the daemon: the roles `KYTHIRA_S3_ROLES` names, the API, website and internal (mutual TLS, layer identities) listeners, the chunk store, the workers and the outbound transports; `--help` lists every setting, `--self-test` checks the operation table; `s3_gateway_node_test` runs it co-located and split | 1, 16 |
 
 ## Core targets and variables used
 
@@ -83,6 +88,12 @@ package to export.
 | `include/raft/persistent_state_machine.hpp`, `memory_kv_engine.hpp` | the index's state machine contract and its test engine |
 | `add_raft_completion_test` (`kythira_test_pch`) | `s3_index_state_machine_test` |
 | `cmake/kythira_test_helpers.cmake` | `kythira_scale_test_timeouts` |
+| `network_simulator`, `KYTHIRA_FUTURE_BACKEND_AVAILABLE`, `Boost_FOUND` | the future backend the persistence headers need, for `s3_gateway_node`, which is not built without them |
+| `include/raft/beast_https_server.hpp`, `mtls_https_client.hpp` | the daemon's listeners and its internal and outbound HTTPS client |
+| `include/raft/layer_roles.hpp`, `layer_identity.hpp` | roles, layer identities in certificates, and the internal route guard |
+| `include/raft/static_key_authorizer.hpp`, `static_keys_file.hpp` | the daemon's access keys |
+| `include/raft/record_segment_store.hpp` | the daemon's change log store |
+| `include/raft/kms_forwarding.hpp`, `sigv4_verifier.hpp` | signing outbound requests and forwarding the caller to a Kythira KMS |
 
 ## What a split would still need
 

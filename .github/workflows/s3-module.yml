@@ -25,10 +25,13 @@
 # request. Whoever merges a pull request that touches the module waits for
 # this workflow too (services/README.md).
 #
-# The container job, which runs the module's compose scenario under rootful
-# Docker and rootless Podman (CLAUDE.md, "Container runtime compatibility";
-# Requirement 1.5), joins with the first task whose daemon serves requests.
-# There is nothing to run in a container yet.
+# s3_gateway_node serves from task 16; its end-to-end test
+# (s3_gateway_node_test, co-located and split over mutual TLS) carries the
+# s3 label and runs with the rest. The container job, which runs the
+# module's compose scenario under rootful Docker and rootless Podman
+# (CLAUDE.md, "Container runtime compatibility"; Requirement 1.5), joins
+# with task 20's docker-chaos scenario, the first that needs several
+# daemons in containers.
 
 name: S3 Module
 
@@ -53,6 +56,12 @@ on:
       # The REST-XML codec the service routes and answers with (task 3).
       - "include/raft/aws_rest_xml_protocol.hpp"
       - "include/raft/aws_query_protocol.hpp"
+      # The daemon's listeners, internal client and layer identities
+      # (task 16).
+      - "include/raft/beast_https_server.hpp"
+      - "include/raft/mtls_https_client.hpp"
+      - "include/raft/layer_identity.hpp"
+      - "include/raft/layer_roles.hpp"
   pull_request:
     branches: ['**']
     # Keep in step with the push list above.
@@ -74,6 +83,12 @@ on:
       # The REST-XML codec the service routes and answers with (task 3).
       - "include/raft/aws_rest_xml_protocol.hpp"
       - "include/raft/aws_query_protocol.hpp"
+      # The daemon's listeners, internal client and layer identities
+      # (task 16).
+      - "include/raft/beast_https_server.hpp"
+      - "include/raft/mtls_https_client.hpp"
+      - "include/raft/layer_identity.hpp"
+      - "include/raft/layer_roles.hpp"
   workflow_dispatch:
 
 permissions:

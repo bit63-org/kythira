@@ -48,8 +48,19 @@ add_test(NAME s3_wire_evidence
             "${_s3_dir}model/s3-2006-03-01.json"
             "${_s3_dir}tests/evidence/data")
 
-# Task 1: s3_gateway_node links and runs.
-add_test(NAME s3_gateway_node_self_test COMMAND s3_gateway_node --self-test)
+# Task 1: s3_gateway_node links and runs. Task 16: it serves, co-located
+# and split (s3_gateway_node_test.py, standard-library SigV4, openssl for
+# the split layout's layer identity certificates). The daemon needs a
+# future backend and Boost.Beast; without them it is not built
+# (../cmd/CMakeLists.txt).
+set(_s3_node_tests)
+if(TARGET s3_gateway_node)
+    add_test(NAME s3_gateway_node_self_test COMMAND s3_gateway_node --self-test)
+    add_test(NAME s3_gateway_node_test
+        COMMAND "${Python3_EXECUTABLE}" "${_s3_dir}tests/s3_gateway_node_test.py"
+                $<TARGET_FILE:s3_gateway_node>)
+    set(_s3_node_tests s3_gateway_node_self_test s3_gateway_node_test)
+endif()
 
 # Task 3: S3's route table over the core REST-XML router. Every request the
 # recorded clients sent (tests/evidence/data/) must route to the operation
@@ -200,12 +211,25 @@ elseif(TARGET Boost::json)
 endif()
 target_compile_definitions(s3_service_test PRIVATE KYTHIRA_S3_DIR_DEFAULT="${_s3_dir}")
 
+# Task 16: roles and layouts, the internal route rules, the metadata layer
+# over the wire (remote, hybrid, the pipeline on remote metadata), the
+# leader-gated worker runner, outbound SigV4 calls and the daemon's
+# settings. It includes the persistent state machine contract, hence the
+# shared test PCH target.
+add_raft_completion_test(s3_layers_test s3_layers_test.cpp)
+target_link_libraries(s3_layers_test PRIVATE kythira_s3)
+if(TARGET boost_json)
+    target_link_libraries(s3_layers_test PRIVATE boost_json)
+elseif(TARGET Boost::json)
+    target_link_libraries(s3_layers_test PRIVATE Boost::json)
+endif()
+
 set_tests_properties(
     s3_model_coverage
     s3_model_coverage_checker
     s3_operations_up_to_date
     s3_wire_evidence
-    s3_gateway_node_self_test
+    ${_s3_node_tests}
     s3_routing_test
     s3_index_state_machine_test
     s3_data_path_test
@@ -221,6 +245,11 @@ set_tests_properties(
     s3_notifications_test
     s3_website_rules_test
     s3_service_test
+    s3_layers_test
     PROPERTIES LABELS "unit;s3;s3-module" TIMEOUT 60)
+if(TARGET s3_gateway_node)
+    # Two daemons, certificates and a metadata node stopped mid-test.
+    set_tests_properties(s3_gateway_node_test PROPERTIES TIMEOUT 300)
+endif()
 
 kythira_scale_test_timeouts()
