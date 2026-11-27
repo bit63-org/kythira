@@ -14,6 +14,7 @@
 
 #include <cstdint>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -106,4 +107,102 @@ BOOST_FIXTURE_TEST_CASE(an_unknown_command_id_halts, fixture) {
     redis_kv_exec_command c{"k", 65000, 1000, 0, {"k"}, {}};
     BOOST_CHECK_THROW((void)sm.apply(encode_redis_kv_command(c), ++index),
                       redis_unknown_command_id);
+}
+
+// Task 4: the expiry family. The front end normalises EXPIRE, PEXPIRE and
+// EXPIREAT to PEXPIREAT with an absolute deadline; apply() decides.
+BOOST_FIXTURE_TEST_CASE(pexpireat_conditions_follow_redis, fixture) {
+    using id = redis_command_id;
+    BOOST_CHECK(exec(id::pexpireat, {"missing", "9000"}) == redis_reply::integer(0));
+    BOOST_CHECK(exec(id::set, {"k", "v"}) == redis_reply::simple("OK"));
+    // No deadline yet: XX and GT refuse, NX and LT pass.
+    BOOST_CHECK(exec(id::pexpireat, {"k", "9000", "XX"}) == redis_reply::integer(0));
+    BOOST_CHECK(exec(id::pexpireat, {"k", "9000", "GT"}) == redis_reply::integer(0));
+    BOOST_CHECK(read(id::pttl, "k") == redis_reply::integer(-1));
+    BOOST_CHECK(exec(id::pexpireat, {"k", "9000", "LT"}) == redis_reply::integer(1));
+    BOOST_CHECK(read(id::pexpiretime, "k") == redis_reply::integer(9000));
+    BOOST_CHECK(exec(id::pexpireat, {"k", "8000", "NX"}) == redis_reply::integer(0));
+    // GT and LT against the deadline 9000.
+    BOOST_CHECK(exec(id::pexpireat, {"k", "9000", "GT"}) == redis_reply::integer(0));
+    BOOST_CHECK(exec(id::pexpireat, {"k", "9500", "GT", "XX"}) == redis_reply::integer(1));
+    BOOST_CHECK(exec(id::pexpireat, {"k", "9500", "LT"}) == redis_reply::integer(0));
+    BOOST_CHECK(exec(id::pexpireat, {"k", "8500", "LT"}) == redis_reply::integer(1));
+    BOOST_CHECK(read(id::pttl, "k") == redis_reply::integer(7500));
+    BOOST_CHECK(read(id::ttl, "k") == redis_reply::integer(8));
+    BOOST_CHECK(read(id::expiretime, "k") == redis_reply::integer(9));
+    BOOST_CHECK(read(id::pttl, "missing") == redis_reply::integer(-2));
+    BOOST_CHECK(read(id::expiretime, "missing") == redis_reply::integer(-2));
+    // PERSIST drops the deadline once.
+    BOOST_CHECK(exec(id::persist, {"k"}) == redis_reply::integer(1));
+    BOOST_CHECK(exec(id::persist, {"k"}) == redis_reply::integer(0));
+    BOOST_CHECK(exec(id::persist, {"missing"}) == redis_reply::integer(0));
+    BOOST_CHECK(read(id::pexpiretime, "k") == redis_reply::integer(-1));
+    BOOST_CHECK(read(id::get, "k") == redis_reply::bulk("v"));
+}
+
+BOOST_FIXTURE_TEST_CASE(a_past_deadline_deletes_the_key, fixture) {
+    using id = redis_command_id;
+    BOOST_CHECK(exec(id::set, {"k", "v"}) == redis_reply::simple("OK"));
+    // GT on a key without a deadline refuses even a past time: no delete.
+    BOOST_CHECK(exec(id::pexpireat, {"k", "-5000", "GT"}) == redis_reply::integer(0));
+    BOOST_CHECK(read(id::exists, "k") == redis_reply::integer(1));
+    // A deadline at the command time is already past: the key goes, 1.
+    BOOST_CHECK(exec(id::pexpireat, {"k", "1000"}) == redis_reply::integer(1));
+    BOOST_CHECK(read(id::exists, "k") == redis_reply::integer(0));
+    BOOST_CHECK(exec(id::set, {"n", "v"}) == redis_reply::simple("OK"));
+    BOOST_CHECK(exec(id::pexpireat, {"n", "-5000"}) == redis_reply::integer(1));
+    BOOST_CHECK(read(id::exists, "n") == redis_reply::integer(0));
+    BOOST_CHECK_EQUAL(sm.approximate_key_count(), 0U);
+}
+
+BOOST_FIXTURE_TEST_CASE(deadlines_change_under_the_immutable_rule, fixture) {
+    using id = redis_command_id;
+    const auto rule = redis_kv_exec_policy::immutable_rule;
+    BOOST_CHECK(exec(id::set, {"k", "v"}, 1000, rule) == redis_reply::simple("OK"));
+    BOOST_CHECK(exec(id::pexpireat, {"k", "9000"}, 1000, rule) == redis_reply::integer(1));
+    BOOST_CHECK(exec(id::persist, {"k"}, 1000, rule) == redis_reply::integer(1));
+    BOOST_CHECK(exec(id::pexpireat, {"k", "0"}, 1000, rule) == redis_reply::integer(1));
+    BOOST_CHECK(read(id::exists, "k") == redis_reply::integer(0));
+}
+
+BOOST_FIXTURE_TEST_CASE(replicas_agree_on_expiry_replies, fixture) {
+    // A second replica applying the same log reaches the same replies and
+    // state, whatever its own clock says: only the stamped times count.
+    fixture other;
+    using id = redis_command_id;
+    const std::vector<std::pair<std::vector<std::string>, std::uint64_t>> log{
+        {{"k", "v", "PXAT", "3000"}, 1000}, {{"k", "2500", "LT"}, 1200}, {{"k", "2000"}, 2600}};
+    BOOST_CHECK(exec(id::set, log[0].first, log[0].second) ==
+                other.exec(id::set, log[0].first, log[0].second));
+    BOOST_CHECK(exec(id::pexpireat, log[1].first, log[1].second) == redis_reply::integer(1));
+    BOOST_CHECK(other.exec(id::pexpireat, log[1].first, log[1].second) == redis_reply::integer(1));
+    // At t=2600 the key's 2500 deadline has passed: it is gone, 0.
+    BOOST_CHECK(exec(id::pexpireat, log[2].first, log[2].second) == redis_reply::integer(0));
+    BOOST_CHECK(other.exec(id::pexpireat, log[2].first, log[2].second) == redis_reply::integer(0));
+}
+
+// The sweep names each key with the deadline the leader saw. An EXPIRE or
+// PERSIST that lands in the log between the sweep being built and applied
+// changes that deadline, so the sweep must leave the key alone; one that
+// lands after the sweep finds the key gone.
+BOOST_FIXTURE_TEST_CASE(sweep_racing_expire_and_persist, fixture) {
+    using id = redis_command_id;
+    BOOST_CHECK(exec(id::set, {"e", "v", "PXAT", "5000"}) == redis_reply::simple("OK"));
+    BOOST_CHECK(exec(id::set, {"p", "v", "PXAT", "5000"}) == redis_reply::simple("OK"));
+    BOOST_CHECK(exec(id::set, {"late", "v", "PXAT", "5000"}) == redis_reply::simple("OK"));
+    const auto sweep = sm.collect_expired(5000, 16);
+    BOOST_REQUIRE_EQUAL(sweep.size(), 3U);
+
+    // Stamped before the deadline, applied before the sweep.
+    BOOST_CHECK(exec(id::pexpireat, {"e", "9000"}, 4990) == redis_reply::integer(1));
+    BOOST_CHECK(exec(id::persist, {"p"}, 4991) == redis_reply::integer(1));
+    (void)sm.apply(encode_redis_kv_command(redis_kv_sweep_command{sweep}), ++index);
+
+    BOOST_CHECK(read(id::pexpiretime, "e", {}, 5000) == redis_reply::integer(9000));
+    BOOST_CHECK(read(id::pttl, "p", {}, 5000) == redis_reply::integer(-1));
+    BOOST_CHECK(read(id::exists, "late", {}, 5000) == redis_reply::integer(0));
+    BOOST_CHECK_EQUAL(sm.approximate_key_count(), 2U);
+    // After the sweep, the deleted key cannot be revived by EXPIRE or PERSIST.
+    BOOST_CHECK(exec(id::pexpireat, {"late", "9000"}, 4995) == redis_reply::integer(0));
+    BOOST_CHECK(exec(id::persist, {"late"}, 4996) == redis_reply::integer(0));
 }

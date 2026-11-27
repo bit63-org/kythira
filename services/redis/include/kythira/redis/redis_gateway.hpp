@@ -35,7 +35,9 @@
 #include <kythira/redis/redis_gateway_value_access.hpp>
 #include <kythira/redis/redis_kv_state_machine.hpp>
 #include <kythira/redis/redis_reply.hpp>
+#include <kythira/redis/redis_expiry_exec.hpp>
 #include <kythira/redis/redis_string_exec.hpp>
+#include <kythira/redis/redis_string_read.hpp>
 #include <kythira/redis/redis_server_identity.hpp>
 #include <kythira/redis/redis_layer_membership.hpp>
 #include <kythira/redis/redis_layer_roles.hpp>

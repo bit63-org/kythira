@@ -150,7 +150,8 @@ enum class acl_decision : std::uint8_t {
         upper_name == "MGET" || upper_name == "MULTI" || upper_name == "EXEC" ||
         upper_name == "DISCARD" || upper_name == "KYTHIRA.ISOLATION" || upper_name == "WATCH" ||
         upper_name == "UNWATCH" || upper_name == "TYPE" || upper_name == "TOUCH" ||
-        upper_name == "OBJECT") {
+        upper_name == "OBJECT" || upper_name == "PTTL" || upper_name == "EXPIRETIME" ||
+        upper_name == "PEXPIRETIME") {
         return redis_role::read_only;
     }
     // MULTI/EXEC/DISCARD need nothing themselves: every queued command is
@@ -162,7 +163,9 @@ enum class acl_decision : std::uint8_t {
         upper_name == "PSETEX" || upper_name == "GETSET" || upper_name == "GETDEL" ||
         upper_name == "GETEX" || upper_name == "APPEND" || upper_name == "SETRANGE" ||
         upper_name == "INCR" || upper_name == "DECR" || upper_name == "INCRBY" ||
-        upper_name == "DECRBY" || upper_name == "UNLINK" || upper_name == "INCRBYFLOAT") {
+        upper_name == "DECRBY" || upper_name == "UNLINK" || upper_name == "INCRBYFLOAT" ||
+        upper_name == "EXPIRE" || upper_name == "PEXPIRE" || upper_name == "EXPIREAT" ||
+        upper_name == "PEXPIREAT" || upper_name == "PERSIST") {
         return redis_role::read_write;
     }
     if (upper_name == "INFO" || upper_name == "KYTHIRA.FORMAT") {
