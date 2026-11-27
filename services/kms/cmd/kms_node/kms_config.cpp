@@ -218,11 +218,8 @@ auto roles_of(const std::string& text) -> kythira::layers::role_set {
         throw fail("KYTHIRA_KMS_ROLES=" + text +
                    ": the KMS's layers are gateway, front_end and data (segments is Kinesis's)");
     }
-    if (roles.has(kythira::layers::role::gateway) && !roles.has(kythira::layers::role::front_end)) {
-        // The gateway hands requests to its own front end; reaching
-        // another node's needs the authenticated call (task 4).
-        throw fail("KYTHIRA_KMS_ROLES=" + text +
-                   ": a gateway needs the front_end role on the same node in this release");
+    if (roles.empty()) {
+        throw fail("KYTHIRA_KMS_ROLES is empty: name at least one of gateway, front_end, data");
     }
     return roles;
 }
@@ -268,7 +265,14 @@ auto from_env(const env_fn& env) -> kms_options {
     o.roles = roles_of(get_opt(env, "KYTHIRA_KMS_ROLES"));
     const bool data = o.roles.has(kythira::layers::role::data);
     const bool front_end = o.roles.has(kythira::layers::role::front_end);
-    o.api_urls = id_map("KYTHIRA_KMS_API_URLS", get_required(env, "KYTHIRA_KMS_API_URLS"));
+    const bool gateway = o.roles.has(kythira::layers::role::gateway);
+    // A gateway alone reaches no catalog: only front ends and data nodes
+    // need the data nodes' URLs.
+    if (data || front_end) {
+        o.api_urls = id_map("KYTHIRA_KMS_API_URLS", get_required(env, "KYTHIRA_KMS_API_URLS"));
+    } else if (const auto urls = get_opt(env, "KYTHIRA_KMS_API_URLS"); !urls.empty()) {
+        o.api_urls = id_map("KYTHIRA_KMS_API_URLS", urls);
+    }
     if (data && !o.api_urls.contains(o.node_id)) {
         throw fail("KYTHIRA_KMS_API_URLS must include this node's own id " +
                    kythira::host_node_id_text(o.node_id));
@@ -288,6 +292,40 @@ auto from_env(const env_fn& env) -> kms_options {
             throw fail("KYTHIRA_KMS_API_URLS: " + url + " is not an " + scheme +
                        " URL (plaintext only with KYTHIRA_KMS_INSECURE_PLAINTEXT)");
         }
+    }
+    // Task 4: the front ends a gateway hands calls to and front ends count
+    // to share the quotas.
+    if (const auto fe = get_opt(env, "KYTHIRA_KMS_FRONT_END_URLS"); !fe.empty()) {
+        o.front_end_urls = id_map("KYTHIRA_KMS_FRONT_END_URLS", fe);
+        for (const auto& [id, url] : o.front_end_urls) {
+            if (!url.starts_with(scheme)) {
+                throw fail("KYTHIRA_KMS_FRONT_END_URLS: " + url + " is not an " + scheme +
+                           " URL (plaintext only with KYTHIRA_KMS_INSECURE_PLAINTEXT)");
+            }
+        }
+        if (front_end && !o.front_end_urls.contains(o.node_id)) {
+            throw fail("KYTHIRA_KMS_FRONT_END_URLS must include this front end's own id " +
+                       kythira::host_node_id_text(o.node_id) +
+                       ": the list is every front end, and the live ones share the quotas");
+        }
+        if (!front_end && o.front_end_urls.contains(o.node_id)) {
+            throw fail("KYTHIRA_KMS_FRONT_END_URLS lists this node's id " +
+                       kythira::host_node_id_text(o.node_id) +
+                       ", but it runs no front end; list the front ends only");
+        }
+    } else if (gateway && !front_end) {
+        throw fail("KYTHIRA_KMS_ROLES=" + o.roles.to_string() +
+                   " needs KYTHIRA_KMS_FRONT_END_URLS: a gateway without its own front end "
+                   "hands every call to one of those");
+    }
+    o.front_end_probe = ms_opt(env, "KYTHIRA_KMS_FRONT_END_PROBE_MS", o.front_end_probe);
+    if (o.front_end_probe.count() == 0) {
+        throw fail("KYTHIRA_KMS_FRONT_END_PROBE_MS must be at least 1");
+    }
+    o.cluster = get_opt(env, "KYTHIRA_KMS_CLUSTER", get_opt(env, "KYTHIRA_CLUSTER", o.cluster));
+    if (!kythira::layers::valid_identity_part(o.cluster)) {
+        throw fail("KYTHIRA_KMS_CLUSTER: '" + o.cluster +
+                   "' cannot be part of a layer identity (letters, digits, '-', '_', '.')");
     }
     const auto listen = split_listen("KYTHIRA_KMS_API_LISTEN",
                                      get_opt(env, "KYTHIRA_KMS_API_LISTEN", "0.0.0.0:8443"));
@@ -450,13 +488,28 @@ auto usage_text() -> std::string_view {
                                      from gateway, front_end, data (all three):
                                      only data nodes are catalog members, only
                                      front ends hold the HSM PIN and run the
-                                     key jobs, and a gateway needs front_end
-                                     on the same node
+                                     key jobs, and a gateway without front_end
+                                     hands each call it authenticated to a
+                                     front end on another node
   KYTHIRA_KMS_API_URLS               id=https://host:port for every catalog
                                      member (data node), this node included
-                                     exactly when it runs data (required): the
-                                     catalog's voters, and where a front end
-                                     without data reads and proposes
+                                     exactly when it runs data (required on
+                                     data nodes and front ends): the catalog's
+                                     voters, and where a front end without
+                                     data reads and proposes
+  KYTHIRA_KMS_FRONT_END_URLS         id=https://host:port for every front end,
+                                     this node included exactly when it runs
+                                     front_end: where a gateway without
+                                     front_end hands calls (required there),
+                                     and on a front end who shares the quotas
+                                     (the live ones; unset: every catalog
+                                     member, the co-located layout)
+  KYTHIRA_KMS_FRONT_END_PROBE_MS     how often each front end's health is
+                                     asked; three missed answers and it is not
+                                     live (1000)
+  KYTHIRA_KMS_CLUSTER                the cluster in this KMS's layer identities,
+                                     kythira://kms/<cluster>/<id>?roles=...
+                                     (default: KYTHIRA_CLUSTER, else default)
   KYTHIRA_KMS_DATA_DIR               state (the node's kms/ in kythira_node)
   KYTHIRA_KMS_API_LISTEN             host:port of the KMS API (0.0.0.0:8443): AWS
                                      clients, and members forwarding to the
@@ -466,12 +519,15 @@ auto usage_text() -> std::string_view {
                                      node's KYTHIRA_NODE_TLS_CERT and _KEY)
   KYTHIRA_KMS_TLS_CA                 the CA the members' certificates chain to
                                      (default: KYTHIRA_NODE_TLS_CA)
-  KYTHIRA_KMS_PEER_IDENTITIES        the members' certificate URI or DNS SANs,
-                                     comma-separated: who may forward, and on
-                                     a data node also the front ends without
-                                     data that may use the catalog API
-                                     (required on a data node with more than
-                                     one member)
+  KYTHIRA_KMS_PEER_IDENTITIES        the nodes' certificate URI or DNS SANs,
+                                     comma-separated, trusted as every layer:
+                                     who may forward, use the catalog API and
+                                     hand front ends calls (required on a data
+                                     node with more than one member). A
+                                     certificate holding a KMS layer identity
+                                     needs no entry and is held to its roles:
+                                     data for forwarding, front_end or data
+                                     for the catalog API, gateway for calls
   KYTHIRA_KMS_INSECURE_PLAINTEXT     plaintext listener and forwarding, for tests
                                      only (default: KYTHIRA_NODE_INSECURE_PLAINTEXT)
   KYTHIRA_KMS_MAX_BODY_BYTES         largest request body (1048576)

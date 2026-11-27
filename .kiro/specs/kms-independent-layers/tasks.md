@@ -21,9 +21,17 @@ a task that needs one first builds it to that spec's design.
     remote catalog access with consistent reads; bounded-staleness switch
   - _Requirements: 1.1-1.3, 2.1-2.4, 4.1-4.3_
 
-- [ ] 4. Gateway apart from the front end; throttling share
+- [x] 4. Gateway apart from the front end; throttling share
   - Authenticated-call handoff, trusted-service envelopes passed through,
     role checks; throttling share over live front ends
+  - Built as `kms_front_end_api.hpp`: `front_end::authenticate` (framing
+    and SigV4) on the gateway and `front_end::execute` on the front end,
+    the client's request carried whole so envelopes pass unchanged; the
+    gateway retries elsewhere only on "not executed" (503) or a failed
+    dial; live front ends come from `KYTHIRA_KMS_FRONT_END_URLS` and
+    health probes; `kms_peer.hpp`'s `admits` checks layer identities per
+    route, members listed in `KYTHIRA_KMS_PEER_IDENTITIES` keep every
+    layer
   - _Requirements: 6.1-6.3, 7.1, 7.2, 9.1, 9.2_
 
 - [ ] 5. In-process consumers in split layouts

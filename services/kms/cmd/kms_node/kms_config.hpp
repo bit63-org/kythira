@@ -12,6 +12,7 @@
 
 #include <raft/console_logger.hpp>
 #include <raft/host_node_id.hpp>
+#include <raft/layer_identity_uri.hpp>
 #include <raft/layer_roles.hpp>
 #include <raft/static_or_iam_authorizer.hpp>
 
@@ -48,6 +49,20 @@ struct kms_options {
     /// it runs `data`.
     std::map<kythira::host_node_id, std::string> api_urls;
     std::filesystem::path data_dir;
+
+    // -- Front ends (kms-independent-layers task 4) -------------------------------
+    /// Every front end's KMS API URL (KYTHIRA_KMS_FRONT_END_URLS): where a
+    /// gateway without its own front end hands calls, and, on a front end,
+    /// who shares the quotas (the live ones). Empty on a co-located
+    /// deployment, where every catalog member is a front end.
+    std::map<kythira::host_node_id, std::string> front_end_urls;
+    /// How often each front end's health is asked; one that has not
+    /// answered for three of these is not live.
+    std::chrono::milliseconds front_end_probe{1000};
+    /// The cluster named in this KMS's layer identities
+    /// (kythira://kms/<cluster>/<node id>?roles=...): KYTHIRA_KMS_CLUSTER,
+    /// else KYTHIRA_CLUSTER.
+    std::string cluster{"default"};
 
     // -- The API listener (Requirement 2.5) -------------------------------------
     std::string api_bind{"0.0.0.0"};

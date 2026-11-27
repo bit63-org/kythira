@@ -194,6 +194,7 @@ public:
         std::string peers;
         std::string urls;
         std::string identities;
+        std::string front_ends;
         for (std::size_t q = 0; q < _members.size(); ++q) {
             const auto* const sep = q == 0 ? "" : ",";
             const auto id = std::to_string(q + 1);
@@ -205,6 +206,12 @@ public:
                         "=https://localhost:" + std::to_string(_members[q].api);
             }
             identities += sep + identity(q);
+            // A split layout lists its front ends (task 4): where gateways
+            // hand calls, and who shares the quotas.
+            if (!_members[q].roles.empty() && runs(_members[q].roles, "front_end")) {
+                front_ends += std::string(front_ends.empty() ? "" : ",") + id +
+                              "=https://localhost:" + std::to_string(_members[q].api);
+            }
         }
         const auto dir = _dir / ("node-" + std::to_string(i + 1));
         fs::create_directories(dir);
@@ -234,6 +241,10 @@ public:
         };
         if (!m.roles.empty()) {
             env.push_back("KYTHIRA_KMS_ROLES=" + m.roles);
+        }
+        if (!front_ends.empty() && (runs(m.roles, "front_end") || runs(m.roles, "gateway"))) {
+            env.push_back("KYTHIRA_KMS_FRONT_END_URLS=" + front_ends);
+            env.push_back("KYTHIRA_KMS_FRONT_END_PROBE_MS=200");
         }
         if (runs(m.roles, "front_end")) {  // the only layer holding the PIN
             env.push_back("KYTHIRA_KMS_PIN_FILE=" + (_dir / "pin").string());
@@ -727,6 +738,28 @@ struct split_cluster : process_cluster {
 constexpr std::size_t k_front_end_a = 3;
 constexpr std::size_t k_front_end_b = 4;
 
+/// kms-independent-layers task 4: every layer apart. Three data nodes, two
+/// front ends (members 4 and 5) and a gateway alone (member 6).
+struct gateway_cluster : process_cluster {
+    gateway_cluster()
+        : process_cluster({"data", "data", "data", "front_end", "front_end", "gateway"}) {}
+};
+
+constexpr std::size_t k_gateway = 5;
+
+/// Waits up to 15 s for member i's metric `name` to read `want`.
+auto await_metric(const process_cluster& c, std::size_t i, std::string_view name, double want)
+    -> bool {
+    const auto deadline = std::chrono::steady_clock::now() + 15s;
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (c.metric(i, name) == want) {
+            return true;
+        }
+        std::this_thread::sleep_for(100ms);
+    }
+    return false;
+}
+
 }  // namespace
 
 // Requirements 2.1-2.3 and 3.3: front ends without a replica answer as
@@ -783,4 +816,57 @@ BOOST_FIXTURE_TEST_CASE(front_ends_without_a_replica_serve_the_api, split_cluste
     BOOST_TEST(call(k_front_end_a, "DescribeKey", R"({"KeyId":")" + kid + R"("})").status == 200);
     start(0);
     wait_serving(0);
+}
+
+// Task 4, Requirements 6.1, 7 and 9: a gateway alone verifies signatures
+// and hands each call to a front end on another node; only gateways may
+// hand calls over; a front end away is skipped; the quotas are shared
+// over the live front ends.
+BOOST_FIXTURE_TEST_CASE(a_gateway_alone_hands_calls_to_front_ends, gateway_cluster) {
+    const auto r = call(k_gateway, "CreateKey", R"({"Description":"through a gateway"})");
+    BOOST_REQUIRE_MESSAGE(r.status == 200, r.status << " " << r.str("__type"));
+    const auto id = std::string(r.body.at("KeyMetadata").as_object().at("KeyId").as_string());
+    const auto e =
+        call(k_gateway, "Encrypt", R"({"KeyId":")" + id + R"(","Plaintext":"c2VjcmV0"})");
+    BOOST_REQUIRE_MESSAGE(e.status == 200, e.status << " " << e.str("__type"));
+    // A front end without its own gateway serves no clients.
+    BOOST_TEST(call(k_front_end_a, "ListKeys", "{}").status == 404);
+    const auto d =
+        call(k_gateway, "Decrypt", R"({"CiphertextBlob":")" + e.str("CiphertextBlob") + R"("})");
+    BOOST_REQUIRE_MESSAGE(d.status == 200, d.status << " " << d.str("__type"));
+    BOOST_TEST(d.str("Plaintext") == "c2VjcmV0");
+
+    // The gateway holds no PIN, no HSM client and no catalog.
+    BOOST_TEST(log_of(k_gateway).find("roles=gateway data_nodes=3 front_ends=2") !=
+               std::string::npos);
+    BOOST_TEST(log_of(k_gateway).find("pkcs11=") == std::string::npos);
+    BOOST_TEST(!metric(k_gateway, "job_lease_holder").has_value());
+    BOOST_TEST(metric(k_gateway, "calls_handed_over").value_or(0) >= 3.0);
+
+    // Only callers the front ends know may hand them calls; a node with no
+    // front end says the call was not executed there.
+    const std::string empty_call(1, '\x01');
+    BOOST_TEST(peer(k_front_end_a, &stranger(), "/v1/kms/front-end/call", empty_call) == 403);
+    BOOST_TEST(peer(k_front_end_a, nullptr, "/v1/kms/front-end/call", empty_call) == 403);
+    BOOST_TEST(peer(0, &tls(k_gateway), "/v1/kms/front-end/call", empty_call) == 503);
+    BOOST_TEST(peer(k_front_end_a, &tls(k_gateway), "/v1/kms/front-end/health") == 200);
+
+    // Both front ends live: each holds half of the quotas.
+    for (const auto f : {k_front_end_a, k_front_end_b}) {
+        BOOST_TEST(await_metric(*this, f, "front_ends_live", 2.0), "front end " << f + 1);
+        BOOST_TEST(await_metric(*this, f, "quota_share_members", 2.0), "front end " << f + 1);
+    }
+
+    // A front end away: the gateway hands calls to the other, which now
+    // holds the whole quota.
+    stop(k_front_end_a);
+    for (int i = 0; i < 4; ++i) {
+        const auto k = call(k_gateway, "DescribeKey", R"({"KeyId":")" + id + R"("})");
+        BOOST_TEST(k.status == 200, i << ": " << k.status << " " << k.str("__type"));
+    }
+    BOOST_TEST(await_metric(*this, k_front_end_b, "front_ends_live", 1.0));
+    BOOST_TEST(await_metric(*this, k_front_end_b, "quota_share_members", 1.0));
+    start(k_front_end_a);
+    wait_serving(k_front_end_a);
+    BOOST_TEST(await_metric(*this, k_front_end_b, "front_ends_live", 2.0));
 }
