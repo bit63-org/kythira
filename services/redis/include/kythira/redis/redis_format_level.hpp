@@ -71,6 +71,22 @@ private:
     std::uint16_t _needed;
 };
 
+/// An `exec` record naming a command this build does not apply. Like a
+/// newer format it halts the group's apply instead of being skipped, since
+/// a replica that skipped it would diverge from one that applied it.
+class redis_unknown_command_id : public std::runtime_error {
+public:
+    explicit redis_unknown_command_id(std::uint16_t id)
+        : std::runtime_error("this log has an exec record for command id " + std::to_string(id) +
+                             ", which this build does not apply; run a newer build"),
+          _id(id) {}
+
+    [[nodiscard]] auto id() const noexcept -> std::uint16_t { return _id; }
+
+private:
+    std::uint16_t _id;
+};
+
 /// The format level a log record needs, from its version byte: 2 for
 /// `0x01`/`0x02`, otherwise the version byte itself (`0x03` is level 3).
 /// An empty buffer needs nothing.

@@ -630,8 +630,8 @@ template<typename Host, typename Logger, typename Metrics>
 auto redis_front_end<Host, Logger, Metrics>::submit(session& s, const std::string& key,
                                                     const std::vector<std::byte>& command,
                                                     std::string& error_reply,
-                                                    std::optional<node_id_type>& forward_to)
-    -> bool {
+                                                    std::optional<node_id_type>& forward_to,
+                                                    std::vector<std::byte>* result) -> bool {
     // A key a transaction holds refuses plain writes. The gateway finishes
     // that transaction if its time is up, then tries once more
     // (multi-raft-transactions design "Error Handling").
@@ -643,7 +643,10 @@ auto redis_front_end<Host, Logger, Metrics>::submit(session& s, const std::strin
                 error_reply = s._writer.error("ERR timeout submitting to shard, retry");
                 return false;
             }
-            (void)std::move(future).get();
+            auto applied = std::move(future).get();
+            if (result != nullptr) {
+                *result = std::move(applied);
+            }
             return true;
         } catch (const key_locked_exception<std::string>& e) {
             if (attempt == 0 && resolve_lock(e.key(), e.holder(), e.primary())) {
@@ -1035,10 +1038,63 @@ auto redis_front_end<Host, Logger, Metrics>::execute_command(session& s, std::st
         return handle_ttl(s, cmd);
     }
     if (upper == "SET") {
+        if (auto e = arity(3, std::numeric_limits<std::size_t>::max())) {
+            return *e;
+        }
+        if (cmd._argv.size() > 3) {
+            return handle_string_write(s, upper, cmd);
+        }
+        return handle_set(s, cmd, false);
+    }
+    if (upper == "SETNX" || upper == "GETSET" || upper == "INCRBY" || upper == "DECRBY" ||
+        upper == "APPEND" || upper == "INCRBYFLOAT") {
         if (auto e = arity(3, 3)) {
             return *e;
         }
-        return handle_set(s, cmd, false);
+        return handle_string_write(s, upper, cmd);
+    }
+    if (upper == "INCR" || upper == "DECR" || upper == "GETDEL") {
+        if (auto e = arity(2, 2)) {
+            return *e;
+        }
+        return handle_string_write(s, upper, cmd);
+    }
+    if (upper == "PSETEX" || upper == "SETRANGE") {
+        if (auto e = arity(4, 4)) {
+            return *e;
+        }
+        return handle_string_write(s, upper, cmd);
+    }
+    if (upper == "GETEX") {
+        if (auto e = arity(2, 4)) {
+            return *e;
+        }
+        return handle_string_write(s, upper, cmd);
+    }
+    if (upper == "TYPE") {
+        if (auto e = arity(2, 2)) {
+            return *e;
+        }
+        return handle_key_read(s, upper, cmd);
+    }
+    if (upper == "TOUCH") {
+        if (auto e = arity(2, std::numeric_limits<std::size_t>::max())) {
+            return *e;
+        }
+        return handle_key_read(s, upper, cmd);
+    }
+    if (upper == "OBJECT") {
+        if (auto e = arity(2, std::numeric_limits<std::size_t>::max())) {
+            return *e;
+        }
+        return handle_key_read(s, upper, cmd);
+    }
+    if (upper == "UNLINK") {
+        // One key here (task 3); several keys are task 6's multi-key path.
+        if (auto e = arity(2, 2)) {
+            return *e;
+        }
+        return handle_del(s, cmd);
     }
     if (upper == "SETEX") {
         if (auto e = arity(4, 4)) {
@@ -1195,14 +1251,18 @@ auto redis_front_end<Host, Logger, Metrics>::handle_getrange(session& s, const r
     if (!r._entry || is_expired(*r._entry)) {
         return s._writer.bulk("");
     }
-    // Redis semantics: negative indexes count from the end, both ends are
-    // inclusive, and out-of-range bounds clamp rather than error.
+    // Redis 7 (getrangeCommand): negative indexes count from the end, both
+    // ends are inclusive, and out-of-range bounds clamp to the string
+    // rather than error, so `0 -100` on a short string is its first byte.
+    if (start < 0 && end < 0 && start > end) {
+        return s._writer.bulk("");
+    }
     const auto len = static_cast<std::int64_t>(value_access::size(*r._entry));
     if (start < 0) {
         start = std::max<std::int64_t>(0, len + start);
     }
     if (end < 0) {
-        end = len + end;
+        end = std::max<std::int64_t>(0, len + end);
     }
     if (end >= len) {
         end = len - 1;
@@ -1522,43 +1582,133 @@ auto redis_front_end<Host, Logger, Metrics>::handle_info(session& s) -> std::str
     return s._writer.bulk(out.str());
 }
 
+/// `COMMAND`, `COMMAND COUNT|LIST|INFO [name...]|DOCS [name...]`, answered
+/// from the command registry (redis-general-data-types Requirement 1.3):
+/// exactly the commands this node accepts, which are the registry's shipped
+/// ones less the transaction commands when transactions are off.
 template<typename Host, typename Logger, typename Metrics>
 auto redis_front_end<Host, Logger, Metrics>::handle_command(session& s, const resp_command& cmd)
     -> std::string {
     if (auto e = authorize(s, "COMMAND", {})) {
         return *e;
     }
-    static constexpr std::array<std::string_view, 17> names = {
-        "GET",   "SET",    "SETEX",  "DEL",  "EXISTS",  "STRLEN", "GETRANGE", "PING", "AUTH",
-        "HELLO", "SELECT", "CLIENT", "QUIT", "COMMAND", "INFO",   "DBSIZE",   "TTL"};
+    const auto accepted = [this](const redis_command_info& c) {
+        if (c.status != redis_command_status::shipped) {
+            return false;
+        }
+        const bool txn = c.name == "MULTI" || c.name == "EXEC" || c.name == "DISCARD" ||
+                         c.name == "WATCH" || c.name == "UNWATCH" ||
+                         c.name == "KYTHIRA.ISOLATION" || c.name == "KYTHIRA.TXN";
+        return !txn || _config._transactions;
+    };
+    const auto lower = [](std::string_view n) {
+        std::string out(n);
+        for (auto& ch : out) {
+            ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+        }
+        return out;
+    };
+    const auto& w = s._writer;
+    const auto info = [&](const redis_command_info& c) {
+        static constexpr std::array<std::string_view, 14> flag_names = {
+            "write",       "readonly",   "denyoom",      "admin",   "noscript",
+            "loading",     "stale",      "skip_slowlog", "fast",    "no_auth",
+            "movablekeys", "allow_busy", "no_multi",     "blocking"};
+        static constexpr std::array<std::string_view, 14> category_names = {
+            "@keyspace", "@read",      "@write",      "@set",        "@list",
+            "@hash",     "@string",    "@admin",      "@fast",       "@slow",
+            "@blocking", "@dangerous", "@connection", "@transaction"};
+        std::vector<std::string> flags;
+        for (std::size_t i = 0; i < flag_names.size(); ++i) {
+            if ((c.flags & (1U << i)) != 0U) {
+                flags.push_back(w.simple_string(flag_names[i]));
+            }
+        }
+        std::vector<std::string> categories;
+        for (std::size_t i = 0; i < category_names.size(); ++i) {
+            if ((c.acl_categories & (1U << i)) != 0U) {
+                categories.push_back(w.simple_string(category_names[i]));
+            }
+        }
+        std::vector<std::string> key_specs;
+        if (c.first_key > 0) {
+            // One key specification from the legacy triple; its flags follow
+            // the command's access (RO/ACCESS for reads, RW/UPDATE otherwise).
+            const bool ro = (c.flags & redis_command_flag::readonly) != 0U;
+            const auto last = c.last_key < 0 ? -1 : c.last_key - c.first_key;
+            key_specs.push_back(w.map(
+                {{"flags", w.array({w.simple_string(ro ? "RO" : "RW"),
+                                    w.simple_string(ro ? "ACCESS" : "UPDATE")})},
+                 {"begin_search", w.map({{"type", w.bulk("index")},
+                                         {"spec", w.map({{"index", w.integer(c.first_key)}})}})},
+                 {"find_keys", w.map({{"type", w.bulk("range")},
+                                      {"spec", w.map({{"lastkey", w.integer(last)},
+                                                      {"keystep", w.integer(c.step)},
+                                                      {"limit", w.integer(0)}})}})}}));
+        }
+        return w.array({w.bulk(lower(c.name)), w.integer(c.arity), w.array(flags),
+                        w.integer(c.first_key), w.integer(c.last_key), w.integer(c.step),
+                        w.array(categories), w.array({}), w.array(key_specs), w.array({})});
+    };
+    const auto docs = [&](const redis_command_info& c) {
+        return w.map({{"since", w.bulk(c.since)}, {"group", w.bulk(c.group)}});
+    };
+    std::vector<const redis_command_info*> all;
+    for (const auto& c : k_redis_commands) {
+        if (accepted(c)) {
+            all.push_back(&c);
+        }
+    }
+    const auto lookup = [&](const std::string& name) -> const redis_command_info* {
+        const auto* c = find_redis_command(resp_to_upper(name));
+        return c != nullptr && accepted(*c) ? c : nullptr;
+    };
     if (cmd._argv.size() >= 2) {
         auto sub = resp_to_upper(cmd._argv[1]);
-        if (sub == "COUNT") {
-            return s._writer.integer(static_cast<std::int64_t>(names.size()));
+        if (sub == "COUNT" && cmd._argv.size() == 2) {
+            return w.integer(static_cast<std::int64_t>(all.size()));
         }
-        if (sub == "LIST") {
+        if (sub == "LIST" && cmd._argv.size() == 2) {
             std::vector<std::string> out;
-            for (auto n : names) {
-                out.push_back(s._writer.bulk(n));
+            for (const auto* c : all) {
+                out.push_back(w.bulk(lower(c->name)));
             }
-            return s._writer.array(out);
+            return w.array(out);
         }
-        if (sub == "DOCS" || sub == "INFO") {
-            return s._writer.array({});
+        if (sub == "INFO") {
+            std::vector<std::string> out;
+            if (cmd._argv.size() == 2) {
+                for (const auto* c : all) {
+                    out.push_back(info(*c));
+                }
+            }
+            for (std::size_t i = 2; i < cmd._argv.size(); ++i) {
+                const auto* c = lookup(cmd._argv[i]);
+                out.push_back(c != nullptr ? info(*c) : w.null_array());
+            }
+            return w.array(out);
         }
-        return s._writer.error("ERR unknown subcommand '" + cmd._argv[1] + "'. Try COMMAND HELP.");
+        if (sub == "DOCS") {
+            std::vector<std::pair<std::string, std::string>> out;
+            if (cmd._argv.size() == 2) {
+                for (const auto* c : all) {
+                    out.emplace_back(lower(c->name), docs(*c));
+                }
+            }
+            for (std::size_t i = 2; i < cmd._argv.size(); ++i) {
+                if (const auto* c = lookup(cmd._argv[i])) {
+                    out.emplace_back(lower(c->name), docs(*c));
+                }
+            }
+            return w.map(out);
+        }
+        return w.error("ERR unknown subcommand '" + cmd._argv[1] + "'. Try COMMAND HELP.");
     }
     std::vector<std::string> out;
-    for (auto n : names) {
-        std::string lower(n);
-        for (auto& c : lower) {
-            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-        }
-        out.push_back(
-            s._writer.array({s._writer.bulk(lower), s._writer.integer(-1), s._writer.array({}),
-                             s._writer.integer(0), s._writer.integer(0), s._writer.integer(0)}));
+    for (const auto* c : all) {
+        out.push_back(info(*c));
     }
-    return s._writer.array(out);
+    return w.array(out);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -3590,6 +3740,370 @@ auto redis_front_end<Host, Logger, Metrics>::format_upgrade(session& s, std::uin
     _logger.log(log_level::info, "redis gateway: format gate applied",
                 {{"level", std::to_string(level)}, {"groups", std::to_string(gated.size())}});
     return s._writer.simple_string("OK");
+}
+
+// ── tier 1 strings (redis-general-data-types task 3) ────────────────────────
+
+template<typename Host, typename Logger, typename Metrics>
+auto redis_front_end<Host, Logger, Metrics>::propose_exec(session& s, const resp_command& cmd,
+                                                          const std::string& key,
+                                                          redis_command_id id,
+                                                          std::vector<std::string> args,
+                                                          bool may_grow) -> std::string {
+    const auto name = resp_to_upper(cmd._argv[0]);
+    std::string error;
+    std::optional<node_id_type> forward_to;
+    auto* node = locate(key, error, forward_to);
+    if (node != nullptr && !node->is_leader()) {
+        forward_to = node->known_leader();
+        error = s._writer.error("ERR shard has no reachable leader, retry");
+        node = nullptr;
+    }
+    if (node == nullptr) {
+        if (forward_to) {
+            if (auto reply = forward(s, cmd, *forward_to)) {
+                return *reply;
+            }
+        }
+        return error;
+    }
+    if (auto refused = format_refusal(s, key, k_redis_typed_values_level)) {
+        return *refused;
+    }
+    if (may_grow) {
+        if (auto refused = space_refusal(key)) {
+            ++_stats._space_refusals;
+            emit("redis.space_refusals", name);
+            return s._writer.error("ERR " + *refused + ", retry later");
+        }
+    }
+    redis_kv_exec_command exec;
+    exec._key = key;
+    exec._command_id = static_cast<std::uint16_t>(id);
+    // The leader's clock: apply() floors it at the group's applied time
+    // (design Component 1).
+    exec._now_ms = now_ms();
+    exec._policy = _config._immutable_values ? redis_kv_exec_policy::immutable_rule : 0;
+    exec._args = std::move(args);
+    const auto encoded = encode_redis_kv_command(exec);
+    std::vector<std::byte> result;
+    if (!submit(s, key, encoded, error, forward_to, &result)) {
+        if (forward_to) {
+            if (auto reply = forward(s, cmd, *forward_to)) {
+                return *reply;
+            }
+        }
+        return error;
+    }
+    if (result.size() == 1 &&
+        result[0] == static_cast<std::byte>(redis_v3_apply_status::refused_before_gate)) {
+        return s._writer.error(std::string(k_redis_format_gate_error));
+    }
+    redis_reply reply;
+    try {
+        reply = decode_redis_reply(result);
+    } catch (const redis_reply_error& e) {
+        _logger.log(log_level::error, "redis gateway: undecodable exec reply",
+                    {{"command", name}, {"error", e.what()}});
+        return s._writer.error("ERR internal error decoding the reply");
+    }
+    if (reply.is_error()) {
+        if (reply._text.rfind("ERR value conflict", 0) == 0) {
+            ++_stats._value_conflicts;
+            emit("redis.value_conflicts", name);
+        }
+    } else {
+        ++_stats._writes;
+        emit("redis.writes", name);
+        if (auto desc = _data.route(key)) {
+            if (id == redis_command_id::getdel) {
+                forget_lru(desc->group_id(), key);
+            } else {
+                touch_lru(desc->group_id(), key);
+            }
+        }
+    }
+    return render_redis_reply(reply, s._writer.version());
+}
+
+namespace redis_gateway_detail {
+/// A positive expiry in `unit_ms` units from `text`, as an absolute ms
+/// deadline from `now`; `nullopt` when not a positive integer or when it
+/// overflows (Redis: "invalid expire time").
+inline auto absolute_deadline(std::string_view text, std::uint64_t unit_ms, bool absolute,
+                              std::uint64_t now) -> std::optional<std::uint64_t> {
+    const auto v = redis_string_detail::parse_int64(text);
+    if (!v || *v <= 0) {
+        return std::nullopt;
+    }
+    const auto u = static_cast<std::uint64_t>(*v);
+    if (u > std::numeric_limits<std::uint64_t>::max() / unit_ms / 2) {
+        return std::nullopt;
+    }
+    const auto ms = u * unit_ms;
+    if (absolute) {
+        return ms;
+    }
+    if (ms > std::numeric_limits<std::uint64_t>::max() / 2 - now) {
+        return std::nullopt;
+    }
+    return now + ms;
+}
+}  // namespace redis_gateway_detail
+
+template<typename Host, typename Logger, typename Metrics>
+auto redis_front_end<Host, Logger, Metrics>::handle_string_write(session& s, std::string_view upper,
+                                                                 const resp_command& cmd)
+    -> std::string {
+    const auto& a = cmd._argv;
+    const auto& key = a[1];
+    if (auto e = authorize(s, upper, {key})) {
+        return *e;
+    }
+    std::string lower(upper);
+    for (auto& c : lower) {
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    }
+    const auto syntax = [&] { return s._writer.error("ERR syntax error"); };
+    const auto bad_expire = [&] {
+        return s._writer.error("ERR invalid expire time in '" + lower + "' command");
+    };
+    const auto oversize = [&](std::size_t n) -> std::optional<std::string> {
+        if (n > _config._max_value_bytes) {
+            ++_stats._oversize_rejections;
+            emit("redis.oversize_rejections", upper);
+            return s._writer.error("ERR value exceeds the configured maximum of " +
+                                   std::to_string(_config._max_value_bytes) + " bytes");
+        }
+        return std::nullopt;
+    };
+    const auto max_bytes = std::to_string(_config._max_value_bytes);
+    using redis_gateway_detail::absolute_deadline;
+
+    if (upper == "SET") {
+        bool nx = false;
+        bool xx = false;
+        bool get = false;
+        bool keepttl = false;
+        std::optional<std::uint64_t> pxat;
+        bool expiry_given = false;
+        for (std::size_t i = 3; i < a.size(); ++i) {
+            const auto opt = resp_to_upper(a[i]);
+            if (opt == "NX" && !xx) {
+                nx = true;
+            } else if (opt == "XX" && !nx) {
+                xx = true;
+            } else if (opt == "GET") {
+                get = true;
+            } else if (opt == "KEEPTTL" && !expiry_given) {
+                keepttl = true;
+            } else if ((opt == "EX" || opt == "PX" || opt == "EXAT" || opt == "PXAT") && !keepttl &&
+                       !expiry_given && i + 1 < a.size()) {
+                expiry_given = true;
+                const bool seconds = opt == "EX" || opt == "EXAT";
+                const bool absolute = opt == "EXAT" || opt == "PXAT";
+                pxat = absolute_deadline(a[++i], seconds ? 1000 : 1, absolute, now_ms());
+                if (!pxat) {
+                    return bad_expire();
+                }
+            } else {
+                return syntax();
+            }
+        }
+        if (auto e = oversize(a[2].size())) {
+            return *e;
+        }
+        std::vector<std::string> args{key, a[2]};
+        if (nx) {
+            args.emplace_back("NX");
+        }
+        if (xx) {
+            args.emplace_back("XX");
+        }
+        if (get) {
+            args.emplace_back("GET");
+        }
+        if (pxat) {
+            args.emplace_back("PXAT");
+            args.push_back(std::to_string(*pxat));
+        } else if (keepttl) {
+            args.emplace_back("KEEPTTL");
+        }
+        return propose_exec(s, cmd, key, redis_command_id::set, std::move(args), true);
+    }
+    if (upper == "SETNX") {
+        if (auto e = oversize(a[2].size())) {
+            return *e;
+        }
+        return propose_exec(s, cmd, key, redis_command_id::setnx, {key, a[2]}, true);
+    }
+    if (upper == "GETSET") {
+        if (auto e = oversize(a[2].size())) {
+            return *e;
+        }
+        return propose_exec(s, cmd, key, redis_command_id::set, {key, a[2], "GET"}, true);
+    }
+    if (upper == "PSETEX") {
+        const auto pxat = absolute_deadline(a[2], 1, false, now_ms());
+        if (!pxat) {
+            return bad_expire();
+        }
+        if (auto e = oversize(a[3].size())) {
+            return *e;
+        }
+        return propose_exec(s, cmd, key, redis_command_id::set,
+                            {key, a[3], "PXAT", std::to_string(*pxat)}, true);
+    }
+    if (upper == "INCR" || upper == "DECR" || upper == "INCRBY" || upper == "DECRBY") {
+        std::int64_t delta = upper == "DECR" ? -1 : 1;
+        if (upper == "INCRBY" || upper == "DECRBY") {
+            const auto v = redis_string_detail::parse_int64(a[2]);
+            if (!v) {
+                return s._writer.error("ERR value is not an integer or out of range");
+            }
+            if (upper == "DECRBY") {
+                if (*v == std::numeric_limits<std::int64_t>::min()) {
+                    return s._writer.error("ERR decrement would overflow");
+                }
+                delta = -*v;
+            } else {
+                delta = *v;
+            }
+        }
+        return propose_exec(s, cmd, key, redis_command_id::incrby, {key, std::to_string(delta)},
+                            true);
+    }
+    if (upper == "INCRBYFLOAT") {
+        const auto incr = parse_redis_float128(a[2]);
+        if (!incr || !is_finite_redis_float128(*incr)) {
+            return s._writer.error(incr ? "ERR increment would produce NaN or Infinity"
+                                        : "ERR value is not a valid float");
+        }
+        return propose_exec(s, cmd, key, redis_command_id::incrbyfloat, {key, a[2]}, true);
+    }
+    if (upper == "GETDEL") {
+        return propose_exec(s, cmd, key, redis_command_id::getdel, {key}, false);
+    }
+    if (upper == "GETEX") {
+        std::vector<std::string> args{key};
+        if (a.size() >= 3) {
+            const auto opt = resp_to_upper(a[2]);
+            if (opt == "PERSIST" && a.size() == 3) {
+                args.emplace_back("PERSIST");
+            } else if ((opt == "EX" || opt == "PX" || opt == "EXAT" || opt == "PXAT") &&
+                       a.size() == 4) {
+                const bool seconds = opt == "EX" || opt == "EXAT";
+                const bool absolute = opt == "EXAT" || opt == "PXAT";
+                const auto pxat = absolute_deadline(a[3], seconds ? 1000 : 1, absolute, now_ms());
+                if (!pxat) {
+                    return bad_expire();
+                }
+                args.emplace_back("PXAT");
+                args.push_back(std::to_string(*pxat));
+            } else {
+                return syntax();
+            }
+        }
+        return propose_exec(s, cmd, key, redis_command_id::getex, std::move(args), false);
+    }
+    if (upper == "APPEND") {
+        if (auto e = oversize(a[2].size())) {
+            return *e;
+        }
+        return propose_exec(s, cmd, key, redis_command_id::append, {key, a[2], max_bytes}, true);
+    }
+    if (upper == "SETRANGE") {
+        const auto offset = redis_string_detail::parse_int64(a[2]);
+        if (!offset) {
+            return s._writer.error("ERR value is not an integer or out of range");
+        }
+        if (*offset < 0) {
+            return s._writer.error("ERR offset is out of range");
+        }
+        if (static_cast<std::uint64_t>(*offset) + a[3].size() >
+            std::min<std::uint64_t>(_config._max_value_bytes, k_redis_max_string_bytes)) {
+            return s._writer.error(std::string(redis_string_detail::k_too_big));
+        }
+        return propose_exec(s, cmd, key, redis_command_id::setrange,
+                            {key, std::to_string(*offset), a[3], max_bytes}, true);
+    }
+    return syntax();
+}
+
+template<typename Host, typename Logger, typename Metrics>
+auto redis_front_end<Host, Logger, Metrics>::handle_key_read(session& s, std::string_view upper,
+                                                             const resp_command& cmd)
+    -> std::string {
+    std::vector<std::string_view> keys;
+    std::size_t first = 1;
+    if (upper == "OBJECT") {
+        const auto sub = resp_to_upper(cmd._argv[1]);
+        if (sub != "ENCODING" || cmd._argv.size() != 3) {
+            return s._writer.error("ERR unknown subcommand or wrong number of arguments for '" +
+                                   cmd._argv[1] + "'. Try OBJECT HELP.");
+        }
+        first = 2;
+    }
+    for (std::size_t i = first; i < cmd._argv.size(); ++i) {
+        keys.emplace_back(cmd._argv[i]);
+    }
+    if (auto e = authorize(s, upper, keys)) {
+        return *e;
+    }
+    std::int64_t touched = 0;
+    for (std::size_t i = first; i < cmd._argv.size(); ++i) {
+        const auto& key = cmd._argv[i];
+        auto r = read_local(s, key);
+        if (!r._error.empty()) {
+            if (r._forward_to && cmd._argv.size() == first + 1) {
+                if (auto reply = forward(s, cmd, *r._forward_to)) {
+                    return *reply;
+                }
+            } else if (r._forward_to && upper == "TOUCH") {
+                // One key of several: ask its node about that key alone.
+                resp_command one{{"TOUCH", key}};
+                const auto reply = forward(s, one, *r._forward_to);
+                if (reply && *reply == ":1\r\n") {
+                    ++touched;
+                    continue;
+                }
+                if (reply && *reply == ":0\r\n") {
+                    continue;
+                }
+            }
+            return r._error;
+        }
+        const bool present = r._entry && !is_expired(*r._entry);
+        if (upper == "TYPE") {
+            return s._writer.simple_string(present ? "string" : "none");
+        }
+        if (upper == "OBJECT") {
+            if (!present) {
+                return s._writer.null();
+            }
+            // D16: the encoding Redis would choose for these bytes.
+            const auto size = value_access::size(*r._entry);
+            if (size <= 20) {
+                auto bytes = value_access::read(r._context, *r._entry);
+                if (bytes) {
+                    const auto view = bytes->view();
+                    const std::string_view text(reinterpret_cast<const char*>(view.data()),
+                                                view.size());
+                    if (redis_string_detail::parse_int64(text)) {
+                        return s._writer.bulk("int");
+                    }
+                }
+            }
+            return s._writer.bulk(size <= 44 ? "embstr" : "raw");
+        }
+        touched += present ? 1 : 0;
+        if (present) {
+            if (auto desc = _data.route(key)) {
+                touch_lru(desc->group_id(), key);
+            }
+        }
+    }
+    return s._writer.integer(touched);
 }
 
 }  // namespace kythira

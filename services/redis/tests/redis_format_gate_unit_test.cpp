@@ -39,7 +39,8 @@ auto gate(std::uint16_t level, std::string key = "a") -> std::vector<std::byte> 
 }
 
 auto exec_record() -> std::vector<std::byte> {
-    return encode_redis_kv_command(redis_kv_exec_command{"k", 1, 1000, 0, {"k", "v"}, {}});
+    return encode_redis_kv_command(redis_kv_exec_command{
+        "k", static_cast<std::uint16_t>(redis_command_id::set), 1000, 0, {"k", "v"}, {}});
 }
 
 auto set_record(const std::string& key) -> std::vector<std::byte> {
@@ -81,9 +82,9 @@ BOOST_AUTO_TEST_CASE(a_gate_raises_the_level_one_way, *boost::unit_test::timeout
     BOOST_CHECK_EQUAL(sm.format_level(), 3U);
     BOOST_CHECK(status_of(sm.apply(gate(3), 4)) == redis_v3_apply_status::unchanged);
     BOOST_CHECK_EQUAL(sm.last_applied_index(), 4U);
-    // After the gate a typed record is the store's to apply (task 3 on).
-    BOOST_CHECK(status_of(sm.apply(exec_record(), 5)) !=
-                redis_v3_apply_status::refused_before_gate);
+    // After the gate a typed record is the store's to apply (task 3 on):
+    // the result is the command's reply, not a status.
+    BOOST_CHECK(decode_redis_reply(sm.apply(exec_record(), 5)) == redis_reply::simple("OK"));
     // The old records still apply after it.
     (void)sm.apply(set_record("k"), 6);
     BOOST_CHECK(sm.lookup("k") != nullptr);
@@ -106,8 +107,7 @@ BOOST_AUTO_TEST_CASE(the_level_survives_a_snapshot_and_a_split, *boost::unit_tes
         mem_sm child;
         child.restore_from_snapshot(part, 3);
         BOOST_CHECK_EQUAL(child.format_level(), 3U);
-        BOOST_CHECK(status_of(child.apply(exec_record(), 4)) !=
-                    redis_v3_apply_status::refused_before_gate);
+        BOOST_CHECK(decode_redis_reply(child.apply(exec_record(), 4)) == redis_reply::simple("OK"));
     }
 }
 

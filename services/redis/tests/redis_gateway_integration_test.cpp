@@ -1042,7 +1042,17 @@ BOOST_AUTO_TEST_CASE(authentication_and_authorization, *boost::unit_test::timeou
         BOOST_CHECK(info.find("kythira_roles:gateway,front_end,data\r\n") != std::string::npos);
         BOOST_CHECK(info.find("kythira_authz_denials:") != std::string::npos);
         BOOST_CHECK_EQUAL(ops.call({"DBSIZE"}), ":1\r\n");
-        BOOST_CHECK_EQUAL(ops.call({"COMMAND", "COUNT"}), ":17\r\n");
+        // COMMAND answers from the registry: its shipped commands, less the
+        // transaction commands this cluster (transactions off) refuses.
+        const auto shipped = std::ranges::count_if(kythira::k_redis_commands, [](const auto& cmd) {
+            return cmd.status == kythira::redis_command_status::shipped && cmd.name != "MULTI" &&
+                   cmd.name != "EXEC" && cmd.name != "DISCARD" && cmd.name != "WATCH" &&
+                   cmd.name != "UNWATCH" && cmd.name != "KYTHIRA.ISOLATION" &&
+                   cmd.name != "KYTHIRA.TXN";
+        });
+        BOOST_CHECK_EQUAL(ops.call({"COMMAND", "COUNT"}), ":" + std::to_string(shipped) + "\r\n");
+        BOOST_CHECK(ops.call({"COMMAND", "INFO", "incr", "nosuch"})
+                        .starts_with("*2\r\n*10\r\n$4\r\nincr\r\n:2\r\n"));
     }
 }
 
@@ -2302,6 +2312,168 @@ BOOST_AUTO_TEST_CASE(kythira_format_is_admin_only, *boost::unit_test::timeout(12
     const auto status = ops.call({"KYTHIRA.FORMAT", "STATUS"});
     BOOST_CHECK(status.find("binary_level:" + std::to_string(k_redis_format_level)) !=
                 std::string::npos);
+}
+
+// ── tier 1 strings (redis-general-data-types task 3) ────────────────────────
+
+namespace {
+/// A cluster with mutable values and the format gate passed.
+auto typed_cluster(redis_gateway_config cfg = {}) -> std::unique_ptr<cluster> {
+    cfg._immutable_values = false;
+    auto c = std::make_unique<cluster>(cfg);
+    BOOST_REQUIRE(c->await_all_leaders(std::chrono::seconds{20}));
+    resp_client ops(c->port(1));
+    BOOST_REQUIRE_EQUAL(ops.auth("ops", "ops-secret"), "+OK\r\n");
+    BOOST_REQUIRE_EQUAL(ops.call({"KYTHIRA.FORMAT", "UPGRADE", "3"}), "+OK\r\n");
+    return c;
+}
+}  // namespace
+
+// Before the gate the new commands answer the gate error; plain SET, GET
+// and DEL keep working (Requirement 14.3).
+BOOST_AUTO_TEST_CASE(string_commands_wait_for_the_format_gate, *boost::unit_test::timeout(120)) {
+    if constexpr (gateway_type::k_node_format_level < k_redis_typed_values_level) {
+        return;
+    }
+    redis_gateway_config cfg;
+    cfg._immutable_values = false;
+    cluster c(cfg);
+    BOOST_REQUIRE(c.await_all_leaders(std::chrono::seconds{20}));
+    resp_client farm(c.port(c.leader_of(k_sccache_group)));
+    BOOST_REQUIRE_EQUAL(farm.auth("farm", "farm-secret"), "+OK\r\n");
+    BOOST_CHECK_EQUAL(farm.call({"INCR", "sccache/n"}),
+                      "-ERR this cluster has not enabled typed values yet (KYTHIRA.FORMAT)\r\n");
+    BOOST_CHECK_EQUAL(farm.call({"SET", "sccache/k", "v"}), "+OK\r\n");
+    resp_client ops(c.port(1));
+    BOOST_REQUIRE_EQUAL(ops.auth("ops", "ops-secret"), "+OK\r\n");
+    BOOST_REQUIRE_EQUAL(ops.call({"KYTHIRA.FORMAT", "UPGRADE", "3"}), "+OK\r\n");
+    BOOST_CHECK_EQUAL(farm.call({"INCR", "sccache/n"}), ":1\r\n");
+}
+
+// Replies match Redis 7.2 byte for byte, sent to a follower so each write
+// is forwarded to its leader and decided in apply().
+BOOST_AUTO_TEST_CASE(tier_one_string_commands, *boost::unit_test::timeout(120)) {
+    if constexpr (gateway_type::k_node_format_level < k_redis_typed_values_level) {
+        return;
+    }
+    auto c = typed_cluster();
+    resp_client r(c->port(c->a_follower_of(k_sccache_group)));
+    BOOST_REQUIRE_EQUAL(r.auth("farm", "farm-secret"), "+OK\r\n");
+    const auto call = [&](const std::vector<std::string>& argv) { return r.call(argv); };
+
+    // INCR family
+    BOOST_CHECK_EQUAL(call({"INCR", "sccache/n"}), ":1\r\n");
+    BOOST_CHECK_EQUAL(call({"INCRBY", "sccache/n", "41"}), ":42\r\n");
+    BOOST_CHECK_EQUAL(call({"DECR", "sccache/n"}), ":41\r\n");
+    BOOST_CHECK_EQUAL(call({"DECRBY", "sccache/n", "-9"}), ":50\r\n");
+    BOOST_CHECK_EQUAL(call({"GET", "sccache/n"}), bulk("50"));
+    BOOST_CHECK_EQUAL(call({"INCRBY", "sccache/n", "x"}),
+                      "-ERR value is not an integer or out of range\r\n");
+    BOOST_CHECK_EQUAL(call({"SET", "sccache/big", "9223372036854775807"}), "+OK\r\n");
+    BOOST_CHECK_EQUAL(call({"INCR", "sccache/big"}),
+                      "-ERR increment or decrement would overflow\r\n");
+    BOOST_CHECK_EQUAL(call({"DECRBY", "sccache/n", "-9223372036854775808"}),
+                      "-ERR decrement would overflow\r\n");
+    BOOST_CHECK_EQUAL(call({"SET", "sccache/s", "abc"}), "+OK\r\n");
+    BOOST_CHECK_EQUAL(call({"INCR", "sccache/s"}),
+                      "-ERR value is not an integer or out of range\r\n");
+
+    // INCRBYFLOAT in binary128 (D1)
+    BOOST_CHECK_EQUAL(call({"INCRBYFLOAT", "sccache/f", "10.5"}), bulk("10.5"));
+    BOOST_CHECK_EQUAL(call({"INCRBYFLOAT", "sccache/f", "0.1"}), bulk("10.6"));
+    BOOST_CHECK_EQUAL(call({"INCRBYFLOAT", "sccache/f", "-5.0e3"}), bulk("-4989.4"));
+    BOOST_CHECK_EQUAL(call({"INCRBYFLOAT", "sccache/f", "x"}),
+                      "-ERR value is not a valid float\r\n");
+    BOOST_CHECK_EQUAL(call({"INCRBYFLOAT", "sccache/f", "inf"}),
+                      "-ERR increment would produce NaN or Infinity\r\n");
+    BOOST_CHECK_EQUAL(call({"INCRBYFLOAT", "sccache/s", "1"}),
+                      "-ERR value is not a valid float\r\n");
+
+    // SET options
+    BOOST_CHECK_EQUAL(call({"SET", "sccache/s", "x", "NX"}), "$-1\r\n");
+    BOOST_CHECK_EQUAL(call({"SET", "sccache/s", "x", "XX", "GET"}), bulk("abc"));
+    BOOST_CHECK_EQUAL(call({"SET", "sccache/new", "y", "XX"}), "$-1\r\n");
+    BOOST_CHECK_EQUAL(call({"SET", "sccache/new", "y", "nx", "px", "60000"}), "+OK\r\n");
+    const auto pttl = call({"TTL", "sccache/new"});
+    BOOST_CHECK(pttl == ":60\r\n" || pttl == ":59\r\n");
+    BOOST_CHECK_EQUAL(call({"SET", "sccache/new", "z", "KEEPTTL"}), "+OK\r\n");
+    const auto kept = call({"TTL", "sccache/new"});
+    BOOST_CHECK(kept == ":60\r\n" || kept == ":59\r\n");
+    BOOST_CHECK_EQUAL(call({"SET", "sccache/new", "z", "NX", "XX"}), "-ERR syntax error\r\n");
+    BOOST_CHECK_EQUAL(call({"SET", "sccache/new", "z", "EX", "0"}),
+                      "-ERR invalid expire time in 'set' command\r\n");
+    BOOST_CHECK_EQUAL(call({"SET", "sccache/new", "z", "EX", "10", "KEEPTTL"}),
+                      "-ERR syntax error\r\n");
+    BOOST_CHECK_EQUAL(call({"SET", "sccache/gone", "z", "PXAT", "1"}), "+OK\r\n");
+    BOOST_CHECK_EQUAL(call({"GET", "sccache/gone"}), "$-1\r\n");
+
+    // SETNX, GETSET, PSETEX, GETDEL, GETEX
+    BOOST_CHECK_EQUAL(call({"SETNX", "sccache/nx", "1"}), ":1\r\n");
+    BOOST_CHECK_EQUAL(call({"SETNX", "sccache/nx", "2"}), ":0\r\n");
+    BOOST_CHECK_EQUAL(call({"GETSET", "sccache/nx", "3"}), bulk("1"));
+    BOOST_CHECK_EQUAL(call({"GETSET", "sccache/fresh", "3"}), "$-1\r\n");
+    BOOST_CHECK_EQUAL(call({"PSETEX", "sccache/ps", "100000", "v"}), "+OK\r\n");
+    BOOST_CHECK_EQUAL(call({"PSETEX", "sccache/ps", "0", "v"}),
+                      "-ERR invalid expire time in 'psetex' command\r\n");
+    BOOST_CHECK_EQUAL(call({"GETEX", "sccache/ps", "PERSIST"}), bulk("v"));
+    BOOST_CHECK_EQUAL(call({"TTL", "sccache/ps"}), ":-1\r\n");
+    BOOST_CHECK_EQUAL(call({"GETEX", "sccache/ps", "EX", "100"}), bulk("v"));
+    BOOST_CHECK_EQUAL(call({"TTL", "sccache/ps"}), ":100\r\n");
+    BOOST_CHECK_EQUAL(call({"GETEX", "sccache/ps", "BOGUS"}), "-ERR syntax error\r\n");
+    BOOST_CHECK_EQUAL(call({"GETDEL", "sccache/ps"}), bulk("v"));
+    BOOST_CHECK_EQUAL(call({"GETDEL", "sccache/ps"}), "$-1\r\n");
+    BOOST_CHECK_EQUAL(call({"GETEX", "sccache/ps"}), "$-1\r\n");
+
+    // APPEND, SETRANGE, GETRANGE (G2)
+    BOOST_CHECK_EQUAL(call({"APPEND", "sccache/a", "Hello"}), ":5\r\n");
+    BOOST_CHECK_EQUAL(call({"APPEND", "sccache/a", " World"}), ":11\r\n");
+    BOOST_CHECK_EQUAL(call({"SETRANGE", "sccache/a", "6", "Redis"}), ":11\r\n");
+    BOOST_CHECK_EQUAL(call({"GET", "sccache/a"}), bulk("Hello Redis"));
+    BOOST_CHECK_EQUAL(call({"SETRANGE", "sccache/pad", "3", "x"}), ":4\r\n");
+    BOOST_CHECK_EQUAL(call({"GET", "sccache/pad"}), bulk(std::string("\0\0\0x", 4)));
+    BOOST_CHECK_EQUAL(call({"SETRANGE", "sccache/pad", "-1", "x"}),
+                      "-ERR offset is out of range\r\n");
+    BOOST_CHECK_EQUAL(call({"SETRANGE", "sccache/none", "5", ""}), ":0\r\n");
+    BOOST_CHECK_EQUAL(call({"GETRANGE", "sccache/a", "0", "-100"}), bulk("H"));
+    BOOST_CHECK_EQUAL(call({"GETRANGE", "sccache/a", "-3", "-5"}), bulk(""));
+    BOOST_CHECK_EQUAL(call({"GETRANGE", "sccache/a", "-5", "-1"}), bulk("Redis"));
+
+    // TYPE, TOUCH, OBJECT ENCODING, UNLINK
+    BOOST_CHECK_EQUAL(call({"TYPE", "sccache/a"}), "+string\r\n");
+    BOOST_CHECK_EQUAL(call({"TYPE", "sccache/missing"}), "+none\r\n");
+    BOOST_CHECK_EQUAL(call({"TOUCH", "sccache/a", "sccache/missing"}), ":1\r\n");
+    BOOST_CHECK_EQUAL(call({"OBJECT", "ENCODING", "sccache/n"}), bulk("int"));
+    BOOST_CHECK_EQUAL(call({"OBJECT", "ENCODING", "sccache/a"}), bulk("embstr"));
+    BOOST_CHECK_EQUAL(call({"OBJECT", "ENCODING", "sccache/missing"}), "$-1\r\n");
+    BOOST_CHECK_EQUAL(call({"UNLINK", "sccache/a"}), ":1\r\n");
+    BOOST_CHECK_EQUAL(call({"UNLINK", "sccache/a"}), ":0\r\n");
+
+    // RESP3 renders the same replies with its own null.
+    BOOST_REQUIRE(call({"HELLO", "3"}).starts_with('%'));
+    BOOST_CHECK_EQUAL(call({"GETDEL", "sccache/a"}), "_\r\n");
+    BOOST_CHECK_EQUAL(call({"SET", "sccache/nx", "4", "GET"}), bulk("3"));
+}
+
+// The immutable-value rule (D11) holds for the new commands: creating a key
+// works, changing a live value is refused and counted.
+BOOST_AUTO_TEST_CASE(immutable_values_refuse_string_mutations, *boost::unit_test::timeout(120)) {
+    if constexpr (gateway_type::k_node_format_level < k_redis_typed_values_level) {
+        return;
+    }
+    cluster c;  // _immutable_values on, as by default
+    BOOST_REQUIRE(c.await_all_leaders(std::chrono::seconds{20}));
+    resp_client ops(c.port(1));
+    BOOST_REQUIRE_EQUAL(ops.auth("ops", "ops-secret"), "+OK\r\n");
+    BOOST_REQUIRE_EQUAL(ops.call({"KYTHIRA.FORMAT", "UPGRADE", "3"}), "+OK\r\n");
+    resp_client r(c.port(c.leader_of(k_sccache_group)));
+    BOOST_REQUIRE_EQUAL(r.auth("farm", "farm-secret"), "+OK\r\n");
+    BOOST_CHECK_EQUAL(r.call({"INCR", "sccache/n"}), ":1\r\n");
+    BOOST_CHECK_EQUAL(r.call({"INCR", "sccache/n"}), "-ERR value conflict for an existing key\r\n");
+    BOOST_CHECK_EQUAL(r.call({"APPEND", "sccache/n", "x"}),
+                      "-ERR value conflict for an existing key\r\n");
+    BOOST_CHECK_EQUAL(r.call({"SET", "sccache/n", "1", "XX", "GET"}), bulk("1"));
+    BOOST_CHECK_EQUAL(r.call({"GETDEL", "sccache/n"}), bulk("1"));
+    BOOST_CHECK_GE(c.gateway(c.leader_of(k_sccache_group)).stats()._value_conflicts.load(), 2U);
 }
 
 BOOST_AUTO_TEST_CASE(only_peer_gateways_may_advise, *boost::unit_test::timeout(120)) {

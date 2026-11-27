@@ -368,7 +368,7 @@ commands:
     acl: [write, string, fast]
     keys: [1, 1, 1]
     path: W
-    status: planned
+    status: shipped
     task: 3
   - name: DECR
     id: 32
@@ -379,7 +379,7 @@ commands:
     acl: [write, string, fast]
     keys: [1, 1, 1]
     path: W
-    status: planned
+    status: shipped
     task: 3
   - name: INCRBY
     id: 33
@@ -390,7 +390,7 @@ commands:
     acl: [write, string, fast]
     keys: [1, 1, 1]
     path: W
-    status: planned
+    status: shipped
     task: 3
   - name: DECRBY
     id: 34
@@ -401,7 +401,7 @@ commands:
     acl: [write, string, fast]
     keys: [1, 1, 1]
     path: W
-    status: planned
+    status: shipped
     task: 3
   - name: INCRBYFLOAT
     id: 35
@@ -412,7 +412,7 @@ commands:
     acl: [write, string, fast]
     keys: [1, 1, 1]
     path: W
-    status: planned
+    status: shipped
     task: 3
   - name: SETNX
     id: 36
@@ -423,7 +423,7 @@ commands:
     acl: [write, string, fast]
     keys: [1, 1, 1]
     path: W
-    status: planned
+    status: shipped
     task: 3
   - name: PSETEX
     id: 37
@@ -434,7 +434,7 @@ commands:
     acl: [write, string, slow]
     keys: [1, 1, 1]
     path: W
-    status: planned
+    status: shipped
     task: 3
   - name: GETSET
     id: 38
@@ -445,7 +445,7 @@ commands:
     acl: [write, string, fast]
     keys: [1, 1, 1]
     path: W
-    status: planned
+    status: shipped
     task: 3
   - name: GETDEL
     id: 39
@@ -456,7 +456,7 @@ commands:
     acl: [write, string, fast]
     keys: [1, 1, 1]
     path: W
-    status: planned
+    status: shipped
     task: 3
   - name: GETEX
     id: 40
@@ -467,7 +467,7 @@ commands:
     acl: [write, string, fast]
     keys: [1, 1, 1]
     path: W
-    status: planned
+    status: shipped
     task: 3
   - name: APPEND
     id: 41
@@ -478,7 +478,7 @@ commands:
     acl: [write, string, fast]
     keys: [1, 1, 1]
     path: W
-    status: planned
+    status: shipped
     task: 3
   - name: SETRANGE
     id: 42
@@ -489,7 +489,7 @@ commands:
     acl: [write, string, slow]
     keys: [1, 1, 1]
     path: W
-    status: planned
+    status: shipped
     task: 3
   - name: TYPE
     id: 43
@@ -500,7 +500,7 @@ commands:
     acl: [keyspace, read, fast]
     keys: [1, 1, 1]
     path: R
-    status: planned
+    status: shipped
     task: 3
   - name: UNLINK
     id: 44
@@ -511,7 +511,7 @@ commands:
     acl: [keyspace, write, fast]
     keys: [1, -1, 1]
     path: M
-    status: planned
+    status: shipped
     task: 3
   - name: TOUCH
     id: 45
@@ -522,7 +522,7 @@ commands:
     acl: [keyspace, read, fast]
     keys: [1, -1, 1]
     path: R
-    status: planned
+    status: shipped
     task: 3
   - name: OBJECT
     id: 46
@@ -533,7 +533,7 @@ commands:
     acl: [slow]
     keys: [0, 0, 0]
     path: R
-    status: planned
+    status: shipped
     task: 3
   - name: EXPIRE
     id: 47
