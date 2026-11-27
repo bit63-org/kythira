@@ -19,6 +19,23 @@
 //   cas       ok: legal iff the value equals `expected`, then sets it
 //             info: sets it iff the value equals `expected`, else no effect
 //
+// Redis data-type operations have models of their own over the same
+// optional-string state (Requirement 23.4 of redis-general-data-types):
+//
+//   incr      state is a decimal count (absent = 0); ok: legal iff it
+//             returned the count plus one
+//   setnx     a lock: absent takes the token iff it reported acquired; held
+//             stays held iff it reported refused
+//   getdel    ok: legal iff it returned the current value; then absent
+//   lpush     state is a list ('\n'-separated, absent when empty); pushes
+//             on the left, ok: legal iff it returned the new length
+//   rpop      pops on the right; ok: legal iff it returned that element
+//             (or nil on an empty list)
+//   read      on a list key the value is the whole list in the same form
+//
+// An indeterminate one of these takes effect with whatever outcome the
+// state gives, or never.
+//
 // How each completion type enters the search:
 //
 //   ok    the operation took effect between its invoke and its completion.
@@ -147,7 +164,92 @@ using state = std::optional<std::string>;
 
 /// The register model's step. Returns the next state, or nothing if the
 /// operation cannot take effect in `s`.
+/// A list state: elements left to right, '\n'-separated; absent when empty
+/// (Redis deletes an empty list).
+inline auto list_of(const state& s) -> std::vector<std::string> {
+    std::vector<std::string> out;
+    if (!s) {
+        return out;
+    }
+    std::size_t pos = 0;
+    for (;;) {
+        const auto end = s->find('\n', pos);
+        out.push_back(s->substr(pos, end == std::string::npos ? std::string::npos : end - pos));
+        if (end == std::string::npos) {
+            return out;
+        }
+        pos = end + 1;
+    }
+}
+
+inline auto state_of(const std::vector<std::string>& list) -> state {
+    if (list.empty()) {
+        return std::nullopt;
+    }
+    std::string out;
+    for (const auto& e : list) {
+        if (!out.empty()) {
+            out += '\n';
+        }
+        out += e;
+    }
+    return out;
+}
+
 inline auto step(const state& s, const operation& op) -> std::optional<state> {
+    // An ok operation's outcome is known and must match; an indeterminate
+    // one's is not (and placing it after everything is "never happened").
+    const bool known = !op.indeterminate;
+    switch (op.f) {
+        case history::op_kind::incr: {
+            auto next = std::to_string((s ? std::stoll(*s) : 0) + 1);
+            if (known && op.value != next) {
+                return std::nullopt;
+            }
+            return next;
+        }
+        case history::op_kind::setnx:
+            // expected: "1" acquired, "0" refused (the key was held).
+            if (!s) {
+                if (known && op.expected != "1") {
+                    return std::nullopt;
+                }
+                return op.value;
+            }
+            if (known && op.expected != "0") {
+                return std::nullopt;
+            }
+            return s;
+        case history::op_kind::getdel:
+            if (known && s != op.value) {
+                return std::nullopt;
+            }
+            return state{};
+        case history::op_kind::lpush: {
+            auto list = list_of(s);
+            list.insert(list.begin(), op.value.value_or(""));
+            if (known && op.expected != std::to_string(list.size())) {
+                return std::nullopt;
+            }
+            return state_of(list);
+        }
+        case history::op_kind::rpop: {
+            auto list = list_of(s);
+            if (list.empty()) {
+                if (known && op.value) {
+                    return std::nullopt;
+                }
+                return s;
+            }
+            if (known && op.value != list.back()) {
+                return std::nullopt;
+            }
+            list.pop_back();
+            return state_of(list);
+        }
+        default:
+            break;
+    }
     switch (op.f) {
         case history::op_kind::read:
             if (s == op.value) {
@@ -165,6 +267,8 @@ inline auto step(const state& s, const operation& op) -> std::optional<state> {
                 return s;
             }
             return std::nullopt;
+        default:
+            break;
     }
     return std::nullopt;
 }
@@ -355,18 +459,21 @@ inline auto search(const std::vector<operation>& ops, std::uint64_t budget, std:
             }
         }
         const bool info = c.type == history::event_type::info;
-        by_key[i.key].push_back(
-            operation{.invoke_event = inv,
-                      .completion_event = *done,
-                      .process = i.process,
-                      .f = i.f,
-                      // A read's value is what it returned; a write's what it wrote.
-                      .value = i.f == history::op_kind::read ? c.value : i.value,
-                      .expected = i.expected,
-                      .call_ns = i.time_ns,
-                      .return_ns = info ? std::numeric_limits<std::int64_t>::max() : c.time_ns,
-                      .indeterminate = info,
-                      .node = c.node});
+        by_key[i.key].push_back(operation{
+            .invoke_event = inv,
+            .completion_event = *done,
+            .process = i.process,
+            .f = i.f,
+            // A read's value is what it returned; a write's what it wrote.
+            .value = history::value_from_completion(i.f) ? c.value : i.value,
+            // cas's expected is what it sent; setnx's and lpush's
+            // the outcome it got back.
+            .expected =
+                i.f == history::op_kind::cas || !history::has_pair(i.f) ? i.expected : c.expected,
+            .call_ns = i.time_ns,
+            .return_ns = info ? std::numeric_limits<std::int64_t>::max() : c.time_ns,
+            .indeterminate = info,
+            .node = c.node});
     };
     for (std::size_t k = 0; k < h.size(); ++k) {
         if (h[k].type == history::event_type::invoke) {
@@ -415,7 +522,7 @@ inline auto search(const std::vector<operation>& ops, std::uint64_t budget, std:
         boost::json::object o{
             {"p", op.process},
             {"f", history::to_string(op.f)},
-            {"value", op.f == history::op_kind::cas
+            {"value", history::has_pair(op.f)
                           ? boost::json::value(boost::json::array{opt(op.expected), opt(op.value)})
                           : opt(op.value)},
             {"invoke", op.invoke_event},
