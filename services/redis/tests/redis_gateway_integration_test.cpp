@@ -2970,8 +2970,10 @@ auto call_answer_of(const std::string& reply)
 /// `reply` is empty, by closing the connection without a word.
 class fake_front_end {
 public:
-    fake_front_end(std::chrono::milliseconds delay, std::string reply)
-        : _delay(delay), _reply(std::move(reply)), _acceptor(_io) {
+    /// `transactions`: answer MULTI and queue what follows it, as a front
+    /// end does, and vanish at EXEC (a front end lost mid-transaction).
+    fake_front_end(std::chrono::milliseconds delay, std::string reply, bool transactions = false)
+        : _delay(delay), _reply(std::move(reply)), _transactions(transactions), _acceptor(_io) {
         boost::asio::ip::tcp::endpoint ep(boost::asio::ip::make_address("127.0.0.1"), 0);
         _acceptor.open(ep.protocol());
         _acceptor.set_option(boost::asio::ip::tcp::acceptor::reuse_address(true));
@@ -3040,6 +3042,20 @@ private:
                 auto state = kythira::redis_call_wire::decode_state(cmd->_argv.at(1));
                 kythira::redis_call_wire::call_answer answer{
                     state.value_or(kythira::redis_call_wire::call_state{}), false, _reply};
+                if (_transactions && cmd->_argv.size() > 2) {
+                    const auto inner = kythira::resp_to_upper(cmd->_argv[2]);
+                    if (inner == "EXEC") {
+                        (void)sock.close(ec);
+                        return;
+                    }
+                    if (inner == "MULTI") {
+                        answer.state.in_multi = true;
+                        answer.reply = "+OK\r\n";
+                    } else if (answer.state.in_multi) {
+                        answer.queued = true;
+                        answer.reply = "+QUEUED\r\n";
+                    }
+                }
                 boost::asio::write(
                     sock,
                     boost::asio::buffer(bulk(kythira::redis_call_wire::encode_answer(answer))), ec);
@@ -3049,6 +3065,7 @@ private:
 
     std::chrono::milliseconds _delay;
     std::string _reply;
+    bool _transactions = false;
     boost::asio::io_context _io;
     boost::asio::ip::tcp::acceptor _acceptor;
     std::uint16_t _port = 0;
@@ -3176,6 +3193,29 @@ BOOST_AUTO_TEST_CASE(a_gateway_apart_never_replays_a_call_its_front_end_may_have
         BOOST_CHECK_EQUAL(one.call({"PING"}), "+PONG\r\n");
     }
     BOOST_CHECK_EQUAL(gw2.stats()._front_end_lost.load(), 0u);
+}
+
+// EXEC ends the transaction even when its front end is lost under it. The
+// gateway used to keep the connection in MULTI, so every later command
+// answered +QUEUED (redis_layer_paths_test caught a writer doing that for
+// a whole step after a front end restarted).
+BOOST_AUTO_TEST_CASE(a_lost_exec_ends_the_transaction, *boost::unit_test::timeout(120)) {
+    fake_front_end lost(std::chrono::milliseconds{0}, "+OK\r\n", true);
+    redis_gateway_config base;
+    base._insecure_plaintext = true;
+    cluster c(base);
+    BOOST_REQUIRE(c.await_all_leaders(std::chrono::seconds{20}));
+
+    auto& gw = c.add_gateway(insecure_gateway_config({lost.endpoint()}));
+    resp_client k(gw.port());
+    BOOST_REQUIRE_EQUAL(k.auth("farm", "farm-secret"), "+OK\r\n");
+    BOOST_REQUIRE_EQUAL(k.call({"MULTI"}), "+OK\r\n");
+    BOOST_REQUIRE_EQUAL(k.call({"SET", "sccache/tx/1", "v"}), "+QUEUED\r\n");
+    BOOST_CHECK_EQUAL(k.call({"EXEC"}),
+                      "-ERR outcome unknown, front end lost; it may have applied\r\n");
+    // Out of the transaction: the next command runs, it is not queued.
+    BOOST_CHECK_EQUAL(k.call({"SET", "sccache/tx/2", "v"}), "+OK\r\n");
+    BOOST_CHECK_EQUAL(gw.stats()._front_end_lost.load(), 1u);
 }
 
 BOOST_AUTO_TEST_CASE(a_draining_gateway_finishes_what_it_received,

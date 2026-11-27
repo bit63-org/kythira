@@ -5,6 +5,13 @@ current list of outstanding work, see [TODO.md](TODO.md).
 
 ### What Changed (November 26, 2026)
 
+- **A gateway apart from its front ends ends a transaction at EXEC even
+  when the front end is lost under it.** It answered the client's EXEC
+  with `-ERR outcome unknown` but kept the connection in `MULTI`, so
+  every later command on it answered `+QUEUED` and never ran. EXEC or
+  DISCARD the gateway answers itself now drops the queue and the watch,
+  and an EXEC no front end could take answers `EXECABORT` rather than
+  `TRYAGAIN`, since a retried EXEC would find no transaction.
 - **Every Redis layer migration path is tested both ways, and the bugs
   the tests found are fixed.** `redis_layer_paths_test` walks one
   in-process cluster from co-located to a three-way split and back under
