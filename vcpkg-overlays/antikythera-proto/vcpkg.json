@@ -1,0 +1,7 @@
+{
+  "name": "antikythera-proto",
+  "version-date": "2026-11-25",
+  "description": "Antikythera's header-only wire formats (src/proto/ and the src/common/ wire and CRC32C helpers they use): hold wire versions 1 and 2, VolumeLayout, ReplicaConfig, reports and the signing test vectors. Consumed by kythira's khold module (.kiro/specs/khold-block-service/ Requirement 1.4) and later the EC2 module, exported as antikythera::proto. Header-only: nothing is compiled.",
+  "homepage": "https://github.com/bit63-org/antikythera",
+  "license": "Apache-2.0"
+}

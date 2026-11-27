@@ -3085,6 +3085,20 @@ private:
             }
             obj["learners"] = learners;
         }
+        if (!snap.configuration().witnesses().empty()) {
+            boost::json::array witnesses;
+            for (const auto& n : snap.configuration().witnesses()) {
+                witnesses.push_back(persistence_node_id::to_json(n));
+            }
+            obj["witnesses"] = witnesses;
+        }
+        if (!snap.configuration().lagging().empty()) {
+            boost::json::array lagging;
+            for (const auto& n : snap.configuration().lagging()) {
+                lagging.push_back(persistence_node_id::to_json(n));
+            }
+            obj["lagging"] = lagging;
+        }
         return boost::json::serialize(obj);
     }
 
@@ -3136,6 +3150,16 @@ private:
         if (obj.contains("learners")) {
             for (const auto& n : obj.at("learners").as_array()) {
                 snap._configuration._learners.push_back(snapshot_member(n));
+            }
+        }
+        if (obj.contains("witnesses")) {
+            for (const auto& n : obj.at("witnesses").as_array()) {
+                snap._configuration._witnesses.push_back(snapshot_member(n));
+            }
+        }
+        if (obj.contains("lagging")) {
+            for (const auto& n : obj.at("lagging").as_array()) {
+                snap._configuration._lagging.push_back(snapshot_member(n));
             }
         }
         return snap;

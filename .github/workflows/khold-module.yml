@@ -1,0 +1,307 @@
+# Copyright (c) 2026 Clark Rawlins
+# SPDX-License-Identifier: Apache-2.0
+
+# The khold module's own workflow (services/khold/, services/README.md
+# "CI", .kiro/specs/khold-block-service/ task 1). ci.yml is the gate: its
+# GCC build-and-test legs build the module and run its tests on every pull
+# request, because ci_full_defconfig sets CONFIG_KHOLD=y. This workflow
+# adds, for changes to the module or what it builds on:
+#
+#   - the boundary check (also in ci.yml's kconfig-check job);
+#   - a module-on build of just the module's targets, with its tests (every
+#     test labelled khold), so a module change gets an answer in minutes
+#     instead of after the full build-and-test legs;
+#   - a module-off configure (configs/ci_no_khold_defconfig) that asserts
+#     no khold target or khold-module test exists with the switch off;
+#   - a container smoke test: khold_node --self-test inside a container
+#     under rootful Docker and rootless Podman (CLAUDE.md, "Container
+#     runtime compatibility"). The compose scenarios join with the first
+#     task whose daemon serves requests (task 13).
+#
+# g++-13, not clang++-18 like the other module workflows: antikythera's
+# headers use std::expected, which libstdc++ 13 hides from Clang 18, so the
+# module only builds with GCC here (top-level CMakeLists.txt skips it on
+# Clang 18 with a status line). The vcpkg key is the g++-13 legs' key, so
+# this job reuses their tree.
+#
+# The module-off configure does not build core: ci.yml's config-variants job
+# already builds every target of minimal_defconfig, where CONFIG_KHOLD is
+# off by default, and the boundary check's core-includes-module rule keeps
+# core from including a module header at all.
+#
+# NOT a required check: GitHub reports nothing for a workflow its paths
+# filter skips, so a required check from it would hang every unrelated pull
+# request. Whoever merges a pull request that touches the module waits for
+# this workflow too (services/README.md).
+
+name: khold Module
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "services/khold/**"
+      - "services/README.md"
+      - "cmake/kythira_test_helpers.cmake"
+      - "cmake/Kconfig.cmake"
+      - "scripts/check_module_boundaries.py"
+      - "scripts/tests/test_check_module_boundaries.py"
+      - "configs/ci_full_defconfig"
+      - "configs/ci_no_khold_defconfig"
+      - "vcpkg.json"
+      - "vcpkg-configuration.json"
+      - "vcpkg-overlays/antikythera-proto/**"
+      - "Kconfig"
+      - "CMakeLists.txt"
+      - ".github/workflows/khold-module.yml"
+  pull_request:
+    branches: ['**']
+    # Keep in step with the push list above.
+    paths:
+      - "services/khold/**"
+      - "services/README.md"
+      - "cmake/kythira_test_helpers.cmake"
+      - "cmake/Kconfig.cmake"
+      - "scripts/check_module_boundaries.py"
+      - "scripts/tests/test_check_module_boundaries.py"
+      - "configs/ci_full_defconfig"
+      - "configs/ci_no_khold_defconfig"
+      - "vcpkg.json"
+      - "vcpkg-configuration.json"
+      - "vcpkg-overlays/antikythera-proto/**"
+      - "Kconfig"
+      - "CMakeLists.txt"
+      - ".github/workflows/khold-module.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: khold-module-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  boundary:
+    name: khold module boundary check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # The fixture tests first, so a broken checker cannot pass the tree by
+      # reporting nothing (same order as ci.yml's kconfig-check).
+      - name: Module boundary checker passes its fixture tests
+        run: python3 scripts/tests/test_check_module_boundaries.py -v
+      - name: services/khold uses only Kythira's public surface
+        run: python3 scripts/check_module_boundaries.py
+
+  build:
+    name: khold module on and off (g++-13, x64)
+    runs-on: ubuntu-24.04
+    # A warm vcpkg tree and sccache make this minutes. A cold vcpkg tree is
+    # config-variants' 78-minute install, which this job shares by key.
+    timeout-minutes: 180
+    # The read-write build-cache key is an environment secret of
+    # build-cache-write (main only); same-repository pull requests write
+    # with the create-only pr key, and everything else reads only. See
+    # doc/ci_build_cache.md.
+    environment: ${{ github.ref == 'refs/heads/main' && 'build-cache-write' || '' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install system dependencies
+        run: |
+          ./scripts/drop-unused-apt-repos.sh
+          # autoconf & co. are for vcpkg's gperf port, needed only on a cold
+          # vcpkg cache; see ci.yml's build-and-test job.
+          for attempt in 1 2 3; do
+            if timeout 300 sudo apt-get update -q \
+                 && timeout 600 sudo apt-get install -y --no-install-recommends \
+                 g++-13 cmake ninja-build libfiu-dev \
+                 autoconf autoconf-archive automake libtool mold; then
+              exit 0
+            fi
+            echo "::warning::apt-get install failed (attempt ${attempt}/3), retrying in 30s..."
+            sleep 30
+          done
+          echo "::error::apt-get install failed after 3 attempts" >&2
+          exit 1
+
+      - name: Install kconfiglib
+        run: pip3 install --user -r scripts/kconfig/requirements.txt
+
+      # Only reached on a cold vcpkg cache: the edhoc feature builds the
+      # lakers overlay port from Rust source.
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+
+      - name: Resolve vcpkg triplet
+        id: triplet
+        run: echo "value=x64-linux" >> "$GITHUB_OUTPUT"
+
+      - name: OCI build cache
+        id: buildcache
+        uses: ./.github/actions/oci-build-cache
+        with:
+          triplet: ${{ steps.triplet.outputs.value }}
+          rw-access-key-id: ${{ secrets.OCI_BUILD_CACHE_RW_ACCESS_KEY_ID }}
+          rw-secret-access-key: ${{ secrets.OCI_BUILD_CACHE_RW_SECRET_ACCESS_KEY }}
+          pr-access-key-id: ${{ secrets.OCI_BUILD_CACHE_PR_ACCESS_KEY_ID }}
+          pr-secret-access-key: ${{ secrets.OCI_BUILD_CACHE_PR_SECRET_ACCESS_KEY }}
+          ro-access-key-id: ${{ secrets.OCI_BUILD_CACHE_RO_ACCESS_KEY_ID }}
+          ro-secret-access-key: ${{ secrets.OCI_BUILD_CACHE_RO_SECRET_ACCESS_KEY }}
+          bucket: ${{ vars.OCI_BUILD_CACHE_BUCKET }}
+          namespace: ${{ vars.OCI_BUILD_CACHE_NAMESPACE }}
+          region: ${{ vars.OCI_CI_REGION }}
+
+      # Byte-identical to ci.yml's x64 g++-13 key (the g++-13 build-and-test
+      # leg, which sets no vcpkg compiler), so this job reuses its tree.
+      - name: Cache vcpkg packages
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: vcpkg-cache
+        with:
+          path: vcpkg_installed
+          key: vcpkg-${{ runner.os }}-${{ runner.arch }}-edhoc-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json', 'vcpkg-overlays/**') }}
+
+      - name: Bootstrap vcpkg and install dependencies
+        if: steps.vcpkg-cache.outputs.cache-hit != 'true'
+        run: |
+          echo "vcpkg binary cache: ${VCPKG_BINARY_SOURCES:-<none>}"
+          # The ports build with the runner's default compiler, as on ci.yml's
+          # g++-13 legs (no CC/CXX export), so the tree matches their key.
+          git clone --filter=blob:none https://github.com/microsoft/vcpkg.git /tmp/vcpkg
+          git -C /tmp/vcpkg checkout 9a7f7340a6c5f11f24c3d59f85e07143feb84e06
+          /tmp/vcpkg/bootstrap-vcpkg.sh -disableMetrics
+          /tmp/vcpkg/vcpkg install --triplet ${{ steps.triplet.outputs.value }} --no-print-usage --x-feature=edhoc
+        env:
+          VCPKG_DEFAULT_TRIPLET: ${{ steps.triplet.outputs.value }}
+
+      - name: Start sccache
+        id: sccache
+        if: steps.buildcache.outputs.enabled == 'true'
+        run: scripts/oci-build-cache/start-sccache.sh
+
+      - name: Configure (module on, ci_full_defconfig, strict)
+        run: |
+          cmake -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CXX_COMPILER=g++-13 \
+            -DKYTHIRA_KCONFIG=configs/ci_full_defconfig \
+            -DKYTHIRA_KCONFIG_STRICT=ON \
+            -DKYTHIRA_COMPILER_LAUNCHER=${{ steps.sccache.outputs.launcher || 'none' }} \
+            -DKYTHIRA_LINKER=mold \
+            -DCMAKE_PREFIX_PATH=${{ github.workspace }}/vcpkg_installed/${{ steps.triplet.outputs.value }}
+
+      # Every test labelled khold, built by name. The list comes from ctest, so
+      # a new test joins without an edit here.
+      - name: Build the module's tests
+        run: |
+          mapfile -t tests < <(ctest --test-dir build -N -L '^khold$' \
+            | sed -n 's/^ *Test *#[0-9]*: \(.*\)$/\1/p')
+          if (( ${#tests[@]} == 0 )); then
+            echo "::error::no test carries the khold label in the module-on build"
+            exit 1
+          fi
+          echo "khold tests: ${tests[*]}"
+          # Some tests run another program (khold_node --self-test) and have
+          # no target of their own; build the tests that are targets, plus
+          # the daemon the self-test runs.
+          mapfile -t known < <(ninja -C build -t targets all | sed -n 's/^\([^:]*\):.*/\1/p')
+          targets=(khold_node)
+          for t in "${tests[@]}"; do
+            if printf '%s\n' "${known[@]}" | grep -qxF "$t"; then
+              targets+=("$t")
+            fi
+          done
+          echo "Building: ${targets[*]}"
+          cmake --build build -j"$(nproc)" --target "${targets[@]}"
+
+      - name: Run the module's tests
+        run: ctest --test-dir build -L '^khold$' --output-on-failure --no-tests=error
+
+      # The container job below runs this binary under both runtimes.
+      - name: Upload khold_node
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: khold-node
+          path: build/khold_node
+          retention-days: 3
+          if-no-files-found: error
+
+      - name: Configure (module off, ci_no_khold_defconfig, strict)
+        run: |
+          cmake -B build-off -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CXX_COMPILER=g++-13 \
+            -DKYTHIRA_KCONFIG=configs/ci_no_khold_defconfig \
+            -DKYTHIRA_KCONFIG_STRICT=ON \
+            -DKYTHIRA_LINKER=mold \
+            -DCMAKE_PREFIX_PATH=${{ github.workspace }}/vcpkg_installed/${{ steps.triplet.outputs.value }}
+
+      - name: Assert nothing of the module is configured with it off
+        run: |
+          rc=0
+          # `khold-module`, not `khold`: a core suite the module builds on
+          # (the Raft append sink, witness voters, commit predicates) may
+          # carry `khold` too and rightly exist with the module off.
+          if ctest --test-dir build -N -L '^khold-module$' | grep -q '^ *Test *#'; then :; else
+            echo "::error::no khold-module test in the module-on build, so the check below proves nothing"
+            rc=1
+          fi
+          if ctest --test-dir build-off -N -L '^khold-module$' | grep -q '^ *Test *#'; then
+            echo "::error::a khold-module test exists with CONFIG_KHOLD off"
+            rc=1
+          fi
+          # Every output Ninja knows; a module target or object would sit
+          # under build-off/services/khold/ or be named after the module.
+          if ninja -C build-off -t targets all \
+               | grep -E '(^|/)services/khold/|kythira_khold|khold_node'; then
+            echo "::error::a services/khold target exists with CONFIG_KHOLD off"
+            rc=1
+          fi
+          exit $rc
+
+  container:
+    name: khold_node in a container (${{ matrix.runtime }})
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        # Rootful Docker (the default CI runtime) and rootless Podman: the
+        # runner user is unprivileged, so podman runs rootless here.
+        runtime: [docker, podman]
+    steps:
+      - name: Download khold_node
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: khold-node
+          path: bin
+
+      # ubuntu:24.04 is the build runner's distribution, so the binary's
+      # glibc and libstdc++ match. The image is named in full so podman
+      # needs no short-name resolution. No --privileged, host networking or
+      # added capabilities (CLAUDE.md).
+      - name: khold_node --self-test under ${{ matrix.runtime }}
+        env:
+          RUNTIME: ${{ matrix.runtime }}
+        run: |
+          chmod +x bin/khold_node
+          if [ "$RUNTIME" = podman ]; then
+            if [ "$(id -u)" = 0 ]; then
+              echo "::error::podman would run rootful here; this job checks rootless podman"
+              exit 1
+            fi
+            podman info --format '{{.Host.Security.Rootless}}' | grep -qx true
+          fi
+          "$RUNTIME" --version
+          "$RUNTIME" run --rm --network none \
+            -v "$PWD/bin:/opt/khold:ro,Z" \
+            docker.io/library/ubuntu:24.04 /opt/khold/khold_node --self-test

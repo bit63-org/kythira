@@ -1,0 +1,23 @@
+# Copyright (c) 2026 Clark Rawlins
+# SPDX-License-Identifier: Apache-2.0
+
+# The khold block service (services/khold/, .kiro/specs/khold-block-service/).
+# Sourced from the top-level Kconfig's "Service Modules" menu.
+
+config KHOLD
+	bool "khold: Raft-replicated network block volumes for antikythera"
+	default n
+	help
+	  Builds the services/khold/ module: a block service that stores
+	  antikythera network volumes in Raft stripe groups and speaks hold
+	  wire version 2 to antikythera's oar-blk initiator, running beside
+	  antikythera's hold per volume class until it reaches feature and
+	  testing parity. So far the module holds the khold_node placeholder
+	  and the check that antikythera's wire formats, consumed through the
+	  antikythera-proto overlay port, reproduce antikythera's test
+	  vectors (task 1); the Raft append sink, witness voters and commit
+	  predicates land in core, and the block store, stripe groups,
+	  gateway and controller follow. Needs a C++ library with
+	  std::expected (GCC 13+ or Clang 19+ over libstdc++); on Clang 18 the
+	  build skips it. Off by default like every new module
+	  (services/README.md). See .kiro/specs/khold-block-service/.

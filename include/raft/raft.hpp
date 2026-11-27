@@ -427,6 +427,34 @@ public:
     /// @return Future that resolves once the configuration change is committed.
     auto promote_to_voter(node_id_type learner) -> future_type;
 
+    /// @brief Promote a learner to a witness voter through joint consensus
+    ///        (`.kiro/specs/khold-block-service/` task 4).
+    ///
+    /// Exactly `promote_to_voter()`, except that the new configuration also
+    /// lists the learner in `witnesses()`. A witness votes and counts toward
+    /// quorum, never campaigns, refuses TimeoutNow, is never a leadership
+    /// transfer target, serves no FetchLogEntries, and, when this node's
+    /// persistence engine can describe entries (`witness_entry()`, which
+    /// `append_sink_persistence` provides), receives descriptors rather than
+    /// payloads. Removing a witness is `remove_server()`.
+    ///
+    /// @param learner Identifier of the learner to promote.
+    /// @return Future that resolves once the configuration change is committed.
+    auto promote_to_witness(node_id_type learner) -> future_type;
+
+    /// @brief Whether @p id is a witness in this node's current configuration.
+    [[nodiscard]] auto is_witness_member(const node_id_type& id) const -> bool;
+
+    /// @brief Data voters the current configuration records as lagging
+    /// (`.kiro/specs/khold-block-service/` task 5).
+    ///
+    /// Under `commit_rule::all_in_sync` the leader records a data follower
+    /// that misses `member_deadline` as lagging, through a committed
+    /// configuration entry, before it commits any entry without it, and
+    /// records it in sync again once it has caught up. Includes markers not
+    /// yet committed, like every configuration read.
+    [[nodiscard]] auto lagging_members() const -> std::vector<node_id_type>;
+
     /// @brief Send a ClusterLeave RPC to the current leader asking it to remove this node.
     ///
     /// No-op when the network client does not satisfy the `network_client_with_cluster_leave`
@@ -1342,6 +1370,18 @@ private:
     // apply_peer_liveness(); leader-local, cleared on step-down.
     std::unordered_map<node_id_type, std::chrono::steady_clock::time_point> _peer_last_contact{};
 
+    // Commit predicates (.kiro/specs/khold-block-service/ task 5): for each
+    // in-sync data follower behind the leader's log, when it fell behind and
+    // the last index it then owed. It is lagging once it has not acknowledged
+    // that index within member_deadline. Leader-local; cleared when the term
+    // changes or this node stops leading.
+    struct behind_record {
+        std::chrono::steady_clock::time_point _since;
+        log_index_type _owed;
+    };
+    std::unordered_map<node_id_type, behind_record> _behind_since{};
+    term_id_type _behind_term{};
+
     // Number of provision_node slots per placement group that are either in
     // flight or have returned a node that has not yet joined the configuration
     // (Req 14.3).  Incremented before provision_node is called; decremented
@@ -1503,7 +1543,8 @@ private:
     // Appends the C_old+new joint entry that makes `learner` a voter and
     // returns the future of the whole change. Callers have already validated
     // leadership, membership and capacity. Must be called with _mutex held.
-    auto begin_voter_promotion(node_id_type learner) -> future_type;
+    auto begin_voter_promotion(node_id_type learner, bool as_witness = false) -> future_type;
+    auto promote_learner(node_id_type learner, bool as_witness) -> future_type;
     auto become_leader() -> void;
 
     // ── The durability barrier (`.kiro/specs/durable-append-barrier/`) ───────
@@ -1897,6 +1938,47 @@ private:
     // eligibility updates immediately when it is promoted, added, or removed.
     [[nodiscard]] auto is_learner() const -> bool;
 
+    // ── Witness helpers (.kiro/specs/khold-block-service/ task 4) ───────────
+    // `_mutex` must be held. Live reads of `_configuration`, like is_learner().
+    [[nodiscard]] auto is_witness() const -> bool;
+    [[nodiscard]] auto is_witness_locked(const node_id_type& id) const -> bool;
+    // The entry as a witness receives it: `_persistence.witness_entry(e)`
+    // when the engine provides one (descriptors, no payload), else `e`.
+    [[nodiscard]] auto for_witness(log_entry_type entry) -> log_entry_type;
+    // Copy into `dst` the witnesses of `src` that are voters of `dst`
+    // (new or, while joint, old), so a membership change keeps them.
+    static auto carry_witnesses(cluster_configuration_type& dst,
+                                const cluster_configuration_type& src) -> void;
+
+    // ── Commit predicates (.kiro/specs/khold-block-service/ task 5) ──────────
+    [[nodiscard]] auto commit_rule_locked() const -> kythira::commit_rule;
+    [[nodiscard]] static auto has_witness_in(const cluster_configuration_type& cfg,
+                                             const node_id_type& id) -> bool;
+    [[nodiscard]] static auto is_lagging_in(const cluster_configuration_type& cfg,
+                                            const node_id_type& id) -> bool;
+    // Whether the configuration names any witness or lagging member, so the
+    // data clauses can change an outcome. False for every group that uses
+    // neither, which then runs exactly the majority check it ran before.
+    [[nodiscard]] static auto has_data_roles(const cluster_configuration_type& cfg) -> bool;
+    // Every voter of `cfg`: new, and old while joint, each once.
+    [[nodiscard]] static auto voters_of(const cluster_configuration_type& cfg)
+        -> std::vector<node_id_type>;
+    // Whether `id` holds index `n`: the leader's durable index for itself,
+    // match_index for a follower.
+    [[nodiscard]] auto holds_index(const node_id_type& id, log_index_type n) const -> bool;
+    // The data clauses at index `n`, judged by `cfg`, the configuration in
+    // force at `n`: at least one data voter holds it and, under all_in_sync,
+    // so does every data voter `cfg` does not record as lagging.
+    [[nodiscard]] auto data_clauses_hold(log_index_type n,
+                                         const cluster_configuration_type& cfg) const -> bool;
+    // The leader's member deadline check, from the heartbeat tick: records
+    // a data follower that missed it as lagging, and a lagging member that
+    // caught up as in sync. Returns whether it appended an entry.
+    auto drive_lagging_members() -> bool;
+    // Append a plain configuration entry that marks (or clears) `id` as
+    // lagging, as add_learner() appends one for a learner.
+    auto append_lagging_marker(const node_id_type& id, bool lagging) -> void;
+
     // Returns this node's own placement group, defaulting to placement_group_id_type{}
     // when absent from _placement_map (same fallback used by build_quorum_cluster_vector()).
     [[nodiscard]] auto placement_of(const node_id_type& id) const -> placement_group_id_type;
@@ -2140,6 +2222,268 @@ auto node<Types>::build_quorum_cluster_vector() const
 template<raft_types Types> auto node<Types>::is_learner() const -> bool {
     const auto& learners = _configuration.learners();
     return std::find(learners.begin(), learners.end(), _node_id) != learners.end();
+}
+
+// ── Witness helpers (.kiro/specs/khold-block-service/ task 4) ──────────────
+
+template<raft_types Types>
+auto node<Types>::is_witness_locked(const node_id_type& id) const -> bool {
+    if constexpr (requires { _configuration.witnesses(); }) {
+        const auto& witnesses = _configuration.witnesses();
+        return std::find(witnesses.begin(), witnesses.end(), id) != witnesses.end();
+    } else {
+        return false;
+    }
+}
+
+template<raft_types Types> auto node<Types>::is_witness() const -> bool {
+    return is_witness_locked(_node_id);
+}
+
+template<raft_types Types>
+auto node<Types>::is_witness_member(const node_id_type& id) const -> bool {
+    std::lock_guard<std::mutex> lock(_mutex);
+    return is_witness_locked(id);
+}
+
+template<raft_types Types> auto node<Types>::for_witness(log_entry_type entry) -> log_entry_type {
+    if constexpr (requires(persistence_engine_type& p, const log_entry_type& e) {
+                      { p.witness_entry(e) } -> std::same_as<log_entry_type>;
+                  }) {
+        return _persistence.witness_entry(entry);
+    } else {
+        return entry;
+    }
+}
+
+template<raft_types Types>
+auto node<Types>::carry_witnesses(cluster_configuration_type& dst,
+                                  const cluster_configuration_type& src) -> void {
+    if constexpr (requires { dst._witnesses; }) {
+        dst._witnesses.clear();
+        for (const auto& w : src.witnesses()) {
+            bool voter = std::find(dst.nodes().begin(), dst.nodes().end(), w) != dst.nodes().end();
+            if (!voter && dst.is_joint_consensus() && dst.old_nodes()) {
+                const auto& old = *dst.old_nodes();
+                voter = std::find(old.begin(), old.end(), w) != old.end();
+            }
+            if (voter) {
+                dst._witnesses.push_back(w);
+            }
+        }
+    }
+    // Lagging marks (task 5) are kept the same way: a member stays lagging
+    // across a membership change while it is still a data voter.
+    if constexpr (requires { dst._lagging; }) {
+        dst._lagging.clear();
+        const auto voters = voters_of(dst);
+        for (const auto& m : src.lagging()) {
+            if (std::find(voters.begin(), voters.end(), m) != voters.end() &&
+                !has_witness_in(dst, m)) {
+                dst._lagging.push_back(m);
+            }
+        }
+    }
+}
+
+// ── Commit predicates (.kiro/specs/khold-block-service/ task 5) ────────────
+
+template<raft_types Types> auto node<Types>::commit_rule_locked() const -> kythira::commit_rule {
+    if constexpr (requires { _config.commit_rule(); }) {
+        return _config.commit_rule();
+    } else {
+        return kythira::commit_rule::majority;
+    }
+}
+
+template<raft_types Types>
+auto node<Types>::has_witness_in(const cluster_configuration_type& cfg, const node_id_type& id)
+    -> bool {
+    if constexpr (requires { cfg.witnesses(); }) {
+        return std::find(cfg.witnesses().begin(), cfg.witnesses().end(), id) !=
+               cfg.witnesses().end();
+    } else {
+        return false;
+    }
+}
+
+template<raft_types Types>
+auto node<Types>::is_lagging_in(const cluster_configuration_type& cfg, const node_id_type& id)
+    -> bool {
+    if constexpr (requires { cfg.lagging(); }) {
+        return std::find(cfg.lagging().begin(), cfg.lagging().end(), id) != cfg.lagging().end();
+    } else {
+        return false;
+    }
+}
+
+template<raft_types Types>
+auto node<Types>::has_data_roles(const cluster_configuration_type& cfg) -> bool {
+    bool any = false;
+    if constexpr (requires { cfg.witnesses(); }) {
+        any = any || !cfg.witnesses().empty();
+    }
+    if constexpr (requires { cfg.lagging(); }) {
+        any = any || !cfg.lagging().empty();
+    }
+    return any;
+}
+
+template<raft_types Types>
+auto node<Types>::voters_of(const cluster_configuration_type& cfg) -> std::vector<node_id_type> {
+    std::vector<node_id_type> voters(cfg.nodes().begin(), cfg.nodes().end());
+    if (cfg.is_joint_consensus() && cfg.old_nodes()) {
+        for (const auto& id : *cfg.old_nodes()) {
+            if (std::find(voters.begin(), voters.end(), id) == voters.end()) {
+                voters.push_back(id);
+            }
+        }
+    }
+    return voters;
+}
+
+template<raft_types Types>
+auto node<Types>::holds_index(const node_id_type& id, log_index_type n) const -> bool {
+    if (id == _node_id) {
+        return _durable_log_index >= n;
+    }
+    auto it = _match_index.find(id);
+    return it != _match_index.end() && it->second >= n;
+}
+
+template<raft_types Types>
+auto node<Types>::data_clauses_hold(log_index_type n, const cluster_configuration_type& cfg) const
+    -> bool {
+    const bool all_in_sync = commit_rule_locked() == kythira::commit_rule::all_in_sync;
+    bool any_data = false;
+    for (const auto& id : voters_of(cfg)) {
+        if (has_witness_in(cfg, id)) {
+            continue;
+        }
+        if (holds_index(id, n)) {
+            any_data = true;
+        } else if (all_in_sync && !is_lagging_in(cfg, id)) {
+            return false;
+        }
+    }
+    return any_data;
+}
+
+template<raft_types Types> auto node<Types>::lagging_members() const -> std::vector<node_id_type> {
+    std::lock_guard<std::mutex> lock(_mutex);
+    if constexpr (requires { _configuration.lagging(); }) {
+        return _configuration.lagging();
+    } else {
+        return {};
+    }
+}
+
+template<raft_types Types>
+auto node<Types>::append_lagging_marker(const node_id_type& id, bool lagging) -> void {
+    if constexpr (requires { _configuration._lagging; }) {
+        cluster_configuration_type new_config = _configuration;
+        auto& marks = new_config._lagging;
+        marks.erase(std::remove(marks.begin(), marks.end(), id), marks.end());
+        if (lagging) {
+            marks.push_back(id);
+        }
+        log_entry_type entry{._term = _current_term,
+                             ._index = get_last_log_index() + 1,
+                             ._command = encode_configuration(new_config),
+                             ._type = entry_type::configuration};
+        append_log_entry(entry);
+        // Requirement 1.3 of durable-append-barrier, as at every
+        // configuration site.
+        persist_and_barrier_locked(entry);
+        _configuration = new_config;
+        sync_peer2peer_membership();
+
+        _logger.warning(
+            lagging ? "Recorded data member as lagging" : "Recorded lagging data member as in sync",
+            {{"node_id", node_id_to_string(_node_id)},
+             {"member", node_id_to_string(id)},
+             {"entry_index", std::to_string(entry.index())}});
+        _metrics.set_metric_name(lagging ? "raft_member_lagging" : "raft_member_in_sync");
+        _metrics.add_dimension("node_id", node_id_to_string(_node_id));
+        _metrics.add_dimension("member", node_id_to_string(id));
+        _metrics.add_one();
+        _metrics.emit();
+    }
+}
+
+template<raft_types Types> auto node<Types>::drive_lagging_members() -> bool {
+    if (_state != kythira::server_state::leader ||
+        commit_rule_locked() != kythira::commit_rule::all_in_sync) {
+        _behind_since.clear();
+        return false;
+    }
+    if constexpr (!requires { _configuration._lagging; }) {
+        return false;
+    } else {
+        if (_behind_term != _current_term) {
+            _behind_since.clear();
+            _behind_term = _current_term;
+        }
+        // A lagging marker is a plain configuration entry; while a joint
+        // change is in flight writes wait for it instead (the C_new append
+        // after the joint commit expects the joint entry to be the last).
+        if (_configuration.is_joint_consensus()) {
+            return false;
+        }
+        const auto now = std::chrono::steady_clock::now();
+        const auto deadline = [&] {
+            if constexpr (requires { _config.member_deadline(); }) {
+                return _config.member_deadline();
+            } else {
+                return std::chrono::milliseconds{1000};
+            }
+        }();
+        const auto last = get_last_log_index();
+        bool appended = false;
+
+        // In sync again: a lagging member, this leader included (it may have
+        // been elected while still marked), that holds everything committed,
+        // once every earlier marker has committed so the two never race.
+        const bool markers_committed = !has_later_configuration_entry(_commit_index);
+        if (markers_committed) {
+            for (const auto& id : std::vector<node_id_type>(_configuration.lagging())) {
+                if (holds_index(id, _commit_index)) {
+                    append_lagging_marker(id, false);
+                    appended = true;
+                    break;  // one at a time: the next waits for this one to commit
+                }
+            }
+        }
+
+        // Lagging: an in-sync data follower that has not acknowledged, within
+        // the member deadline, the last index the leader had when it fell
+        // behind.
+        for (const auto& id : voters_of(_configuration)) {
+            if (id == _node_id || has_witness_in(_configuration, id) ||
+                is_lagging_in(_configuration, id)) {
+                _behind_since.erase(id);
+                continue;
+            }
+            if (holds_index(id, last)) {
+                _behind_since.erase(id);
+                continue;
+            }
+            auto it = _behind_since.find(id);
+            if (it == _behind_since.end() || holds_index(id, it->second._owed)) {
+                _behind_since[id] = behind_record{._since = now, ._owed = last};
+                continue;
+            }
+            if (now - it->second._since >= deadline) {
+                _behind_since.erase(it);
+                append_lagging_marker(id, true);
+                appended = true;
+            }
+        }
+        if (appended) {
+            advance_commit_index();
+        }
+        return appended;
+    }
 }
 
 template<raft_types Types>
@@ -3446,6 +3790,9 @@ auto node<Types>::transfer_leadership(node_id_type target, std::chrono::millisec
         if (std::find(learners.begin(), learners.end(), target) != learners.end()) {
             return fail("target is a learner and can never win an election");
         }
+        if (is_witness_locked(target)) {
+            return fail("target is a witness and never campaigns");
+        }
         if (_transfer_target.has_value()) {
             return fail("a leadership transfer to " + node_id_to_string(*_transfer_target) +
                         " is already in flight");
@@ -3712,7 +4059,7 @@ auto node<Types>::handle_timeout_now(const timeout_now_request_type& request)
     if (request.term() < _current_term) {
         return timeout_now_response_type{_current_term, false};
     }
-    if (is_learner()) {
+    if (is_learner() || is_witness()) {
         return timeout_now_response_type{_current_term, false};
     }
     if (request.term() > _current_term) {
@@ -5021,6 +5368,7 @@ auto node<Types>::remove_server(node_id_type old_node) -> future_type {
     // Learners are preserved unchanged — remove_server() only affects the voting set.
     cluster_configuration_type new_config{new_nodes, false, std::nullopt,
                                           _configuration.learners()};
+    carry_witnesses(new_config, _configuration);
 
     // Start configuration change using ConfigurationSynchronizer
     auto timeout = _config.append_entries_timeout() * 10;  // Longer timeout for config changes
@@ -5032,6 +5380,7 @@ auto node<Types>::remove_server(node_id_type old_node) -> future_type {
     // commits in apply_committed_entries().
     cluster_configuration_type joint_config{new_nodes, true, _configuration.nodes(),
                                             _configuration.learners()};
+    carry_witnesses(joint_config, _configuration);
     auto joint_bytes = encode_configuration(joint_config);
     const auto joint_idx = get_last_log_index() + 1;
     log_entry_type joint_entry{._term = _current_term,
@@ -5307,6 +5656,16 @@ auto node<Types>::remove_learner(node_id_type learner) -> future_type {
 template<raft_types Types>
 
 auto node<Types>::promote_to_voter(node_id_type learner) -> future_type {
+    return promote_learner(learner, false);
+}
+
+template<raft_types Types>
+auto node<Types>::promote_to_witness(node_id_type learner) -> future_type {
+    return promote_learner(learner, true);
+}
+
+template<raft_types Types>
+auto node<Types>::promote_learner(node_id_type learner, bool as_witness) -> future_type {
     std::lock_guard<std::mutex> lock(_mutex);
 
     _logger.info("Promote to voter requested", {{"node_id", node_id_to_string(_node_id)},
@@ -5369,11 +5728,11 @@ auto node<Types>::promote_to_voter(node_id_type learner) -> future_type {
         return future;
     }
 
-    return begin_voter_promotion(learner);
+    return begin_voter_promotion(learner, as_witness);
 }
 
 template<raft_types Types>
-auto node<Types>::begin_voter_promotion(node_id_type learner) -> future_type {
+auto node<Types>::begin_voter_promotion(node_id_type learner, bool as_witness) -> future_type {
     _logger.info(
         "Starting learner promotion with joint consensus",
         {{"node_id", node_id_to_string(_node_id)}, {"learner", node_id_to_string(learner)}});
@@ -5388,6 +5747,12 @@ auto node<Types>::begin_voter_promotion(node_id_type learner) -> future_type {
 
     // C_new (final target): non-joint, used by config synchronizer to know when we are done.
     cluster_configuration_type new_config{new_voting, false, std::nullopt, remaining_learners};
+    carry_witnesses(new_config, _configuration);
+    if constexpr (requires { new_config._witnesses; }) {
+        if (as_witness) {
+            new_config._witnesses.push_back(learner);
+        }
+    }
 
     auto timeout = _config.append_entries_timeout() * 10;  // Longer timeout for config changes
     auto config_future = _config_synchronizer.start_configuration_change(new_config, timeout);
@@ -5395,6 +5760,7 @@ auto node<Types>::begin_voter_promotion(node_id_type learner) -> future_type {
     // Build C_old+new joint configuration and append it as a configuration log entry.
     cluster_configuration_type joint_config{new_voting, true, _configuration.nodes(),
                                             remaining_learners};
+    carry_witnesses(joint_config, new_config);
     auto joint_bytes = encode_configuration(joint_config);
     const auto joint_idx = get_last_log_index() + 1;
     log_entry_type joint_entry{._term = _current_term,
@@ -5476,6 +5842,14 @@ auto node<Types>::check_election_timeout() -> void {
     // Learners never start an election, regardless of elapsed time since the last
     // heartbeat (.kiro/specs/non-voting-nodes/requirements.md, Requirement 2.1).
     if (is_learner()) {
+        return;
+    }
+
+    // Nor do witnesses: they vote, but never lead
+    // (.kiro/specs/khold-block-service/ Requirement 5.2). A TimeoutNow a
+    // witness accepted before its configuration said so is dropped too.
+    if (is_witness()) {
+        _timeout_now_pending = false;
         return;
     }
 
@@ -5603,6 +5977,10 @@ auto node<Types>::check_heartbeat_timeout() -> void {
             _metrics.emit();
         }
 
+        // Commit predicates (task 5): the member deadline check. Runs for
+        // every state so a node that stopped leading drops its records.
+        const bool marker_appended = drive_lagging_members();
+
         // Only leaders send heartbeats
         if (_state != kythira::server_state::leader) {
             return;
@@ -5610,6 +5988,12 @@ auto node<Types>::check_heartbeat_timeout() -> void {
 
         auto now = std::chrono::steady_clock::now();
         auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - _last_heartbeat);
+        if (marker_appended) {
+            // Ship the marker now rather than a heartbeat interval later:
+            // writes are paused until it commits.
+            should_heartbeat = true;
+            _last_heartbeat = now;
+        }
 
         if (elapsed >= _heartbeat_interval) {
             _logger.debug("Heartbeat timeout elapsed, sending heartbeats",
@@ -8171,6 +8555,7 @@ auto node<Types>::become_leader() -> void {
     if (_configuration.is_joint_consensus() && !has_later_configuration_entry(_last_applied)) {
         cluster_configuration_type c_new{_configuration.nodes(), false, std::nullopt,
                                          _configuration.learners()};
+        carry_witnesses(c_new, _configuration);
         log_entry_type c_new_entry{._term = _current_term,
                                    ._index = get_last_log_index() + 1,
                                    ._command = encode_configuration(c_new),
@@ -8718,6 +9103,7 @@ auto node<Types>::send_append_entries_to(node_id_type target) -> void {
                 max_bytes = _config.max_append_bytes();
             }
             std::size_t batch_bytes = 0;
+            const bool target_is_witness = is_witness_locked(target);
             for (log_index_type idx = next_idx;
                  idx <= last_log_idx && entries_to_send.size() < max_entries; ++idx) {
                 auto entry = get_log_entry(idx);
@@ -8728,7 +9114,11 @@ auto node<Types>::send_append_entries_to(node_id_type target) -> void {
                         break;
                     }
                     batch_bytes += size;
-                    entries_to_send.push_back(std::move(*entry));
+                    if (target_is_witness) {
+                        entries_to_send.push_back(for_witness(std::move(*entry)));
+                    } else {
+                        entries_to_send.push_back(std::move(*entry));
+                    }
                 } else {
                     _logger.error(
                         "Log entry not found during replication",
@@ -9589,6 +9979,13 @@ auto node<Types>::handle_fetch_log_entries(const fetch_log_entries_request_type&
     // at from_index (already compacted into a snapshot, or simply doesn't have it
     // yet) — never blocks waiting to acquire it, never recurses into its own
     // peer2peer_replicator on the requester's behalf.
+    // A witness holds descriptors, not payloads, so what it would serve is
+    // not the log a data replica needs (.kiro/specs/khold-block-service/
+    // task 4). Refused as unavailable, which the requester treats as a
+    // failed catch-up attempt and leaves to the leader.
+    if (is_witness()) {
+        return fetch_log_entries_response_type{_node_id, false, term_id_type{0}, {}};
+    }
     auto from_entry = get_log_entry(request.from_index());
     if (!from_entry.has_value()) {
         _logger.debug("FetchLogEntries: entry not available",
@@ -9613,12 +10010,14 @@ auto node<Types>::handle_fetch_log_entries(const fetch_log_entries_request_type&
     // Requirement 5.5: never serve more than min(to_index, get_last_log_index()).
     auto last_index_to_serve = std::min(request.to_index(), get_last_log_index());
     std::vector<log_entry_type> entries_to_send;
+    const bool requester_is_witness = is_witness_locked(request.requester_id());
     for (log_index_type idx = request.from_index(); idx <= last_index_to_serve; ++idx) {
         auto entry = get_log_entry(idx);
         if (!entry.has_value()) {
             break;
         }
-        entries_to_send.push_back(entry.value());
+        entries_to_send.push_back(requester_is_witness ? for_witness(std::move(*entry))
+                                                       : std::move(*entry));
     }
 
     _logger.debug("FetchLogEntries: serving entries",
@@ -9916,7 +10315,50 @@ auto node<Types>::advance_commit_index() -> void {
         return count_acks(s) * 2 > s.size();
     };
 
+    // Commit predicates (.kiro/specs/khold-block-service/ task 5). The
+    // majority above uses the latest configuration, as Raft does; the data
+    // clauses use the configuration in force at each index, because a
+    // lagging marker relaxes the rule only from its own index on: entries
+    // before it still need the member, and commit when the marker does.
+    // That makes the data clauses non-monotone across a marker, so a failure
+    // there skips to the next configuration entry instead of stopping.
+    // Groups with no witness and no lagging member under `majority` skip all
+    // of this and run the check they always ran.
+    const bool data_rule = commit_rule_locked() == kythira::commit_rule::all_in_sync;
+    std::vector<std::pair<log_index_type, cluster_configuration_type>> changes;
+    std::optional<cluster_configuration_type> in_force;
+    const bool need_data = data_rule || has_data_roles(_configuration);
+    if (need_data) {
+        for (auto it = _log.rbegin(); it != _log.rend() && it->index() > _commit_index; ++it) {
+            if (it->type() == entry_type::configuration && it->index() <= last_log_idx) {
+                changes.emplace_back(it->index(),
+                                     deserialize_configuration<node_id_type>(it->command()));
+            }
+        }
+        std::reverse(changes.begin(), changes.end());
+        in_force = changes.empty() ? _configuration : configuration_at(_commit_index);
+    }
+    std::size_t next_change = 0;
+
     for (log_index_type n = _commit_index + 1; n <= last_log_idx; ++n) {
+        bool data_ok = true;
+        if (need_data) {
+            while (next_change < changes.size() && changes[next_change].first <= n) {
+                in_force = changes[next_change].second;
+                ++next_change;
+            }
+            data_ok = data_clauses_hold(n, *in_force);
+        }
+        if (has_commit_quorum(n) && !data_ok) {
+            // Only the data clauses failed. Under the same configuration
+            // they fail for every later index too; the next configuration
+            // entry may record the missing member as lagging.
+            if (next_change < changes.size()) {
+                n = changes[next_change].first - 1;
+                continue;
+            }
+            break;
+        }
         if (has_commit_quorum(n)) {
             // Raft safety requirement: only commit entries from current term directly
             // Entries from previous terms are committed indirectly
@@ -10151,6 +10593,7 @@ auto node<Types>::apply_committed_entries() -> void {
                 // Learners are preserved unchanged — the joint phase only affects the voting set.
                 cluster_configuration_type c_new{new_config.nodes(), false, std::nullopt,
                                                  new_config.learners()};
+                carry_witnesses(c_new, new_config);
                 auto c_new_bytes = encode_configuration(c_new);
                 log_entry_type c_new_entry{._term = _current_term,
                                            ._index = get_last_log_index() + 1,

@@ -18,16 +18,21 @@ spec.
 
 ## Phase 1: khold serves network volumes
 
-- [ ] 1. Module skeleton
+- [x] 1. Module skeleton
   - `KHOLD` Kconfig option (default off), `services/khold/`, module
     number 12 in `module_numbers`, boundary list,
     `configs/ci_no_khold_defconfig`, `khold-module.yml` (Docker and
     rootless Podman, path-filtered)
   - Consume antikythera's `src/proto/` through the overlay port; a test
     reproducing its hold wire and report vectors byte for byte
+  - Done: `vcpkg-overlays/antikythera-proto` pins antikythera after
+    bit63-org/antikythera#117; `khold_proto_vectors_test` reproduces
+    vectors 4 and 6-11. khold builds only where `std::expected` compiles
+    (GCC 13+, Clang 19+), so the Clang 18 legs and clang-tidy skip it
+    (`services/khold/README.md`)
   - _Requirements: 1.1-1.4_
 
-- [ ] 2. **(antikythera)** Hold wire version 2 and `VolumeLayout` codecs
+- [x] 2. **(antikythera)** Hold wire version 2 and `VolumeLayout` codecs
   - `src/proto/hold_wire_v2.hpp` beside version 1: group ID and term in
     the header, `REDIRECT` with leader, endpoint and term, statuses
     `not_leader`, `no_space`, `repairing`, real `DISCARD` and
@@ -39,30 +44,54 @@ spec.
   - Reports: `group_status`, `capacity`, `lagging` and `media_error`
     faults
   - Test vectors, fuzz targets, version 1 unchanged
+  - Done in bit63-org/antikythera#117: the faults are a `group_fault`
+    report kind (lagging, caught_up, media_error, fail_slow, no_space,
+    checksum_unrepairable) rather than new volume fault kinds, so hold's
+    exhaustive fault switch is untouched; vectors 6-11
   - _Requirements: 11.1, 11.2, 11.5, 16.3_
 
-- [ ] 3. Core: append sink on log persistence
+- [x] 3. Core: append sink on log persistence
   - A persistence-engine hook that hands a state machine an entry's
     payload at append time, before commit, and stores only the
     descriptor in the log; the durable point covers both
   - Unchanged behaviour for every existing state machine; a benchmark
     row shows append cost unchanged without a sink
+  - Done: `include/raft/append_sink.hpp`, a persistence-engine adaptor
+    (`append_sink_persistence`) rather than a change to `node`: reads
+    rehydrate payloads through the sink, so the node, replication and
+    `apply` see full entries; a barrier syncs the sink first; start-up
+    recovery truncates descriptors whose payload a crash lost
   - _Requirements: 7.4_
 
-- [ ] 4. Core: witness voters
+- [x] 4. Core: witness voters
   - A member kind that votes and stores descriptors, never campaigns,
     never receives payloads; joint consensus and learner promotion
     handle it
   - Raft property tests: no election of a candidate behind the witness,
     no witness leadership under any schedule
+  - Done: `cluster_configuration::witnesses()`, a subset of the voters
+    carried in configuration entries and snapshots (omitted when empty,
+    so stores without witnesses are byte for byte unchanged);
+    `node::promote_to_witness` promotes a learner through the same joint
+    path as `promote_to_voter`; a witness never starts an election,
+    refuses TimeoutNow and transfers, never serves catch-up, and is sent
+    descriptors only (`describing_append_sink::describe`)
   - _Requirements: 5.2_
 
-- [ ] 5. Core: commit predicates and lagging entries
+- [x] 5. Core: commit predicates and lagging entries
   - Per-group commit predicate replacing "majority"; khold's predicate
     (majority, every non-lagging data replica, at least one data
     replica), `lagging(member)` and `in_sync(member)` entries, the member
     deadline, the `majority` option
   - Property tests with crashes and partitions at every step
+  - Done: `raft_configuration::_commit_rule` (`majority`, the default,
+    or `all_in_sync`) and `_member_deadline`; the lagging marks are
+    `cluster_configuration::lagging()`, set and cleared by plain
+    configuration entries the leader appends from the heartbeat tick, so
+    they revert on truncation and ride in snapshots. Each index is judged
+    by the configuration in force at it, so a write before a marker
+    commits only with the marker. Reporting a lagging member to the
+    controller (7.3) is the stripe group's, task 7
   - _Requirements: 7.1-7.3, 7.5, 7.6_
 
 - [ ] 6. Block store

@@ -651,6 +651,7 @@ source "services/kms/Kconfig"
 source "services/sqs/Kconfig"
 source "services/sns/Kconfig"
 source "services/s3/Kconfig"
+source "services/khold/Kconfig"
 
 endmenu # Service Modules
 

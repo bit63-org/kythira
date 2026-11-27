@@ -72,3 +72,10 @@ CONFIG_SNS=y
 # and clang-tidy cover it. Needs only OpenSSL, which every leg has.
 # configs/ci_no_s3_defconfig is this file without it.
 CONFIG_S3=y
+# The khold module (services/khold/, .kiro/specs/khold-block-service/). Off by
+# default like every new module; on here so the GCC build-and-test legs and
+# coverage cover it. Needs the antikythera-proto overlay port (a default vcpkg
+# dependency) and std::expected, so the Clang 18 legs and clang-tidy skip it
+# with a status line (top-level CMakeLists.txt).
+# configs/ci_no_khold_defconfig is this file without it.
+CONFIG_KHOLD=y

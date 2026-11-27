@@ -89,6 +89,24 @@ auto serialize_configuration(const cluster_configuration<NodeId>& cfg,
     }
     obj["learners"] = std::move(learners);
 
+    // Witnesses only when there are any, so a configuration without them
+    // encodes byte for byte as it did before witnesses existed.
+    if (!cfg.witnesses().empty()) {
+        boost::json::array witnesses;
+        for (const auto& n : cfg.witnesses()) {
+            witnesses.push_back(config_entry_detail::encode_id(n));
+        }
+        obj["witnesses"] = std::move(witnesses);
+    }
+    // Lagging members likewise (task 5), only when there are any.
+    if (!cfg.lagging().empty()) {
+        boost::json::array lagging;
+        for (const auto& n : cfg.lagging()) {
+            lagging.push_back(config_entry_detail::encode_id(n));
+        }
+        obj["lagging"] = std::move(lagging);
+    }
+
     if (placement != nullptr && !placement->empty()) {
         // Placement-group assignments ride along with the configuration so
         // every replica, and so any future leader, groups nodes the way the
@@ -147,6 +165,16 @@ auto deserialize_configuration(const std::vector<std::byte>& data)
     if (obj.contains("learners")) {
         for (const auto& n : obj["learners"].as_array()) {
             cfg._learners.push_back(config_entry_detail::decode_id<NodeId>(n));
+        }
+    }
+    if (obj.contains("witnesses")) {
+        for (const auto& n : obj["witnesses"].as_array()) {
+            cfg._witnesses.push_back(config_entry_detail::decode_id<NodeId>(n));
+        }
+    }
+    if (obj.contains("lagging")) {
+        for (const auto& n : obj["lagging"].as_array()) {
+            cfg._lagging.push_back(config_entry_detail::decode_id<NodeId>(n));
         }
     }
 

@@ -881,6 +881,19 @@ private:
             bp::write_node_list(inner, cfg.learners());
             inner.u64(snap.state_machine_state().size());
             inner.bytes(snap.state_machine_state());
+            // Witnesses trail the state, and only when there are any, so a
+            // snapshot without them is byte for byte what it was before
+            // witnesses existed and an older reader, which stops after the
+            // state, still opens one that has them.
+            // Lagging members (task 5) follow the witness list, which is
+            // then written even when empty so the reader knows where the
+            // lagging list starts.
+            if (!cfg.witnesses().empty() || !cfg.lagging().empty()) {
+                bp::write_node_list(inner, cfg.witnesses());
+            }
+            if (!cfg.lagging().empty()) {
+                bp::write_node_list(inner, cfg.lagging());
+            }
 
             bp::writer w;
             w.u32(bp::snapshot_magic);
@@ -959,6 +972,12 @@ private:
             const auto len = ir.u64();
             const auto state_bytes = ir.bytes(static_cast<std::size_t>(len));
             snap._state_machine_state.assign(state_bytes.begin(), state_bytes.end());
+            if (ir.position() < inner.size()) {
+                snap._configuration._witnesses = bp::read_node_list<NodeId>(ir);
+            }
+            if (ir.position() < inner.size()) {
+                snap._configuration._lagging = bp::read_node_list<NodeId>(ir);
+            }
             _snapshot = std::move(snap);
         }
 

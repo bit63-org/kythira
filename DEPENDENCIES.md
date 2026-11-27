@@ -70,6 +70,18 @@ This document lists the dependencies required to build and use the network simul
   `vcpkg-overlays/libcoap`, a copy of that registry's port plus a patch for an upstream
   release-build regression in its certificate callback (see that directory's README).
 
+#### antikythera-proto (Apache-2.0) — khold module
+- **Status**: Default vcpkg dependency; used only when `CONFIG_KHOLD=y`
+- **Purpose**: antikythera's header-only wire formats (hold wire versions 1 and 2,
+  `VolumeLayout`, reports, signing test vectors), which the khold block service
+  (`services/khold/`, `.kiro/specs/khold-block-service/` Requirement 1.4) speaks with
+  oar-blk and helm. Exported as `antikythera::proto`.
+- **Notes**: Supplied by `vcpkg-overlays/antikythera-proto`, which fetches
+  `bit63-org/antikythera` at a pinned commit with `vcpkg_from_git` and installs
+  `src/proto/*.hpp` plus `src/common/{wire,crc32c}.hpp`; nothing is compiled. The
+  headers need `std::expected` (GCC 13+, Clang 19+ over libstdc++), so khold is skipped
+  on Clang 18 builds (see the port's README).
+
 ## Optional Dependencies
 
 ### libfiu (Fault Injection Userspace) — test-only

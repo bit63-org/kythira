@@ -1245,6 +1245,33 @@ add_raft_completion_test(raft_snapshot_boundary_replication_test raft_snapshot_b
 # cluster makes — a follower's run in one call, term before vote, "no vote"
 # stored after a term change.
 add_raft_completion_test(raft_batched_durable_writes_test raft_batched_durable_writes_test.cpp)
+# .kiro/specs/khold-block-service/ task 3: the append sink. The adaptor's
+# contract (descriptors in the log, payloads in the sink, one durable point,
+# recovery after a crash), a three-node cluster over it whose state machines
+# see the full commands, and the benchmark rows (excluded from CI by label:
+# a no-sink baseline beside the adaptor's cost).
+add_raft_completion_test(append_sink_unit_test append_sink_unit_test.cpp)
+add_raft_completion_test(raft_append_sink_cluster_test raft_append_sink_cluster_test.cpp)
+set_tests_properties(append_sink_unit_test raft_append_sink_cluster_test PROPERTIES
+    LABELS "unit;khold")
+add_raft_completion_test(append_sink_benchmark_test append_sink_benchmark_test.cpp)
+set_tests_properties(append_sink_benchmark_test PROPERTIES LABELS "benchmark;performance")
+# Task 4: witness voters. Witnesses in stored configurations (log entries
+# and snapshots, unchanged bytes without them), and a cluster of two data
+# replicas and a witness: the witness never campaigns, holds descriptors
+# only, refuses a candidate behind it, and random crash and partition
+# schedules never make it leader or lose an acknowledged write.
+add_raft_completion_test(witness_configuration_unit_test witness_configuration_unit_test.cpp)
+add_raft_completion_test(raft_witness_voter_test raft_witness_voter_test.cpp)
+set_tests_properties(witness_configuration_unit_test PROPERTIES LABELS "unit;khold")
+set_tests_properties(raft_witness_voter_test PROPERTIES LABELS "unit;khold" TIMEOUT 300)
+# Task 5: commit predicates. all_in_sync on the general shape: writes
+# acknowledged on every data replica, a stalled one recorded lagging after
+# the member deadline (and never before its marker commits), in sync once
+# it catches up, no pause when the witness fails, the majority option, and
+# random crash and partition schedules.
+add_raft_completion_test(raft_commit_predicate_test raft_commit_predicate_test.cpp)
+set_tests_properties(raft_commit_predicate_test PROPERTIES LABELS "unit;khold" TIMEOUT 300)
 # A follower's write-behind barrier, taken with the node's lock released,
 # outlived by a newer leader's AppendEntries that truncates what it covered:
 # the old request is not acknowledged, and its barrier does not count for the
