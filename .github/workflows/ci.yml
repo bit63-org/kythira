@@ -65,6 +65,12 @@ concurrency:
   group: ci-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
+# Runners: x64 build/test jobs run on the org's self-hosted ARC runner scale set
+# on reliant when the repository variable KYTHIRA_SELF_HOSTED_RUNNER names it
+# (bit63), but only for pushes, manual runs and pull requests from this
+# repository. Fork pull requests, and every run while the variable is unset,
+# stay on GitHub-hosted ubuntu-24.04. arm64 legs and the small lint/docs jobs
+# always run GitHub-hosted (reliant is amd64 only).
 jobs:
   # ── Build and test ──────────────────────────────────────────────────────────
   # Runs under both GCC and Clang, on both x86_64 and native arm64 runners, to
@@ -76,7 +82,7 @@ jobs:
       contents: read
       checks: write         # dorny/test-reporter posts inline results
     name: Build & Test (${{ matrix.compiler }}, ${{ matrix.arch_label }})
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.os == 'ubuntu-24.04' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.KYTHIRA_SELF_HOSTED_RUNNER || matrix.os }}
     timeout-minutes: ${{ matrix.timeout_minutes }}
     strategy:
       fail-fast: false
@@ -746,7 +752,7 @@ jobs:
     # Full matrix only: skipped on stacked PRs (see the note under `on:`).
     if: github.event_name != 'pull_request' || github.base_ref == 'main'
     name: GCP SDK Build (clang++-18, x64)
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.KYTHIRA_SELF_HOSTED_RUNNER || 'ubuntu-24.04' }}
     # 360, not 180: this job's vcpkg ports are clang-built for mold
     # (mold-linker Requirement 9), and a cold google-cloud-cpp install alone
     # took 163 minutes before the OCI binary cache existed.
@@ -945,7 +951,7 @@ jobs:
     # Full matrix only: skipped on stacked PRs (see the note under `on:`).
     if: github.event_name != 'pull_request' || github.base_ref == 'main'
     name: Ion Serializer Build (g++-14, x64)
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.KYTHIRA_SELF_HOSTED_RUNNER || 'ubuntu-24.04' }}
     timeout-minutes: 300
     # The read-write build-cache key is an environment secret of
     # build-cache-write, whose deployment branches are main only, so a
@@ -1189,7 +1195,7 @@ jobs:
     # Full matrix only: skipped on stacked PRs (see the note under `on:`).
     if: github.event_name != 'pull_request' || github.base_ref == 'main'
     name: Config Variants (clang++-18, x64)
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.KYTHIRA_SELF_HOSTED_RUNNER || 'ubuntu-24.04' }}
     # Sized from build-and-test's 180-minute budget for one full cold build,
     # plus headroom for the two smaller builds. Measured on main: 9.6 min
     # with a warm sccache (run 37567880231) and 39.4 min after a change to
@@ -1493,7 +1499,7 @@ jobs:
     # Full matrix only: skipped on stacked PRs (see the note under `on:`).
     if: github.event_name != 'pull_request' || github.base_ref == 'main'
     name: Alternate CoAP Backends (g++-13, ${{ matrix.arch_label }})
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.os == 'ubuntu-24.04' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.KYTHIRA_SELF_HOSTED_RUNNER || matrix.os }}
     strategy:
       fail-fast: false
       matrix:
@@ -1778,7 +1784,7 @@ jobs:
     # Full matrix only: skipped on stacked PRs (see the note under `on:`).
     if: github.event_name != 'pull_request' || github.base_ref == 'main'
     name: DNS Discovery Build (g++-13, x64)
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.KYTHIRA_SELF_HOSTED_RUNNER || 'ubuntu-24.04' }}
     timeout-minutes: 180
     steps:
       - name: Checkout
@@ -1984,7 +1990,7 @@ jobs:
     # Full matrix only: skipped on stacked PRs (see the note under `on:`).
     if: github.event_name != 'pull_request' || github.base_ref == 'main'
     name: No Folly (clang++-18, x64)
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.KYTHIRA_SELF_HOSTED_RUNNER || 'ubuntu-24.04' }}
     # One full build and test run, the same work as a build-and-test leg.
     # Measured on main: 12.8 min with a warm sccache (run 37567880231) and
     # 63.8 min after a change to widely included headers (run 37584489048).
@@ -2244,7 +2250,7 @@ jobs:
     # Full matrix only: skipped on stacked PRs (see the note under `on:`).
     if: github.event_name != 'pull_request' || github.base_ref == 'main'
     name: clang-tidy (shard ${{ matrix.shard }} of 6)
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.KYTHIRA_SELF_HOSTED_RUNNER || 'ubuntu-24.04' }}
     # Sized for a cold cache (or the cache off): the slowest cold shard took
     # 57 minutes on an EPYC 7763 runner (run 42351017144), plus about 3
     # minutes of setup. Warm shards finish in under 2 minutes.
@@ -2452,7 +2458,7 @@ jobs:
     # Full matrix only: skipped on stacked PRs (see the note under `on:`).
     if: github.event_name != 'pull_request' || github.base_ref == 'main'
     name: clang-tidy (${{ matrix.variant }})
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.KYTHIRA_SELF_HOSTED_RUNNER || 'ubuntu-24.04' }}
     # A warm leg is setup plus 1-8 files. 120 covers a vcpkg miss that has to
     # build the variant's own port (poco-dnssd, ion-c) from source.
     timeout-minutes: 120
@@ -2651,7 +2657,7 @@ jobs:
       checks: write         # dorny/test-reporter posts inline results
       pull-requests: write  # sticky coverage comment on the PR
     name: Coverage (clang++-18)
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.KYTHIRA_SELF_HOSTED_RUNNER || 'ubuntu-24.04' }}
     # 300, not 180: the clang-built vcpkg tree (mold-linker Requirement 9)
     # costs a cold 78-minute install the first time.
     timeout-minutes: 300
@@ -3107,7 +3113,7 @@ jobs:
       contents: read
       checks: write         # dorny/test-reporter posts inline results
     name: ThreadSanitizer (Beast + Proxygen concurrency suites)
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.KYTHIRA_SELF_HOSTED_RUNNER || 'ubuntu-24.04' }}
     timeout-minutes: 120
 
     # The read-write build-cache key is an environment secret of
@@ -3441,7 +3447,7 @@ jobs:
     # Full matrix only: skipped on stacked PRs (see the note under `on:`).
     if: github.event_name != 'pull_request' || github.base_ref == 'main'
     name: Full suite (${{ matrix.backend }} future backend)
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.KYTHIRA_SELF_HOSTED_RUNNER || 'ubuntu-24.04' }}
     # Was 180 ("matches build-and-test's budget"), and that stopped being
     # enough. The stdexec leg is materially heavier than a Build & Test leg,
     # and pooling the heavy TUs (17c720a, df8dbdf) traded wall time for the
