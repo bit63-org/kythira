@@ -57,6 +57,7 @@
 #include <boost/asio.hpp>
 #include <boost/asio/ssl.hpp>
 
+#include <algorithm>
 #include <atomic>
 #include <array>
 #include <cctype>
@@ -358,6 +359,12 @@ struct redis_gateway_config {
     /// cluster-aware tools treat `cluster` as a promise that `CLUSTER`
     /// commands work.
     bool _cluster_compat_mode = false;
+    /// The phase 1 data types (redis-general-data-types Requirement 37.1,
+    /// `CONFIG_REDIS_GATEWAY_DATA_TYPES`). Off, every command a phase 1
+    /// task shipped (registry `task` above 0) answers unknown command, as
+    /// on a build from before the spec, and this node reports format level
+    /// 2, so no cluster it belongs to can pass the typed-values gate.
+    bool _data_types = true;
     /// The Redis format level this node reports to `KYTHIRA.FORMAT`
     /// (redis-general-data-types task 2). 0, the default, is the build's
     /// own; the in-process rolling-upgrade tests set a lower one to stand
@@ -866,6 +873,7 @@ protected:
         return "config";
     }
     auto handle_command(session& s, const resp_command& cmd) -> std::string;
+    auto unknown_command(session& s, const resp_command& cmd) -> std::string;
     auto handle_dbsize(session& s) -> std::string;
 
     // ---- transactions (multi-raft-transactions task 9) -------------------------
@@ -1060,8 +1068,18 @@ protected:
     /// The level this node reports: `_reported_format_level`, else
     /// `k_node_format_level`.
     [[nodiscard]] auto reported_format_level() const noexcept -> std::uint16_t {
-        return _config._reported_format_level != 0 ? _config._reported_format_level
-                                                   : k_node_format_level;
+        const std::uint16_t level = _config._reported_format_level != 0
+                                        ? _config._reported_format_level
+                                        : k_node_format_level;
+        return _config._data_types ? level : std::min(level, k_redis_base_format_level);
+    }
+    /// Whether this node serves `info`'s command: shipped, and not a phase 1
+    /// command on a node without the data types. `KYTHIRA.FORMAT` (task 2)
+    /// stays: peers ask every node's level before a gate, and a node
+    /// without the data types must answer 2 so that the gate is refused.
+    [[nodiscard]] auto serves(const redis_command_info* info) const noexcept -> bool {
+        return info != nullptr && info->status == redis_command_status::shipped &&
+               (_config._data_types || info->task <= k_redis_format_gate_task);
     }
     /// Sends `argv` to `node`'s gateway on the internal link and returns the
     /// raw reply, or `nullopt` when there is no link or no answer in time.

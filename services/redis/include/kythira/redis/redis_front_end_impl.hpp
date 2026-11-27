@@ -1034,6 +1034,13 @@ auto redis_front_end<Host, Logger, Metrics>::execute_command(session& s, std::st
         return handle_data(s, cmd);
     }
 
+    // A node built without the phase 1 data types answers their commands
+    // as one from before the spec does (Requirement 37.1).
+    if (const auto* info = find_redis_command(upper);
+        info != nullptr && info->task > 0 && !serves(info)) {
+        return unknown_command(s, cmd);
+    }
+
     if (s._txn_view != nullptr) {
         // EXEC evaluating its queue: every write is an `exec` record the
         // view takes, so the plain SET/SETEX/DEL paths and the
@@ -1327,7 +1334,13 @@ auto redis_front_end<Host, Logger, Metrics>::execute_command(session& s, std::st
         return handle_internal_exec(s, cmd);
     }
 
-    // Requirement 1.8: unknown commands are an error, not a disconnect.
+    return unknown_command(s, cmd);
+}
+
+/// Requirement 1.8: unknown commands are an error, not a disconnect.
+template<typename Host, typename Logger, typename Metrics>
+auto redis_front_end<Host, Logger, Metrics>::unknown_command(session& s, const resp_command& cmd)
+    -> std::string {
     std::string args;
     for (std::size_t i = 1; i < cmd._argv.size(); ++i) {
         args += "'" + cmd._argv[i].substr(0, 32) + "' ";
@@ -1897,7 +1910,7 @@ auto redis_front_end<Host, Logger, Metrics>::handle_command(session& s, const re
         return *e;
     }
     const auto accepted = [this](const redis_command_info& c) {
-        if (c.status != redis_command_status::shipped) {
+        if (!serves(&c)) {
             return false;
         }
         const bool txn = c.name == "MULTI" || c.name == "EXEC" || c.name == "DISCARD" ||
@@ -2867,8 +2880,7 @@ auto redis_front_end<Host, Logger, Metrics>::queue_in_multi(session& s, std::str
     const bool queueable =
         info != nullptr && !k_string_only_store &&
         (keyless ||
-         (keyed_group && info->status == redis_command_status::shipped &&
-          (info->flags & redis_command_flag::no_multi) == 0 &&
+         (keyed_group && serves(info) && (info->flags & redis_command_flag::no_multi) == 0 &&
           (info->flags & redis_command_flag::blocking) == 0 &&
           (info->first_key > 0 || (info->flags & redis_command_flag::movablekeys) != 0)));
     if (!queueable) {

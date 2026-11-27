@@ -2088,6 +2088,44 @@ BOOST_AUTO_TEST_CASE(cluster_mode_only_with_the_compatibility_mode,
     BOOST_CHECK(info.find("\r\ncluster_enabled:1\r\n") != std::string::npos);
 }
 
+// CONFIG_REDIS_GATEWAY_DATA_TYPES=n (redis-general-data-types Requirement
+// 37.1): the phase 1 commands answer unknown command, the earlier ones work
+// as before with KYTHIRA.FORMAT, COMMAND lists only those, and the node
+// reports format level 2, so the typed-values gate cannot pass.
+BOOST_AUTO_TEST_CASE(without_data_types_only_the_earlier_commands_are_served,
+                     *boost::unit_test::timeout(120)) {
+    redis_gateway_config cfg;
+    cfg._data_types = false;
+    cluster c(cfg);
+    BOOST_REQUIRE(c.await_all_leaders(std::chrono::seconds{20}));
+    resp_client ops(c.port(c.leader_of(k_sccache_group)));
+    BOOST_REQUIRE_EQUAL(ops.auth("ops", "ops-secret"), "+OK\r\n");
+    BOOST_CHECK_EQUAL(ops.call({"SET", "sccache/dt", "v"}), "+OK\r\n");
+    BOOST_CHECK_EQUAL(ops.call({"GET", "sccache/dt"}), "$1\r\nv\r\n");
+    for (const std::vector<std::string>& argv :
+         {std::vector<std::string>{"HSET", "sccache/h", "f", "v"},
+          std::vector<std::string>{"SADD", "sccache/s", "m"}, std::vector<std::string>{"SCAN", "0"},
+          std::vector<std::string>{"APPEND", "sccache/dt", "x"}}) {
+        BOOST_CHECK_MESSAGE(ops.call(argv).rfind("-ERR unknown command '" + argv[0], 0) == 0,
+                            argv[0]);
+    }
+    // Transactions are off by default, and COMMAND leaves their seven
+    // commands out then.
+    const std::set<std::string_view> txn{
+        "MULTI", "EXEC", "DISCARD", "WATCH", "UNWATCH", "KYTHIRA.ISOLATION", "KYTHIRA.TXN"};
+    std::size_t earlier = 0;
+    for (const auto& info : kythira::k_redis_commands) {
+        earlier += info.status == kythira::redis_command_status::shipped &&
+                           info.task <= kythira::k_redis_format_gate_task &&
+                           !txn.contains(info.name)
+                       ? 1
+                       : 0;
+    }
+    BOOST_CHECK_EQUAL(ops.call({"COMMAND", "COUNT"}), ":" + std::to_string(earlier) + "\r\n");
+    BOOST_CHECK_EQUAL(ops.call({"KYTHIRA.FORMAT", "LEVEL"}), ":2\r\n");
+    BOOST_CHECK(ops.call({"KYTHIRA.FORMAT", "UPGRADE", "3"}).starts_with("-"));
+}
+
 // A compatibility level with a vendor suffix, or not three numbers, would
 // break clients' version parsers, so the gateway refuses to start with one.
 BOOST_AUTO_TEST_CASE(a_suffixed_compat_version_is_refused_at_start,

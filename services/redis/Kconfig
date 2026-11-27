@@ -22,6 +22,22 @@ config REDIS_GATEWAY
 	  the feature's targets out of a build that does not want them, not to
 	  gate a dependency. See .kiro/specs/redis-compatible-kv/.
 
+config REDIS_GATEWAY_DATA_TYPES
+	bool "Hashes, sets, lists and the rest of phase 1 in the Redis gateway"
+	default y
+	depends on REDIS_GATEWAY
+	help
+	  The commands .kiro/specs/redis-general-data-types/ phase 1 ships:
+	  the hash, set and list types, the rest of the string and keyspace
+	  commands, the SCAN family, MULTI over every type, the admin tools
+	  and the ElastiCache-compatible ACL words. Typed values still need
+	  the cluster's format gate raised (KYTHIRA.FORMAT UPGRADE 3) before
+	  they can be written. Off, the gateway answers those commands with
+	  unknown command, as a build from before the spec does, and reports
+	  format level 2, so its cluster cannot raise the gate. The code is
+	  in the build either way; the symbol decides what the daemon serves.
+	  See doc/redis-gateway.md.
+
 config REDIS_GATEWAY_TRANSACTIONS
 	bool "Cross-shard transactions in redis_gateway_node (MSET, MULTI/EXEC)"
 	default n

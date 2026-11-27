@@ -184,6 +184,11 @@ BOOST_AUTO_TEST_CASE(server_identity_settings) {
         BOOST_TEST(opt._gateway._kythira_version == std::string(kythira::build_version()));
         BOOST_TEST(!opt._gateway._kythira_version.empty());
         BOOST_TEST(!opt._gateway._cluster_compat_mode);
+#if defined(KYTHIRA_REDIS_GATEWAY_NO_DATA_TYPES)
+        BOOST_TEST(!opt._gateway._data_types);
+#else
+        BOOST_TEST(opt._gateway._data_types);
+#endif
     }
     ::setenv("KYTHIRA_REDIS_COMPAT_VERSION", "7.2.4", 1);
     BOOST_TEST(from_env()._gateway._redis_compat_version == "7.2.4");
