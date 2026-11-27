@@ -29,6 +29,7 @@
 #include <kythira/redis/redis_expiry_exec.hpp>
 #include <kythira/redis/redis_format_level.hpp>
 #include <kythira/redis/redis_hash_exec.hpp>
+#include <kythira/redis/redis_list_exec.hpp>
 #include <kythira/redis/redis_set_exec.hpp>
 #include <kythira/redis/redis_typed_read.hpp>
 #include <kythira/redis/redis_kv_commands.hpp>
@@ -74,6 +75,8 @@ struct redis_kv_value_entry {
     std::shared_ptr<const redis_hash> _hash;
     /// The set when `_type` is `set` (task 8).
     std::shared_ptr<const redis_set> _set;
+    /// The list when `_type` is `list` (task 9).
+    std::shared_ptr<const redis_list> _list;
 };
 
 /// The bytes an entry counts for size accounting (key excluded).
@@ -83,6 +86,8 @@ struct redis_kv_value_entry {
             return e._hash ? e._hash->bytes() : 0;
         case redis_value_type::set:
             return e._set ? e._set->bytes() : 0;
+        case redis_value_type::list:
+            return e._list ? e._list->bytes() : 0;
         default:
             return e._value.size();
     }
@@ -407,6 +412,14 @@ public:
                     redis_kv_detail::put_u32(out, static_cast<std::uint32_t>(entry->_set->size()));
                     entry->_set->for_each([&](const std::string& m) { put_text(m); });
                     break;
+                case redis_value_type::list:
+                    redis_kv_detail::put_u32(out, static_cast<std::uint32_t>(entry->_list->size()));
+                    entry->_list->visit(0, entry->_list->size() - 1,
+                                        [&](std::size_t, const std::string& v) {
+                                            put_text(v);
+                                            return true;
+                                        });
+                    break;
                 default:
                     throw redis_kv_codec_error("a value type this build cannot store");
             }
@@ -496,6 +509,21 @@ public:
                         entry->_type = redis_value_type::set;
                         entry->_set = std::make_shared<const redis_set>(
                             redis_set::from_sorted(std::move(members)));
+                        break;
+                    }
+                    case redis_value_type::list: {
+                        const auto n = in.u32();
+                        std::vector<std::string> elements;
+                        elements.reserve(std::min<std::size_t>(n, in.remaining() / 4));
+                        for (std::uint32_t j = 0; j < n; ++j) {
+                            elements.push_back(in.string(in.u32()));
+                        }
+                        if (elements.empty()) {
+                            throw redis_kv_codec_error("an empty list in a state blob");
+                        }
+                        entry->_type = redis_value_type::list;
+                        entry->_list = std::make_shared<const redis_list>(
+                            redis_list::from_elements(std::move(elements)));
                         break;
                     }
                     default:
@@ -593,6 +621,9 @@ private:
         }
         if (!reply) {
             reply = apply_redis_set_exec(ops, c, t);
+        }
+        if (!reply) {
+            reply = apply_redis_list_exec(ops, c, t);
         }
         if (!reply) {
             throw redis_unknown_command_id(c._command_id);

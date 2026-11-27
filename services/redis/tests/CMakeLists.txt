@@ -49,6 +49,7 @@ kythira_redis_test(redis_float128_test redis_float128_test.cpp)
 kythira_redis_test(redis_string_exec_unit_test redis_string_exec_unit_test.cpp)
 kythira_redis_test(redis_hash_exec_unit_test redis_hash_exec_unit_test.cpp)
 kythira_redis_test(redis_set_exec_unit_test redis_set_exec_unit_test.cpp)
+kythira_redis_test(redis_list_exec_unit_test redis_list_exec_unit_test.cpp)
 target_link_libraries(redis_format_gate_unit_test PRIVATE OpenSSL::Crypto)
 # Task 12: snapshot isolation over three hosts whose shards keep versions.
 kythira_redis_test(multi_raft_txn_snapshot_test multi_raft_txn_snapshot_test.cpp)

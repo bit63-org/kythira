@@ -71,12 +71,21 @@ namespace kythira {
                 out.push_back(i);
             }
             break;
+        case redis_command_id::lmove:
         case redis_command_id::smove:
             // src dst max-bytes max-count member
             for (std::size_t i = 0; i < 2 && i < args.size(); ++i) {
                 out.push_back(i);
             }
             break;
+        case redis_command_id::lmpop: {
+            // numkeys key [key ...] LEFT|RIGHT count
+            const auto n = args.empty() ? std::nullopt : redis_string_detail::parse_u64(args[0]);
+            for (std::size_t i = 1; n && i <= *n && i < args.size(); ++i) {
+                out.push_back(i);
+            }
+            break;
+        }
         case redis_command_id::sinterstore:
         case redis_command_id::sunionstore:
         case redis_command_id::sdiffstore:

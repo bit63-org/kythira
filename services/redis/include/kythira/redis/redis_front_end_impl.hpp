@@ -851,9 +851,15 @@ auto redis_front_end<Host, Logger, Metrics>::forward(session& s, const resp_comm
         return std::nullopt;
     }
     auto reply = forward_argv(cmd._argv, to, resp_to_upper(cmd._argv[0]));
-    // The internal hop speaks RESP2; a RESP3 client expects `_` for null.
-    if (reply && s._writer.version() >= 3 && *reply == "$-1\r\n") {
-        *reply = "_\r\n";
+    // The internal hop speaks RESP2; a RESP3 client expects `_` for every
+    // null, nested ones included. Shapes RESP2 flattens (maps, sets) are
+    // restored by the handlers that know them.
+    if (reply && s._writer.version() >= 3 &&
+        (reply->find("$-1\r\n") != std::string::npos ||
+         reply->find("*-1\r\n") != std::string::npos)) {
+        if (auto tree = parse_resp2_reply(*reply)) {
+            *reply = render_redis_reply(*tree, s._writer.version());
+        }
     }
     return reply;
 }
@@ -1158,13 +1164,15 @@ auto redis_front_end<Host, Logger, Metrics>::execute_command(session& s, std::st
         return handle_set(s, cmd, true);
     }
     if (const auto* info = find_redis_command(upper);
-        info != nullptr && (info->group == "hash" || info->group == "set") &&
+        info != nullptr &&
+        (info->group == "hash" || info->group == "set" || info->group == "list") &&
         info->status == redis_command_status::shipped) {
         const auto argc = static_cast<std::ptrdiff_t>(cmd._argv.size());
         const bool pairs = upper == "HSET" || upper == "HMSET";
         if ((info->arity > 0 && argc != info->arity) || (info->arity < 0 && argc < -info->arity) ||
             (pairs && argc % 2 != 0) || (upper == "HRANDFIELD" && argc > 4) ||
-            ((upper == "SPOP" || upper == "SRANDMEMBER") && argc > 3)) {
+            ((upper == "SPOP" || upper == "SRANDMEMBER" || upper == "LPOP" || upper == "RPOP") &&
+             argc > 3)) {
             return *arity(std::numeric_limits<std::size_t>::max(), 0);
         }
         return handle_collection(s, *info, cmd);
@@ -4000,7 +4008,11 @@ auto redis_front_end<Host, Logger, Metrics>::handle_internal_exec(session& s,
         return s._writer.error("ERR unknown command id " + a[1]);
     }
     std::vector<std::string> args(a.begin() + 4, a.end());
-    const auto key = args[0];
+    const auto keys = redis_exec_keys(command, args);
+    if (keys.empty()) {
+        return s._writer.error("ERR syntax error");
+    }
+    const auto& key = keys.front();
     return propose_exec(s, cmd, key, command, std::move(args), a[3] == "1", a[2]);
 }
 
@@ -4420,7 +4432,8 @@ auto redis_front_end<Host, Logger, Metrics>::cross_group_exec(session& s, redis_
                 default:
                     // A collection does not cross groups until typed values
                     // join transactions (task 11).
-                    if (redis_set_detail::is_set_write(id)) {
+                    if (redis_set_detail::is_set_write(id) ||
+                        redis_list_detail::is_list_write(id)) {
                         return stop(s._writer.error(
                             "CROSSSLOT Keys in request don't hash to the same slot"));
                     }
@@ -4582,6 +4595,9 @@ auto redis_front_end<Host, Logger, Metrics>::handle_collection(session& s,
     const auto max_bytes = std::to_string(_config._max_collection_bytes);
     const auto max_count = std::to_string(_config._max_collection_elements);
 
+    if (auto reply = handle_list_command(s, info, cmd)) {
+        return *reply;
+    }
     // Commands naming several keys.
     switch (id) {
         case redis_command_id::sinter:
@@ -4645,6 +4661,54 @@ auto redis_front_end<Host, Logger, Metrics>::handle_collection(session& s,
 
     // A read: arguments the data side expects already valid.
     std::vector<std::string> args(a.begin() + 2, a.end());
+    if (id == redis_command_id::lindex || id == redis_command_id::lrange) {
+        for (const auto& v : args) {
+            if (!redis_string_detail::parse_int64(v)) {
+                return s._writer.error("ERR value is not an integer or out of range");
+            }
+        }
+    }
+    if (id == redis_command_id::lpos) {
+        // LPOS key element [RANK r] [COUNT n] [MAXLEN m], in normal form
+        // `element rank count maxlen with-count`.
+        std::string rank = "1";
+        std::string count = "0";
+        std::string maxlen = "0";
+        bool with_count = false;
+        for (std::size_t i = 1; i < args.size(); i += 2) {
+            const auto opt = resp_to_upper(args[i]);
+            if (i + 1 >= args.size() || (opt != "RANK" && opt != "COUNT" && opt != "MAXLEN")) {
+                return s._writer.error("ERR syntax error");
+            }
+            const auto v = redis_string_detail::parse_int64(args[i + 1]);
+            if (!v) {
+                return s._writer.error("ERR value is not an integer or out of range");
+            }
+            if (opt == "RANK") {
+                if (*v == 0) {
+                    return s._writer.error(
+                        "ERR RANK can't be zero: use 1 to start from the first match, 2 from the "
+                        "second ... or use negative to start from the end of the list");
+                }
+                if (*v == std::numeric_limits<std::int64_t>::min()) {
+                    return s._writer.error("ERR value is out of range");
+                }
+                rank = args[i + 1];
+            } else if (opt == "COUNT") {
+                if (*v < 0) {
+                    return s._writer.error("ERR COUNT can't be negative");
+                }
+                count = args[i + 1];
+                with_count = true;
+            } else {
+                if (*v < 0) {
+                    return s._writer.error("ERR MAXLEN can't be negative");
+                }
+                maxlen = args[i + 1];
+            }
+        }
+        args = {args[0], rank, count, maxlen, with_count ? "1" : "0"};
+    }
     if (id == redis_command_id::srandmember && !args.empty() &&
         !redis_string_detail::parse_int64(args[0])) {
         return s._writer.error("ERR value is not an integer or out of range");
@@ -4875,6 +4939,140 @@ auto redis_front_end<Host, Logger, Metrics>::handle_set_algebra(session& s, redi
         out.push_back(redis_reply::bulk(std::move(m)));
     }
     return render_redis_reply(redis_reply::set(std::move(out)), s._writer.version());
+}
+
+template<typename Host, typename Logger, typename Metrics>
+auto redis_front_end<Host, Logger, Metrics>::handle_list_command(session& s,
+                                                                 const redis_command_info& info,
+                                                                 const resp_command& cmd)
+    -> std::optional<std::string> {
+    const auto id = static_cast<redis_command_id>(info.id);
+    if (!redis_list_detail::is_list_write(id) && id != redis_command_id::rpoplpush) {
+        return std::nullopt;
+    }
+    const auto& a = cmd._argv;
+    const std::string upper(info.name);
+    const auto max_bytes = std::to_string(_config._max_collection_bytes);
+    const auto max_count = std::to_string(_config._max_collection_elements);
+    const auto not_integer = [&] {
+        return s._writer.error("ERR value is not an integer or out of range");
+    };
+    const auto side = [](const std::string& v) -> std::optional<std::string> {
+        auto u = resp_to_upper(v);
+        return u == "LEFT" || u == "RIGHT" ? std::optional(u) : std::nullopt;
+    };
+    using redis_string_detail::parse_int64;
+
+    if (id == redis_command_id::lmove || id == redis_command_id::rpoplpush) {
+        if (auto e =
+                authorize(s, upper, {a[1]}, redis_key_access::read | redis_key_access::write)) {
+            return e;
+        }
+        if (auto e = authorize(s, upper, {a[2]}, redis_key_access::write)) {
+            return e;
+        }
+        std::string from = "RIGHT";
+        std::string to = "LEFT";
+        if (id == redis_command_id::lmove) {
+            const auto f = side(a[3]);
+            const auto t = side(a[4]);
+            if (!f || !t) {
+                return s._writer.error("ERR syntax error");
+            }
+            from = *f;
+            to = *t;
+        }
+        return propose_exec(s, cmd, a[1], redis_command_id::lmove,
+                            {a[1], a[2], from, to, max_bytes, max_count}, true);
+    }
+    if (id == redis_command_id::lmpop) {
+        const auto n = parse_int64(a[1]);
+        if (!n) {
+            return not_integer();
+        }
+        if (*n <= 0) {
+            return s._writer.error("ERR numkeys should be greater than 0");
+        }
+        const auto numkeys = static_cast<std::size_t>(*n);
+        if (a.size() < numkeys + 3) {
+            return s._writer.error("ERR syntax error");
+        }
+        const auto dir = side(a[numkeys + 2]);
+        if (!dir) {
+            return s._writer.error("ERR syntax error");
+        }
+        std::string count = "1";
+        if (a.size() == numkeys + 5 && resp_to_upper(a[numkeys + 3]) == "COUNT") {
+            const auto c = parse_int64(a[numkeys + 4]);
+            if (!c || *c <= 0) {
+                return s._writer.error("ERR count should be greater than 0");
+            }
+            count = a[numkeys + 4];
+        } else if (a.size() != numkeys + 3) {
+            return s._writer.error("ERR syntax error");
+        }
+        std::vector<std::string_view> keys(a.begin() + 2,
+                                           a.begin() + 2 + static_cast<std::ptrdiff_t>(numkeys));
+        if (auto e = authorize(s, upper, keys, redis_key_access::read | redis_key_access::write)) {
+            return e;
+        }
+        std::vector<std::string> args{a[1]};
+        args.insert(args.end(), keys.begin(), keys.end());
+        args.push_back(*dir);
+        args.push_back(count);
+        return propose_exec(s, cmd, a[2], id, std::move(args), false);
+    }
+
+    const auto& key = a[1];
+    if (auto e = authorize(s, upper, {key})) {
+        return e;
+    }
+    switch (id) {
+        case redis_command_id::lpush:
+        case redis_command_id::rpush:
+        case redis_command_id::lpushx:
+        case redis_command_id::rpushx: {
+            std::vector<std::string> args{key, max_bytes, max_count};
+            args.insert(args.end(), a.begin() + 2, a.end());
+            return propose_exec(s, cmd, key, id, std::move(args), true);
+        }
+        case redis_command_id::lpop:
+        case redis_command_id::rpop: {
+            if (a.size() == 3) {
+                const auto c = parse_int64(a[2]);
+                if (!c || *c < 0) {
+                    return s._writer.error("ERR value is out of range, must be positive");
+                }
+                return propose_exec(s, cmd, key, id, {key, "1", a[2]}, false);
+            }
+            return propose_exec(s, cmd, key, id, {key, "0", "1"}, false);
+        }
+        case redis_command_id::lset:
+            if (!parse_int64(a[2])) {
+                return not_integer();
+            }
+            return propose_exec(s, cmd, key, id, {key, a[2], a[3], max_bytes}, true);
+        case redis_command_id::linsert: {
+            const auto where = resp_to_upper(a[2]);
+            if (where != "BEFORE" && where != "AFTER") {
+                return s._writer.error("ERR syntax error");
+            }
+            return propose_exec(s, cmd, key, id, {key, where, a[3], a[4], max_bytes, max_count},
+                                true);
+        }
+        case redis_command_id::lrem:
+            if (!parse_int64(a[2])) {
+                return not_integer();
+            }
+            return propose_exec(s, cmd, key, id, {key, a[2], a[3]}, false);
+        case redis_command_id::ltrim:
+            if (!parse_int64(a[2]) || !parse_int64(a[3])) {
+                return not_integer();
+            }
+            return propose_exec(s, cmd, key, id, {key, a[2], a[3]}, false);
+        default:
+            return std::nullopt;
+    }
 }
 
 }  // namespace kythira

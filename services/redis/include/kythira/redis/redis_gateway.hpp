@@ -673,6 +673,10 @@ protected:
     /// (redis_typed_read.hpp).
     auto handle_collection(session& s, const redis_command_info& info, const resp_command& cmd)
         -> std::string;
+    /// The list writes (task 9) in normal form; `nullopt` for any other
+    /// command.
+    auto handle_list_command(session& s, const redis_command_info& info, const resp_command& cmd)
+        -> std::optional<std::string>;
     /// `SPOP`: the members picked here, on the group's leader, and proposed
     /// as an explicit removal (Requirement 9.5).
     auto handle_spop(session& s, const resp_command& cmd) -> std::string;

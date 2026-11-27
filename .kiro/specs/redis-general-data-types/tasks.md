@@ -113,7 +113,7 @@ is extended as the rest land.
     multi-key set ops through task 6's planner
   - _Requirements: 9.5, 11.1_
 
-- [ ] 9. Lists (non-blocking)
+- [x] 9. Lists (non-blocking)
   - Every non-blocking list command; O(1) ends; `LMOVE`/`RPOPLPUSH`
     through the planner; blocking forms stay unknown
   - _Requirements: 12.1-12.3_

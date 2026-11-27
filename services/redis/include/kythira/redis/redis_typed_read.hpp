@@ -13,6 +13,7 @@
 
 #include <kythira/redis/redis_command_ids.hpp>
 #include <kythira/redis/redis_hash_exec.hpp>
+#include <kythira/redis/redis_list_exec.hpp>
 #include <kythira/redis/redis_reply.hpp>
 #include <kythira/redis/redis_set_exec.hpp>
 #include <kythira/redis/redis_string_read.hpp>
@@ -36,6 +37,9 @@ namespace redis_typed_read_detail {
     if (redis_set_detail::is_set_read(id)) {
         return redis_value_type::set;
     }
+    if (redis_list_detail::is_list_read(id)) {
+        return redis_value_type::list;
+    }
     return std::nullopt;
 }
 
@@ -48,6 +52,8 @@ namespace redis_typed_read_detail {
             return evaluate_redis_hash_read(nullptr, id, args);
         case redis_value_type::set:
             return evaluate_redis_set_read(nullptr, id, args);
+        case redis_value_type::list:
+            return evaluate_redis_list_read(nullptr, id, args);
         default:
             return std::nullopt;
     }
@@ -93,6 +99,7 @@ auto evaluate_redis_read(const Entry* entry, redis_command_id id, std::span<cons
     if constexpr (requires {
                       entry->_hash;
                       entry->_set;
+                      entry->_list;
                   }) {
         if (type == redis_value_type::hash) {
             if (id == redis_command_id::object) {
@@ -108,6 +115,14 @@ auto evaluate_redis_read(const Entry* entry, redis_command_id id, std::span<cons
             }
             if (collection_of(id) == redis_value_type::set) {
                 return evaluate_redis_set_read(entry->_set.get(), id, args);
+            }
+        }
+        if (type == redis_value_type::list) {
+            if (id == redis_command_id::object) {
+                return redis_reply::bulk(redis_list_encoding(*entry->_list));
+            }
+            if (collection_of(id) == redis_value_type::list) {
+                return evaluate_redis_list_read(entry->_list.get(), id, args);
             }
         }
     }

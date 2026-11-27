@@ -1017,7 +1017,7 @@ commands:
     acl: [write, list, fast]
     keys: [1, 1, 1]
     path: W
-    status: planned
+    status: shipped
     task: 9
   - name: RPUSH
     id: 91
@@ -1028,7 +1028,7 @@ commands:
     acl: [write, list, fast]
     keys: [1, 1, 1]
     path: W
-    status: planned
+    status: shipped
     task: 9
   - name: LPUSHX
     id: 92
@@ -1039,7 +1039,7 @@ commands:
     acl: [write, list, fast]
     keys: [1, 1, 1]
     path: W
-    status: planned
+    status: shipped
     task: 9
   - name: RPUSHX
     id: 93
@@ -1050,7 +1050,7 @@ commands:
     acl: [write, list, fast]
     keys: [1, 1, 1]
     path: W
-    status: planned
+    status: shipped
     task: 9
   - name: LPOP
     id: 94
@@ -1061,7 +1061,7 @@ commands:
     acl: [write, list, fast]
     keys: [1, 1, 1]
     path: W
-    status: planned
+    status: shipped
     task: 9
   - name: RPOP
     id: 95
@@ -1072,7 +1072,7 @@ commands:
     acl: [write, list, fast]
     keys: [1, 1, 1]
     path: W
-    status: planned
+    status: shipped
     task: 9
   - name: LLEN
     id: 96
@@ -1083,7 +1083,7 @@ commands:
     acl: [read, list, fast]
     keys: [1, 1, 1]
     path: R
-    status: planned
+    status: shipped
     task: 9
   - name: LINDEX
     id: 97
@@ -1094,7 +1094,7 @@ commands:
     acl: [read, list, slow]
     keys: [1, 1, 1]
     path: R
-    status: planned
+    status: shipped
     task: 9
   - name: LRANGE
     id: 98
@@ -1105,7 +1105,7 @@ commands:
     acl: [read, list, slow]
     keys: [1, 1, 1]
     path: R
-    status: planned
+    status: shipped
     task: 9
   - name: LSET
     id: 99
@@ -1116,7 +1116,7 @@ commands:
     acl: [write, list, slow]
     keys: [1, 1, 1]
     path: W
-    status: planned
+    status: shipped
     task: 9
   - name: LINSERT
     id: 100
@@ -1127,7 +1127,7 @@ commands:
     acl: [write, list, slow]
     keys: [1, 1, 1]
     path: W
-    status: planned
+    status: shipped
     task: 9
   - name: LREM
     id: 101
@@ -1138,7 +1138,7 @@ commands:
     acl: [write, list, slow]
     keys: [1, 1, 1]
     path: W
-    status: planned
+    status: shipped
     task: 9
   - name: LTRIM
     id: 102
@@ -1149,7 +1149,7 @@ commands:
     acl: [write, list, slow]
     keys: [1, 1, 1]
     path: W
-    status: planned
+    status: shipped
     task: 9
   - name: LPOS
     id: 103
@@ -1160,7 +1160,7 @@ commands:
     acl: [read, list, slow]
     keys: [1, 1, 1]
     path: R
-    status: planned
+    status: shipped
     task: 9
   - name: LMOVE
     id: 104
@@ -1171,7 +1171,7 @@ commands:
     acl: [write, list, slow]
     keys: [1, 2, 1]
     path: M
-    status: planned
+    status: shipped
     task: 9
   - name: RPOPLPUSH
     id: 105
@@ -1182,7 +1182,7 @@ commands:
     acl: [write, list, slow]
     keys: [1, 2, 1]
     path: M
-    status: planned
+    status: shipped
     task: 9
   - name: LMPOP
     id: 106
@@ -1193,7 +1193,7 @@ commands:
     acl: [write, list, slow]
     keys: [0, 0, 0]
     path: M
-    status: planned
+    status: shipped
     task: 9
   - name: SCAN
     id: 107
