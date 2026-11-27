@@ -2678,6 +2678,59 @@ BOOST_AUTO_TEST_CASE(set_commands, *boost::unit_test::timeout(120)) {
     BOOST_CHECK_EQUAL(call({"SDIFF", "a/z", "sccache/u"}), "~1\r\n$1\r\nq\r\n");
 }
 
+// Task 9: lists end to end from a follower; the blocking forms stay
+// unknown until phase 2.
+BOOST_AUTO_TEST_CASE(list_commands, *boost::unit_test::timeout(120)) {
+    if constexpr (gateway_type::k_node_format_level < k_redis_typed_values_level) {
+        return;
+    }
+    auto c = typed_cluster();
+    resp_client r(c->port(c->a_follower_of(k_sccache_group)));
+    BOOST_REQUIRE_EQUAL(r.auth("ops", "ops-secret"), "+OK\r\n");
+    const auto call = [&](const std::vector<std::string>& argv) { return r.call(argv); };
+
+    BOOST_CHECK_EQUAL(call({"RPUSH", "sccache/l", "b", "c"}), ":2\r\n");
+    BOOST_CHECK_EQUAL(call({"LPUSH", "sccache/l", "a"}), ":3\r\n");
+    BOOST_CHECK_EQUAL(call({"LPUSHX", "sccache/none", "a"}), ":0\r\n");
+    BOOST_CHECK_EQUAL(call({"LRANGE", "sccache/l", "0", "-1"}),
+                      "*3\r\n$1\r\na\r\n$1\r\nb\r\n$1\r\nc\r\n");
+    BOOST_CHECK_EQUAL(call({"LLEN", "sccache/l"}), ":3\r\n");
+    BOOST_CHECK_EQUAL(call({"LINDEX", "sccache/l", "-1"}), bulk("c"));
+    BOOST_CHECK_EQUAL(call({"LINDEX", "sccache/l", "x"}),
+                      "-ERR value is not an integer or out of range\r\n");
+    BOOST_CHECK_EQUAL(call({"LSET", "sccache/l", "1", "B"}), "+OK\r\n");
+    BOOST_CHECK_EQUAL(call({"LINSERT", "sccache/l", "before", "B", "x"}), ":4\r\n");
+    BOOST_CHECK_EQUAL(call({"LPOS", "sccache/l", "x"}), ":1\r\n");
+    BOOST_CHECK_EQUAL(call({"LPOS", "sccache/l", "x", "RANK", "0"}).substr(0, 25),
+                      "-ERR RANK can't be zero: ");
+    BOOST_CHECK_EQUAL(call({"LREM", "sccache/l", "0", "x"}), ":1\r\n");
+    BOOST_CHECK_EQUAL(call({"LTRIM", "sccache/l", "0", "1"}), "+OK\r\n");
+    BOOST_CHECK_EQUAL(call({"RPOPLPUSH", "sccache/l", "sccache/m"}), bulk("B"));
+    BOOST_CHECK_EQUAL(call({"LMOVE", "sccache/m", "sccache/l", "left", "right"}), bulk("B"));
+    BOOST_CHECK_EQUAL(call({"LMPOP", "2", "sccache/none", "sccache/l", "LEFT", "COUNT", "5"}),
+                      "*2\r\n$9\r\nsccache/l\r\n*2\r\n$1\r\na\r\n$1\r\nB\r\n");
+    BOOST_CHECK_EQUAL(call({"LMPOP", "1", "sccache/l", "LEFT"}), "*-1\r\n");
+    BOOST_CHECK_EQUAL(call({"RPUSH", "sccache/l", "1", "2", "3"}), ":3\r\n");
+    BOOST_CHECK_EQUAL(call({"LPOP", "sccache/l"}), bulk("1"));
+    BOOST_CHECK_EQUAL(call({"RPOP", "sccache/l", "5"}), "*2\r\n$1\r\n3\r\n$1\r\n2\r\n");
+    BOOST_CHECK_EQUAL(call({"LPOP", "sccache/l"}), "$-1\r\n");
+    BOOST_CHECK_EQUAL(call({"LPOP", "sccache/l", "2"}), "*-1\r\n");
+    BOOST_CHECK_EQUAL(call({"RPUSH", "sccache/t", "x"}), ":1\r\n");
+    BOOST_CHECK_EQUAL(call({"TYPE", "sccache/t"}), "+list\r\n");
+    BOOST_CHECK_EQUAL(call({"OBJECT", "ENCODING", "sccache/t"}), bulk("quicklist"));
+    BOOST_CHECK_EQUAL(call({"GET", "sccache/t"}),
+                      "-WRONGTYPE Operation against a key holding the wrong kind of value\r\n");
+    BOOST_CHECK_EQUAL(call({"RPUSH", "a/t", "y"}), ":1\r\n");
+    BOOST_CHECK_EQUAL(call({"LMOVE", "a/t", "sccache/t", "LEFT", "LEFT"}),
+                      "-CROSSSLOT Keys in request don't hash to the same slot\r\n");
+    for (const auto* name : {"BLPOP", "BRPOP", "BLMOVE", "BRPOPLPUSH", "BLMPOP"}) {
+        BOOST_CHECK(call({name, "sccache/t", "0"}).starts_with("-ERR unknown command"));
+    }
+    BOOST_CHECK(call({"HELLO", "3"}).starts_with("%"));
+    BOOST_CHECK_EQUAL(call({"LPOP", "sccache/none", "2"}), "_\r\n");
+    BOOST_CHECK_EQUAL(call({"LRANGE", "a/t", "0", "-1"}), "*1\r\n$1\r\ny\r\n");
+}
+
 // Requirement 5.4: the rule is decided in apply(), so writers racing to
 // create one key cannot both pass: exactly one INCR creates it and every
 // other one finds it existing. In a mutable prefix every INCR counts.

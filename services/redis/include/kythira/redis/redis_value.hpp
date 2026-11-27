@@ -334,4 +334,219 @@ public:
     }
 };
 
+/// A list, in list order, chunked: a vector of shared chunks of at most
+/// `k_redis_chunk_entries` elements. The mutators change this list in
+/// place, copying only the chunks they touch, so a caller copies the list
+/// (sharing every chunk) and mutates the copy: a published list never
+/// changes. Pushing or popping at an end copies one chunk and the chunk
+/// vector (Requirement 12.2: bounded by the chunking, not the list).
+class redis_list {
+public:
+    using chunk = std::vector<std::string>;
+
+    [[nodiscard]] auto size() const noexcept -> std::size_t { return _count; }
+    [[nodiscard]] auto bytes() const noexcept -> std::size_t { return _bytes; }
+    [[nodiscard]] auto empty() const noexcept -> bool { return _count == 0; }
+    [[nodiscard]] auto chunks() const noexcept -> const std::vector<std::shared_ptr<const chunk>>& {
+        return _chunks;
+    }
+
+    /// The element at `i` (`i < size()`).
+    [[nodiscard]] auto at(std::size_t i) const -> const std::string& {
+        const auto [c, off] = locate(i);
+        return (*_chunks[c])[off];
+    }
+
+    /// Calls `f(index, element)` for elements `first..last` inclusive, in
+    /// order, while `f` returns true.
+    template<typename F> auto visit(std::size_t first, std::size_t last, F&& f) const -> void {
+        if (first > last || first >= _count) {
+            return;
+        }
+        auto [c, off] = locate(first);
+        for (std::size_t i = first; i <= last && i < _count; ++i) {
+            if (!f(i, (*_chunks[c])[off])) {
+                return;
+            }
+            if (++off == _chunks[c]->size()) {
+                ++c;
+                off = 0;
+            }
+        }
+    }
+
+    /// Calls `f(index, element)` from the last element back to the first,
+    /// while `f` returns true.
+    template<typename F> auto visit_backwards(F&& f) const -> void {
+        std::size_t i = _count;
+        for (auto c = _chunks.size(); c-- > 0;) {
+            for (auto off = _chunks[c]->size(); off-- > 0;) {
+                if (!f(--i, (*_chunks[c])[off])) {
+                    return;
+                }
+            }
+        }
+    }
+
+    auto push_back(std::string v) -> void {
+        account_add(v);
+        if (_chunks.empty() || _chunks.back()->size() >= k_redis_chunk_entries) {
+            _chunks.push_back(std::make_shared<const chunk>(chunk{std::move(v)}));
+            return;
+        }
+        auto ch = std::make_shared<chunk>(*_chunks.back());
+        ch->push_back(std::move(v));
+        _chunks.back() = std::move(ch);
+    }
+
+    auto push_front(std::string v) -> void {
+        account_add(v);
+        if (_chunks.empty() || _chunks.front()->size() >= k_redis_chunk_entries) {
+            _chunks.insert(_chunks.begin(), std::make_shared<const chunk>(chunk{std::move(v)}));
+            return;
+        }
+        auto ch = std::make_shared<chunk>();
+        ch->reserve(_chunks.front()->size() + 1);
+        ch->push_back(std::move(v));
+        ch->insert(ch->end(), _chunks.front()->begin(), _chunks.front()->end());
+        _chunks.front() = std::move(ch);
+    }
+
+    /// Removes and returns the first element (`!empty()`).
+    auto pop_front() -> std::string {
+        auto ch = std::make_shared<chunk>(*_chunks.front());
+        auto v = std::move(ch->front());
+        ch->erase(ch->begin());
+        account_remove(v);
+        if (ch->empty()) {
+            _chunks.erase(_chunks.begin());
+        } else {
+            _chunks.front() = std::move(ch);
+        }
+        return v;
+    }
+
+    /// Removes and returns the last element (`!empty()`).
+    auto pop_back() -> std::string {
+        auto ch = std::make_shared<chunk>(*_chunks.back());
+        auto v = std::move(ch->back());
+        ch->pop_back();
+        account_remove(v);
+        if (ch->empty()) {
+            _chunks.pop_back();
+        } else {
+            _chunks.back() = std::move(ch);
+        }
+        return v;
+    }
+
+    /// Replaces the element at `i` (`i < size()`).
+    auto set(std::size_t i, std::string v) -> void {
+        const auto [c, off] = locate(i);
+        auto ch = std::make_shared<chunk>(*_chunks[c]);
+        _bytes -= (*ch)[off].size();
+        _bytes += v.size();
+        (*ch)[off] = std::move(v);
+        _chunks[c] = std::move(ch);
+    }
+
+    /// Inserts `v` so that it lands at index `i` (`i <= size()`).
+    auto insert(std::size_t i, std::string v) -> void {
+        if (i == _count) {
+            push_back(std::move(v));
+            return;
+        }
+        const auto [c, off] = locate(i);
+        account_add(v);
+        auto ch = std::make_shared<chunk>(*_chunks[c]);
+        ch->insert(ch->begin() + static_cast<std::ptrdiff_t>(off), std::move(v));
+        if (ch->size() > k_redis_chunk_entries) {
+            const auto half = static_cast<std::ptrdiff_t>(ch->size() / 2);
+            auto upper = std::make_shared<chunk>(std::make_move_iterator(ch->begin() + half),
+                                                 std::make_move_iterator(ch->end()));
+            ch->erase(ch->begin() + half, ch->end());
+            _chunks[c] = std::move(ch);
+            _chunks.insert(_chunks.begin() + static_cast<std::ptrdiff_t>(c) + 1, std::move(upper));
+            return;
+        }
+        _chunks[c] = std::move(ch);
+    }
+
+    /// Keeps only elements whose index `keep(i, element)` accepts, copying
+    /// only the chunks that lose an element. Returns how many were removed.
+    template<typename Keep> auto retain(Keep&& keep) -> std::size_t {
+        std::vector<std::shared_ptr<const chunk>> next;
+        next.reserve(_chunks.size());
+        std::size_t i = 0;
+        std::size_t removed = 0;
+        for (const auto& c : _chunks) {
+            std::shared_ptr<chunk> copy;
+            for (std::size_t off = 0; off < c->size(); ++off, ++i) {
+                const bool kept = keep(i, (*c)[off]);
+                if (!kept && !copy) {
+                    copy = std::make_shared<chunk>(c->begin(),
+                                                   c->begin() + static_cast<std::ptrdiff_t>(off));
+                }
+                if (!kept) {
+                    ++removed;
+                    account_remove((*c)[off]);
+                } else if (copy) {
+                    copy->push_back((*c)[off]);
+                }
+            }
+            if (!copy) {
+                next.push_back(c);
+            } else if (!copy->empty()) {
+                next.push_back(std::move(copy));
+            }
+        }
+        _chunks = std::move(next);
+        return removed;
+    }
+
+    /// Builds a list from elements in order (a snapshot's).
+    [[nodiscard]] static auto from_elements(std::vector<std::string> elements) -> redis_list {
+        redis_list out;
+        for (auto& e : elements) {
+            out.push_back(std::move(e));
+        }
+        return out;
+    }
+
+private:
+    [[nodiscard]] auto locate(std::size_t i) const -> std::pair<std::size_t, std::size_t> {
+        // Walk from the nearer end.
+        if (i < _count / 2) {
+            for (std::size_t c = 0; c < _chunks.size(); ++c) {
+                if (i < _chunks[c]->size()) {
+                    return {c, i};
+                }
+                i -= _chunks[c]->size();
+            }
+        } else {
+            std::size_t from_end = _count - i;
+            for (auto c = _chunks.size(); c-- > 0;) {
+                if (from_end <= _chunks[c]->size()) {
+                    return {c, _chunks[c]->size() - from_end};
+                }
+                from_end -= _chunks[c]->size();
+            }
+        }
+        return {_chunks.size() - 1, _chunks.back()->size() - 1};
+    }
+
+    auto account_add(const std::string& v) noexcept -> void {
+        ++_count;
+        _bytes += v.size() + k_redis_element_overhead;
+    }
+    auto account_remove(const std::string& v) noexcept -> void {
+        --_count;
+        _bytes -= v.size() + k_redis_element_overhead;
+    }
+
+    std::vector<std::shared_ptr<const chunk>> _chunks;
+    std::size_t _count = 0;
+    std::size_t _bytes = 0;
+};
+
 }  // namespace kythira

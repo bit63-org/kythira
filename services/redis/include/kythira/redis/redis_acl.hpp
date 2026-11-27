@@ -244,14 +244,16 @@ enum class acl_decision : std::uint8_t {
         upper_name == "PTTL" || upper_name == "EXPIRETIME" || upper_name == "PEXPIRETIME" ||
         upper_name == "TOUCH" || upper_name == "OBJECT" || upper_name == "STRLEN" ||
         upper_name == "WATCH" || upper_name == "HLEN" || upper_name == "HEXISTS" ||
-        upper_name == "HSTRLEN" || upper_name == "SCARD") {
+        upper_name == "HSTRLEN" || upper_name == "SCARD" || upper_name == "LLEN") {
         return none;
     }
     if (upper_name == "GETSET" || upper_name == "GETDEL" || upper_name == "GETEX" ||
         upper_name == "INCR" || upper_name == "DECR" || upper_name == "INCRBY" ||
         upper_name == "DECRBY" || upper_name == "INCRBYFLOAT" || upper_name == "RENAME" ||
         upper_name == "RENAMENX" || upper_name == "COPY" || upper_name == "HINCRBY" ||
-        upper_name == "HINCRBYFLOAT" || upper_name == "SPOP") {
+        upper_name == "HINCRBYFLOAT" || upper_name == "SPOP" || upper_name == "LPOP" ||
+        upper_name == "RPOP" || upper_name == "LMOVE" || upper_name == "RPOPLPUSH" ||
+        upper_name == "LMPOP") {
         return read | write;
     }
     const auto* info = find_redis_command(upper_name);

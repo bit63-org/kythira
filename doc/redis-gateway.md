@@ -835,6 +835,23 @@ deadlines, chunking and immutable-value rule. `SSCAN` arrives with `SCAN`.
   that received the command, so their keys may be in different shards.
   The keys are read one after another, not as one snapshot.
 
+## Lists
+
+`LPUSH`, `RPUSH`, `LPUSHX`, `RPUSHX`, `LPOP` and `RPOP` (with a count),
+`LLEN`, `LINDEX`, `LRANGE`, `LSET`, `LINSERT`, `LREM`, `LTRIM`, `LPOS`,
+`LMOVE`, `RPOPLPUSH` and `LMPOP` behave as in Redis 7, on the same stores and
+format level as hashes, with the same type errors, limits, deadlines and
+immutable-value rule. The blocking forms (`BLPOP`, `BRPOP`, `BLMOVE`,
+`BRPOPLPUSH`, `BLMPOP`) answer `-ERR unknown command` until a later release.
+
+- A list is stored in chunks of at most 128 elements. Pushing or popping
+  at either end copies one chunk and the list of chunks, never the
+  elements; an index operation walks chunks from the nearer end.
+- `LMOVE`, `RPOPLPUSH` and `LMPOP` are multi-key writes: their keys in one
+  shard make one log entry; keys in several shards answer `-CROSSSLOT`
+  until collections join transactions.
+- `OBJECT ENCODING` reports `quicklist`, as Redis 7.0 does for every list.
+
 ## Transactions
 
 A daemon built with `CONFIG_REDIS_GATEWAY_TRANSACTIONS=y` and run with
