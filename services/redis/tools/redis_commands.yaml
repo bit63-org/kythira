@@ -632,7 +632,7 @@ commands:
     acl: [keyspace, write, slow]
     keys: [1, 2, 1]
     path: M
-    status: planned
+    status: shipped
     task: 6
   - name: RENAMENX
     id: 56
@@ -643,7 +643,7 @@ commands:
     acl: [keyspace, write, fast]
     keys: [1, 2, 1]
     path: M
-    status: planned
+    status: shipped
     task: 6
   - name: COPY
     id: 57
@@ -654,7 +654,7 @@ commands:
     acl: [keyspace, write, slow]
     keys: [1, 2, 1]
     path: M
-    status: planned
+    status: shipped
     task: 6
   - name: MSETNX
     id: 58
@@ -665,7 +665,7 @@ commands:
     acl: [write, string, slow]
     keys: [1, -1, 2]
     path: M
-    status: planned
+    status: shipped
     task: 6
   - name: HSET
     id: 59

@@ -1143,6 +1143,22 @@ public:
     auto submit_command(const std::vector<std::byte>& command, std::chrono::milliseconds timeout)
         -> future_type;
 
+    /// @brief Submit an ordinary command that names several keys to the
+    ///        shard owning all of them.
+    ///
+    /// Routes by `keys.front()` and checks every key against the local
+    /// replica's own range, as `submit_txn` does: a key elsewhere means the
+    /// caller planned against a routing table that has since moved (a split
+    /// between routing and submission), so the request is refused with
+    /// `shard_epoch_mismatch_exception` carrying the descriptors now covering
+    /// the stray keys, and the caller re-plans. The command is submitted as
+    /// `submit_command` submits it (enveloped on a transactional state
+    /// machine). The configured partitioner's key must be one of `keys`.
+    /// @throws std::invalid_argument (via the future) if `keys` is empty.
+    auto submit_multi_key_command(const std::vector<Key>& keys,
+                                  const std::vector<std::byte>& command,
+                                  std::chrono::milliseconds timeout) -> future_type;
+
     /// @brief Submit a transaction envelope to the shard owning every key in
     ///        `keys` (multi-raft-transactions task 5).
     ///
@@ -2086,7 +2102,8 @@ private:
                        std::optional<shard_epoch> expected_epoch,
                        const std::vector<std::byte>* command, bool is_read,
                        std::chrono::milliseconds timeout,
-                       const std::vector<Key>* txn_keys = nullptr) -> future_type;
+                       const std::vector<Key>* txn_keys = nullptr, bool plain_with_keys = false)
+        -> future_type;
 
     /// @brief A plain command on a wrapped host: envelope it, submit it, and
     ///        turn the result back into what an unwrapped host returns

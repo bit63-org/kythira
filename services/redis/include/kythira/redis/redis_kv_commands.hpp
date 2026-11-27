@@ -199,6 +199,48 @@ struct redis_kv_exec_command {
     auto operator==(const redis_kv_exec_command&) const -> bool = default;
 };
 
+/// The `exec` record a front end proposes for one key: the command id, the
+/// arguments in normal form, the proposer's clock (apply() floors it at the
+/// group's applied time, so no node has to re-stamp it), the
+/// immutable-value rule and the key's mutable bit (Requirement 5). Shared by
+/// the co-located path and a front end without data, which sends the
+/// encoded record to a data node.
+[[nodiscard]] inline auto make_redis_exec_record(std::string key, std::uint16_t command_id,
+                                                 std::vector<std::string> args,
+                                                 std::uint64_t now_ms, bool immutable_rule,
+                                                 bool mutable_key) -> redis_kv_exec_command {
+    redis_kv_exec_command c;
+    c._key = std::move(key);
+    c._command_id = command_id;
+    c._now_ms = now_ms;
+    c._policy = immutable_rule ? redis_kv_exec_policy::immutable_rule : 0;
+    if (immutable_rule && mutable_key) {
+        c._mutable_keys = {std::byte{0x01}};
+    }
+    c._args = std::move(args);
+    return c;
+}
+
+/// The same for a record naming several keys: `mutable_bits` holds one `0`
+/// or `1` per key, in the record's key order.
+[[nodiscard]] inline auto make_redis_exec_record(std::string key, std::uint16_t command_id,
+                                                 std::vector<std::string> args,
+                                                 std::uint64_t now_ms, bool immutable_rule,
+                                                 std::string_view mutable_bits)
+    -> redis_kv_exec_command {
+    auto c = make_redis_exec_record(std::move(key), command_id, std::move(args), now_ms,
+                                    immutable_rule, false);
+    if (immutable_rule && mutable_bits.find('1') != std::string_view::npos) {
+        c._mutable_keys.assign((mutable_bits.size() + 7) / 8, std::byte{0});
+        for (std::size_t i = 0; i < mutable_bits.size(); ++i) {
+            if (mutable_bits[i] == '1') {
+                c._mutable_keys[i / 8] |= static_cast<std::byte>(1U << (i % 8));
+            }
+        }
+    }
+    return c;
+}
+
 /// Delete every key in `[_lo, _hi)` on the group, at most `_max_keys` of them
 /// in this entry (prefix delete and flush, design Component 7). An empty
 /// `_hi` is the end of the keyspace.

@@ -718,6 +718,33 @@ deadline it saw, so an `EXPIRE` or `PERSIST` that lands in the log after
 the sweep was built and before it applied keeps the key alive. Under the
 immutable-value rule a deadline is part of what the rule protects.
 
+### Multi-key commands
+
+| Command | Notes |
+|---|---|
+| `DEL` `UNLINK` `EXISTS key [key ...]` | count of keys removed or present |
+| `RENAME` `RENAMENX` | the destination takes the source's deadline |
+| `COPY src dst [DB 0] [REPLACE]` | one database: any other `DB` answers `-ERR DB index is out of range` |
+| `MSETNX` | all keys or none, only if none exists |
+
+The node that receives the command routes every key first. Keys that live
+in one shard make one log entry there, with no transaction, so the
+command is atomic and as fast as a single-key write. Keys in several
+shards run as one transaction across them, at the connection's isolation
+(as `MSET`), on a build and node with transactions on; anywhere else the
+command answers `-CROSSSLOT Keys in request don't hash to the same slot`,
+the error Redis Cluster clients already handle, and changes nothing. If a
+shard splits between routing and submission so that one entry would name
+a key the shard no longer owns, the entry is refused before it is
+proposed, the node learns the new layout and plans again (it may then
+become a transaction). `EXISTS` with several keys reads each where it
+lives and needs no transaction. Under the immutable-value rule `RENAME`
+needs the source, and an existing destination, to be in the user's
+mutable prefixes, and `COPY REPLACE` needs an existing destination to be;
+`MSETNX` and `COPY` to a new key only create. Before the typed-values gate a
+multi-key `DEL` keeps its earlier form: a transaction where transactions
+are on, refused elsewhere.
+
 ## Transactions
 
 A daemon built with `CONFIG_REDIS_GATEWAY_TRANSACTIONS=y` and run with

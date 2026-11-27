@@ -2500,6 +2500,46 @@ BOOST_AUTO_TEST_CASE(immutable_values_refuse_string_mutations, *boost::unit_test
                       "-ERR value conflict for an existing key\r\n");
 }
 
+// Task 6: multi-key commands. Keys in one group make one record; this
+// build has no transactions, so keys in two groups answer -CROSSSLOT and
+// change nothing (Requirement 6.3). Sent to a follower: the record hops.
+BOOST_AUTO_TEST_CASE(multi_key_commands, *boost::unit_test::timeout(120)) {
+    if constexpr (gateway_type::k_node_format_level < k_redis_typed_values_level) {
+        return;
+    }
+    auto c = typed_cluster();
+    resp_client r(c->port(c->a_follower_of(k_sccache_group)));
+    BOOST_REQUIRE_EQUAL(r.auth("ops", "ops-secret"), "+OK\r\n");
+    const auto call = [&](const std::vector<std::string>& argv) { return r.call(argv); };
+    const std::string crossslot = "-CROSSSLOT Keys in request don't hash to the same slot\r\n";
+
+    BOOST_CHECK_EQUAL(call({"MSETNX", "sccache/a", "1", "sccache/b", "2"}), ":1\r\n");
+    BOOST_CHECK_EQUAL(call({"MSETNX", "sccache/b", "x", "sccache/c", "3"}), ":0\r\n");
+    BOOST_CHECK_EQUAL(call({"EXISTS", "sccache/a", "sccache/b", "sccache/c", "a/x"}), ":2\r\n");
+    BOOST_CHECK_EQUAL(call({"SET", "sccache/t", "v", "PX", "100000"}), "+OK\r\n");
+    BOOST_CHECK_EQUAL(call({"RENAME", "sccache/t", "sccache/u"}), "+OK\r\n");
+    BOOST_CHECK_EQUAL(call({"GET", "sccache/u"}), bulk("v"));
+    BOOST_CHECK(call({"PTTL", "sccache/u"}) != ":-1\r\n");
+    BOOST_CHECK_EQUAL(call({"RENAME", "sccache/t", "sccache/u"}), "-ERR no such key\r\n");
+    BOOST_CHECK_EQUAL(call({"RENAMENX", "sccache/u", "sccache/a"}), ":0\r\n");
+    BOOST_CHECK_EQUAL(call({"COPY", "sccache/u", "sccache/a"}), ":0\r\n");
+    BOOST_CHECK_EQUAL(call({"COPY", "sccache/u", "sccache/a", "DB", "0", "REPLACE"}), ":1\r\n");
+    BOOST_CHECK_EQUAL(call({"COPY", "sccache/u", "sccache/a", "DB", "1"}),
+                      "-ERR DB index is out of range\r\n");
+    BOOST_CHECK_EQUAL(call({"GET", "sccache/a"}), bulk("v"));
+    BOOST_CHECK_EQUAL(call({"DEL", "sccache/a", "sccache/b", "sccache/zz"}), ":2\r\n");
+    BOOST_CHECK_EQUAL(call({"UNLINK", "sccache/u", "sccache/a"}), ":1\r\n");
+
+    // Across the "m" cut: refused, nothing changed.
+    BOOST_CHECK_EQUAL(call({"SET", "a/x", "1"}), "+OK\r\n");
+    BOOST_CHECK_EQUAL(call({"RENAME", "a/x", "sccache/x"}), crossslot);
+    BOOST_CHECK_EQUAL(call({"MSETNX", "a/y", "1", "sccache/y", "2"}), crossslot);
+    BOOST_CHECK_EQUAL(call({"DEL", "a/x", "sccache/c"}), crossslot);
+    BOOST_CHECK_EQUAL(call({"GET", "a/x"}), bulk("1"));
+    BOOST_CHECK_EQUAL(call({"EXISTS", "a/y", "sccache/y", "sccache/x"}), ":0\r\n");
+    BOOST_CHECK(call({"MSETNX", "a", "1", "b"}).starts_with("-ERR wrong number of arguments"));
+}
+
 // Requirement 5.4: the rule is decided in apply(), so writers racing to
 // create one key cannot both pass: exactly one INCR creates it and every
 // other one finds it existing. In a mutable prefix every INCR counts.

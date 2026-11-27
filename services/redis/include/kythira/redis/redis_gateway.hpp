@@ -34,6 +34,7 @@
 #include <kythira/redis/redis_data_wire.hpp>
 #include <kythira/redis/redis_gateway_value_access.hpp>
 #include <kythira/redis/redis_kv_state_machine.hpp>
+#include <kythira/redis/redis_multi_key_exec.hpp>
 #include <kythira/redis/redis_reply.hpp>
 #include <kythira/redis/redis_expiry_exec.hpp>
 #include <kythira/redis/redis_string_exec.hpp>
@@ -643,16 +644,36 @@ protected:
     /// the leader is elsewhere the record goes there as `KYTHIRA.EXEC`, so
     /// the normal form and the user's mutable bit (Requirement 5) travel
     /// with it; `mutable_key` is that bit as the hop carries it.
+    ///
+    /// A record that names several keys (redis_multi_key_exec.hpp) is
+    /// planned first: keys in one group make one record; keys in several
+    /// go to `cross_group_exec`. `mutable_bits` is the hop's bitmap, one
+    /// `0` or `1` per key in record order.
     auto propose_exec(session& s, const resp_command& cmd, const std::string& key,
                       redis_command_id id, std::vector<std::string> args, bool may_grow,
-                      std::optional<bool> mutable_key = std::nullopt) -> std::string;
+                      std::optional<std::string> mutable_bits = std::nullopt, int replans = 0)
+        -> std::string;
+    /// A multi-key write whose keys route to several groups: a multi-Raft
+    /// transaction on a transactional build, else `-CROSSSLOT`
+    /// (Requirement 6.2, 6.3).
+    auto cross_group_exec(session& s, redis_command_id id, const std::vector<std::string>& args,
+                          const std::string& mutable_bits) -> std::string;
+    /// `DEL`, `UNLINK`, `RENAME`, `RENAMENX`, `COPY`, `MSETNX` with several
+    /// keys: syntax checks and normal form (task 6).
+    auto handle_multi_key_write(session& s, std::string_view upper, const resp_command& cmd)
+        -> std::string;
     /// Whether a plain `SET` or `SETEX` of `key` goes as an `exec` record:
     /// the key is in one of the user's mutable prefixes under the
     /// immutable-value rule, and its group has the typed-values gate. The
     /// record carries the mutable bit to the leader; the original record
     /// would reach it as the internal user, who has no mutable prefix.
     auto mutable_exec(const session& s, const std::string& key) -> bool;
-    /// `KYTHIRA.EXEC <command id> <mutable 0|1> <may grow 0|1> <args...>`:
+    /// Whether `key`'s group has the typed-values gate (or no replica here
+    /// says otherwise): the multi-key commands plan as `exec` records.
+    auto typed_ready(const std::string& key) -> bool;
+    /// The deadline of `src` for a cross-group `RENAME` or `COPY`.
+    auto source_deadline(session& s, const std::string& src) -> std::optional<std::uint64_t>;
+    /// `KYTHIRA.EXEC <command id> <mutable bits> <may grow 0|1> <args...>`:
     /// the internal hop of an `exec` record whose leader is on this node.
     auto handle_internal_exec(session& s, const resp_command& cmd) -> std::string;
     /// SET with options, SETNX, PSETEX, GETSET, the INCR family, GETDEL,
@@ -813,10 +834,14 @@ protected:
         std::optional<node_id_type> _forward_to;
     };
     auto read_local(session& s, const std::string& key) -> read_result;
-    /// `result`, when given, receives the entry's apply result.
+    /// `result`, when given, receives the entry's apply result. With
+    /// `keys`, the entry names all of them and goes to the group owning
+    /// every one; `moved`, when given, is set when a split moved one away
+    /// (the routes are learnt, so planning again sees the new layout).
     auto submit(session& s, const std::string& key, const std::vector<std::byte>& command,
                 std::string& error_reply, std::optional<node_id_type>& forward_to,
-                std::vector<std::byte>* result = nullptr) -> bool;
+                std::vector<std::byte>* result = nullptr,
+                const std::vector<std::string>* keys = nullptr, bool* moved = nullptr) -> bool;
     auto forward(session& s, const resp_command& cmd, const node_id_type& to)
         -> std::optional<std::string>;
     /// The forward link itself, with none of `forward()`'s one-hop and

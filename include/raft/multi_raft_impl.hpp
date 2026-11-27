@@ -3369,13 +3369,10 @@ auto multi_raft<Types, Key, GroupId>::load_counters(const GroupId& group) const
 }
 
 template<raft_types Types, shard_key Key, raft_group_id GroupId>
-auto multi_raft<Types, Key, GroupId>::route_and_run(std::optional<Key> key,
-                                                    std::optional<GroupId> group,
-                                                    std::optional<shard_epoch> expected_epoch,
-                                                    const std::vector<std::byte>* command,
-                                                    bool is_read, std::chrono::milliseconds timeout,
-                                                    const std::vector<Key>* txn_keys)
-    -> future_type {
+auto multi_raft<Types, Key, GroupId>::route_and_run(
+    std::optional<Key> key, std::optional<GroupId> group, std::optional<shard_epoch> expected_epoch,
+    const std::vector<std::byte>* command, bool is_read, std::chrono::milliseconds timeout,
+    const std::vector<Key>* txn_keys, bool plain_with_keys) -> future_type {
     std::exception_ptr last_error;
 
     for (std::size_t attempt = 0; attempt <= _cfg.max_route_retries; ++attempt) {
@@ -3640,7 +3637,7 @@ auto multi_raft<Types, Key, GroupId>::route_and_run(std::optional<Key> key,
         local->_writes.fetch_add(1, std::memory_order_relaxed);
         local->_write_bytes.fetch_add(command->size(), std::memory_order_relaxed);
         if constexpr (is_transactional_state_machine_v<typename Types::state_machine_type>) {
-            if (txn_keys == nullptr) {
+            if (txn_keys == nullptr || plain_with_keys) {
                 return submit_plain_enveloped(*local->_node, *command, timeout);
             }
         }
@@ -3710,6 +3707,18 @@ requires is_transactional_state_machine_v<typename Types::state_machine_type>
     }
     return route_and_run(keys.front(), std::nullopt, std::nullopt, &envelope, false, timeout,
                          &keys);
+}
+
+template<raft_types Types, shard_key Key, raft_group_id GroupId>
+auto multi_raft<Types, Key, GroupId>::submit_multi_key_command(
+    const std::vector<Key>& keys, const std::vector<std::byte>& command,
+    std::chrono::milliseconds timeout) -> future_type {
+    if (keys.empty()) {
+        return failed_future(std::make_exception_ptr(
+            std::invalid_argument("multi_raft: submit_multi_key_command needs a key")));
+    }
+    return route_and_run(keys.front(), std::nullopt, std::nullopt, &command, false, timeout, &keys,
+                         true);
 }
 
 template<raft_types Types, shard_key Key, raft_group_id GroupId>
