@@ -140,9 +140,10 @@ enum class redis_command_id : std::uint16_t {
     flushall = 115,
     memory = 116,
     slowlog = 117,
+    kythira_install = 118,
 };
 
-inline constexpr std::array<redis_command_info, 117> k_redis_commands{{
+inline constexpr std::array<redis_command_info, 118> k_redis_commands{{
     {"APPEND", 41, 3, redis_command_flag::write | redis_command_flag::denyoom | redis_command_flag::fast, redis_acl_category::write | redis_acl_category::string | redis_acl_category::fast, 1, 1, 1, redis_command_path::write, redis_command_status::shipped, "string", "2.0.0", 3},
     {"AUTH", 11, -2, redis_command_flag::noscript | redis_command_flag::loading | redis_command_flag::stale | redis_command_flag::fast | redis_command_flag::no_auth | redis_command_flag::allow_busy, redis_acl_category::fast | redis_acl_category::connection, 0, 0, 0, redis_command_path::local, redis_command_status::shipped, "connection", "1.0.0", 0},
     {"CLIENT", 14, -2, 0U, redis_acl_category::slow | redis_acl_category::connection, 0, 0, 0, redis_command_path::local, redis_command_status::shipped, "connection", "2.4.0", 0},
@@ -191,6 +192,7 @@ inline constexpr std::array<redis_command_info, 117> k_redis_commands{{
     {"KYTHIRA.ADVISE", 27, -2, redis_command_flag::admin | redis_command_flag::noscript | redis_command_flag::loading | redis_command_flag::stale, redis_acl_category::admin | redis_acl_category::slow | redis_acl_category::dangerous, 0, 0, 0, redis_command_path::local, redis_command_status::shipped, "kythira", "7.0.0", 0},
     {"KYTHIRA.DELPREFIX", 112, -2, redis_command_flag::write | redis_command_flag::admin, redis_acl_category::keyspace | redis_acl_category::write | redis_acl_category::admin | redis_acl_category::slow | redis_acl_category::dangerous, 0, 0, 0, redis_command_path::admin, redis_command_status::planned, "kythira", "7.0.0", 13},
     {"KYTHIRA.FORMAT", 30, -2, redis_command_flag::admin | redis_command_flag::noscript | redis_command_flag::loading | redis_command_flag::stale, redis_acl_category::admin | redis_acl_category::slow | redis_acl_category::dangerous, 0, 0, 0, redis_command_path::admin, redis_command_status::shipped, "kythira", "7.0.0", 2},
+    {"KYTHIRA.INSTALL", 118, -5, redis_command_flag::write | redis_command_flag::admin | redis_command_flag::noscript | redis_command_flag::loading | redis_command_flag::stale, redis_acl_category::admin | redis_acl_category::write | redis_acl_category::slow | redis_acl_category::dangerous, 1, 1, 1, redis_command_path::local, redis_command_status::shipped, "kythira", "7.0.0", 11},
     {"KYTHIRA.ISOLATION", 28, -1, redis_command_flag::noscript | redis_command_flag::loading | redis_command_flag::stale | redis_command_flag::fast, redis_acl_category::fast | redis_acl_category::connection, 0, 0, 0, redis_command_path::local, redis_command_status::shipped, "kythira", "7.0.0", 0},
     {"KYTHIRA.TXN", 29, -2, redis_command_flag::admin | redis_command_flag::noscript | redis_command_flag::loading | redis_command_flag::stale, redis_acl_category::admin | redis_acl_category::slow | redis_acl_category::dangerous, 0, 0, 0, redis_command_path::local, redis_command_status::shipped, "kythira", "7.0.0", 0},
     {"KYTHIRA.USAGE", 113, -1, redis_command_flag::readonly | redis_command_flag::admin, redis_acl_category::keyspace | redis_acl_category::read | redis_acl_category::admin | redis_acl_category::slow, 0, 0, 0, redis_command_path::fan_out, redis_command_status::planned, "kythira", "7.0.0", 13},

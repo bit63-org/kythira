@@ -286,7 +286,7 @@ BOOST_AUTO_TEST_CASE(roles_are_category_sets, *boost::unit_test::timeout(30)) {
     const auto rw_rules = only_user("admin * +@all -@admin -@dangerous");
     for (const auto& c : k_redis_commands) {
         if (c.status != redis_command_status::shipped || c.name == "KYTHIRA.ADVISE" ||
-            c.name == "KYTHIRA.TXN") {
+            c.name == "KYTHIRA.INSTALL" || c.name == "KYTHIRA.TXN") {
             continue;
         }
         BOOST_TEST_CONTEXT(c.name) {

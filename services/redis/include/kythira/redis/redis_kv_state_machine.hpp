@@ -29,6 +29,7 @@
 #include <kythira/redis/redis_expiry_exec.hpp>
 #include <kythira/redis/redis_format_level.hpp>
 #include <kythira/redis/redis_hash_exec.hpp>
+#include <kythira/redis/redis_exec_appliers.hpp>
 #include <kythira/redis/redis_list_exec.hpp>
 #include <kythira/redis/redis_set_exec.hpp>
 #include <kythira/redis/redis_typed_read.hpp>
@@ -93,6 +94,107 @@ struct redis_kv_value_entry {
             return e._value.size();
     }
 }
+
+namespace redis_kv_detail {
+
+/// A collection's body, as snapshots and transactional reads carry it:
+/// `u32 BE n`, then each element as `u32 BE len, bytes` in the collection's
+/// order (a hash's field, then its value). The type byte is the caller's.
+inline auto put_collection_body(std::vector<std::byte>& out, const redis_kv_value_entry& e)
+    -> void {
+    const auto put_text = [&](const std::string& text) {
+        put_u32(out, static_cast<std::uint32_t>(text.size()));
+        put_string(out, text);
+    };
+    switch (e._type) {
+        case redis_value_type::hash:
+            put_u32(out, static_cast<std::uint32_t>(e._hash->size()));
+            e._hash->for_each([&](const std::string& f, const std::string& v) {
+                put_text(f);
+                put_text(v);
+            });
+            break;
+        case redis_value_type::set:
+            put_u32(out, static_cast<std::uint32_t>(e._set->size()));
+            e._set->for_each([&](const std::string& m) { put_text(m); });
+            break;
+        case redis_value_type::list:
+            put_u32(out, static_cast<std::uint32_t>(e._list->size()));
+            e._list->visit(0, e._list->size() - 1, [&](std::size_t, const std::string& v) {
+                put_text(v);
+                return true;
+            });
+            break;
+        default:
+            throw redis_kv_codec_error("a value type this build cannot store");
+    }
+}
+
+/// Reads a body `put_collection_body` wrote for a collection of type `tag`
+/// into `e`. Refuses an empty collection, and hash fields or set members out
+/// of order (which also refuses duplicates).
+inline auto read_collection_body(reader& in, std::uint8_t tag, redis_kv_value_entry& e) -> void {
+    switch (static_cast<redis_value_type>(tag)) {
+        case redis_value_type::hash: {
+            const auto n = in.u32();
+            std::vector<redis_hash::entry> fields;
+            fields.reserve(std::min<std::size_t>(n, in.remaining() / 8));
+            for (std::uint32_t j = 0; j < n; ++j) {
+                auto f = in.string(in.u32());
+                auto v = in.string(in.u32());
+                if (!fields.empty() && fields.back().first >= f) {
+                    throw redis_kv_codec_error("hash fields out of order in a state blob");
+                }
+                fields.emplace_back(std::move(f), std::move(v));
+            }
+            if (fields.empty()) {
+                throw redis_kv_codec_error("an empty hash in a state blob");
+            }
+            e._type = redis_value_type::hash;
+            e._hash =
+                std::make_shared<const redis_hash>(redis_hash::from_sorted(std::move(fields)));
+            return;
+        }
+        case redis_value_type::set: {
+            const auto n = in.u32();
+            std::vector<std::string> members;
+            members.reserve(std::min<std::size_t>(n, in.remaining() / 4));
+            for (std::uint32_t j = 0; j < n; ++j) {
+                auto m = in.string(in.u32());
+                if (!members.empty() && members.back() >= m) {
+                    throw redis_kv_codec_error("set members out of order in a state blob");
+                }
+                members.push_back(std::move(m));
+            }
+            if (members.empty()) {
+                throw redis_kv_codec_error("an empty set in a state blob");
+            }
+            e._type = redis_value_type::set;
+            e._set = std::make_shared<const redis_set>(redis_set::from_sorted(std::move(members)));
+            return;
+        }
+        case redis_value_type::list: {
+            const auto n = in.u32();
+            std::vector<std::string> elements;
+            elements.reserve(std::min<std::size_t>(n, in.remaining() / 4));
+            for (std::uint32_t j = 0; j < n; ++j) {
+                elements.push_back(in.string(in.u32()));
+            }
+            if (elements.empty()) {
+                throw redis_kv_codec_error("an empty list in a state blob");
+            }
+            e._type = redis_value_type::list;
+            e._list =
+                std::make_shared<const redis_list>(redis_list::from_elements(std::move(elements)));
+            return;
+        }
+        default:
+            throw redis_kv_codec_error("unknown value type " + std::to_string(tag) +
+                                       " in a state blob");
+    }
+}
+
+}  // namespace redis_kv_detail
 
 template<typename LogIndex = std::uint64_t>
 requires log_index<LogIndex>
@@ -389,41 +491,16 @@ public:
         }
         redis_kv_detail::put_bytes(out, k_typed_marker);
         redis_kv_detail::put_u32(out, static_cast<std::uint32_t>(typed));
-        const auto put_text = [&](const std::string& text) {
-            redis_kv_detail::put_u32(out, static_cast<std::uint32_t>(text.size()));
-            redis_kv_detail::put_string(out, text);
-        };
         for (auto it = begin; it != end; ++it) {
             const auto& [key, entry] = *it;
             if (entry->_type == redis_value_type::string) {
                 continue;
             }
-            put_text(key);
+            redis_kv_detail::put_u32(out, static_cast<std::uint32_t>(key.size()));
+            redis_kv_detail::put_string(out, key);
             redis_kv_detail::put_u64(out, entry->_expire_at_ms);
             out.push_back(static_cast<std::byte>(entry->_type));
-            switch (entry->_type) {
-                case redis_value_type::hash:
-                    redis_kv_detail::put_u32(out, static_cast<std::uint32_t>(entry->_hash->size()));
-                    entry->_hash->for_each([&](const std::string& f, const std::string& v) {
-                        put_text(f);
-                        put_text(v);
-                    });
-                    break;
-                case redis_value_type::set:
-                    redis_kv_detail::put_u32(out, static_cast<std::uint32_t>(entry->_set->size()));
-                    entry->_set->for_each([&](const std::string& m) { put_text(m); });
-                    break;
-                case redis_value_type::list:
-                    redis_kv_detail::put_u32(out, static_cast<std::uint32_t>(entry->_list->size()));
-                    entry->_list->visit(0, entry->_list->size() - 1,
-                                        [&](std::size_t, const std::string& v) {
-                                            put_text(v);
-                                            return true;
-                                        });
-                    break;
-                default:
-                    throw redis_kv_codec_error("a value type this build cannot store");
-            }
+            redis_kv_detail::put_collection_body(out, *entry);
         }
         return out;
     }
@@ -469,68 +546,7 @@ public:
                 auto key = in.string(in.u32());
                 auto entry = std::make_shared<redis_kv_value_entry>();
                 entry->_expire_at_ms = in.u64();
-                const auto tag = std::to_integer<std::uint8_t>(in.bytes(1)[0]);
-                switch (static_cast<redis_value_type>(tag)) {
-                    case redis_value_type::hash: {
-                        const auto n = in.u32();
-                        std::vector<redis_hash::entry> fields;
-                        fields.reserve(std::min<std::size_t>(n, in.remaining() / 8));
-                        for (std::uint32_t j = 0; j < n; ++j) {
-                            auto f = in.string(in.u32());
-                            auto v = in.string(in.u32());
-                            if (!fields.empty() && fields.back().first >= f) {
-                                throw redis_kv_codec_error(
-                                    "hash fields out of order in a state blob");
-                            }
-                            fields.emplace_back(std::move(f), std::move(v));
-                        }
-                        if (fields.empty()) {
-                            throw redis_kv_codec_error("an empty hash in a state blob");
-                        }
-                        entry->_type = redis_value_type::hash;
-                        entry->_hash = std::make_shared<const redis_hash>(
-                            redis_hash::from_sorted(std::move(fields)));
-                        break;
-                    }
-                    case redis_value_type::set: {
-                        const auto n = in.u32();
-                        std::vector<std::string> members;
-                        members.reserve(std::min<std::size_t>(n, in.remaining() / 4));
-                        for (std::uint32_t j = 0; j < n; ++j) {
-                            auto m = in.string(in.u32());
-                            if (!members.empty() && members.back() >= m) {
-                                throw redis_kv_codec_error(
-                                    "set members out of order in a state blob");
-                            }
-                            members.push_back(std::move(m));
-                        }
-                        if (members.empty()) {
-                            throw redis_kv_codec_error("an empty set in a state blob");
-                        }
-                        entry->_type = redis_value_type::set;
-                        entry->_set = std::make_shared<const redis_set>(
-                            redis_set::from_sorted(std::move(members)));
-                        break;
-                    }
-                    case redis_value_type::list: {
-                        const auto n = in.u32();
-                        std::vector<std::string> elements;
-                        elements.reserve(std::min<std::size_t>(n, in.remaining() / 4));
-                        for (std::uint32_t j = 0; j < n; ++j) {
-                            elements.push_back(in.string(in.u32()));
-                        }
-                        if (elements.empty()) {
-                            throw redis_kv_codec_error("an empty list in a state blob");
-                        }
-                        entry->_type = redis_value_type::list;
-                        entry->_list = std::make_shared<const redis_list>(
-                            redis_list::from_elements(std::move(elements)));
-                        break;
-                    }
-                    default:
-                        throw redis_kv_codec_error("unknown value type " + std::to_string(tag) +
-                                                   " in a state blob");
-                }
+                redis_kv_detail::read_collection_body(in, in.u8(), *entry);
                 if (into.contains(key)) {
                     throw redis_kv_codec_error("a key twice in a state blob");
                 }
@@ -610,22 +626,7 @@ private:
             }
             auto erase(const key_type& key) -> bool { return _sm.erase(key); }
         } ops{*this};
-        auto reply = apply_redis_string_exec(ops, c, t);
-        if (!reply) {
-            reply = apply_redis_expiry_exec(ops, c, t);
-        }
-        if (!reply) {
-            reply = apply_redis_multi_key_exec(ops, c, t);
-        }
-        if (!reply) {
-            reply = apply_redis_hash_exec(ops, c, t);
-        }
-        if (!reply) {
-            reply = apply_redis_set_exec(ops, c, t);
-        }
-        if (!reply) {
-            reply = apply_redis_list_exec(ops, c, t);
-        }
+        auto reply = apply_redis_exec(ops, c, t);
         if (!reply) {
             throw redis_unknown_command_id(c._command_id);
         }

@@ -1316,6 +1316,17 @@ commands:
     path: L
     status: planned
     task: 13
+  - name: KYTHIRA.INSTALL
+    id: 118
+    group: kythira
+    since: 7.0.0
+    arity: -5
+    flags: [write, admin, noscript, loading, stale]
+    acl: [admin, write, slow, dangerous]
+    keys: [1, 1, 1]
+    path: L
+    status: shipped
+    task: 11
 
 # Commands removed after their id was issued: `- name: X` and `id: N` only.
 retired: []

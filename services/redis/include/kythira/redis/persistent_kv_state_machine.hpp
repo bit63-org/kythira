@@ -91,6 +91,7 @@
 #include <kythira/redis/redis_kv_commands.hpp>
 #include <kythira/redis/redis_kv_state_machine.hpp>
 #include <kythira/redis/redis_reply.hpp>
+#include <kythira/redis/redis_exec_appliers.hpp>
 #include <kythira/redis/redis_typed_read.hpp>
 #include <kythira/redis/redis_value.hpp>
 #include <raft/types.hpp>
@@ -922,22 +923,7 @@ private:
             }
             auto erase(const key_type& key) -> bool { return _sm.erase(key); }
         } ops{*this};
-        auto reply = apply_redis_string_exec(ops, c, t);
-        if (!reply) {
-            reply = apply_redis_expiry_exec(ops, c, t);
-        }
-        if (!reply) {
-            reply = apply_redis_multi_key_exec(ops, c, t);
-        }
-        if (!reply) {
-            reply = apply_redis_hash_exec(ops, c, t);
-        }
-        if (!reply) {
-            reply = apply_redis_set_exec(ops, c, t);
-        }
-        if (!reply) {
-            reply = apply_redis_list_exec(ops, c, t);
-        }
+        auto reply = apply_redis_exec(ops, c, t);
         if (!reply) {
             throw redis_unknown_command_id(c._command_id);
         }

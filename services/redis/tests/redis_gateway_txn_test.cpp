@@ -495,6 +495,99 @@ BOOST_AUTO_TEST_CASE(multi_key_commands_plan_by_group, *boost::unit_test::timeou
     BOOST_CHECK_GE(committed(), before + 4);
 }
 
+/// redis-general-data-types task 11: typed commands queue in MULTI, run
+/// against the transaction's view (reads see its own earlier writes), and
+/// commit as the resulting values; multi-key commands on collections cross
+/// groups the same way.
+BOOST_AUTO_TEST_CASE(typed_commands_in_multi_and_across_groups, *boost::unit_test::timeout(180)) {
+    redis_gateway_config cfg;
+    cfg._immutable_values = false;
+    cluster c(cfg);
+    BOOST_REQUIRE(c.await_all_leaders(std::chrono::seconds{20}));
+    const std::string wrongtype =
+        "-WRONGTYPE Operation against a key holding the wrong kind of value\r\n";
+    resp_client r(c.port(1));
+    BOOST_REQUIRE_EQUAL(r.call({"AUTH", "ops", "ops-secret"}), "+OK\r\n");
+    BOOST_REQUIRE_EQUAL(r.call({"KYTHIRA.FORMAT", "UPGRADE", "3"}), "+OK\r\n");
+
+    // One EXEC over both groups: hashes, lists, sets and strings, each
+    // command seeing the ones before it.
+    BOOST_CHECK_EQUAL(r.call({"MULTI"}), "+OK\r\n");
+    for (const std::vector<std::string>& queued :
+         {std::vector<std::string>{"HSET", "a/h", "f", "1", "g", "2"},
+          {"HINCRBY", "a/h", "f", "5"},
+          {"HGET", "a/h", "f"},
+          {"RPUSH", "z/l", "x", "y"},
+          {"LPOP", "z/l"},
+          {"SADD", "a/s", "m"},
+          {"INCR", "z/n"},
+          {"EXPIRE", "a/h", "1000"},
+          {"TYPE", "a/h"},
+          {"GET", "a/h"}}) {
+        BOOST_CHECK_EQUAL(r.call(queued), "+QUEUED\r\n");
+    }
+    BOOST_CHECK_EQUAL(r.call({"EXEC"}), "*10\r\n:2\r\n:6\r\n" + bulk("6") + ":2\r\n" + bulk("x") +
+                                            ":1\r\n:1\r\n:1\r\n+hash\r\n" + wrongtype);
+    BOOST_CHECK_EQUAL(r.call({"HGETALL", "a/h"}),
+                      "*4\r\n" + bulk("f") + bulk("6") + bulk("g") + bulk("2"));
+    const auto pttl = r.call({"PTTL", "a/h"});
+    BOOST_CHECK_MESSAGE(pttl.starts_with(':') && pttl != ":-1\r\n" && pttl != ":-2\r\n",
+                        "PTTL " << pttl);
+    BOOST_CHECK_EQUAL(r.call({"LRANGE", "z/l", "0", "-1"}), "*1\r\n" + bulk("y"));
+    BOOST_CHECK_EQUAL(r.call({"SMEMBERS", "a/s"}), "*1\r\n" + bulk("m"));
+    BOOST_CHECK_EQUAL(r.call({"GET", "z/n"}), bulk("1"));
+
+    // A command's runtime error is its element; the rest commits.
+    BOOST_CHECK_EQUAL(r.call({"MULTI"}), "+OK\r\n");
+    BOOST_CHECK_EQUAL(r.call({"SET", "a/str", "v"}), "+QUEUED\r\n");
+    BOOST_CHECK_EQUAL(r.call({"HSET", "a/str", "f", "v"}), "+QUEUED\r\n");
+    BOOST_CHECK_EQUAL(r.call({"HLEN", "z/l"}), "+QUEUED\r\n");
+    BOOST_CHECK_EQUAL(r.call({"EXEC"}), "*3\r\n+OK\r\n" + wrongtype + wrongtype);
+    BOOST_CHECK_EQUAL(r.call({"GET", "a/str"}), bulk("v"));
+
+    // Commands that cannot run inside MULTI, or with the wrong argument
+    // count, doom the EXEC.
+    BOOST_CHECK_EQUAL(r.call({"MULTI"}), "+OK\r\n");
+    BOOST_CHECK_EQUAL(r.call({"HDEL", "a/h", "f"}), "+QUEUED\r\n");
+    BOOST_CHECK(r.call({"KYTHIRA.FORMAT", "STATUS"}).starts_with("-ERR KYTHIRA.FORMAT is not"));
+    BOOST_CHECK_EQUAL(r.call({"HSET", "a/h"}),
+                      "-ERR wrong number of arguments for 'hset' command\r\n");
+    BOOST_CHECK(r.call({"EXEC"}).starts_with("-EXECABORT"));
+    BOOST_CHECK_EQUAL(r.call({"HGET", "a/h", "f"}), bulk("6"));
+
+    // Collections cross groups as whole values, with their deadlines.
+    const auto committed = [&] {
+        std::uint64_t n = 0;
+        for (node_id_t id = 1; id <= k_node_count; ++id) {
+            n += c.gateway(id).stats()._txn_committed.load();
+        }
+        return n;
+    };
+    const auto before = committed();
+    BOOST_CHECK_EQUAL(r.call({"RENAME", "a/h", "z/h"}), "+OK\r\n");
+    BOOST_CHECK_EQUAL(r.call({"TYPE", "a/h"}), "+none\r\n");
+    BOOST_CHECK_EQUAL(r.call({"HGET", "z/h", "f"}), bulk("6"));
+    const auto moved_pttl = r.call({"PTTL", "z/h"});
+    BOOST_CHECK_MESSAGE(
+        moved_pttl.starts_with(':') && moved_pttl != ":-1\r\n" && moved_pttl != ":-2\r\n",
+        "PTTL " << moved_pttl);
+    BOOST_CHECK_EQUAL(r.call({"COPY", "z/h", "a/h2"}), ":1\r\n");
+    BOOST_CHECK_EQUAL(r.call({"HGET", "a/h2", "g"}), bulk("2"));
+    BOOST_CHECK_EQUAL(r.call({"SMOVE", "a/s", "z/s", "m"}), ":1\r\n");
+    BOOST_CHECK_EQUAL(r.call({"EXISTS", "a/s"}), ":0\r\n");
+    BOOST_CHECK_EQUAL(r.call({"SISMEMBER", "z/s", "m"}), ":1\r\n");
+    BOOST_CHECK_EQUAL(r.call({"LMOVE", "z/l", "a/l", "LEFT", "RIGHT"}), bulk("y"));
+    BOOST_CHECK_EQUAL(r.call({"LRANGE", "a/l", "0", "-1"}), "*1\r\n" + bulk("y"));
+    BOOST_CHECK_EQUAL(r.call({"EXISTS", "z/l"}), ":0\r\n");
+    BOOST_CHECK_EQUAL(r.call({"RENAME", "z/s", "a/str"}), "+OK\r\n");
+    BOOST_CHECK_EQUAL(r.call({"TYPE", "a/str"}), "+set\r\n");
+    BOOST_CHECK_GE(committed(), before + 5);
+
+    // The commit's install record is never a client's command.
+    BOOST_CHECK_EQUAL(r.call({"KYTHIRA.INSTALL", "a/x", "set", "0", "m"}),
+                      "-NOPERM KYTHIRA.INSTALL is internal to the gateways\r\n");
+}
+
 BOOST_AUTO_TEST_CASE(mset_keeps_values_immutable, *boost::unit_test::timeout(120)) {
     cluster c;
     BOOST_REQUIRE(c.await_all_leaders(std::chrono::seconds{20}));

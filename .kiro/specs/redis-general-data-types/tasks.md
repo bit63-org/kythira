@@ -125,7 +125,7 @@ is extended as the rest land.
   - Engine-chaos scenario gains hashes and lists in its history
   - _Requirements: 13.1-13.3_
 
-- [ ] 11. Typed values in transactions and MVCC
+- [x] 11. Typed values in transactions and MVCC
   - Prepare evaluates, intent holds the resulting value, commit installs;
     typed commands in `MULTI`; `WATCH` on typed keys
   - MVCC chunk sharing between versions; GC frees unshared chunks; bank

@@ -210,7 +210,9 @@ enum class acl_decision : std::uint8_t {
 /// registry (`@admin` or `@dangerous`: admin; `@write`: read_write; else
 /// read_only), so a command shipped later needs no entry here. Commands
 /// this build does not ship need a role nobody has, and so do commands
-/// that never go through authorization (`KYTHIRA.ADVISE`, a peer-only hop).
+/// that never go through authorization: `KYTHIRA.ADVISE`, a peer-only hop,
+/// and `KYTHIRA.INSTALL`, an `exec` record id a transaction's commit
+/// applies, never a client command.
 [[nodiscard]] inline auto redis_command_min_role(std::string_view upper_name)
     -> std::optional<redis_role> {
     // The transaction coordinator's internal hop; the gateway also refuses
@@ -218,7 +220,7 @@ enum class acl_decision : std::uint8_t {
     if (upper_name == "KYTHIRA.TXN") {
         return redis_role::read_write;
     }
-    if (upper_name == "KYTHIRA.ADVISE") {
+    if (upper_name == "KYTHIRA.ADVISE" || upper_name == "KYTHIRA.INSTALL") {
         return std::nullopt;
     }
     const auto* info = find_redis_command(upper_name);

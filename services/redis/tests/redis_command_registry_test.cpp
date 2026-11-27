@@ -39,9 +39,10 @@ namespace flag = kythira::redis_command_flag;
 namespace cat = kythira::redis_acl_category;
 
 /// Every command the gateway accepted before this spec, as its ACL knows
-/// them, plus the internal KYTHIRA.ADVISE the ACL leaves to the gateway.
+/// them, plus the internal KYTHIRA.ADVISE the ACL leaves to the gateway and
+/// KYTHIRA.INSTALL, which only a transaction's commit record names.
 auto accepted_today() -> std::set<std::string> {
-    std::set<std::string> out{"KYTHIRA.ADVISE"};
+    std::set<std::string> out{"KYTHIRA.ADVISE", "KYTHIRA.INSTALL"};
     for (const auto& c : k_redis_commands) {
         if (kythira::redis_command_min_role(c.name)) {
             out.emplace(c.name);
