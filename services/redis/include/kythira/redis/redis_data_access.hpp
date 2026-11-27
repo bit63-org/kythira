@@ -132,6 +132,11 @@ public:
         }
         return std::nullopt;
     }
+    /// Every routing row this node's map holds, in key order (empty while
+    /// routing is still loading). `KYTHIRA.FORMAT UPGRADE` gates each one.
+    [[nodiscard]] auto all_routes() const -> std::vector<route_type> {
+        return routes_answer(_host.shard_map_snapshot(), shard_range<std::string>{});
+    }
     /// The node to send a command for `key` to: the leader a local replica
     /// knows, else the routing row's hint, else any other voter (which can
     /// say who leads). `nullopt` when there is none.

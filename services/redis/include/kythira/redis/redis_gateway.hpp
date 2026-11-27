@@ -26,6 +26,7 @@
 #include <kythira/redis/redis_acl.hpp>
 #include <kythira/redis/redis_auth_limiter.hpp>
 #include <kythira/redis/redis_call_wire.hpp>
+#include <kythira/redis/redis_format_level.hpp>
 #include <kythira/redis/redis_forward_link.hpp>
 #include <kythira/redis/redis_kv_commands.hpp>
 #include <kythira/redis/redis_data_access.hpp>
@@ -322,6 +323,11 @@ struct redis_gateway_config {
     /// cluster-aware tools treat `cluster` as a promise that `CLUSTER`
     /// commands work.
     bool _cluster_compat_mode = false;
+    /// The Redis format level this node reports to `KYTHIRA.FORMAT`
+    /// (redis-general-data-types task 2). 0, the default, is the build's
+    /// own; the in-process rolling-upgrade tests set a lower one to stand
+    /// for a node still running an older binary.
+    std::uint16_t _reported_format_level = 0;
 };
 
 /// Counters the gateway keeps for INFO and for the metrics back-end.
@@ -465,6 +471,17 @@ public:
     /// CONFIG_REDIS_GATEWAY_SNAPSHOT_ISOLATION): then the gateway offers
     /// `snapshot`, and every write takes an oracle timestamp.
     static constexpr bool k_snapshot = redis_gateway_detail::is_mvcc_v<state_machine_type>;
+    /// The store under the transaction wrapper, if any.
+    using kv_store_type = std::remove_cvref_t<decltype(redis_gateway_detail::kv_of(
+        std::declval<state_machine_type&>()))>;
+    /// The Redis format level this node reports (redis-general-data-types
+    /// Requirement 14.3): the binary's level when its store reads the newer
+    /// formats, else the base level, so a cluster whose store does not
+    /// (the engine and multi-version stores until tasks 10 and 11) can
+    /// never pass the gate.
+    static constexpr std::uint16_t k_node_format_level = requires(const kv_store_type& kv) {
+        kv.format_level();
+    } ? k_redis_format_level : k_redis_base_format_level;
 
     redis_front_end(Host& host, redis_acl& acl, Logger& logger, Metrics& metrics,
                     redis_gateway_config config, endpoint_resolver resolver);
@@ -501,6 +518,11 @@ public:
 
     [[nodiscard]] auto stats() const noexcept -> const redis_gateway_stats& { return _stats; }
     [[nodiscard]] auto config() const noexcept -> const redis_gateway_config& { return _config; }
+    /// The Redis format level this node reports to `KYTHIRA.FORMAT`, `INFO`
+    /// and the health metrics (redis-general-data-types Requirement 14.3).
+    [[nodiscard]] auto format_level() const noexcept -> std::uint16_t {
+        return reported_format_level();
+    }
 
     /// Sends `argv` to the gateway listening at `endpoint` (`host:port`)
     /// over the forward link, authenticated as the internal identity, and
@@ -785,6 +807,36 @@ protected:
     auto touch_lru(group_id_type group, const std::string& key) -> void;
     auto forget_lru(group_id_type group, const std::string& key) -> void;
     auto handle_advise(session& s, const resp_command& cmd) -> std::string;
+
+    // ---- format level and gate (redis-general-data-types task 2) ----------
+
+    /// `KYTHIRA.FORMAT STATUS | LEVEL | UPGRADE <level>`.
+    auto handle_format(session& s, const resp_command& cmd) -> std::string;
+    /// `KYTHIRA.FORMAT UPGRADE <level>`: check every node, then gate every
+    /// group (design Component 8).
+    auto format_upgrade(session& s, std::uint16_t level) -> std::string;
+    /// A peer's format level over the forwarding link, or `nullopt` when it
+    /// cannot be asked or does not answer.
+    auto peer_format_level(const node_id_type& node) -> std::optional<std::uint16_t>;
+    /// The level this node reports: `_reported_format_level`, else
+    /// `k_node_format_level`.
+    [[nodiscard]] auto reported_format_level() const noexcept -> std::uint16_t {
+        return _config._reported_format_level != 0 ? _config._reported_format_level
+                                                   : k_node_format_level;
+    }
+    /// Sends `argv` to `node`'s gateway on the internal link and returns the
+    /// raw reply, or `nullopt` when there is no link or no answer in time.
+    auto call_peer(const node_id_type& node, const std::vector<std::string>& argv)
+        -> std::optional<std::string>;
+    /// The format level `key`'s group has passed a gate for, when this node
+    /// holds a replica of it; `nullopt` otherwise (the group's own apply
+    /// then refuses a typed record before its gate).
+    auto group_format_level(const std::string& key) -> std::optional<std::uint16_t>;
+    /// The gate refusal for a command that needs `level` on `key`, if the
+    /// local replica of its group has not passed that gate.
+    auto format_refusal(session& s, const std::string& key, std::uint16_t level)
+        -> std::optional<std::string>;
+
     /// Send each shard leader the reads this node served for it and the
     /// cache hooks' advisory payload.
     auto send_advisories() -> void;

@@ -766,6 +766,40 @@ decide which commands to send, so it never carries a vendor suffix (earlier
 builds answered `7.0.0-kythira`). Earlier builds also reported `cluster`,
 which cluster-aware tools take as a promise that `CLUSTER` commands work.
 
+### Format level and the rolling upgrade
+
+The commands of `.kiro/specs/redis-general-data-types/` write a newer log
+and snapshot format (`0x03` records, the `KRV3` snapshot marker). A binary's
+**format level** is the newest format it reads: level 2 is the earlier
+records, level 3 adds the typed-value records. Each node reports its level
+as `kythira_format_level` in `INFO`, as the module's `format_level` health
+metric, and to `KYTHIRA.FORMAT LEVEL`. A node whose store does not read the
+newer formats yet (the engine and multi-version stores, until their tasks
+land) reports level 2.
+
+A group writes the newer formats only after a **format gate** has applied
+on it. To enable them on a running cluster:
+
+1. Roll every node onto a build of level 3, one at a time, as for any
+   upgrade. Nothing changes on disk yet.
+2. `KYTHIRA.FORMAT UPGRADE 3` (admin) on any node. It asks every node that
+   holds a replica of any group for its level and refuses, naming each node
+   that is below 3 or does not answer; then it proposes the gate to every
+   group, through each group's leader, until each has applied it. A group
+   that splits afterwards passes its level to its children. Repeating the
+   command is harmless.
+3. `KYTHIRA.FORMAT STATUS` (admin) shows this node's level and the gate each
+   of its local groups has passed.
+
+Until a group's gate, the new commands answer `-ERR this cluster has not
+enabled typed values yet (KYTHIRA.FORMAT)`.
+
+**The gate is one way.** After it, the log and snapshots may hold records
+an older binary cannot read, so a downgrade needs a restore from a snapshot
+taken before the gate. An older binary that meets a gate, a record or a
+snapshot above its level does not skip it: the group stops applying its log
+and logs `this log needs Redis format level N; run a newer build`.
+
 `INFO` (admin) reports the shards this node holds and leads, key and expiring
 key counts, approximate bytes, and counters for writes, deletes, value
 conflicts, oversize rejections, auth failures, authorization denials,

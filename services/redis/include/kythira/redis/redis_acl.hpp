@@ -160,7 +160,7 @@ enum class acl_decision : std::uint8_t {
         upper_name == "MSET" || upper_name == "KYTHIRA.TXN") {
         return redis_role::read_write;
     }
-    if (upper_name == "INFO") {
+    if (upper_name == "INFO" || upper_name == "KYTHIRA.FORMAT") {
         return redis_role::admin;
     }
     return std::nullopt;

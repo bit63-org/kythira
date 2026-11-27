@@ -533,6 +533,9 @@ public:
     [[nodiscard]] auto redis_port() const -> std::uint16_t override {
         return _gateway ? _gateway->port() : 0;
     }
+    [[nodiscard]] auto format_level() const -> std::uint16_t override {
+        return _gateway ? _gateway->format_level() : gateway_type::k_node_format_level;
+    }
 
 private:
     auto make_config(Host& node, const service_node::group_space& space) -> config_type {

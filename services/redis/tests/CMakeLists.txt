@@ -41,6 +41,9 @@ kythira_redis_test(persistent_kv_state_machine_test persistent_kv_state_machine_
 target_link_libraries(persistent_kv_state_machine_test PRIVATE OpenSSL::Crypto)
 # multi-raft-transactions task 11: the multi-version variant.
 kythira_redis_test(redis_kv_mvcc_state_machine_test redis_kv_mvcc_state_machine_test.cpp)
+# redis-general-data-types task 2: the format gate in every store.
+kythira_redis_test(redis_format_gate_unit_test redis_format_gate_unit_test.cpp)
+target_link_libraries(redis_format_gate_unit_test PRIVATE OpenSSL::Crypto)
 # Task 12: snapshot isolation over three hosts whose shards keep versions.
 kythira_redis_test(multi_raft_txn_snapshot_test multi_raft_txn_snapshot_test.cpp)
 # Task 14: the tier-2 bank workload (snapshot reads always sum to the total).

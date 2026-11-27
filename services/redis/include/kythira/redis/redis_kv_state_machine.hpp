@@ -26,6 +26,7 @@
 ///     An 8 MiB compiler artefact copied under that mutex would stall every
 ///     AppendEntries for the shard.
 
+#include <kythira/redis/redis_format_level.hpp>
 #include <kythira/redis/redis_kv_commands.hpp>
 #include <raft/shard_types.hpp>
 #include <raft/splittable_state_machine.hpp>
@@ -73,6 +74,15 @@ public:
     /// through `node::read_state`-style paths can tell a no-op from a change.
     auto apply(const std::vector<std::byte>& command, LogIndex index) -> std::vector<std::byte> {
         _last_applied_index = index;
+        require_redis_record_level(command);
+        if (is_redis_kv_v3_record(command)) {
+            const auto record = decode_redis_kv_v3_command(command);
+            if (auto status = apply_redis_v3_common(*this, record)) {
+                return redis_v3_apply_result(*status);
+            }
+            // Typed records after the gate: applied from task 3 onwards.
+            return redis_v3_apply_result(redis_v3_apply_status::unchanged);
+        }
         auto decoded = decode_redis_kv_command(command);
         bool changed = std::visit([this](auto& c) { return apply_one(c); }, decoded);
         return {changed ? std::byte{1} : std::byte{0}};
@@ -322,6 +332,9 @@ public:
             head._applied_time_ms = in.u64();
             if (head._format_level == 0) {
                 throw redis_kv_codec_error("redis kv state marker with format level 0");
+            }
+            if (head._format_level > k_redis_format_level) {
+                throw redis_format_too_new(head._format_level);
             }
         }
         auto count = in.u32();
