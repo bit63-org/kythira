@@ -1158,14 +1158,16 @@ auto redis_front_end<Host, Logger, Metrics>::execute_command(session& s, std::st
         return handle_set(s, cmd, true);
     }
     if (const auto* info = find_redis_command(upper);
-        info != nullptr && info->group == "hash" && info->status == redis_command_status::shipped) {
+        info != nullptr && (info->group == "hash" || info->group == "set") &&
+        info->status == redis_command_status::shipped) {
         const auto argc = static_cast<std::ptrdiff_t>(cmd._argv.size());
         const bool pairs = upper == "HSET" || upper == "HMSET";
         if ((info->arity > 0 && argc != info->arity) || (info->arity < 0 && argc < -info->arity) ||
-            (pairs && argc % 2 != 0) || (upper == "HRANDFIELD" && argc > 4)) {
+            (pairs && argc % 2 != 0) || (upper == "HRANDFIELD" && argc > 4) ||
+            ((upper == "SPOP" || upper == "SRANDMEMBER") && argc > 3)) {
             return *arity(std::numeric_limits<std::size_t>::max(), 0);
         }
-        return handle_hash(s, *info, cmd);
+        return handle_collection(s, *info, cmd);
     }
     if (upper == "INFO") {
         if (auto e = authorize(s, upper, {})) {
@@ -4416,6 +4418,12 @@ auto redis_front_end<Host, Logger, Metrics>::cross_group_exec(session& s, redis_
                     return finish(s._writer.integer(1));
                 }
                 default:
+                    // A collection does not cross groups until typed values
+                    // join transactions (task 11).
+                    if (redis_set_detail::is_set_write(id)) {
+                        return stop(s._writer.error(
+                            "CROSSSLOT Keys in request don't hash to the same slot"));
+                    }
                     return stop(s._writer.error("ERR syntax error"));
             }
         } catch (const std::exception& e) {
@@ -4563,14 +4571,61 @@ auto redis_front_end<Host, Logger, Metrics>::handle_key_read(session& s, std::st
 }
 
 template<typename Host, typename Logger, typename Metrics>
-auto redis_front_end<Host, Logger, Metrics>::handle_hash(session& s, const redis_command_info& info,
-                                                         const resp_command& cmd) -> std::string {
+auto redis_front_end<Host, Logger, Metrics>::handle_collection(session& s,
+                                                               const redis_command_info& info,
+                                                               const resp_command& cmd)
+    -> std::string {
     const auto id = static_cast<redis_command_id>(info.id);
     const auto& a = cmd._argv;
     const auto& key = a[1];
     const std::string upper(info.name);
+    const auto max_bytes = std::to_string(_config._max_collection_bytes);
+    const auto max_count = std::to_string(_config._max_collection_elements);
+
+    // Commands naming several keys.
+    switch (id) {
+        case redis_command_id::sinter:
+        case redis_command_id::sunion:
+        case redis_command_id::sdiff:
+        case redis_command_id::sintercard:
+            return handle_set_algebra(s, id, cmd);
+        case redis_command_id::smove: {
+            if (auto e = authorize(s, upper, {a[1], a[2]})) {
+                return *e;
+            }
+            return propose_exec(s, cmd, a[1], id, {a[1], a[2], max_bytes, max_count, a[3]}, true);
+        }
+        case redis_command_id::sinterstore:
+        case redis_command_id::sunionstore:
+        case redis_command_id::sdiffstore: {
+            std::vector<std::string_view> sources(a.begin() + 2, a.end());
+            if (auto e = authorize(s, upper, {a[1]}, redis_key_access::write)) {
+                return *e;
+            }
+            if (auto e = authorize(s, upper, sources, redis_key_access::read)) {
+                return *e;
+            }
+            std::vector<std::string> args{a[1], max_bytes, max_count};
+            args.insert(args.end(), a.begin() + 2, a.end());
+            return propose_exec(s, cmd, a[1], id, std::move(args), true);
+        }
+        default:
+            break;
+    }
     if (auto e = authorize(s, upper, {key})) {
         return *e;
+    }
+    if (id == redis_command_id::spop) {
+        return handle_spop(s, cmd);
+    }
+    if (id == redis_command_id::sadd) {
+        std::vector<std::string> args{key, max_bytes, max_count};
+        args.insert(args.end(), a.begin() + 2, a.end());
+        return propose_exec(s, cmd, key, id, std::move(args), true);
+    }
+    if (id == redis_command_id::srem) {
+        std::vector<std::string> args(a.begin() + 1, a.end());
+        return propose_exec(s, cmd, key, id, std::move(args), false);
     }
     if (redis_hash_detail::is_hash_write(id)) {
         std::vector<std::string> args{key};
@@ -4590,6 +4645,10 @@ auto redis_front_end<Host, Logger, Metrics>::handle_hash(session& s, const redis
 
     // A read: arguments the data side expects already valid.
     std::vector<std::string> args(a.begin() + 2, a.end());
+    if (id == redis_command_id::srandmember && !args.empty() &&
+        !redis_string_detail::parse_int64(args[0])) {
+        return s._writer.error("ERR value is not an integer or out of range");
+    }
     if (id == redis_command_id::hrandfield && !args.empty()) {
         if (!redis_string_detail::parse_int64(args[0])) {
             return s._writer.error("ERR value is not an integer or out of range");
@@ -4619,6 +4678,9 @@ auto redis_front_end<Host, Logger, Metrics>::handle_hash(session& s, const redis
                 }
                 if (id == redis_command_id::hgetall && tree->_kind == redis_reply_kind::array) {
                     tree = redis_reply::map(std::move(tree->_elements));
+                } else if (id == redis_command_id::smembers &&
+                           tree->_kind == redis_reply_kind::array) {
+                    tree = redis_reply::set(std::move(tree->_elements));
                 } else if (id == redis_command_id::hrandfield && args.size() == 2 &&
                            tree->_kind == redis_reply_kind::array) {
                     std::vector<redis_reply> pairs;
@@ -4650,6 +4712,169 @@ auto redis_front_end<Host, Logger, Metrics>::handle_hash(session& s, const redis
     } else {
         return s._writer.error("ERR this command needs KYTHIRA_CACHE_PERSISTENCE=memory or engine");
     }
+}
+
+template<typename Host, typename Logger, typename Metrics>
+auto redis_front_end<Host, Logger, Metrics>::handle_spop(session& s, const resp_command& cmd)
+    -> std::string {
+    const auto& key = cmd._argv[1];
+    std::optional<std::int64_t> count;
+    if (cmd._argv.size() == 3) {
+        count = redis_string_detail::parse_int64(cmd._argv[2]);
+        if (!count || *count < 0) {
+            return s._writer.error("ERR value is out of range, must be positive");
+        }
+    }
+    if (auto refused = format_refusal(s, key, k_redis_typed_values_level)) {
+        return *refused;
+    }
+    const auto empty_reply = [&] { return count ? s._writer.array({}) : s._writer.null(); };
+    if (count && *count == 0) {
+        return empty_reply();
+    }
+    // Pick distinct members from the set as this node, or the leader, sees
+    // it; apply() removes only those still there, so a stale pick costs a
+    // smaller pop, never a wrong one.
+    const std::vector<std::string> pick_args{std::to_string(count.value_or(1))};
+    std::optional<redis_reply> picked;
+    auto r = read_local(s, key);
+    if (r._error.empty()) {
+        if constexpr (requires(const entry_type& e) {
+                          e._value;
+                          e._expire_at_ms;
+                      }) {
+            picked = evaluate_redis_read(r._entry.get(), redis_command_id::srandmember, pick_args,
+                                         now_ms());
+        } else {
+            return s._writer.error(
+                "ERR this command needs KYTHIRA_CACHE_PERSISTENCE=memory or engine");
+        }
+    } else if (r._forward_to) {
+        if (auto reply =
+                forward_argv({"SRANDMEMBER", key, pick_args[0]}, *r._forward_to, "SRANDMEMBER")) {
+            picked = parse_resp2_reply(*reply);
+        }
+    }
+    if (!picked) {
+        return r._error.empty() ? s._writer.error("ERR shard has no reachable leader, retry")
+                                : r._error;
+    }
+    if (picked->is_error()) {
+        return render_redis_reply(*picked, s._writer.version());
+    }
+    std::vector<std::string> args{key, count ? "1" : "0"};
+    for (auto& m : picked->_elements) {
+        args.push_back(std::move(m._text));
+    }
+    if (args.size() == 2) {
+        return empty_reply();
+    }
+    return propose_exec(s, cmd, key, redis_command_id::spop, std::move(args), false);
+}
+
+template<typename Host, typename Logger, typename Metrics>
+auto redis_front_end<Host, Logger, Metrics>::set_members_of(session& s, const std::string& key)
+    -> std::variant<std::vector<std::string>, std::string> {
+    auto r = read_local(s, key);
+    if (r._error.empty()) {
+        if (!r._entry || is_expired(*r._entry)) {
+            return std::vector<std::string>{};
+        }
+        if constexpr (requires(const entry_type& e) { e._set; }) {
+            if (r._entry->_type == redis_value_type::set) {
+                std::vector<std::string> out;
+                out.reserve(r._entry->_set->size());
+                r._entry->_set->for_each([&](const std::string& m) { out.push_back(m); });
+                return out;
+            }
+        }
+        return s._writer.error(std::string(k_redis_wrongtype));
+    }
+    if (!r._forward_to) {
+        return r._error;
+    }
+    auto reply = forward_argv({"SMEMBERS", key}, *r._forward_to, "SMEMBERS");
+    if (!reply) {
+        return r._error;
+    }
+    auto tree = parse_resp2_reply(*reply);
+    if (!tree || tree->_kind != redis_reply_kind::array) {
+        return tree && tree->is_error() ? *reply : r._error;
+    }
+    std::vector<std::string> out;
+    out.reserve(tree->_elements.size());
+    for (auto& m : tree->_elements) {
+        out.push_back(std::move(m._text));
+    }
+    return out;
+}
+
+template<typename Host, typename Logger, typename Metrics>
+auto redis_front_end<Host, Logger, Metrics>::handle_set_algebra(session& s, redis_command_id id,
+                                                                const resp_command& cmd)
+    -> std::string {
+    const auto& a = cmd._argv;
+    std::size_t first = 1;
+    std::size_t last = a.size();
+    std::size_t limit = 0;
+    if (id == redis_command_id::sintercard) {
+        const auto n = redis_string_detail::parse_int64(a[1]);
+        if (!n || *n <= 0) {
+            return s._writer.error("ERR numkeys should be greater than 0");
+        }
+        if (static_cast<std::uint64_t>(*n) > a.size() - 2) {
+            return s._writer.error("ERR Number of keys can't be greater than number of args");
+        }
+        first = 2;
+        last = 2 + static_cast<std::size_t>(*n);
+        for (std::size_t i = last; i < a.size(); i += 2) {
+            if (resp_to_upper(a[i]) != "LIMIT" || i + 1 >= a.size()) {
+                return s._writer.error("ERR syntax error");
+            }
+            const auto v = redis_string_detail::parse_int64(a[i + 1]);
+            if (!v) {
+                return s._writer.error("ERR value is not an integer or out of range");
+            }
+            if (*v < 0) {
+                return s._writer.error("ERR LIMIT can't be negative");
+            }
+            limit = static_cast<std::size_t>(*v);
+        }
+    }
+    std::vector<std::string_view> keys(a.begin() + static_cast<std::ptrdiff_t>(first),
+                                       a.begin() + static_cast<std::ptrdiff_t>(last));
+    if (auto e = authorize(s, resp_to_upper(a[0]), keys, redis_key_access::read)) {
+        return *e;
+    }
+    if (auto refused = format_refusal(s, a[first], k_redis_typed_values_level)) {
+        return *refused;
+    }
+    // Each key read where it lives, at the connection's consistency, as a
+    // multi-key EXISTS (Requirement 6.4).
+    std::vector<redis_set> sets;
+    sets.reserve(keys.size());
+    for (const auto key : keys) {
+        auto members = set_members_of(s, std::string(key));
+        if (auto* error = std::get_if<std::string>(&members)) {
+            return *error;
+        }
+        sets.push_back(
+            redis_set::from_sorted(std::get<std::vector<std::string>>(std::move(members))));
+    }
+    std::vector<const redis_set*> views;
+    for (const auto& set : sets) {
+        views.push_back(&set);
+    }
+    auto result = redis_set_detail::combine(id, views, limit);
+    if (id == redis_command_id::sintercard) {
+        return s._writer.integer(static_cast<std::int64_t>(result.size()));
+    }
+    std::vector<redis_reply> out;
+    out.reserve(result.size());
+    for (auto& m : result) {
+        out.push_back(redis_reply::bulk(std::move(m)));
+    }
+    return render_redis_reply(redis_reply::set(std::move(out)), s._writer.version());
 }
 
 }  // namespace kythira

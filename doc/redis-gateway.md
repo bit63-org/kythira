@@ -793,6 +793,33 @@ chunk, not the hash; a read takes a handle to the hash under the shard's
 lock and builds its reply after releasing it, so `HGETALL` on a large hash
 never copies it under the lock.
 
+## Sets
+
+`SADD`, `SREM`, `SISMEMBER`, `SMISMEMBER`, `SMEMBERS`, `SCARD`, `SPOP`,
+`SRANDMEMBER`, `SMOVE`, `SINTER`, `SUNION`, `SDIFF`, `SINTERCARD`,
+`SINTERSTORE`, `SUNIONSTORE` and `SDIFFSTORE` behave as in Redis 7, on the
+same stores and format level as hashes, with the same type errors, limits,
+deadlines, chunking and immutable-value rule. `SSCAN` arrives with `SCAN`.
+
+- Members come back in byte order on every replica; Redis promises no
+  order. `OBJECT ENCODING` reports `intset` (every member an integer, at
+  most 512) or `hashtable`.
+- Random picks never happen in the log. `SRANDMEMBER` picks on the node
+  that serves the read. `SPOP` picks on the node that serves the read of
+  the set and proposes the removal of exactly those members; each is
+  removed only if it is still there when the entry applies, and the reply
+  names what was removed. A pop racing another pop of the same member
+  therefore returns fewer members (nil without a count) rather than the
+  same member twice.
+- `SMOVE` and the `*STORE` forms are multi-key writes: their keys in one
+  shard make one log entry. A `*STORE` replaces its destination whatever
+  it held and deletes it when the result is empty. Until collections join
+  transactions, keys in several shards answer `-CROSSSLOT`.
+- `SINTER`, `SUNION`, `SDIFF` and `SINTERCARD` read each key where it
+  lives, at the connection's consistency, and combine them on the node
+  that received the command, so their keys may be in different shards.
+  The keys are read one after another, not as one snapshot.
+
 ## Transactions
 
 A daemon built with `CONFIG_REDIS_GATEWAY_TRANSACTIONS=y` and run with

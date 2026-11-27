@@ -29,6 +29,8 @@
 #include <kythira/redis/redis_expiry_exec.hpp>
 #include <kythira/redis/redis_format_level.hpp>
 #include <kythira/redis/redis_hash_exec.hpp>
+#include <kythira/redis/redis_set_exec.hpp>
+#include <kythira/redis/redis_typed_read.hpp>
 #include <kythira/redis/redis_kv_commands.hpp>
 #include <kythira/redis/redis_multi_key_exec.hpp>
 #include <kythira/redis/redis_string_exec.hpp>
@@ -70,6 +72,8 @@ struct redis_kv_value_entry {
     /// The hash when `_type` is `hash`: shared, so a reader encodes it after
     /// the node lock is released (redis_value.hpp).
     std::shared_ptr<const redis_hash> _hash;
+    /// The set when `_type` is `set` (task 8).
+    std::shared_ptr<const redis_set> _set;
 };
 
 /// The bytes an entry counts for size accounting (key excluded).
@@ -77,6 +81,8 @@ struct redis_kv_value_entry {
     switch (e._type) {
         case redis_value_type::hash:
             return e._hash ? e._hash->bytes() : 0;
+        case redis_value_type::set:
+            return e._set ? e._set->bytes() : 0;
         default:
             return e._value.size();
     }
@@ -397,6 +403,10 @@ public:
                         put_text(v);
                     });
                     break;
+                case redis_value_type::set:
+                    redis_kv_detail::put_u32(out, static_cast<std::uint32_t>(entry->_set->size()));
+                    entry->_set->for_each([&](const std::string& m) { put_text(m); });
+                    break;
                 default:
                     throw redis_kv_codec_error("a value type this build cannot store");
             }
@@ -466,6 +476,26 @@ public:
                         entry->_type = redis_value_type::hash;
                         entry->_hash = std::make_shared<const redis_hash>(
                             redis_hash::from_sorted(std::move(fields)));
+                        break;
+                    }
+                    case redis_value_type::set: {
+                        const auto n = in.u32();
+                        std::vector<std::string> members;
+                        members.reserve(std::min<std::size_t>(n, in.remaining() / 4));
+                        for (std::uint32_t j = 0; j < n; ++j) {
+                            auto m = in.string(in.u32());
+                            if (!members.empty() && members.back() >= m) {
+                                throw redis_kv_codec_error(
+                                    "set members out of order in a state blob");
+                            }
+                            members.push_back(std::move(m));
+                        }
+                        if (members.empty()) {
+                            throw redis_kv_codec_error("an empty set in a state blob");
+                        }
+                        entry->_type = redis_value_type::set;
+                        entry->_set = std::make_shared<const redis_set>(
+                            redis_set::from_sorted(std::move(members)));
                         break;
                     }
                     default:
@@ -560,6 +590,9 @@ private:
         }
         if (!reply) {
             reply = apply_redis_hash_exec(ops, c, t);
+        }
+        if (!reply) {
+            reply = apply_redis_set_exec(ops, c, t);
         }
         if (!reply) {
             throw redis_unknown_command_id(c._command_id);
