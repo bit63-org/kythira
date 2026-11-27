@@ -1070,6 +1070,9 @@ auto redis_front_end<Host, Logger, Metrics>::execute_command(session& s, std::st
     if (upper == "KYTHIRA.ADVISE") {
         return handle_advise(s, cmd);
     }
+    if (upper == "KYTHIRA.FORMAT") {
+        return handle_format(s, cmd);
+    }
 
     // Requirement 1.8: unknown commands are an error, not a disconnect.
     std::string args;
@@ -1468,6 +1471,7 @@ auto redis_front_end<Host, Logger, Metrics>::handle_info(session& s) -> std::str
         << "server_name:kythira\r\n"
         << "kythira_version:" << _config._kythira_version << "\r\n"
         << "kythira_gateway:1\r\n"
+        << "kythira_format_level:" << reported_format_level() << "\r\n"
         << "redis_mode:" << server_mode() << "\r\n"
         << "uptime_in_seconds:" << uptime.count() << "\r\n"
         << "kythira_roles:" << _config._layer_roles.to_string() << "\r\n"
@@ -3287,6 +3291,304 @@ auto redis_front_end<Host, Logger, Metrics>::handle_advise(session& s, const res
     if (_cache_hooks._on_advisory) {
         _cache_hooks._on_advisory(cmd._argv[1]);
     }
+    return s._writer.simple_string("OK");
+}
+
+// ── format level and gate (redis-general-data-types task 2) ─────────────────
+
+namespace redis_gateway_detail {
+template<typename Id> auto describe_id(const Id& id) -> std::string {
+    if constexpr (requires { std::to_string(id); }) {
+        return std::to_string(id);
+    } else if constexpr (requires(std::ostream& os) { os << id; }) {
+        std::ostringstream out;
+        out << id;
+        return out.str();
+    } else {
+        return "?";
+    }
+}
+}  // namespace redis_gateway_detail
+
+template<typename Host, typename Logger, typename Metrics>
+auto redis_front_end<Host, Logger, Metrics>::call_peer(const node_id_type& node,
+                                                       const std::vector<std::string>& argv)
+    -> std::optional<std::string> {
+    if (_config._internal_secret.empty() ||
+        (!_config._forward_tls && !_config._allow_plaintext_forwarding)) {
+        return std::nullopt;
+    }
+    auto endpoint = forward_endpoint(node);
+    if (!endpoint) {
+        return std::nullopt;
+    }
+    const auto budget = _config._command_timeout.count() > 0
+                            ? std::chrono::steady_clock::duration{_config._command_timeout}
+                            : std::chrono::steady_clock::duration{std::chrono::seconds{5}};
+    try {
+        auto sock = forward_socket(*endpoint, std::chrono::steady_clock::now() + budget);
+        resp_writer w;
+        std::vector<std::string> parts;
+        parts.reserve(argv.size());
+        for (const auto& a : argv) {
+            parts.push_back(w.bulk(a));
+        }
+        auto wire = w.array(parts);
+        sock->write(boost::asio::buffer(wire));
+        std::string buf;
+        std::array<char, 512> chunk{};
+        std::size_t len = 0;
+        while ((len = resp_reply_length(buf)) == 0) {
+            if (buf.size() > 64U * 1024U) {
+                throw std::runtime_error("oversized reply from peer gateway");
+            }
+            auto n = sock->read_some(boost::asio::buffer(chunk));
+            buf.append(chunk.data(), n);
+        }
+        buf.resize(len);
+        return_forward_socket(*endpoint, std::move(sock));
+        return buf;
+    } catch (const std::exception& e) {
+        _logger.log(log_level::debug, "redis gateway: peer call failed",
+                    {{"endpoint", *endpoint},
+                     {"command", argv.empty() ? "" : argv[0]},
+                     {"error", e.what()}});
+        return std::nullopt;
+    }
+}
+
+template<typename Host, typename Logger, typename Metrics>
+auto redis_front_end<Host, Logger, Metrics>::peer_format_level(const node_id_type& node)
+    -> std::optional<std::uint16_t> {
+    auto reply = call_peer(node, {"KYTHIRA.FORMAT", "LEVEL"});
+    if (!reply || reply->size() < 4 || (*reply)[0] != ':') {
+        return std::nullopt;
+    }
+    try {
+        std::size_t used = 0;
+        const auto body = reply->substr(1, reply->size() - 3);
+        const auto v = std::stoul(body, &used);
+        if (used != body.size() || v > 0xFFFFU) {
+            return std::nullopt;
+        }
+        return static_cast<std::uint16_t>(v);
+    } catch (const std::exception&) {
+        return std::nullopt;
+    }
+}
+
+template<typename Host, typename Logger, typename Metrics>
+auto redis_front_end<Host, Logger, Metrics>::group_format_level(const std::string& key)
+    -> std::optional<std::uint16_t> {
+    if constexpr (k_node_format_level < k_redis_typed_values_level) {
+        (void)key;
+        return k_redis_base_format_level;
+    } else {
+        redis_data_status status{};
+        std::optional<node_id_type> leader;
+        auto* node = _data.replica_for(key, status, leader);
+        if (node == nullptr) {
+            return std::nullopt;
+        }
+        return node->with_state_machine(
+            [](auto& sm) { return redis_gateway_detail::kv_of(sm).format_level(); });
+    }
+}
+
+template<typename Host, typename Logger, typename Metrics>
+auto redis_front_end<Host, Logger, Metrics>::format_refusal(session& s, const std::string& key,
+                                                            std::uint16_t level)
+    -> std::optional<std::string> {
+    auto have = group_format_level(key);
+    if (have && *have < level) {
+        return s._writer.error(std::string(k_redis_format_gate_error));
+    }
+    return std::nullopt;
+}
+
+/// `KYTHIRA.FORMAT STATUS`: this node's level and each local group's gate.
+/// `KYTHIRA.FORMAT LEVEL`: this node's level, as an integer (what peers ask).
+/// `KYTHIRA.FORMAT UPGRADE <level>`: see `format_upgrade`.
+/// `KYTHIRA.FORMAT GATE <level> <key>`: internal only; propose the gate to
+/// `key`'s group from here, its leader.
+template<typename Host, typename Logger, typename Metrics>
+auto redis_front_end<Host, Logger, Metrics>::handle_format(session& s, const resp_command& cmd)
+    -> std::string {
+    if (cmd._argv.size() < 2) {
+        return s._writer.error("ERR wrong number of arguments for 'kythira.format' command");
+    }
+    const auto sub = resp_to_upper(cmd._argv[1]);
+    const bool internal_hop = s._internal && (sub == "LEVEL" || sub == "GATE");
+    if (!internal_hop) {
+        if (auto e = authorize(s, "KYTHIRA.FORMAT", {})) {
+            return *e;
+        }
+    }
+    auto parse_level = [](const std::string& text) -> std::optional<std::uint16_t> {
+        if (text.empty() || text.size() > 5 ||
+            !std::ranges::all_of(text, [](char c) { return c >= '0' && c <= '9'; })) {
+            return std::nullopt;
+        }
+        const auto v = std::stoul(text);
+        return v <= 0xFFFFU ? std::optional<std::uint16_t>(static_cast<std::uint16_t>(v))
+                            : std::nullopt;
+    };
+    if (sub == "LEVEL" && cmd._argv.size() == 2) {
+        return s._writer.integer(reported_format_level());
+    }
+    if (sub == "STATUS" && cmd._argv.size() == 2) {
+        std::ostringstream out;
+        out << "node_level:" << reported_format_level() << "\r\n"
+            << "binary_level:" << k_redis_format_level << "\r\n";
+        for (const auto& g : _data.local_groups()) {
+            auto* node = _data.local_replica(g);
+            if (node == nullptr) {
+                continue;
+            }
+            std::uint16_t level = 0;
+            if constexpr (k_node_format_level >= k_redis_typed_values_level) {
+                level = node->with_state_machine(
+                    [](auto& sm) { return redis_gateway_detail::kv_of(sm).format_level(); });
+            }
+            out << "group:" << redis_gateway_detail::describe_id(g)
+                << ":gate=" << (level == 0 ? k_redis_base_format_level : level) << "\r\n";
+        }
+        return s._writer.bulk(out.str());
+    }
+    if (sub == "UPGRADE" && cmd._argv.size() == 3) {
+        auto level = parse_level(cmd._argv[2]);
+        if (!level) {
+            return s._writer.error("ERR KYTHIRA.FORMAT UPGRADE needs a format level");
+        }
+        return format_upgrade(s, *level);
+    }
+    if (sub == "GATE" && cmd._argv.size() == 4) {
+        if (!s._internal) {
+            ++_stats._authz_denials;
+            return s._writer.error("NOPERM KYTHIRA.FORMAT GATE is for peer gateways only");
+        }
+        auto level = parse_level(cmd._argv[2]);
+        if (!level || *level > reported_format_level()) {
+            return s._writer.error("ERR KYTHIRA.FORMAT GATE above this node's format level");
+        }
+        const auto entry =
+            encode_redis_kv_command(redis_kv_format_gate_command{cmd._argv[3], *level});
+        try {
+            auto future = _data.propose(cmd._argv[3], entry, _config._command_timeout);
+            if (!future.wait(_config._command_timeout)) {
+                return s._writer.error("ERR timeout proposing the format gate");
+            }
+            (void)std::move(future).get();
+            return s._writer.simple_string("OK");
+        } catch (const std::exception& e) {
+            return s._writer.error(std::string("ERR format gate not applied: ") + e.what());
+        }
+    }
+    return s._writer.error(
+        "ERR unknown subcommand or wrong number of arguments for "
+        "'KYTHIRA.FORMAT'. Try STATUS, LEVEL or UPGRADE <level>");
+}
+
+/// Design Component 8: refuse unless every node holding a replica of any
+/// group reports at least `level`, naming the ones that do not; then propose
+/// `format_gate{level}` to every group, from here when this node leads it
+/// and through its leader otherwise, until each applies. Groups a split made
+/// meanwhile inherit the gate through `split_state`; the walk is repeated
+/// until it finds no group it has not gated. Safe to repeat: a gate at or
+/// below a group's level changes nothing.
+template<typename Host, typename Logger, typename Metrics>
+auto redis_front_end<Host, Logger, Metrics>::format_upgrade(session& s, std::uint16_t level)
+    -> std::string {
+    if (level < k_redis_typed_values_level || level > k_redis_format_level) {
+        return s._writer.error("ERR KYTHIRA.FORMAT UPGRADE level must be between " +
+                               std::to_string(k_redis_typed_values_level) + " and " +
+                               std::to_string(k_redis_format_level));
+    }
+    auto routes = _data.all_routes();
+    if (routes.empty()) {
+        return s._writer.error("ERR KYTHIRA.FORMAT routing is still loading, retry");
+    }
+    // 1. Every node with a replica of any group, and this one.
+    std::set<node_id_type> nodes{_data.self()};
+    for (const auto& r : routes) {
+        nodes.insert(r.voters().begin(), r.voters().end());
+        nodes.insert(r.learners().begin(), r.learners().end());
+    }
+    std::vector<std::string> behind;
+    for (const auto& n : nodes) {
+        const auto have =
+            n == _data.self() ? std::optional(reported_format_level()) : peer_format_level(n);
+        if (!have) {
+            behind.push_back(redis_gateway_detail::describe_id(n) + " (no answer)");
+        } else if (*have < level) {
+            behind.push_back(redis_gateway_detail::describe_id(n) + " (level " +
+                             std::to_string(*have) + ")");
+        }
+    }
+    if (!behind.empty()) {
+        std::string names;
+        for (const auto& b : behind) {
+            names += (names.empty() ? "" : ", ") + b;
+        }
+        return s._writer.error("ERR KYTHIRA.FORMAT cannot reach level " + std::to_string(level) +
+                               ": nodes below it: " + names);
+    }
+    // 2. Gate every group.
+    std::set<group_id_type> gated;
+    const auto deadline = std::chrono::steady_clock::now() +
+                          std::max(_config._command_timeout * 4, std::chrono::milliseconds{1000});
+    for (int pass = 0; pass < 8; ++pass) {
+        if (pass > 0) {
+            routes = _data.all_routes();
+        }
+        bool any_new = false;
+        for (const auto& r : routes) {
+            if (gated.contains(r.group_id())) {
+                continue;
+            }
+            any_new = true;
+            const std::string key = r.range()._start.value_or(std::string{});
+            const auto entry = encode_redis_kv_command(redis_kv_format_gate_command{key, level});
+            std::optional<node_id_type> to;
+            while (std::chrono::steady_clock::now() < deadline) {
+                try {
+                    auto future = _data.propose(key, entry, _config._command_timeout);
+                    if (future.wait(_config._command_timeout)) {
+                        (void)std::move(future).get();
+                        gated.insert(r.group_id());
+                        break;
+                    }
+                } catch (const shard_not_leader_exception<group_id_type, node_id_type>& e) {
+                    to = e.leader_hint();
+                } catch (const std::exception&) {
+                    to.reset();
+                }
+                if (!to) {
+                    to = _data.leader_of(key);
+                }
+                if (to && *to != _data.self()) {
+                    auto reply =
+                        call_peer(*to, {"KYTHIRA.FORMAT", "GATE", std::to_string(level), key});
+                    if (reply && reply->rfind("+OK", 0) == 0) {
+                        gated.insert(r.group_id());
+                        break;
+                    }
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds{50});
+                to.reset();
+            }
+            if (!gated.contains(r.group_id())) {
+                return s._writer.error("ERR KYTHIRA.FORMAT could not gate group " +
+                                       redis_gateway_detail::describe_id(r.group_id()) +
+                                       "; the gate is idempotent, retry");
+            }
+        }
+        if (!any_new) {
+            break;
+        }
+    }
+    _logger.log(log_level::info, "redis gateway: format gate applied",
+                {{"level", std::to_string(level)}, {"groups", std::to_string(gated.size())}});
     return s._writer.simple_string("OK");
 }
 

@@ -39,6 +39,7 @@
 /// (`snapshot_too_old`, task 13).
 
 #include <raft/multi_version_state_machine.hpp>
+#include <kythira/redis/redis_format_level.hpp>
 #include <kythira/redis/redis_kv_commands.hpp>
 #include <kythira/redis/redis_kv_state_machine.hpp>
 #include <raft/shard_types.hpp>
@@ -116,6 +117,10 @@ public:
     /// changed what some read would see, `{0}` otherwise.
     auto apply_at(const std::vector<std::byte>& command, std::uint64_t commit_ts)
         -> std::vector<std::byte> {
+        // A record from a newer format halts the group rather than being
+        // skipped (redis-general-data-types Requirement 14.4). This store
+        // reads no format-0x03 record yet: decoding refuses one.
+        require_redis_record_level(command);
         auto decoded = decode_redis_kv_command(command);
         const bool changed =
             std::visit([this, commit_ts](auto& c) { return apply_one(c, commit_ts); }, decoded);

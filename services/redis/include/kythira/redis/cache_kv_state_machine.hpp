@@ -51,6 +51,7 @@
 /// status byte.
 
 #include <kythira/redis/cache_chunk_store.hpp>
+#include <kythira/redis/redis_format_level.hpp>
 #include <kythira/redis/redis_kv_commands.hpp>
 #include <raft/shard_types.hpp>
 #include <raft/splittable_state_machine.hpp>
@@ -348,6 +349,10 @@ public:
         require_bound();
         _last_applied_index = index;
         expire_pending(index);
+        // A record from a newer format halts the group rather than being
+        // skipped (redis-general-data-types Requirement 14.4). This store
+        // reads no format-0x03 record yet: decoding refuses one.
+        require_redis_record_level(command);
         auto decoded = decode_redis_kv_command(command);
         const bool changed =
             std::visit([this, index](auto& c) { return apply_one(c, index); }, decoded);

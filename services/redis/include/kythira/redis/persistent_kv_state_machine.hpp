@@ -42,6 +42,7 @@
 
 #include <raft/memory_kv_engine.hpp>
 #include <raft/persistent_state_machine.hpp>
+#include <kythira/redis/redis_format_level.hpp>
 #include <kythira/redis/redis_kv_commands.hpp>
 #include <kythira/redis/redis_kv_state_machine.hpp>
 #include <raft/types.hpp>
@@ -211,6 +212,10 @@ public:
             _pending.clear();
             _staged = _meta;
         }
+        // A record from a newer format halts the group rather than being
+        // skipped (redis-general-data-types Requirement 14.4). This store
+        // reads no format-0x03 record yet: decoding refuses one.
+        require_redis_record_level(command);
         auto decoded = decode_redis_kv_command(command);
         const bool changed =
             std::visit([&](auto& c) { return apply_one(c, batch, *_staged); }, decoded);

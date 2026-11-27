@@ -88,7 +88,8 @@ BOOST_AUTO_TEST_CASE(lookups_by_name_and_id_agree) {
 
 // The registry's `shipped` set is exactly what the gateway accepts today;
 // a planned command is one the gateway still refuses as unknown
-// (Requirement 1.1). When a task ships a command it flips both.
+// (Requirement 1.1). A task that ships a command flips its status and
+// adds it to the gateway's ACL table.
 BOOST_AUTO_TEST_CASE(shipped_means_accepted_by_the_gateway) {
     const auto accepted = accepted_today();
     for (const auto& c : k_redis_commands) {
@@ -96,8 +97,10 @@ BOOST_AUTO_TEST_CASE(shipped_means_accepted_by_the_gateway) {
         BOOST_CHECK_MESSAGE(shipped == accepted.contains(std::string(c.name)),
                             c.name << (shipped ? " is shipped but not accepted"
                                                : " is accepted but still planned"));
-        BOOST_CHECK_MESSAGE(shipped == (c.task == 0),
-                            c.name << ": only commands from earlier specs ship with task 0");
+        // Task 0 is the earlier specs' commands, all shipped; a planned
+        // command names the task that ships it, and keeps naming it after.
+        BOOST_CHECK_MESSAGE(shipped || c.task != 0,
+                            c.name << ": a planned command names the task that ships it");
     }
 }
 

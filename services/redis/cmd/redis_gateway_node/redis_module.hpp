@@ -223,7 +223,8 @@ public:
         }
         std::vector<service_node::module_metric> out{
             {"groups", static_cast<double>(_serving->group_count()), {}},
-            {"raft_term_sum", _serving->raft_term_sum(), {}}};
+            {"raft_term_sum", _serving->raft_term_sum(), {}},
+            {"format_level", static_cast<double>(_serving->format_level()), {}}};
         // kythira_redis_role{role="..."} (redis-general-data-types
         // Requirement 16.7): 1 for each layer this node runs, 0 for the
         // other two, so a query finds every node of a layer.

@@ -107,6 +107,9 @@ BOOST_GLOBAL_FIXTURE(folly_init_fixture);
 namespace {
 
 using kythira::hibernation_mode;
+using kythira::k_redis_base_format_level;
+using kythira::k_redis_format_level;
+using kythira::k_redis_typed_values_level;
 using kythira::multi_raft;
 using kythira::multi_raft_config;
 using kythira::redis_acl;
@@ -573,8 +576,12 @@ public:
     /// a case installs cache hooks.
     using gateway_setup = std::function<void(node_id_t, gateway_type&)>;
 
+    /// Adjusts one node's gateway configuration before it is built: where a
+    /// case makes one node differ from the others.
+    using config_tweak = std::function<void(node_id_t, redis_gateway_config&)>;
+
     explicit cluster(redis_gateway_config base = {}, bool plaintext_forwarding = true,
-                     const gateway_setup& setup = {}) {
+                     const gateway_setup& setup = {}, const config_tweak& tweak = {}) {
         _acl.reload(acl_text());
         for (node_id_t id = 1; id <= k_node_count; ++id) {
             _hosts.push_back(std::make_unique<host_type>(make_config(id)));
@@ -595,6 +602,9 @@ public:
             cfg._allow_plaintext_forwarding =
                 base._allow_plaintext_forwarding || plaintext_forwarding;
             const node_id_t from = static_cast<node_id_t>(i + 1);
+            if (tweak) {
+                tweak(from, cfg);
+            }
             auto resolver = [this, from](const node_id_t& to) -> std::optional<std::string> {
                 if (auto endpoint = endpoint_override(from, to)) {
                     return endpoint;
@@ -2184,6 +2194,114 @@ BOOST_AUTO_TEST_CASE(resp_replies_match_the_golden_file, *boost::unit_test::time
     BOOST_CHECK(v3.wait_closed());
 
     kythira::testing::golden::check_golden("resp_replies.txt", out);
+}
+
+// ── format level and gate (redis-general-data-types task 2) ─────────────────
+
+namespace {
+/// Every local group's gate level from `KYTHIRA.FORMAT STATUS`.
+auto gate_levels(resp_client& ops) -> std::vector<std::string> {
+    const auto status = ops.call({"KYTHIRA.FORMAT", "STATUS"});
+    std::vector<std::string> out;
+    for (std::size_t at = status.find("group:"); at != std::string::npos;
+         at = status.find("group:", at + 1)) {
+        const auto eq = status.find(":gate=", at);
+        const auto end = status.find("\r\n", eq);
+        out.push_back(status.substr(eq + 6, end - eq - 6));
+    }
+    return out;
+}
+}  // namespace
+
+// Requirement 14.3: one node still on an older binary (it reports level 2)
+// blocks the gate, and the refusal names it; nothing is gated.
+BOOST_AUTO_TEST_CASE(one_old_level_node_blocks_the_format_gate, *boost::unit_test::timeout(120)) {
+    cluster c({}, true, {}, [](node_id_t id, redis_gateway_config& cfg) {
+        if (id == 3) {
+            cfg._reported_format_level = k_redis_base_format_level;
+        }
+    });
+    BOOST_REQUIRE(c.await_all_leaders(std::chrono::seconds{20}));
+    resp_client ops(c.port(1));
+    BOOST_REQUIRE_EQUAL(ops.auth("ops", "ops-secret"), "+OK\r\n");
+    const auto refused = ops.call({"KYTHIRA.FORMAT", "UPGRADE", "3"});
+    BOOST_TEST_INFO(refused);
+    BOOST_CHECK(refused.rfind("-ERR KYTHIRA.FORMAT cannot reach level 3", 0) == 0);
+    BOOST_CHECK(refused.find("3 (level 2)") != std::string::npos);
+    BOOST_CHECK_EQUAL(ops.call({"KYTHIRA.FORMAT", "LEVEL"}),
+                      ":" + std::to_string(gateway_type::k_node_format_level) + "\r\n");
+    for (node_id_t id = 1; id <= 3; ++id) {
+        resp_client each(c.port(id));
+        BOOST_REQUIRE_EQUAL(each.auth("ops", "ops-secret"), "+OK\r\n");
+        for (const auto& level : gate_levels(each)) {
+            BOOST_CHECK_EQUAL(level, "2");
+        }
+    }
+    resp_client old(c.port(3));
+    BOOST_REQUIRE_EQUAL(old.auth("ops", "ops-secret"), "+OK\r\n");
+    BOOST_CHECK(old.call({"INFO"}).find("\r\nkythira_format_level:2\r\n") != std::string::npos);
+}
+
+// With every node at the binary's level, UPGRADE gates every group on every
+// replica, from whichever node it is sent to (it proposes through each
+// group's leader); repeating it changes nothing. A store that does not read
+// the newer formats yet reports level 2 and is always refused.
+BOOST_AUTO_TEST_CASE(the_format_gate_reaches_every_group, *boost::unit_test::timeout(120)) {
+    cluster c;
+    BOOST_REQUIRE(c.await_all_leaders(std::chrono::seconds{20}));
+    const auto follower = c.a_follower_of(k_sccache_group);
+    resp_client ops(c.port(follower));
+    BOOST_REQUIRE_EQUAL(ops.auth("ops", "ops-secret"), "+OK\r\n");
+    if constexpr (gateway_type::k_node_format_level < k_redis_typed_values_level) {
+        BOOST_CHECK(ops.call({"KYTHIRA.FORMAT", "UPGRADE", "3"}).find("(level 2)") !=
+                    std::string::npos);
+        return;
+    }
+    BOOST_CHECK_EQUAL(ops.call({"KYTHIRA.FORMAT", "UPGRADE", "3"}), "+OK\r\n");
+    for (node_id_t id = 1; id <= 3; ++id) {
+        resp_client each(c.port(id));
+        BOOST_REQUIRE_EQUAL(each.auth("ops", "ops-secret"), "+OK\r\n");
+        std::vector<std::string> levels;
+        for (int i = 0; i < 100; ++i) {
+            levels = gate_levels(each);
+            if (!levels.empty() &&
+                std::ranges::all_of(levels, [](const auto& l) { return l == "3"; })) {
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds{20});
+        }
+        BOOST_CHECK_EQUAL(levels.size(), 2U);
+        for (const auto& level : levels) {
+            BOOST_CHECK_EQUAL(level, "3");
+        }
+    }
+    BOOST_CHECK_EQUAL(ops.call({"KYTHIRA.FORMAT", "UPGRADE", "3"}), "+OK\r\n");
+    // Plain commands keep working after the gate.
+    resp_client farm(c.port(follower));
+    BOOST_REQUIRE_EQUAL(farm.auth("farm", "farm-secret"), "+OK\r\n");
+    BOOST_CHECK_EQUAL(farm.call({"SET", "sccache/after-gate", "v"}), "+OK\r\n");
+    BOOST_CHECK_EQUAL(farm.call({"GET", "sccache/after-gate"}), bulk("v"));
+}
+
+// KYTHIRA.FORMAT is an admin command; the gate hop is for peers only, and
+// levels outside what the binary knows are refused.
+BOOST_AUTO_TEST_CASE(kythira_format_is_admin_only, *boost::unit_test::timeout(120)) {
+    cluster c;
+    BOOST_REQUIRE(c.await_all_leaders(std::chrono::seconds{20}));
+    resp_client farm(c.port(1));
+    BOOST_REQUIRE_EQUAL(farm.auth("farm", "farm-secret"), "+OK\r\n");
+    BOOST_CHECK(farm.call({"KYTHIRA.FORMAT", "STATUS"}).rfind("-NOPERM", 0) == 0);
+    BOOST_CHECK(farm.call({"KYTHIRA.FORMAT", "UPGRADE", "3"}).rfind("-NOPERM", 0) == 0);
+    resp_client ops(c.port(1));
+    BOOST_REQUIRE_EQUAL(ops.auth("ops", "ops-secret"), "+OK\r\n");
+    BOOST_CHECK(ops.call({"KYTHIRA.FORMAT", "GATE", "3", "a"}).rfind("-NOPERM", 0) == 0);
+    BOOST_CHECK(ops.call({"KYTHIRA.FORMAT", "UPGRADE", "4"}).rfind("-ERR", 0) == 0);
+    BOOST_CHECK(ops.call({"KYTHIRA.FORMAT", "UPGRADE", "2"}).rfind("-ERR", 0) == 0);
+    BOOST_CHECK(ops.call({"KYTHIRA.FORMAT", "UPGRADE", "x"}).rfind("-ERR", 0) == 0);
+    BOOST_CHECK(ops.call({"KYTHIRA.FORMAT"}).rfind("-ERR wrong number", 0) == 0);
+    const auto status = ops.call({"KYTHIRA.FORMAT", "STATUS"});
+    BOOST_CHECK(status.find("binary_level:" + std::to_string(k_redis_format_level)) !=
+                std::string::npos);
 }
 
 BOOST_AUTO_TEST_CASE(only_peer_gateways_may_advise, *boost::unit_test::timeout(120)) {
