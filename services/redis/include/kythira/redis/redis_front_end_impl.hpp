@@ -3633,6 +3633,11 @@ template<typename Host, typename Logger, typename Metrics>
 auto redis_front_end<Host, Logger, Metrics>::format_refusal(session& s, const std::string& key,
                                                             std::uint16_t level)
     -> std::optional<std::string> {
+    if constexpr (k_string_only_store) {
+        (void)key;
+        (void)level;
+        return s._writer.error(std::string(k_redis_string_only_store_error));
+    }
     auto have = group_format_level(key);
     if (have && *have < level) {
         return s._writer.error(std::string(k_redis_format_gate_error));
@@ -4774,7 +4779,7 @@ auto redis_front_end<Host, Logger, Metrics>::handle_collection(session& s,
         }
         return render_redis_reply(*reply, s._writer.version());
     } else {
-        return s._writer.error("ERR this command needs KYTHIRA_CACHE_PERSISTENCE=memory or engine");
+        return s._writer.error(std::string(k_redis_string_only_store_error));
     }
 }
 
@@ -4810,8 +4815,7 @@ auto redis_front_end<Host, Logger, Metrics>::handle_spop(session& s, const resp_
             picked = evaluate_redis_read(r._entry.get(), redis_command_id::srandmember, pick_args,
                                          now_ms());
         } else {
-            return s._writer.error(
-                "ERR this command needs KYTHIRA_CACHE_PERSISTENCE=memory or engine");
+            return s._writer.error(std::string(k_redis_string_only_store_error));
         }
     } else if (r._forward_to) {
         if (auto reply =

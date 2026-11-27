@@ -66,9 +66,10 @@ struct redis_kv_value_entry {
     std::vector<std::byte> _value;
     /// ms since the Unix epoch; 0 = never expires.
     std::uint64_t _expire_at_ms = 0;
-    /// What the key holds (redis-general-data-types task 7). Only the
-    /// in-memory store holds collections; every other store's entries are
-    /// strings.
+    /// What the key holds (redis-general-data-types task 7). The in-memory
+    /// and engine stores hold collections (the engine store decodes them
+    /// from its rows, task 10); the multi-version store's entries are
+    /// strings until task 11.
     redis_value_type _type = redis_value_type::string;
     /// The hash when `_type` is `hash`: shared, so a reader encodes it after
     /// the node lock is released (redis_value.hpp).

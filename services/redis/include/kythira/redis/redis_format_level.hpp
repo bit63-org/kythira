@@ -56,6 +56,13 @@ inline constexpr std::uint16_t k_redis_base_format_level = 2;
 inline constexpr std::string_view k_redis_format_gate_error =
     "ERR this cluster has not enabled typed values yet (KYTHIRA.FORMAT)";
 
+/// The reply on a store that holds only strings, the disk-backed build
+/// cache (`KYTHIRA_CACHE_PERSISTENCE=file`), to every command that needs
+/// more than a plain string write (Requirement 13.3). That store never
+/// passes the gate, so its log and snapshot formats never change.
+inline constexpr std::string_view k_redis_string_only_store_error =
+    "ERR this command needs KYTHIRA_CACHE_PERSISTENCE=memory or engine";
+
 /// A log entry or snapshot this binary is too old to read.
 class redis_format_too_new : public std::runtime_error {
 public:

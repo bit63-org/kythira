@@ -2207,6 +2207,17 @@ BOOST_AUTO_TEST_CASE(resp_replies_match_the_golden_file, *boost::unit_test::time
     record(v3, "v3", {"QUIT"});
     BOOST_CHECK(v3.wait_closed());
 
+    if constexpr (gateway_type::k_string_only_store) {
+        // The file was recorded before the gate. The disk-backed cache never
+        // passes it and says why instead (Requirement 13.3); every other
+        // byte is the same.
+        const std::string refusal = escape(std::string(kythira::k_redis_string_only_store_error));
+        const std::string gate = escape(std::string(kythira::k_redis_format_gate_error));
+        for (auto at = out.find(refusal); at != std::string::npos;
+             at = out.find(refusal, at + gate.size())) {
+            out.replace(at, refusal.size(), gate);
+        }
+    }
     kythira::testing::golden::check_golden("resp_replies.txt", out);
 }
 
@@ -2352,6 +2363,34 @@ BOOST_AUTO_TEST_CASE(string_commands_wait_for_the_format_gate, *boost::unit_test
     BOOST_REQUIRE_EQUAL(ops.auth("ops", "ops-secret"), "+OK\r\n");
     BOOST_REQUIRE_EQUAL(ops.call({"KYTHIRA.FORMAT", "UPGRADE", "3"}), "+OK\r\n");
     BOOST_CHECK_EQUAL(farm.call({"INCR", "sccache/n"}), ":1\r\n");
+}
+
+// The disk-backed build cache holds only strings: every command that needs
+// the typed-values level answers that it needs another store, on the leader
+// and through a follower alike, and plain strings keep working
+// (Requirement 13.3). Its formats are pinned by state_machines.txt.
+BOOST_AUTO_TEST_CASE(the_file_store_refuses_typed_commands, *boost::unit_test::timeout(120)) {
+    if constexpr (!gateway_type::k_string_only_store) {
+        return;
+    }
+    cluster c;
+    BOOST_REQUIRE(c.await_all_leaders(std::chrono::seconds{20}));
+    const std::string refusal =
+        "-ERR this command needs KYTHIRA_CACHE_PERSISTENCE=memory or engine\r\n";
+    for (const auto id : {c.leader_of(k_sccache_group), c.a_follower_of(k_sccache_group)}) {
+        resp_client farm(c.port(id));
+        BOOST_REQUIRE_EQUAL(farm.auth("farm", "farm-secret"), "+OK\r\n");
+        BOOST_CHECK_EQUAL(farm.call({"INCR", "sccache/n"}), refusal);
+        BOOST_CHECK_EQUAL(farm.call({"APPEND", "sccache/n", "x"}), refusal);
+        BOOST_CHECK_EQUAL(farm.call({"HSET", "sccache/h", "f", "v"}), refusal);
+        BOOST_CHECK_EQUAL(farm.call({"SADD", "sccache/s", "m"}), refusal);
+        BOOST_CHECK_EQUAL(farm.call({"LPUSH", "sccache/l", "e"}), refusal);
+        BOOST_CHECK_EQUAL(farm.call({"HGET", "sccache/h", "f"}), refusal);
+    }
+    resp_client farm(c.port(c.leader_of(k_sccache_group)));
+    BOOST_REQUIRE_EQUAL(farm.auth("farm", "farm-secret"), "+OK\r\n");
+    BOOST_CHECK_EQUAL(farm.call({"SET", "sccache/k", "v"}), "+OK\r\n");
+    BOOST_CHECK_EQUAL(farm.call({"GET", "sccache/k"}), bulk("v"));
 }
 
 // Replies match Redis 7.2 byte for byte, sent to a follower so each write

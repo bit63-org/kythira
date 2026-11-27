@@ -48,6 +48,12 @@
 //      linearizability checker (tests/docker_chaos/checkers/). A write that
 //      was acknowledged and then lost to a kill, or applied twice from a
 //      replayed log, shows up there as a read no linearization explains.
+//      Once the format gate is up the history also holds hashes and lists
+//      (.kiro/specs/redis-general-data-types/ task 10), each used as a
+//      register so the same checker applies: `HSET h/<i> f v` / `HGET h/<i>
+//      f`, and `RPUSH l/<i> v` / `LINDEX l/<i> -1`, whose last element is
+//      the last push. Their element rows and headers go through the same
+//      kills and replays as the strings.
 //
 //   2. .kiro/specs/file-install-snapshot/ Requirement 8.3. A follower is
 //      stopped while the others take a bulk load large enough to compact
@@ -79,6 +85,9 @@ constexpr const char* k_network = "kythira_engine_chaos_net";
 /// is exponential in the worst case, and the first draft's 3,600
 /// operations a key ran every search out of steps (`unknown`).
 constexpr int k_keys = 30;
+/// Hashes and lists of the linearizability case, each kind on both sides of
+/// the shard cut ("h/..." sorts below "k/2", "l/..." above).
+constexpr int k_typed_keys = 10;
 constexpr auto k_think = std::chrono::milliseconds{100};
 /// The transfer case's bulk load: incompressible values, so the RocksDB
 /// checkpoint is about as large as the load.
@@ -104,6 +113,26 @@ std::vector<std::string> compose_cmd(std::initializer_list<std::string> args) {
 
 std::string key(int i) {
     return "k/" + std::to_string(i);
+}
+
+/// What a register of the linearizability history is stored as.
+enum class kind : std::uint8_t {
+    string,
+    hash,
+    list
+};
+
+/// The register a key of `kind` is: its name in the history and the key.
+std::string register_key(kind kd, int i) {
+    switch (kd) {
+        case kind::hash:
+            return "h/" + std::to_string(i);
+        case kind::list:
+            return "l/" + std::to_string(i);
+        case kind::string:
+            break;
+    }
+    return key(i);
 }
 
 std::string bulk_key(int i) {
@@ -378,15 +407,18 @@ public:
                 return;
             }
         }
-        const auto k = key(std::uniform_int_distribution<int>(0, k_keys - 1)(_rng));
+        const auto kd = static_cast<kind>(std::uniform_int_distribution<int>(0, 2)(_rng));
+        const auto k =
+            register_key(kd, std::uniform_int_distribution<int>(
+                                 0, (kd == kind::string ? k_keys : k_typed_keys) - 1)(_rng));
         if (std::bernoulli_distribution(0.5)(_rng)) {
-            read(k);
+            read(kd, k);
         } else {
-            write(k);
+            write(kd, k);
         }
     }
 
-    auto final_read(const std::string& k) -> void {
+    auto final_read(kind kd, const std::string& k) -> void {
         for (int attempt = 0; attempt < 40; ++attempt) {
             if (!_conn) {
                 try {
@@ -397,7 +429,7 @@ public:
                     continue;
                 }
             }
-            if (read(k)) {
+            if (read(kd, k)) {
                 return;
             }
             std::this_thread::sleep_for(250ms);
@@ -419,11 +451,21 @@ private:
         _node = (_node + 1) % k_resp_ports.size();
     }
 
-    auto read(const std::string& k) -> bool {
+    auto read(kind kd, const std::string& k) -> bool {
         _rec.invoke(_p, history::op_kind::read, k, std::nullopt);
         std::string reply;
         try {
-            reply = _conn->call({"GET", k});
+            switch (kd) {
+                case kind::string:
+                    reply = _conn->call({"GET", k});
+                    break;
+                case kind::hash:
+                    reply = _conn->call({"HGET", k, "f"});
+                    break;
+                case kind::list:
+                    reply = _conn->call({"LINDEX", k, "-1"});
+                    break;
+            }
         } catch (const std::exception& e) {
             lost(history::op_kind::read, k, std::nullopt, e.what());
             return false;
@@ -445,20 +487,34 @@ private:
         return true;
     }
 
-    auto write(const std::string& k) -> void {
+    auto write(kind kd, const std::string& k) -> void {
         const auto id = "p" + std::to_string(_p) + "-" + std::to_string(_seq++);
         // 1 KiB of padding, so the load also compacts logs (the threshold is
         // 4 MiB) and a restarted node may need a snapshot, not just entries.
-        const auto value = id + ":" + std::string(1024, static_cast<char>('a' + (_seq % 26)));
+        // A list keeps every push, so its elements stay short.
+        const auto value =
+            id + ":" +
+            std::string(kd == kind::list ? 16 : 1024, static_cast<char>('a' + (_seq % 26)));
         _rec.invoke(_p, history::op_kind::write, k, id);
         std::string reply;
         try {
-            reply = _conn->call({"SET", k, value});
+            switch (kd) {
+                case kind::string:
+                    reply = _conn->call({"SET", k, value});
+                    break;
+                case kind::hash:
+                    reply = _conn->call({"HSET", k, "f", value});
+                    break;
+                case kind::list:
+                    reply = _conn->call({"RPUSH", k, value});
+                    break;
+            }
         } catch (const std::exception& e) {
             lost(history::op_kind::write, k, id, e.what());
             return;
         }
-        if (reply == "+OK\r\n") {
+        // SET answers +OK; HSET and RPUSH an integer.
+        if (reply == "+OK\r\n" || (kd != kind::string && reply.rfind(':', 0) == 0)) {
             _rec.complete(_p, history::event_type::ok, history::op_kind::write, k, id, node_id());
             ++_n.ok_writes;
             return;
@@ -558,6 +614,21 @@ BOOST_TEST_GLOBAL_FIXTURE(EngineChaosFixture);
 
 BOOST_AUTO_TEST_CASE(sigkilled_replicas_keep_the_history_linearizable,
                      *boost::unit_test::timeout(1200)) {
+    // Hashes and lists need the typed-values format gate, which every
+    // engine node can pass.
+    std::string upgraded;
+    for (int attempt = 0; attempt < 60 && upgraded != "+OK\r\n"; ++attempt) {
+        try {
+            resp_client ops(k_resp_ports[0]);
+            upgraded = ops.call({"KYTHIRA.FORMAT", "UPGRADE", "3"});
+        } catch (const std::exception& e) {
+            upgraded = e.what();
+        }
+        if (upgraded != "+OK\r\n") {
+            std::this_thread::sleep_for(1s);
+        }
+    }
+    BOOST_REQUIRE_EQUAL(upgraded, "+OK\r\n");
     recorder rec;
     counts n;
     std::atomic<bool> stop{false};
@@ -613,7 +684,11 @@ BOOST_AUTO_TEST_CASE(sigkilled_replicas_keep_the_history_linearizable,
     for (std::size_t i = 0; i < k_resp_ports.size(); ++i) {
         client c(rec, n, i, 1000U + static_cast<unsigned>(i));
         for (int k = 0; k < k_keys; ++k) {
-            c.final_read(key(k));
+            c.final_read(kind::string, key(k));
+        }
+        for (int k = 0; k < k_typed_keys; ++k) {
+            c.final_read(kind::hash, register_key(kind::hash, k));
+            c.final_read(kind::list, register_key(kind::list, k));
         }
     }
 

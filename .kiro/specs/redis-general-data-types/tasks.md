@@ -118,7 +118,7 @@ is extended as the rest land.
     through the planner; blocking forms stay unknown
   - _Requirements: 12.1-12.3_
 
-- [ ] 10. Typed values on the engine store
+- [x] 10. Typed values on the engine store
   - Header and element rows, key codec escaping, split/absorb moving a
     key's rows together, snapshot marker; file store refusal and an
     unchanged file-store golden test
