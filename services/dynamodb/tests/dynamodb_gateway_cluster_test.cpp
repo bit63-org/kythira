@@ -586,3 +586,229 @@ BOOST_AUTO_TEST_CASE(a_front_end_without_the_data_role_serves_every_table) {
                    .as_string() == "30");
     BOOST_TEST(!failure);
 }
+
+namespace {
+
+/// A node run on its own thread by one of the daemon's `run_*` functions,
+/// stopped (its `wait()` released) on destruction or by `stop()`.
+class background_node {
+public:
+    using runner = std::function<void(const std::function<void(bool, std::string_view)>&,
+                                      const std::function<void()>&)>;
+
+    explicit background_node(runner run)
+        : _thread([this, run = std::move(run)] {
+              try {
+                  run(
+                      [this](bool, std::string_view line) {
+                          const std::lock_guard lock(_mu);
+                          _lines.emplace_back(line);
+                      },
+                      [this] {
+                          std::unique_lock lock(_mu);
+                          _cv.wait(lock, [this] { return _done; });
+                      });
+              } catch (...) {
+                  _failure = std::current_exception();
+              }
+          }) {}
+
+    background_node(const background_node&) = delete;
+    auto operator=(const background_node&) -> background_node& = delete;
+    background_node(background_node&&) = delete;
+    auto operator=(background_node&&) -> background_node& = delete;
+    ~background_node() { stop(); }
+
+    void stop() {
+        {
+            const std::lock_guard lock(_mu);
+            _done = true;
+        }
+        _cv.notify_all();
+        if (_thread.joinable()) {
+            _thread.join();
+        }
+    }
+
+    [[nodiscard]] auto logged(std::string_view part) -> bool {
+        const std::lock_guard lock(_mu);
+        return std::any_of(_lines.begin(), _lines.end(),
+                           [&](const std::string& l) { return l.find(part) != std::string::npos; });
+    }
+    [[nodiscard]] auto failed() const -> bool { return static_cast<bool>(_failure); }
+
+private:
+    std::mutex _mu;
+    std::condition_variable _cv;
+    bool _done = false;
+    std::vector<std::string> _lines;
+    std::exception_ptr _failure;
+    std::thread _thread;
+};
+
+/// A call to `port`, retried while the listener is not up or the answer is
+/// a 5xx, for up to a minute.
+auto call_until_answered(std::uint16_t port, std::string_view op, const std::string& body)
+    -> answer {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(60);
+    while (true) {
+        std::optional<answer> a;
+        try {
+            a = cluster::call_at(port, "us-east-1", op, body);
+        } catch (const std::exception&) {
+            // The listener is not up yet.
+        }
+        if ((a && a->status < 500U) || std::chrono::steady_clock::now() > deadline) {
+            return a.value_or(answer{});
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    }
+}
+
+}  // namespace
+
+// .kiro/specs/dynamodb-independent-layers/ task 5: gateways apart from
+// their front ends. A gateway alone (KYTHIRA_DYNAMODB_ROLES=gateway) holds
+// nothing: it verifies each request and hands it to a front end, here a
+// front end alone (KYTHIRA_DYNAMODB_ROLES=front_end, which serves only
+// gateways) and one of the voters, which keeps every role. A client moves
+// from a voter's gateway onto the gateway alone and back, and no write it
+// was told succeeded is lost on the way, in either direction (the gateway
+// role's migration paths). When the front end alone goes away, the gateway
+// hands its calls to the voter instead.
+BOOST_AUTO_TEST_CASE(a_gateway_alone_serves_through_front_ends_and_clients_move_both_ways) {
+    cluster c;
+    const std::string secret = "0123456789abcdef-cluster-test";
+    const auto keys = "AKIDADMIN:" + std::string(k_secret) + ":111122223333:admin:admin";
+    const auto fe_port = kythira::testing::free_port();
+    const auto gw_port = kythira::testing::free_port();
+    auto front_node = std::make_unique<background_node>([&](const auto& log, const auto& wait) {
+        dynamodb_gateway::run_front_end(
+            cluster::parse({{"KYTHIRA_DYNAMODB_INSECURE_PLAINTEXT", "1"},
+                            {"KYTHIRA_DYNAMODB_BIND", "127.0.0.1"},
+                            {"KYTHIRA_DYNAMODB_PORT", std::to_string(fe_port)},
+                            {"KYTHIRA_DYNAMODB_STATIC_KEYS", keys},
+                            {"KYTHIRA_DYNAMODB_ROLES", "front_end"},
+                            {"KYTHIRA_DYNAMODB_DATA_NODES",
+                             "127.0.0.1:" + std::to_string(c.gateway_ports.at(1))},
+                            {"KYTHIRA_DYNAMODB_FORWARD_SECRET", secret},
+                            {"KYTHIRA_DYNAMODB_FRONT_ENDS", "4"}}),
+            log, wait);
+    });
+    background_node gate([&](const auto& log, const auto& wait) {
+        dynamodb_gateway::run_gateway_relay(
+            cluster::parse({{"KYTHIRA_DYNAMODB_INSECURE_PLAINTEXT", "1"},
+                            {"KYTHIRA_DYNAMODB_BIND", "127.0.0.1"},
+                            {"KYTHIRA_DYNAMODB_PORT", std::to_string(gw_port)},
+                            {"KYTHIRA_DYNAMODB_ADVERTISED_ENDPOINT",
+                             "edge.example:" + std::to_string(gw_port)},
+                            {"KYTHIRA_DYNAMODB_STATIC_KEYS", keys},
+                            {"KYTHIRA_DYNAMODB_ROLES", "gateway"},
+                            {"KYTHIRA_DYNAMODB_FRONT_END_NODES",
+                             "127.0.0.1:" + std::to_string(fe_port) +
+                                 ",127.0.0.1:" + std::to_string(c.gateway_ports.at(2))},
+                            {"KYTHIRA_DYNAMODB_FORWARD_SECRET", secret}}),
+            log, wait);
+    });
+
+    const auto put_body = [](int sk) {
+        return R"({"TableName":"orders","Item":{"pk":{"S":"p"},"sk":{"N":")" + std::to_string(sk) +
+               R"("}}})";
+    };
+    const auto get_body = [](int sk) {
+        return R"({"TableName":"orders","ConsistentRead":true,"Key":{"pk":{"S":"p"},"sk":{"N":")" +
+               std::to_string(sk) + R"("}}})";
+    };
+    const auto count_at = [&](std::uint16_t port) {
+        const auto n = call_until_answered(
+            port, "Scan", R"({"TableName":"orders","ConsistentRead":true,"Select":"COUNT"})");
+        BOOST_REQUIRE_MESSAGE(n.status == 200U, json::serialize(n.body));
+        return n.body.at("Count").to_number<int>();
+    };
+
+    // Co-located: the client starts on voter 0's gateway.
+    const auto created =
+        c.call_until_served(0, "CreateTable",
+                            R"({"TableName":"orders","BillingMode":"PAY_PER_REQUEST",)"
+                            R"("AttributeDefinitions":[{"AttributeName":"pk","AttributeType":"S"},)"
+                            R"({"AttributeName":"sk","AttributeType":"N"}],)"
+                            R"("KeySchema":[{"AttributeName":"pk","KeyType":"HASH"},)"
+                            R"({"AttributeName":"sk","KeyType":"RANGE"}]})");
+    BOOST_REQUIRE_MESSAGE(created.status == 200U || created.type() == "ResourceInUseException",
+                          json::serialize(created.body));
+    {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(60);
+        std::string status;
+        while (status != "ACTIVE" && std::chrono::steady_clock::now() < deadline) {
+            const auto d = c.call_until_served(0, "DescribeTable", R"({"TableName":"orders"})");
+            if (d.status == 200U) {
+                status = std::string(d.body.at("Table").at("TableStatus").as_string());
+            }
+            if (status != "ACTIVE") {
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
+        }
+        BOOST_REQUIRE_MESSAGE(status == "ACTIVE", status);
+    }
+    int acknowledged = 0;
+    for (int sk = 0; sk < 5; ++sk) {
+        BOOST_REQUIRE(c.call_until_served(0, "PutItem", put_body(sk)).status == 200U);
+        ++acknowledged;
+    }
+
+    // Onto the gateway alone: every earlier write is there, and its own
+    // writes, conditions and transactions behave as on a voter.
+    BOOST_TEST(count_at(gw_port) == acknowledged);
+    for (int sk = 5; sk < 10; ++sk) {
+        const auto put = call_until_answered(gw_port, "PutItem", put_body(sk));
+        BOOST_REQUIRE_MESSAGE(put.status == 200U, json::serialize(put.body));
+        ++acknowledged;
+    }
+    const auto cond =
+        call_until_answered(gw_port, "PutItem",
+                            R"({"TableName":"orders","Item":{"pk":{"S":"p"},"sk":{"N":"1"}},)"
+                            R"x("ConditionExpression":"attribute_not_exists(pk)"})x");
+    BOOST_TEST(cond.status == 400U);
+    BOOST_TEST(cond.type() == "ConditionalCheckFailedException");
+    const auto txn = call_until_answered(
+        gw_port, "TransactWriteItems",
+        R"({"TransactItems":[{"Put":{"TableName":"orders","Item":)"
+        R"x({"pk":{"S":"p"},"sk":{"N":"10"}},"ConditionExpression":"attribute_not_exists(pk)"}},)x"
+        R"({"ConditionCheck":{"TableName":"orders","Key":{"pk":{"S":"p"},"sk":{"N":"0"}},)"
+        R"x("ConditionExpression":"attribute_exists(pk)"}}]})x");
+    BOOST_REQUIRE_MESSAGE(txn.status == 200U, json::serialize(txn.body));
+    ++acknowledged;
+    // DescribeEndpoints names the gateway, and health its roles.
+    const auto endpoints = call_until_answered(gw_port, "DescribeEndpoints", "{}");
+    BOOST_REQUIRE(endpoints.status == 200U);
+    BOOST_TEST(endpoints.body.at("Endpoints").as_array()[0].at("Address").as_string() ==
+               "edge.example:" + std::to_string(gw_port));
+    const auto [health, roles, health_body] = raw_request(gw_port, http::verb::get, "");
+    BOOST_TEST(health == 200U);
+    BOOST_TEST(roles == "gateway");
+    BOOST_TEST(gate.logged("gateway only"));
+    // The front end alone serves gateways, not clients.
+    const auto [direct, direct_roles, direct_body] =
+        raw_request(fe_port, http::verb::post, R"({"TableName":"orders"})");
+    BOOST_TEST(direct == 404U);
+    BOOST_TEST(direct_roles == "front_end");
+
+    // The front end alone goes away: the gateway hands its calls to the
+    // voter's front end.
+    front_node->stop();
+    front_node.reset();
+    for (int sk = 11; sk < 14; ++sk) {
+        const auto put = call_until_answered(gw_port, "PutItem", put_body(sk));
+        BOOST_REQUIRE_MESSAGE(put.status == 200U, json::serialize(put.body));
+        ++acknowledged;
+    }
+    BOOST_TEST(count_at(gw_port) == acknowledged);
+
+    // And back to a voter's gateway: nothing acknowledged on the way is
+    // missing, and the gateway's writes read back there.
+    BOOST_TEST(count_at(c.gateway_ports.at(1)) == acknowledged);
+    const auto last = c.call_until_served(1, "GetItem", get_body(13));
+    BOOST_REQUIRE_MESSAGE(last.status == 200U, json::serialize(last.body));
+    BOOST_TEST(last.body.contains("Item"));
+    BOOST_TEST(!gate.failed());
+}

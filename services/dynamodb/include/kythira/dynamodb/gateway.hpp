@@ -82,20 +82,39 @@
 /// | `KYTHIRA_DYNAMODB_DATA_NODES` | | `host:port,...`: data nodes' gateways a front end without
 /// the data role asks for routes first |
 /// | `KYTHIRA_DYNAMODB_FRONT_ENDS` | the voters | how many front ends share each capacity limit |
+/// | `KYTHIRA_DYNAMODB_FRONT_END_NODES` | | `host:port,...`: the front ends a gateway without the
+/// front_end role hands its calls to |
+/// | `KYTHIRA_DYNAMODB_DRAIN_TIMEOUT_MS` | `10000` | how long a drain lets requests finish |
 ///
 /// `KYTHIRA_DYNAMODB_ROLES` (.kiro/specs/dynamodb-independent-layers/
 /// task 1) is a `,`-separated subset of `gateway`, `front_end`, `data` and
-/// `segments`. Unset, a node runs all four, exactly as before. This build
-/// serves three sets: all four; `data,segments`, a data node that is a
-/// Raft voter and runs the leader-side workers, takes ops forwarded from
-/// the other voters' gateways, and answers clients 404; and
-/// `gateway,front_end`, a front end with no replica (task 4) that learns
-/// the routes from the data nodes in `KYTHIRA_DYNAMODB_DATA_NODES` and
-/// sends each op to its group's leader over the forward channel
-/// (`remote_backend.hpp`), so it needs `KYTHIRA_DYNAMODB_FORWARD_SECRET`
-/// and no `PEERS`. Every other set stops the node at start, naming the
-/// part it lacks. The set shows on `GET /` as the `x-kythira-roles`
-/// header, and in kythira_node's `/healthz` and `/metrics`.
+/// `segments`. Unset, a node runs all four, exactly as before. `data`
+/// needs `segments` (the change log stays on the data node until segment
+/// volumes exist). With `data`, the node is a Raft voter that runs the
+/// leader-side workers and takes ops forwarded from the other nodes. Without
+/// it, the node holds no replica: no `PEERS`, and a front end learns the
+/// routes from the data nodes in `KYTHIRA_DYNAMODB_DATA_NODES` and sends
+/// each op to its group's leader over the forward channel
+/// (`remote_backend.hpp`, task 4), so it needs
+/// `KYTHIRA_DYNAMODB_FORWARD_SECRET`. The client roles (task 5) combine
+/// freely: `gateway` and `front_end` together serve clients as before;
+/// `gateway` without `front_end` verifies each request and hands it to a
+/// front end in `KYTHIRA_DYNAMODB_FRONT_END_NODES`
+/// (`front_end_handoff.hpp`; a gateway alone is a `gateway_relay`, which
+/// keeps nothing); `front_end` without `gateway` serves only gateways'
+/// handoffs; neither answers clients 404. Every other combination stops
+/// the node at start, naming the part it lacks. The set shows on `GET /`
+/// as the `x-kythira-roles` header, and in kythira_node's `/healthz` and
+/// `/metrics`.
+///
+/// Every node drains on `POST /_kythira/dynamodb/v1/drain` (signed with
+/// the forward secret) or on shutdown: `GET /` answers 503, the listener
+/// stops accepting, answers close their connections, handoffs are answered
+/// as not executed, and requests in flight get
+/// `KYTHIRA_DYNAMODB_DRAIN_TIMEOUT_MS` to finish. With a layer route guard
+/// (`set_layer_guard`, `route_guard_options_for`) the internal routes take
+/// only callers whose layer identity holds a role the route allows, and the
+/// forward secret counts as the data role alone (Requirement 8).
 ///
 /// Each front end admits `1 / KYTHIRA_DYNAMODB_FRONT_ENDS` of every
 /// capacity limit (one over the voters when unset, as before), so the
@@ -144,6 +163,7 @@
 #include <kythira/dynamodb/dynamodb_actions.hpp>
 #include <kythira/dynamodb/forward_link.hpp>
 #include <kythira/dynamodb/front_end.hpp>
+#include <kythira/dynamodb/front_end_handoff.hpp>
 #include <kythira/dynamodb/global_tables.hpp>
 #include <kythira/dynamodb/insights_api.hpp>
 #include <kythira/dynamodb/vector_search.hpp>
@@ -161,6 +181,7 @@
 #include <kythira/dynamodb/txn_api.hpp>
 
 #include <raft/beast_https_server.hpp>
+#include <raft/layer_identity.hpp>
 #include <raft/layer_roles.hpp>
 #include <raft/logger.hpp>
 #include <raft/static_key_authorizer.hpp>
@@ -217,6 +238,11 @@ struct cluster_config {
     std::vector<forward_peer> data_nodes;
     /// How many front ends share each capacity limit; 0 is the voters.
     std::size_t front_ends = 0;
+    /// A gateway without the front_end role: the front ends' listeners it
+    /// hands authenticated calls to (task 5, `front_end_handoff.hpp`).
+    std::vector<forward_peer> front_end_nodes;
+    /// How long a drain lets requests in flight finish.
+    std::chrono::milliseconds drain_timeout{10000};
     /// PEM bundle the peers' gateway certificates chain to; empty uses the
     /// system's.
     std::string forward_ca_path;
@@ -568,13 +594,21 @@ inline constexpr std::string_view k_gateway_env_help =
     "                                        range (2500, 5000)\n"
     "  KYTHIRA_DYNAMODB_ROLES                layers this node runs: all four\n"
     "                                        (gateway,front_end,data,segments, the\n"
-    "                                        default), data,segments, or\n"
-    "                                        gateway,front_end (with DATA_NODES)\n"
+    "                                        default), or data,segments with any\n"
+    "                                        of gateway and front_end, or those two\n"
+    "                                        without data (front_end needs\n"
+    "                                        DATA_NODES, gateway alone\n"
+    "                                        FRONT_END_NODES)\n"
     "  KYTHIRA_DYNAMODB_DATA_NODES           host:port,... data nodes' gateways a\n"
     "                                        front end without the data role asks\n"
     "                                        for routes first\n"
     "  KYTHIRA_DYNAMODB_FRONT_ENDS           front ends sharing each capacity\n"
-    "                                        limit (the voters)\n";
+    "                                        limit (the voters)\n"
+    "  KYTHIRA_DYNAMODB_FRONT_END_NODES      host:port,... front ends a gateway\n"
+    "                                        without the front_end role hands its\n"
+    "                                        calls to\n"
+    "  KYTHIRA_DYNAMODB_DRAIN_TIMEOUT_MS     how long a drain lets requests finish\n"
+    "                                        (10000)\n";
 
 /// The header `GET /` and a data node's refusals carry the node's role set
 /// in.
@@ -654,6 +688,36 @@ namespace gateway_detail {
                    "and needs " +
                    std::to_string(k_min_forward_secret) + " or more characters";
         }
+    }
+    if (auto v = env("KYTHIRA_DYNAMODB_FRONT_END_NODES"); v && !trim(*v).empty()) {
+        std::string_view rest = *v;
+        while (!rest.empty()) {
+            const auto comma = rest.find(',');
+            const auto entry = trim(rest.substr(0, comma));
+            rest = comma == std::string_view::npos ? std::string_view{} : rest.substr(comma + 1);
+            if (entry.empty()) {
+                continue;
+            }
+            const auto hp = parse_host_port(entry);
+            if (!hp) {
+                return "KYTHIRA_DYNAMODB_FRONT_END_NODES: '" + std::string(entry) +
+                       "' is not host:port";
+            }
+            k.front_end_nodes.push_back(*hp);
+        }
+        k.forward_secret = env("KYTHIRA_DYNAMODB_FORWARD_SECRET").value_or("");
+        if (k.forward_secret.size() < k_min_forward_secret) {
+            return "KYTHIRA_DYNAMODB_FORWARD_SECRET is required with "
+                   "KYTHIRA_DYNAMODB_FRONT_END_NODES, and needs " +
+                   std::to_string(k_min_forward_secret) + " or more characters";
+        }
+    }
+    if (auto v = env("KYTHIRA_DYNAMODB_DRAIN_TIMEOUT_MS")) {
+        const auto n = number<std::uint64_t>(trim(*v));
+        if (!n) {
+            return "KYTHIRA_DYNAMODB_DRAIN_TIMEOUT_MS: not a count: '" + *v + "'";
+        }
+        k.drain_timeout = std::chrono::milliseconds{static_cast<std::int64_t>(*n)};
     }
     const auto peers = env("KYTHIRA_DYNAMODB_PEERS");
     if (!peers || trim(*peers).empty()) {
@@ -769,16 +833,26 @@ namespace gateway_detail {
                    "the segments role without data needs segment volumes, which this build "
                    "does not have yet; drop segments or add data";
         }
-        if (c.roles.has(role::gateway) != c.roles.has(role::front_end)) {
-            return named +
-                   "a gateway apart from its front end needs the authenticated-call handoff, "
-                   "which this build does not have yet; run both or neither";
-        }
         if (c.cluster.enabled()) {
             return named +
                    "a node without the data role holds no replica, so it is no voter: unset "
                    "KYTHIRA_DYNAMODB_PEERS and list the data nodes' gateways in "
                    "KYTHIRA_DYNAMODB_DATA_NODES";
+        }
+        if (!c.roles.has(role::front_end)) {
+            // A gateway alone (task 5): it keeps nothing and reaches the
+            // data only through the front ends it hands calls to.
+            if (c.cluster.front_end_nodes.empty()) {
+                return named +
+                       "a gateway without its front end hands each call to one on another "
+                       "node: set KYTHIRA_DYNAMODB_FRONT_END_NODES (and "
+                       "KYTHIRA_DYNAMODB_FORWARD_SECRET)";
+            }
+            if (!c.cluster.data_nodes.empty()) {
+                return named +
+                       "a gateway alone reaches no data node: unset KYTHIRA_DYNAMODB_DATA_NODES";
+            }
+            return std::nullopt;
         }
         if (c.cluster.data_nodes.empty()) {
             return named +
@@ -797,10 +871,11 @@ namespace gateway_detail {
                "the data role without segments needs a segment node's volume for the change "
                "log, which this build does not have yet; add segments";
     }
-    if (c.roles.has(role::gateway) != c.roles.has(role::front_end)) {
+    if (c.roles.has(role::gateway) && !c.roles.has(role::front_end) &&
+        c.cluster.front_end_nodes.empty()) {
         return named +
-               "a gateway apart from its front end needs the authenticated-call handoff, which "
-               "this build does not have yet; run both or neither";
+               "a gateway without its front end hands each call to one on another node: set "
+               "KYTHIRA_DYNAMODB_FRONT_END_NODES";
     }
     if (!c.cluster.enabled()) {
         return named +
@@ -1261,6 +1336,12 @@ namespace gateway_detail {
             "(KYTHIRA_DYNAMODB_ROLES=gateway,front_end); a data node finds the others through "
             "KYTHIRA_DYNAMODB_PEERS");
     }
+    if (!c.cluster.front_end_nodes.empty() && (c.roles.has(kythira::layers::role::front_end) ||
+                                               !c.roles.has(kythira::layers::role::gateway))) {
+        return std::string(
+            "KYTHIRA_DYNAMODB_FRONT_END_NODES is only for a gateway without the front_end role "
+            "(KYTHIRA_DYNAMODB_ROLES=gateway, or gateway,data,segments)");
+    }
     c.backup_dir = env("KYTHIRA_DYNAMODB_BACKUP_DIR").value_or("");
     c.backup_s3_bucket = env("KYTHIRA_DYNAMODB_BACKUP_S3_BUCKET").value_or("");
     c.backup_s3_prefix = env("KYTHIRA_DYNAMODB_BACKUP_S3_PREFIX").value_or("");
@@ -1318,6 +1399,106 @@ namespace gateway_detail {
     res.prepare_payload();
     return res;
 }
+
+namespace gateway_detail {
+
+/// The relay a gateway without the front_end role hands its calls through
+/// (task 5): to `cluster.front_end_nodes`, over the forward channel's
+/// client, signed with the forward secret.
+[[nodiscard]] inline auto make_front_end_relay(const gateway_config& cfg,
+                                               relay_transport transport = {})
+    -> std::unique_ptr<front_end_relay> {
+    if (!transport) {
+        auto client = std::make_shared<forward_client>(
+            forward_client_config{.secret = cfg.cluster.forward_secret,
+                                  .tls = !cfg.http.insecure_plaintext,
+                                  .ca_path = cfg.cluster.forward_ca_path,
+                                  .timeout = std::chrono::milliseconds{20000}},
+            std::map<std::string, forward_peer>{});
+        transport = [client](const forward_peer& peer, std::string_view path,
+                             const std::string& body) { return client->post(peer, path, body); };
+    }
+    return std::make_unique<front_end_relay>(
+        front_end_relay_options{.front_ends = cfg.cluster.front_end_nodes}, std::move(transport));
+}
+
+/// A plain-text answer.
+[[nodiscard]] inline auto text_reply(boost::beast::http::status status, unsigned version,
+                                     std::string body) -> https::response {
+    https::response res{status, version};
+    res.set(boost::beast::http::field::content_type, "text/plain");
+    res.body() = std::move(body);
+    res.prepare_payload();
+    return res;
+}
+
+/// The handoff's "did not run here" answer: the gateway tries another
+/// front end.
+[[nodiscard]] inline auto not_executed_reply(unsigned version, std::string why) -> https::response {
+    auto res =
+        text_reply(boost::beast::http::status::service_unavailable, version, std::move(why) + "\n");
+    res.set(handoff::k_not_executed_header, "1");
+    return res;
+}
+
+/// Counts a request for as long as it is answered.
+class in_flight_count {
+public:
+    explicit in_flight_count(std::atomic<std::uint64_t>& n) : _n(n) {
+        _n.fetch_add(1, std::memory_order_acq_rel);
+    }
+    in_flight_count(const in_flight_count&) = delete;
+    auto operator=(const in_flight_count&) -> in_flight_count& = delete;
+    in_flight_count(in_flight_count&&) = delete;
+    auto operator=(in_flight_count&&) -> in_flight_count& = delete;
+    ~in_flight_count() { _n.fetch_sub(1, std::memory_order_acq_rel); }
+
+private:
+    std::atomic<std::uint64_t>& _n;
+};
+
+/// Waits until `n` is at most `floor` or `bound` passes; whether it got
+/// there.
+[[nodiscard]] inline auto await_in_flight(const std::atomic<std::uint64_t>& n, std::uint64_t floor,
+                                          std::chrono::milliseconds bound) -> bool {
+    const auto until = std::chrono::steady_clock::now() + bound;
+    while (n.load(std::memory_order_acquire) > floor) {
+        if (std::chrono::steady_clock::now() >= until) {
+            return false;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds{10});
+    }
+    return true;
+}
+
+/// A gateway without its front end's half of a request (task 5): SigV4
+/// and framing here, the rest on a front end through `relay`.
+/// DescribeEndpoints is the gateway's to answer (Requirement 4.3: it names
+/// the gateway layer's endpoint), so it runs here.
+template<typename FrontEnd>
+[[nodiscard]] auto relay_call(FrontEnd& front, front_end_relay& relay, const front_end_request& in,
+                              unsigned version,
+                              const std::function<void(bool, std::string_view)>& log)
+    -> https::response {
+    auto call = front.authenticate(in, /*check_body=*/true);
+    if (auto* fault = std::get_if<aws_json::http_response>(&call)) {
+        return to_https_response(*fault, version);
+    }
+    auto& authenticated = std::get<authenticated_call>(call);
+    if (detail::header_value(in, "x-amz-target").ends_with(".DescribeEndpoints")) {
+        return to_https_response(front.execute(authenticated), version);
+    }
+    if (auto answer = relay.relay(authenticated)) {
+        return to_https_response(*answer, version);
+    }
+    if (log) {
+        log(true,
+            "request " + authenticated.request_id + ": no front end answered; InternalServerError");
+    }
+    return to_https_response(front.internal_error(authenticated), version);
+}
+
+}  // namespace gateway_detail
 
 /// The front end and handlers over one backend, served over HTTPS.
 template<dynamo_backend Backend> class gateway {
@@ -1404,6 +1585,10 @@ public:
         };
         front.namespaced = [this] { return _namespaced.load(std::memory_order_acquire); };
         _front = std::make_unique<front_end<authorizer>>(std::move(front), _auth);
+        if (_config.roles.has(kythira::layers::role::gateway) &&
+            !_config.roles.has(kythira::layers::role::front_end)) {
+            _relay = gateway_detail::make_front_end_relay(_config, std::move(_relay_transport));
+        }
         if (_config.auth != auth_mode::static_keys) {
             // IAM evaluates resource policies and tag conditions, so it
             // gets each resource's (task 28); without this lookup no
@@ -1562,6 +1747,52 @@ private:
     }
 
 public:
+    /// Checks callers of the internal routes by layer identity
+    /// (`route_guard_options_for`, Requirement 8.1). Unset, the forward
+    /// secret admits them, as before. Set before `start`.
+    void set_layer_guard(std::shared_ptr<const kythira::layers::route_guard> guard) {
+        _layer_guard = std::move(guard);
+    }
+
+    /// How a gateway without the front_end role reaches the front ends;
+    /// unset, the forward channel's client. For tests. Set before `start`.
+    void set_relay_transport(relay_transport transport) { _relay_transport = std::move(transport); }
+
+    /// Begins draining (task 5): `GET /` answers 503, every answer closes
+    /// its connection, handoffs are answered as not executed and the
+    /// listener stops accepting. Idempotent.
+    void begin_drain() {
+        if (_draining.exchange(true, std::memory_order_acq_rel)) {
+            return;
+        }
+        if (_log) {
+            _log(false, "draining: no new connections, requests in flight get " +
+                            std::to_string(_config.cluster.drain_timeout.count()) + " ms");
+        }
+        if (_server) {
+            _server->stop_accepting();
+        }
+    }
+
+    [[nodiscard]] auto draining() const noexcept -> bool {
+        return _draining.load(std::memory_order_acquire);
+    }
+
+    /// Requests being answered now.
+    [[nodiscard]] auto in_flight() const noexcept -> std::uint64_t {
+        return _in_flight.load(std::memory_order_acquire);
+    }
+
+    /// Drains, then waits for requests in flight, up to the drain timeout
+    /// (`KYTHIRA_DYNAMODB_DRAIN_TIMEOUT_MS`). Whether they all finished.
+    auto drain() -> bool {
+        begin_drain();
+        return gateway_detail::await_in_flight(_in_flight, 0, _config.cluster.drain_timeout);
+    }
+
+    /// The relay of a gateway without the front_end role; null otherwise.
+    [[nodiscard]] auto relay() const -> const front_end_relay* { return _relay.get(); }
+
     void stop() {
         if (_workers) {
             _workers->stop();
@@ -1584,8 +1815,25 @@ public:
 
     /// One request; public so tests can call it without a socket.
     auto handle(const https::request& req, const https::request_context& ctx) -> https::response {
+        const gateway_detail::in_flight_count counted(_in_flight);
+        auto res = answer(req, ctx);
+        if (draining()) {
+            res.keep_alive(false);
+        }
+        return res;
+    }
+
+private:
+    auto answer(const https::request& req, const https::request_context& ctx) -> https::response {
         namespace http = boost::beast::http;
-        if (req.method() == http::verb::get && req.target() == "/") {
+        const std::string_view target(req.target().data(), req.target().size());
+        if (req.method() == http::verb::get && target == "/") {
+            if (draining()) {
+                auto res = gateway_detail::text_reply(http::status::service_unavailable,
+                                                      req.version(), "draining\n");
+                res.set(k_roles_header, _config.roles.to_string());
+                return res;
+            }
             https::response res{http::status::ok, req.version()};
             res.set(http::field::content_type, "text/plain");
             res.body() = "healthy: dynamodb." + _config.front.region + ".amazonaws.com ";
@@ -1593,13 +1841,40 @@ public:
             res.prepare_payload();
             return res;
         }
+        if (target == handoff::k_drain_path) {
+            return drain_request(req);
+        }
+        // Layer identities, when the cluster uses them (Requirement 8.1):
+        // a refused caller never reaches the route.
+        std::optional<kythira::layers::verdict> verdict;
+        if (_layer_guard) {
+            verdict = _layer_guard->check(req, ctx);
+            if (!verdict->permitted()) {
+                return gateway_detail::text_reply(http::status::forbidden, req.version(),
+                                                  verdict->reason + "\n");
+            }
+        }
+        const bool by_identity =
+            verdict && verdict->kind != kythira::layers::verdict_kind::not_internal;
+        if (target.starts_with(handoff::k_prefix)) {
+            return handoff_call(req, by_identity);
+        }
         if (!_ready.load() || !settle_namespaces()) {
             https::response res{http::status::service_unavailable, req.version()};
             res.prepare_payload();
             return res;
         }
         if constexpr (serves_ops) {
-            if (req.target() == k_forward_path && !_config.cluster.forward_secret.empty()) {
+            if (target == k_forward_path && by_identity) {
+                // The guard admitted it (a layer identity, or the forward
+                // secret it checked itself).
+                https::response res{http::status::ok, req.version()};
+                res.set(http::field::content_type, "application/octet-stream");
+                res.body() = _backend.serve(req.body());
+                res.prepare_payload();
+                return res;
+            }
+            if (target == k_forward_path && !_config.cluster.forward_secret.empty()) {
                 return forwarded(req, _config.cluster.forward_secret,
                                  [this](std::string_view op) { return _backend.serve(op); });
             }
@@ -1620,10 +1895,69 @@ public:
             res.prepare_payload();
             return res;
         }
+        if (_relay) {
+            return relayed(to_front_end_request(req, ctx), req.version());
+        }
         return to_https_response(_front->handle(to_front_end_request(req, ctx)), req.version());
     }
 
-private:
+    /// A gateway without its front end (task 5): SigV4 and framing here,
+    /// the rest on a front end. DescribeEndpoints is the gateway's to
+    /// answer (Requirement 4.3), so it runs here.
+    auto relayed(const front_end_request& in, unsigned version) -> https::response {
+        return gateway_detail::relay_call(*_front, *_relay, in, version, _log);
+    }
+
+    /// A gateway's handoff (task 5): admitted by layer identity (the guard
+    /// already checked it) or, without a guard, by the forward secret over
+    /// the path and body; run here unless this node cannot.
+    auto handoff_call(const https::request& req, bool by_identity) -> https::response {
+        namespace http = boost::beast::http;
+        const std::string_view target(req.target().data(), req.target().size());
+        if (!by_identity &&
+            !(_layer_guard == nullptr &&
+              handoff::signed_by_secret(req, target, _config.cluster.forward_secret))) {
+            return gateway_detail::text_reply(http::status::forbidden, req.version(), "refused\n");
+        }
+        if (req.method() != http::verb::post || target != handoff::k_call_path) {
+            return gateway_detail::text_reply(http::status::not_found, req.version(),
+                                              "not found\n");
+        }
+        if (!_config.roles.has(kythira::layers::role::front_end)) {
+            return gateway_detail::not_executed_reply(
+                req.version(),
+                "this node runs no DynamoDB front end (roles " + _config.roles.to_string() + ")");
+        }
+        if (draining()) {
+            return gateway_detail::not_executed_reply(req.version(), "draining");
+        }
+        if (!_ready.load() || !settle_namespaces()) {
+            return gateway_detail::not_executed_reply(req.version(), "not ready");
+        }
+        auto call = handoff::decode_call(req.body());
+        if (!call) {
+            return gateway_detail::text_reply(http::status::bad_request, req.version(),
+                                              "malformed call\n");
+        }
+        https::response res{http::status::ok, req.version()};
+        res.set(http::field::content_type, "application/octet-stream");
+        res.body() = handoff::encode_answer(_front->execute(*call));
+        res.prepare_payload();
+        return res;
+    }
+
+    /// `POST k_drain_path`, signed with the forward secret over the path.
+    auto drain_request(const https::request& req) -> https::response {
+        namespace http = boost::beast::http;
+        if (req.method() != http::verb::post ||
+            !handoff::signed_by_secret(req, handoff::k_drain_path,
+                                       _config.cluster.forward_secret)) {
+            return gateway_detail::text_reply(http::status::forbidden, req.version(), "refused\n");
+        }
+        begin_drain();
+        return gateway_detail::text_reply(http::status::accepted, req.version(), "draining\n");
+    }
+
     /// Whether the catalog's table naming is known (task 28): per-account
     /// names when the catalog records an owner, turning them on first when
     /// `namespaces` is set. Until it is known nothing is served, since a
@@ -1826,6 +2160,12 @@ private:
     };
     std::function<void(bool, std::string_view)> _log;
     std::unique_ptr<front_end<authorizer>> _front;
+    std::shared_ptr<const kythira::layers::route_guard> _layer_guard;
+    relay_transport _relay_transport;
+    /// A gateway without the front_end role hands calls through it.
+    std::unique_ptr<front_end_relay> _relay;
+    std::atomic<bool> _draining{false};
+    std::atomic<std::uint64_t> _in_flight{0};
     std::unique_ptr<https::server> _server;
     std::atomic<bool> _ready{false};
     std::atomic<bool> _namespaced{false};

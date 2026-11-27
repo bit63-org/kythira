@@ -109,6 +109,29 @@ struct forward_peer {
     std::uint16_t port = 0;
 };
 
+/// What `forward_client::post` heard back (task 5 of
+/// `.kiro/specs/dynamodb-independent-layers/`): whether the request was
+/// written, so a caller knows whether the peer could have acted on it, and
+/// the answer when one came.
+struct forward_reply {
+    bool written = false;
+    bool answered = false;
+    unsigned status = 0;
+    std::vector<std::pair<std::string, std::string>> headers;
+    std::string body;
+};
+
+/// What a request to `path` is signed over: the path, then the body, so a
+/// signed request cannot be replayed on another internal route. The forward
+/// path keeps its older body-only signature.
+[[nodiscard]] inline auto path_signed_text(std::string_view path, std::string_view body)
+    -> std::string {
+    std::string out(path);
+    out.push_back('\n');
+    out.append(body);
+    return out;
+}
+
 struct forward_client_config {
     std::string secret;
     /// Speak HTTPS to peers (whenever the gateways serve HTTPS).
@@ -144,39 +167,66 @@ public:
     /// addresses their routes name).
     [[nodiscard]] auto send_to(const forward_peer& peer, const std::string& op) const
         -> std::optional<std::string> {
-        try {
-            return _config.tls ? exchange_tls(peer, op) : exchange_plain(peer, op);
-        } catch (const std::exception&) {
+        const auto reply = exchange(peer, make_request(peer, _config.path, op, op));
+        if (!reply.answered || reply.status != 200) {
             return std::nullopt;
         }
+        return reply.body;
+    }
+
+    /// POSTs `body` to `path` on `peer`, signed over `path_signed_text`,
+    /// and says whether it was written and what came back. Never throws.
+    [[nodiscard]] auto post(const forward_peer& peer, std::string_view path,
+                            const std::string& body) const -> forward_reply {
+        return exchange(peer,
+                        make_request(peer, std::string(path), body, path_signed_text(path, body)));
     }
 
 private:
     using request = boost::beast::http::request<boost::beast::http::string_body>;
     using response = boost::beast::http::response<boost::beast::http::string_body>;
 
-    [[nodiscard]] auto make_request(const forward_peer& peer, const std::string& op) const
+    /// A POST of `body` to `path`, its MAC over `signed_text`.
+    [[nodiscard]] auto make_request(const forward_peer& peer, const std::string& path,
+                                    const std::string& body, std::string_view signed_text) const
         -> request {
         namespace http = boost::beast::http;
         const auto now =
             static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
                                            std::chrono::system_clock::now().time_since_epoch())
                                            .count());
-        request req{http::verb::post, _config.path, 11};
+        request req{http::verb::post, path, 11};
         req.set(http::field::host, peer.host + ":" + std::to_string(peer.port));
         req.set(http::field::content_type, "application/octet-stream");
         req.set(k_forward_time_header, std::to_string(now));
-        req.set(k_forward_mac_header, forward_mac(_config.secret, now, op));
-        req.body() = op;
+        req.set(k_forward_mac_header, forward_mac(_config.secret, now, signed_text));
+        req.body() = body;
         req.prepare_payload();
         return req;
     }
 
-    [[nodiscard]] static auto answer(const response& res) -> std::optional<std::string> {
-        if (res.result() != boost::beast::http::status::ok) {
-            return std::nullopt;
+    [[nodiscard]] auto exchange(const forward_peer& peer, const request& req) const
+        -> forward_reply {
+        forward_reply reply;
+        try {
+            if (_config.tls) {
+                exchange_tls(peer, req, reply);
+            } else {
+                exchange_plain(peer, req, reply);
+            }
+        } catch (const std::exception&) {
+            // `written` says how far it got.
         }
-        return res.body();
+        return reply;
+    }
+
+    static void take(const response& res, forward_reply& reply) {
+        reply.answered = true;
+        reply.status = res.result_int();
+        for (const auto& f : res) {
+            reply.headers.emplace_back(std::string(f.name_string()), std::string(f.value()));
+        }
+        reply.body = res.body();
     }
 
     /// Connects `stream` to `peer` through the bounded resolver, not
@@ -220,26 +270,25 @@ private:
         }
     }
 
-    [[nodiscard]] auto exchange_plain(const forward_peer& peer, const std::string& op) const
-        -> std::optional<std::string> {
+    void exchange_plain(const forward_peer& peer, const request& req, forward_reply& reply) const {
         namespace beast = boost::beast;
         namespace http = beast::http;
         boost::asio::io_context ioc;
         beast::tcp_stream stream(ioc);
         stream.expires_after(_config.timeout);
         connect(stream, peer);
-        http::write(stream, make_request(peer, op));
+        reply.written = true;
+        http::write(stream, req);
         beast::flat_buffer buffer;
         http::response_parser<http::string_body> parser;
         parser.body_limit(k_max_answer_bytes);
         http::read(stream, buffer, parser);
         beast::error_code ec;
         (void)stream.socket().shutdown(boost::asio::ip::tcp::socket::shutdown_both, ec);
-        return answer(parser.get());
+        take(parser.get(), reply);
     }
 
-    [[nodiscard]] auto exchange_tls(const forward_peer& peer, const std::string& op) const
-        -> std::optional<std::string> {
+    void exchange_tls(const forward_peer& peer, const request& req, forward_reply& reply) const {
         namespace beast = boost::beast;
         namespace http = beast::http;
         namespace ssl = boost::asio::ssl;
@@ -253,13 +302,14 @@ private:
         ctx.set_verify_mode(ssl::verify_peer);
         beast::ssl_stream<beast::tcp_stream> stream(ioc, ctx);
         if (SSL_set_tlsext_host_name(stream.native_handle(), peer.host.c_str()) != 1) {
-            return std::nullopt;
+            return;
         }
         stream.set_verify_callback(ssl::host_name_verification(peer.host));
         beast::get_lowest_layer(stream).expires_after(_config.timeout);
         connect(beast::get_lowest_layer(stream), peer);
         stream.handshake(ssl::stream_base::client);
-        http::write(stream, make_request(peer, op));
+        reply.written = true;
+        http::write(stream, req);
         beast::flat_buffer buffer;
         http::response_parser<http::string_body> parser;
         parser.body_limit(k_max_answer_bytes);
@@ -268,7 +318,7 @@ private:
         // without close_notify costs nothing here, so the result is ignored.
         beast::error_code ec;
         (void)stream.shutdown(ec);
-        return answer(parser.get());
+        take(parser.get(), reply);
     }
 
     /// A page carries at most about 1 MiB of items; leave room.

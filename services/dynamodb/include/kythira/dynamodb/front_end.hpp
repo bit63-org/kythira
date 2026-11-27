@@ -89,6 +89,7 @@
 #include <string>
 #include <string_view>
 #include <utility>
+#include <variant>
 #include <vector>
 
 namespace kythira::dynamodb {
@@ -149,6 +150,18 @@ struct front_end_request {
     std::string body;
     std::string source_ip;
     bool secure = true;
+};
+
+/// A request whose SigV4 signature the gateway has verified: the request as
+/// it arrived, the principal the signature proved and the request id the
+/// client will be answered with (`.kiro/specs/dynamodb-independent-layers/`
+/// task 5). `front_end::authenticate` makes one and `front_end::execute`
+/// runs it, on the same node or, through `front_end_handoff.hpp`, on a
+/// front end on another node, which takes the principal on trust.
+struct authenticated_call {
+    std::string request_id;
+    aws_auth::principal_context principal;
+    front_end_request request;
 };
 
 /// What a handler sees besides its input.
@@ -470,29 +483,38 @@ public:
     void set_replication_handler(front_end_handler h) { _replication = std::move(h); }
 
     [[nodiscard]] auto handle(const front_end_request& req) -> aws_json::http_response {
-        if (req.path == k_insights_report_path && _report) {
-            return report(req);
+        auto call = authenticate(req);
+        if (auto* answer = std::get_if<aws_json::http_response>(&call)) {
+            return std::move(*answer);
         }
-        if (req.path == k_replication_path && _replication) {
-            return replicate(req);
-        }
+        return execute(std::get<authenticated_call>(call));
+    }
+
+    /// The gateway's half of a request (task 5): framing faults that need
+    /// no signature (method, content type, target), then SigV4. A fault is
+    /// answered at once; otherwise the call `execute` runs, here or on
+    /// another node. With `check_body`, the body is also framed and held to
+    /// the request limits here, so a gateway apart from its front end
+    /// refuses a malformed or oversized request without handing it on;
+    /// `handle` leaves that to `execute`, which frames it anyway.
+    [[nodiscard]] auto authenticate(const front_end_request& req, bool check_body = false)
+        -> std::variant<aws_json::http_response, authenticated_call> {
+        const bool extension = (req.path == k_insights_report_path && _report) ||
+                               (req.path == k_replication_path && _replication);
         const auto target = detail::header_value(req, "x-amz-target");
         const auto content_type = detail::header_value(req, "content-type");
         const aws_json::http_request_view view{req.method, req.path, content_type, target,
                                                req.body};
-        const auto dot = target.rfind('.');
-        const auto prefix = dot == std::string_view::npos ? target : target.substr(0, dot);
-        const aws_json::codec& c = prefix == k_streams_target_prefix ? _streams : _dynamodb;
+        const aws_json::codec& c = extension ? _dynamodb : codec_for(target);
         auto id = c.new_request_id();
-
-        const auto* op = c.resolve_target(view);
-        if (op == nullptr) {
-            // Framing faults (method, content type, prefix, operation) and
-            // body limits are the codec's to word.
-            auto parsed = c.parse(view);
-            return c.respond(parsed ? unknown_operation(c) : parsed.error(), id);
+        if (!extension) {
+            if (c.resolve_target(view) == nullptr) {
+                // Framing faults (method, content type, prefix, operation)
+                // and body limits are the codec's to word.
+                auto parsed = c.parse(view);
+                return c.respond(parsed ? unknown_operation(c) : parsed.error(), id);
+            }
         }
-
         sigv4::service_rules rules;
         rules.service = "dynamodb";
         rules.protocol = sigv4::error_protocol::json;
@@ -500,10 +522,54 @@ public:
             rules.regions = {_config.region};
         }
         const sigv4::request sreq{req.method, req.path, req.query, req.headers, req.body};
-        const auto who = _authorizer.authenticate(sreq, rules);
+        auto who = _authorizer.authenticate(sreq, rules);
         if (!who) {
             return c.respond(auth_error(who.error()), id);
         }
+        if (check_body && !extension) {
+            if (auto parsed = c.parse(view); !parsed) {
+                return c.respond(parsed.error(), id);
+            }
+        }
+        return authenticated_call{
+            .request_id = std::move(id), .principal = std::move(*who), .request = req};
+    }
+
+    /// InternalServerError for `call`, worded as its service words it: what
+    /// a gateway answers when the front end it handed the call to may have
+    /// run it but sent no answer, which every DynamoDB client retries.
+    [[nodiscard]] auto internal_error(const authenticated_call& call) const
+        -> aws_json::http_response {
+        const auto& c = codec_for(detail::header_value(call.request, "x-amz-target"));
+        aws_json::error e;
+        e.status = 500;
+        e.type = c.options().style.internal_type;
+        e.message = "Internal server error";
+        return c.respond(e, call.request_id);
+    }
+
+    /// The front end's half (task 5): authorization, then the handler, for
+    /// a call `authenticate` made. The principal is taken as given.
+    [[nodiscard]] auto execute(const authenticated_call& call) -> aws_json::http_response {
+        const auto& req = call.request;
+        const auto& id = call.request_id;
+        if (req.path == k_insights_report_path && _report) {
+            return report(req, id, call.principal);
+        }
+        if (req.path == k_replication_path && _replication) {
+            return replicate(req, id, call.principal);
+        }
+        const auto target = detail::header_value(req, "x-amz-target");
+        const auto content_type = detail::header_value(req, "content-type");
+        const aws_json::http_request_view view{req.method, req.path, content_type, target,
+                                               req.body};
+        const aws_json::codec& c = codec_for(target);
+        const auto* op = c.resolve_target(view);
+        if (op == nullptr) {
+            auto parsed = c.parse(view);
+            return c.respond(parsed ? unknown_operation(c) : parsed.error(), id);
+        }
+        const auto* who = &call.principal;
 
         const auto h = _handlers.find(std::string(op->name));
         if (h == _handlers.end()) {
@@ -579,20 +645,11 @@ private:
     }
     /// The Contributor Insights report: SigV4, then the read action on the
     /// table or index, then the handler.
-    [[nodiscard]] auto report(const front_end_request& req) -> aws_json::http_response {
+    [[nodiscard]] auto report(const front_end_request& req, const std::string& id,
+                              const aws_auth::principal_context& principal)
+        -> aws_json::http_response {
         const aws_json::codec& c = _dynamodb;
-        auto id = c.new_request_id();
-        sigv4::service_rules rules;
-        rules.service = "dynamodb";
-        rules.protocol = sigv4::error_protocol::json;
-        if (!_config.region.empty()) {
-            rules.regions = {_config.region};
-        }
-        const sigv4::request sreq{req.method, req.path, req.query, req.headers, req.body};
-        const auto who = _authorizer.authenticate(sreq, rules);
-        if (!who) {
-            return c.respond(auth_error(who.error()), id);
-        }
+        const auto* who = &principal;
         if (req.method != "GET") {
             return c.respond(validation_error("The report is read with GET"), id);
         }
@@ -645,20 +702,11 @@ private:
 
     /// A peer's replication call: SigV4, then the action its `Action`
     /// names on the table, then the handler.
-    [[nodiscard]] auto replicate(const front_end_request& req) -> aws_json::http_response {
+    [[nodiscard]] auto replicate(const front_end_request& req, const std::string& id,
+                                 const aws_auth::principal_context& principal)
+        -> aws_json::http_response {
         const aws_json::codec& c = _dynamodb;
-        auto id = c.new_request_id();
-        sigv4::service_rules rules;
-        rules.service = "dynamodb";
-        rules.protocol = sigv4::error_protocol::json;
-        if (!_config.region.empty()) {
-            rules.regions = {_config.region};
-        }
-        const sigv4::request sreq{req.method, req.path, req.query, req.headers, req.body};
-        const auto who = _authorizer.authenticate(sreq, rules);
-        if (!who) {
-            return c.respond(auth_error(who.error()), id);
-        }
+        const auto* who = &principal;
         if (req.method != "POST") {
             return c.respond(validation_error("Replication calls are POSTed"), id);
         }
@@ -736,6 +784,13 @@ private:
     aws_json::codec _streams;
     std::map<std::string, front_end_handler, std::less<>> _handlers;
     std::set<std::string, std::less<>> _actions;
+
+    /// The Streams codec for a Streams target, else DynamoDB's.
+    [[nodiscard]] auto codec_for(std::string_view target) const -> const aws_json::codec& {
+        const auto dot = target.rfind('.');
+        const auto prefix = dot == std::string_view::npos ? target : target.substr(0, dot);
+        return prefix == k_streams_target_prefix ? _streams : _dynamodb;
+    }
 
     [[nodiscard]] static auto codec_options(const front_end_config& cfg)
         -> aws_json::codec_options {
