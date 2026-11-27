@@ -252,47 +252,14 @@ public:
         if (!parsed) {
             return parsed.error();
         }
-        const auto& c = *parsed;
-        if (c.security_token.has_value() || c.access_key_id.starts_with("ASIA")) {
-            return authenticate_session(c, rules, now);
+        auto r = resolve_at(*parsed, rules.protocol, now);
+        if (!r) {
+            return r.error();
         }
-        std::optional<aws_auth::principal_context> who;
-        std::optional<std::string> secret;
-        _state([&](const iam_state_machine& sm) {
-            const auto [acct, key] = sm.access_key(c.access_key_id);
-            if (acct == nullptr || key == nullptr || !key->active) {
-                return;
-            }
-            secret = open_secret(_kek(sm.kek_salt()), key->sealed_secret, key->id);
-            aws_auth::principal_context p;
-            p.account = acct->id;
-            p.access_key_id = key->id;
-            if (key->owner.empty()) {
-                p.type = aws_auth::principal_type::root;
-                p.arn = "arn:" + sm.config().partition + ":iam::" + acct->id + ":root";
-                p.userid = acct->id;
-            } else {
-                const auto* u = sm.user(acct->id, key->owner);
-                if (u == nullptr) {
-                    return;
-                }
-                p.type = aws_auth::principal_type::user;
-                p.arn = sm.arn(acct->id, "user", u->path, u->name);
-                p.userid = u->id;
-                p.username = u->name;
-                p.tags.assign(u->tags.begin(), u->tags.end());
-            }
-            who = std::move(p);
-        });
-        if (!who || !secret) {
-            return sigv4::invalid_client_token_id(rules.protocol);
-        }
-        const auto key = _keys.get(c.access_key_id, *secret, c.scope);
-        OPENSSL_cleanse(secret->data(), secret->size());
-        if (!sigv4::verify(c, key)) {
+        if (!sigv4::verify(*parsed, r->key)) {
             return sigv4::signature_mismatch(rules.protocol);
         }
-        return std::move(*who);
+        return r->who;
     }
 
     /// Temporary credentials (design Component 9): the session travels in
@@ -301,26 +268,26 @@ public:
                                             const sigv4::service_rules& rules,
                                             std::chrono::sys_seconds now)
         -> aws_auth::authn_result {
-        if (!c.security_token || !c.access_key_id.starts_with("ASIA")) {
-            return sigv4::invalid_client_token_id(rules.protocol);
+        auto r = resolve_session(c, rules.protocol, now);
+        if (!r) {
+            return r.error();
         }
-        std::vector<sts::sts_key> keys;
-        _state([&](const iam_state_machine& sm) { keys = sts::keys_of(sm, _kek(sm.kek_salt())); });
-        const auto opened = sts::open(*c.security_token, keys, now.time_since_epoch().count());
-        if (!opened.has_value()) {
-            return opened.error() == sts::token_error::expired
-                       ? sigv4::expired_token(rules.protocol)
-                       : sigv4::invalid_client_token_id(rules.protocol);
-        }
-        const auto& s = opened.value();
-        if (s.access_key_id != c.access_key_id) {
-            return sigv4::invalid_client_token_id(rules.protocol);
-        }
-        const auto key = _keys.get(c.access_key_id, s.secret_access_key, c.scope);
-        if (!sigv4::verify(c, key)) {
+        if (!sigv4::verify(c, r->key)) {
             return sigv4::signature_mismatch(rules.protocol);
         }
-        return sts::principal_of(s);
+        return r->who;
+    }
+
+    /// The claim's principal and its signing key, without checking the
+    /// signature (`aws_claim_resolver`): for streaming upload chunks and S3
+    /// POST policies, which the front end verifies itself.
+    [[nodiscard]] auto resolve(const sigv4::claim& c, sigv4::error_protocol protocol)
+        -> aws_auth::resolve_result {
+        if (stale()) {
+            return sigv4::aws_error{std::string(k_service_unavailable),
+                                    "The IAM state on this node is stale; retry shortly.", 503};
+        }
+        return resolve_at(c, protocol, std::chrono::floor<std::chrono::seconds>(_clock()));
     }
 
     /// Requirement 7.1-7.2: whether `who` may do `r`.
@@ -509,6 +476,72 @@ public:
         return out;
     }
 
+    /// An unsigned request (`aws_anonymous_authorizer`): no identity
+    /// policies, so only `r.resource_policy` granting anyone can allow it.
+    /// `aws:PrincipalType` is `Anonymous`.
+    [[nodiscard]] auto authorize_anonymous(const aws_auth::authz_request& r)
+        -> aws_auth::authz_decision {
+        aws_auth::principal_context audit_who;
+        audit_who.arn = "anonymous";
+        aws_auth::authz_decision out;
+        if (stale()) {
+            out.reason = "the IAM replica is stale";
+            record(audit_who, r, out);
+            return out;
+        }
+        if (_registry->find(r.action) == nullptr) {
+            out.reason = "the action is not registered by any service";
+            record(audit_who, r, out);
+            return out;
+        }
+        evaluation_request req;
+        req.who.kind = principal_kind::anonymous;
+        req.action = r.action;
+        req.resource = r.resource;
+        req.resource_account = r.resource_account;
+        req.resource_kind = resource_policy_kind::ordinary;
+        std::shared_ptr<const policy_document> doc;
+        if (r.resource_policy) {
+            try {
+                doc = std::make_shared<const policy_document>(parse_policy(
+                    *r.resource_policy, policy_type::resource,
+                    {.max_size = std::max<std::size_t>(r.resource_policy->size(), 1)}));
+                req.resource_policy = named_policy{"resource", doc.get()};
+            } catch (const policy_error&) {
+                // An unreadable resource policy grants nothing.
+            }
+        }
+        request_facts f;
+        f.now = _clock();
+        f.secure_transport = r.secure_transport;
+        f.source_ip = r.source_ip;
+        f.user_agent = r.user_agent;
+        f.requested_region = r.region;
+        f.principal_type = "Anonymous";
+        f.request_tags = r.request_tags;
+        f.resource_tags = r.resource_tags;
+        f.resource_account = r.resource_account;
+        auto ctx = global_condition_keys(f);
+        for (const auto& [key, values] : r.keys) {
+            if (values.size() == 1) {
+                ctx.set(key, values.front());
+            } else {
+                ctx.set_multi(key, values);
+            }
+        }
+        req.context = std::move(ctx);
+        const auto d = evaluate(req);
+        out.allowed = d.allowed();
+        out.explicit_deny = d.result == decision::outcome::explicit_deny;
+        if (d.deciding) {
+            out.policy = d.deciding->policy;
+            out.sid = d.deciding->sid;
+        }
+        out.reason = d.reason;
+        record(audit_who, r, out);
+        return out;
+    }
+
     /// Drop the signing keys derived for a key whose secret or status
     /// changed (the replica's apply loop calls this).
     void forget_key(std::string_view access_key_id) { _keys.invalidate(access_key_id); }
@@ -517,6 +550,77 @@ public:
 
 private:
     [[nodiscard]] auto stale() const -> bool { return _fresh && !_fresh(); }
+
+    /// A long-term key's owner (root or user) and signing key, or a
+    /// session's.
+    [[nodiscard]] auto resolve_at(const sigv4::claim& c, sigv4::error_protocol protocol,
+                                  std::chrono::sys_seconds now) -> aws_auth::resolve_result {
+        if (c.security_token.has_value() || c.access_key_id.starts_with("ASIA")) {
+            return resolve_session(c, protocol, now);
+        }
+        std::optional<aws_auth::principal_context> who;
+        std::optional<std::string> secret;
+        _state([&](const iam_state_machine& sm) {
+            const auto [acct, key] = sm.access_key(c.access_key_id);
+            if (acct == nullptr || key == nullptr || !key->active) {
+                return;
+            }
+            secret = open_secret(_kek(sm.kek_salt()), key->sealed_secret, key->id);
+            aws_auth::principal_context p;
+            p.account = acct->id;
+            p.access_key_id = key->id;
+            if (key->owner.empty()) {
+                p.type = aws_auth::principal_type::root;
+                p.arn = "arn:" + sm.config().partition + ":iam::" + acct->id + ":root";
+                p.userid = acct->id;
+            } else {
+                const auto* u = sm.user(acct->id, key->owner);
+                if (u == nullptr) {
+                    return;
+                }
+                p.type = aws_auth::principal_type::user;
+                p.arn = sm.arn(acct->id, "user", u->path, u->name);
+                p.userid = u->id;
+                p.username = u->name;
+                p.tags.assign(u->tags.begin(), u->tags.end());
+            }
+            who = std::move(p);
+        });
+        if (!who || !secret) {
+            if (secret) {
+                OPENSSL_cleanse(secret->data(), secret->size());
+            }
+            return sigv4::invalid_client_token_id(protocol);
+        }
+        aws_auth::resolved_claim out;
+        out.key = _keys.get(c.access_key_id, *secret, c.scope);
+        OPENSSL_cleanse(secret->data(), secret->size());
+        out.who = std::move(*who);
+        return out;
+    }
+
+    [[nodiscard]] auto resolve_session(const sigv4::claim& c, sigv4::error_protocol protocol,
+                                       std::chrono::sys_seconds now) -> aws_auth::resolve_result {
+        if (!c.security_token || !c.access_key_id.starts_with("ASIA")) {
+            return sigv4::invalid_client_token_id(protocol);
+        }
+        std::vector<sts::sts_key> keys;
+        _state([&](const iam_state_machine& sm) { keys = sts::keys_of(sm, _kek(sm.kek_salt())); });
+        const auto opened = sts::open(*c.security_token, keys, now.time_since_epoch().count());
+        if (!opened.has_value()) {
+            return opened.error() == sts::token_error::expired
+                       ? sigv4::expired_token(protocol)
+                       : sigv4::invalid_client_token_id(protocol);
+        }
+        const auto& session = opened.value();
+        if (session.access_key_id != c.access_key_id) {
+            return sigv4::invalid_client_token_id(protocol);
+        }
+        aws_auth::resolved_claim out;
+        out.key = _keys.get(c.access_key_id, session.secret_access_key, c.scope);
+        out.who = sts::principal_of(session);
+        return out;
+    }
 
     [[nodiscard]] auto context_for(
         const aws_auth::principal_context& who, const aws_auth::authz_request& r,
@@ -599,5 +703,7 @@ private:
 };
 
 static_assert(aws_auth::aws_request_authorizer<iam_authorizer>);
+static_assert(aws_auth::aws_claim_resolver<iam_authorizer>);
+static_assert(aws_auth::aws_anonymous_authorizer<iam_authorizer>);
 
 }  // namespace kythira::iam

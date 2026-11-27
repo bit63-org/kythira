@@ -288,6 +288,31 @@ BOOST_AUTO_TEST_CASE(inv_key_4_unknown_inactive_deleted_and_temporary_keys_are_i
     BOOST_TEST(f.authz.authenticate(good, k_iam_rules).error().code == "InvalidClientTokenId");
 }
 
+// aws_claim_resolver: the claim's owner and the key that verifies it,
+// with the errors authenticate() gives for the same key.
+BOOST_AUTO_TEST_CASE(resolve_gives_the_owner_and_the_signing_key) {
+    fixture f;
+    f.run(iam_command::create_user, {{"name", "alice"}, {"id", "AIDAALICE00000000001"}});
+    const auto k = f.key_for("alice");
+    const auto req = signed_request(k.key_id, k.secret, k_list_users, f.clock);
+    const auto parsed =
+        sigv4::parse(req, k_iam_rules, std::chrono::floor<std::chrono::seconds>(f.clock));
+    BOOST_TEST_REQUIRE(parsed.has_value());
+    const auto r = f.authz.resolve(*parsed, sigv4::error_protocol::query);
+    BOOST_TEST_REQUIRE(r.has_value(), r.error().message);
+    BOOST_TEST(r->who.arn == "arn:aws:iam::111122223333:user/alice");
+    BOOST_TEST(sigv4::verify(*parsed, r->key));
+    BOOST_TEST((r->key == sigv4::derive_signing_key(k.secret, parsed->scope)));
+
+    auto unknown = *parsed;
+    unknown.access_key_id = "AKIAUNKNOWNFIXTURE01";
+    BOOST_TEST(f.authz.resolve(unknown, sigv4::error_protocol::s3).error().code ==
+               "InvalidAccessKeyId");
+    f.run(iam_command::update_access_key, {{"key_id", k.key_id}, {"status", "Inactive"}});
+    BOOST_TEST(f.authz.resolve(*parsed, sigv4::error_protocol::query).error().code ==
+               "InvalidClientTokenId");
+}
+
 BOOST_AUTO_TEST_SUITE_END()
 
 BOOST_AUTO_TEST_SUITE(authorization)
@@ -341,6 +366,28 @@ BOOST_AUTO_TEST_CASE(an_unregistered_action_is_denied_whatever_the_policy) {
     const auto d = f.authz.authorize(root, {.action = "kinesis:PutRecord"});
     BOOST_TEST(!d.allowed);
     BOOST_TEST(d.reason == "the action is not registered by any service");
+}
+
+// aws_anonymous_authorizer: only a resource policy granting anyone allows
+// an unsigned request, and an unregistered action is still refused.
+BOOST_AUTO_TEST_CASE(anonymous_requests_need_a_public_resource_policy) {
+    fixture f;
+    aws_auth::authz_request r;
+    r.action = "s3:GetObject";
+    r.resource = "arn:aws:s3:::public/key";
+    r.resource_account = std::string(k_account);
+    BOOST_TEST(!f.authz.authorize_anonymous(r).allowed);
+    r.resource_policy =
+        R"({"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"AWS":"*"},)"
+        R"("Action":"s3:GetObject","Resource":"arn:aws:s3:::public/*"}]})";
+    BOOST_TEST(f.authz.authorize_anonymous(r).allowed);
+    r.resource_policy =
+        R"({"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"AWS":)"
+        R"("111122223333"},"Action":"s3:GetObject","Resource":"arn:aws:s3:::public/*"}]})";
+    BOOST_TEST(!f.authz.authorize_anonymous(r).allowed);
+    r.action = "kinesis:PutRecord";
+    BOOST_TEST(f.authz.authorize_anonymous(r).reason ==
+               "the action is not registered by any service");
 }
 
 BOOST_AUTO_TEST_CASE(role_sessions_use_the_role_and_its_session_policies) {

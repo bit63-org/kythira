@@ -8,7 +8,7 @@ Reads services/s3/model/s3-2006-03-01.json and writes
 services/s3/include/kythira/s3/model/operations.hpp: one entry per
 operation, sorted by name, with what the REST-XML codec (task 3) routes and
 frames by: the HTTP method, the request URI template with its literal query
-keys, the success status, whether the request or response body is a
+keys, the required query parameters and headers, the success status, whether the request or response body is a
 streaming payload, and whether the request needs a checksum. The header is
 checked in so that a model upgrade shows its effect in the pull request's
 diff (.kiro/specs/s3-compatible-storage/ Requirement 2.3).
@@ -63,6 +63,23 @@ def checksum_required(op: dict) -> bool:
     return bool(op.get("httpChecksum", {}).get("requestChecksumRequired"))
 
 
+def required_members(model: dict, shape_name: str | None, location: str) -> str:
+    """The wire names of the input's required members bound to `location`
+    (querystring or header), sorted and comma-separated. The router needs
+    them where operations share a method and path: UploadPart is PutObject
+    with `partNumber` and `uploadId`, CopyObject is PutObject with
+    `x-amz-copy-source`."""
+    if not shape_name:
+        return ""
+    shape = model["shapes"][shape_name]
+    names = []
+    for member_name in shape.get("required", []):
+        member = shape["members"][member_name]
+        if member.get("location") == location:
+            names.append(member.get("locationName", member_name))
+    return ",".join(sorted(names, key=str.lower))
+
+
 def cxx_bool(value: bool) -> str:
     return "true" if value else "false"
 
@@ -103,6 +120,11 @@ def render(model: dict) -> str:
         "    bool _checksum_required = false;",
         "    /// Deprecated in the model in favour of a newer operation.",
         "    bool _deprecated = false;",
+        "    /// Required query parameters and headers, by wire name, sorted and",
+        "    /// comma-separated: what tells apart operations on one method and",
+        "    /// path (`partNumber,uploadId` for UploadPart).",
+        "    std::string_view _required_query;",
+        "    std::string_view _required_headers;",
         "};",
         "",
         f'inline constexpr std::string_view botocore_version = "{BOTOCORE_VERSION}";',
@@ -129,6 +151,8 @@ def render(model: dict) -> str:
             cxx_bool(event_stream_output(model, output_shape)),
             cxx_bool(checksum_required(op)),
             cxx_bool(bool(op.get("deprecated"))),
+            f'"{required_members(model, input_shape, "querystring")}"',
+            f'"{required_members(model, input_shape, "header")}"',
         ]
         lines.append(f"    {{{', '.join(fields)}}},")
     lines += ["}};", "// clang-format on", "", "}  // namespace kythira::s3::model", ""]

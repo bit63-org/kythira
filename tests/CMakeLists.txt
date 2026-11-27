@@ -882,6 +882,30 @@ set_tests_properties(segment_store_move_test PROPERTIES
 # placement groups preferred, room first, epochs on replacement. Header-only.
 add_raft_completion_test(segment_volume_placement_test segment_volume_placement_test.cpp)
 
+# The content-addressed chunk store and its pack files
+# (.kiro/specs/disk-backed-build-cache/ task 2), core since
+# .kiro/specs/s3-compatible-storage/ task 2 because the build cache and the
+# S3 service both keep their bytes in it. Registered unconditionally: the
+# store needs only OpenSSL. The crash and write-failure cases need libfiu's
+# control API; without it they compile away and the rest still run.
+add_executable(chunk_store_test chunk_store_test.cpp)
+target_link_libraries(chunk_store_test PRIVATE
+    Boost::unit_test_framework
+    OpenSSL::Crypto
+    Threads::Threads
+)
+target_compile_features(chunk_store_test PRIVATE cxx_std_23)
+add_test(NAME chunk_store_test COMMAND chunk_store_test)
+set_tests_properties(chunk_store_test PROPERTIES
+    TIMEOUT 600
+    LABELS "unit;persistence;cache;s3"
+)
+if(FIU_FOUND)
+    target_compile_definitions(chunk_store_test PRIVATE FIU_ENABLE)
+    target_link_libraries(chunk_store_test PRIVATE ${FIU_LDFLAGS})
+    target_include_directories(chunk_store_test PRIVATE ${FIU_INCLUDE_DIRS})
+endif()
+
 # Cloud key-object persistence: the generic engine and its conformance suite
 # (.kiro/specs/cloud-object-persistence/ tasks 1-2).
 #
@@ -5385,6 +5409,22 @@ set_tests_properties(aws_query_protocol_test PROPERTIES
     LABELS "unit;aws;iam"
 )
 
+# S3 spec task 3: the AWS REST-XML protocol codec (query strings,
+# addressing and bucket names, the router, the strict XML reader, error and
+# response documents). S3's own route table is checked against recorded
+# client traffic in services/s3/tests (s3_routing_test).
+add_executable(aws_rest_xml_protocol_test aws_rest_xml_protocol_test.cpp)
+target_link_libraries(aws_rest_xml_protocol_test PRIVATE
+    Boost::unit_test_framework
+    OpenSSL::Crypto
+)
+target_compile_features(aws_rest_xml_protocol_test PRIVATE cxx_std_23)
+add_test(NAME aws_rest_xml_protocol_test COMMAND aws_rest_xml_protocol_test)
+set_tests_properties(aws_rest_xml_protocol_test PROPERTIES
+    TIMEOUT 30
+    LABELS "unit;aws;s3"
+)
+
 # DynamoDB spec task 2: the AWS JSON protocol codec shared by the DynamoDB
 # and Kinesis modules (framing, the generated shape tables, AWS's two-pass
 # validation, the standard response headers, dispatch), on a fixture model.
@@ -5539,6 +5579,29 @@ if(TARGET certificate_authority)
     )
 else()
     message(STATUS "beast_https_server_test: skipped (requires certificate_authority)")
+endif()
+
+# Chunk reads and writes between nodes (chunk_service.hpp;
+# .kiro/specs/s3-compatible-storage/ task 2): the local access, the routes,
+# and the remote access over mutual TLS against a real listener, with
+# certificates from the test CA.
+if(TARGET certificate_authority)
+    add_executable(chunk_service_test chunk_service_test.cpp)
+    target_link_libraries(chunk_service_test PRIVATE
+        Boost::unit_test_framework
+        certificate_authority
+        OpenSSL::SSL
+        OpenSSL::Crypto
+        Threads::Threads
+    )
+    target_compile_features(chunk_service_test PRIVATE cxx_std_23)
+    add_test(NAME chunk_service_test COMMAND chunk_service_test)
+    set_tests_properties(chunk_service_test PROPERTIES
+        TIMEOUT 120
+        LABELS "unit;https;persistence;s3"
+    )
+else()
+    message(STATUS "chunk_service_test: skipped (requires certificate_authority)")
 endif()
 
 # HTTP/2 in the core HTTPS server (h2_server_session.hpp; Kinesis task 13):
