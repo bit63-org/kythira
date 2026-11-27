@@ -1,0 +1,2139 @@
+{
+ "client": "aws-sdk-js-v3-3.1166.0",
+ "requests": [
+  {
+   "operation": "DescribeRegions",
+   "method": "POST",
+   "path": "/",
+   "http_version": "HTTP/1.1",
+   "content_type": "application/x-www-form-urlencoded",
+   "content_type_header": "application/x-www-form-urlencoded",
+   "headers": [
+    [
+     "content-type",
+     "application/x-www-form-urlencoded"
+    ],
+    [
+     "content-length",
+     "64"
+    ],
+    [
+     "x-amz-user-agent",
+     "aws-sdk-js/3.1165.0"
+    ],
+    [
+     "user-agent",
+     "aws-sdk-js/3.1165.0 ua/2.1 os/linux#<kernel> lang/js md/nodejs#22.23.5 api/ec2#3.1165.0 m/E,N,g"
+    ],
+    [
+     "host",
+     "127.0.0.1:<port>"
+    ],
+    [
+     "amz-sdk-invocation-id",
+     "<uuid>"
+    ],
+    [
+     "amz-sdk-request",
+     "attempt=1; max=3"
+    ],
+    [
+     "x-amz-date",
+     "<amz-date>"
+    ],
+    [
+     "x-amz-content-sha256",
+     "<sha256-hex>"
+    ],
+    [
+     "authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/ec2/aws4_request, SignedHeaders=amz-sdk-invocation-id;amz-sdk-request;content-length;content-type;host;x-amz-content-sha256;x-amz-date;x-amz-user-agent, Signature=<hex>"
+    ],
+    [
+     "Connection",
+     "keep-alive"
+    ]
+   ],
+   "body_sha256": "5ecef2e1f9f2b88d050203c113392e51e0c8faedfdaec4dc31a10b41e370f6b3",
+   "form": [
+    [
+     "Action",
+     "DescribeRegions"
+    ],
+    [
+     "Version",
+     "2016-11-15"
+    ],
+    [
+     "RegionName.1",
+     "us-east-1"
+    ]
+   ],
+   "response_status": 200,
+   "response_code": null
+  },
+  {
+   "operation": "DescribeAvailabilityZones",
+   "method": "POST",
+   "path": "/",
+   "http_version": "HTTP/1.1",
+   "content_type": "application/x-www-form-urlencoded",
+   "content_type_header": "application/x-www-form-urlencoded",
+   "headers": [
+    [
+     "content-type",
+     "application/x-www-form-urlencoded"
+    ],
+    [
+     "content-length",
+     "98"
+    ],
+    [
+     "x-amz-user-agent",
+     "aws-sdk-js/3.1165.0"
+    ],
+    [
+     "user-agent",
+     "aws-sdk-js/3.1165.0 ua/2.1 os/linux#<kernel> lang/js md/nodejs#22.23.5 api/ec2#3.1165.0 m/E,N,g"
+    ],
+    [
+     "host",
+     "127.0.0.1:<port>"
+    ],
+    [
+     "amz-sdk-invocation-id",
+     "<uuid>"
+    ],
+    [
+     "amz-sdk-request",
+     "attempt=1; max=3"
+    ],
+    [
+     "x-amz-date",
+     "<amz-date>"
+    ],
+    [
+     "x-amz-content-sha256",
+     "<sha256-hex>"
+    ],
+    [
+     "authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/ec2/aws4_request, SignedHeaders=amz-sdk-invocation-id;amz-sdk-request;content-length;content-type;host;x-amz-content-sha256;x-amz-date;x-amz-user-agent, Signature=<hex>"
+    ],
+    [
+     "Connection",
+     "keep-alive"
+    ]
+   ],
+   "body_sha256": "33668f6328478254add341b587a7e3bc373485f478fd18129ebfa56b88a38994",
+   "form": [
+    [
+     "Action",
+     "DescribeAvailabilityZones"
+    ],
+    [
+     "Version",
+     "2016-11-15"
+    ],
+    [
+     "Filter.1.Name",
+     "state"
+    ],
+    [
+     "Filter.1.Value.1",
+     "available"
+    ]
+   ],
+   "response_status": 200,
+   "response_code": null
+  },
+  {
+   "operation": "CreateVpc",
+   "method": "POST",
+   "path": "/",
+   "http_version": "HTTP/1.1",
+   "content_type": "application/x-www-form-urlencoded",
+   "content_type_header": "application/x-www-form-urlencoded",
+   "headers": [
+    [
+     "content-type",
+     "application/x-www-form-urlencoded"
+    ],
+    [
+     "content-length",
+     "242"
+    ],
+    [
+     "x-amz-user-agent",
+     "aws-sdk-js/3.1165.0"
+    ],
+    [
+     "user-agent",
+     "aws-sdk-js/3.1165.0 ua/2.1 os/linux#<kernel> lang/js md/nodejs#22.23.5 api/ec2#3.1165.0 m/E,N,g"
+    ],
+    [
+     "host",
+     "127.0.0.1:<port>"
+    ],
+    [
+     "amz-sdk-invocation-id",
+     "<uuid>"
+    ],
+    [
+     "amz-sdk-request",
+     "attempt=1; max=3"
+    ],
+    [
+     "x-amz-date",
+     "<amz-date>"
+    ],
+    [
+     "x-amz-content-sha256",
+     "<sha256-hex>"
+    ],
+    [
+     "authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/ec2/aws4_request, SignedHeaders=amz-sdk-invocation-id;amz-sdk-request;content-length;content-type;host;x-amz-content-sha256;x-amz-date;x-amz-user-agent, Signature=<hex>"
+    ],
+    [
+     "Connection",
+     "keep-alive"
+    ]
+   ],
+   "body_sha256": "2fee623e093e3a805f496effd198f7ea7fea8e7ff2183595a81c150548180f7a",
+   "form": [
+    [
+     "Action",
+     "CreateVpc"
+    ],
+    [
+     "Version",
+     "2016-11-15"
+    ],
+    [
+     "CidrBlock",
+     "10.0.0.0/16"
+    ],
+    [
+     "TagSpecification.1.ResourceType",
+     "vpc"
+    ],
+    [
+     "TagSpecification.1.Tag.1.Key",
+     "Name"
+    ],
+    [
+     "TagSpecification.1.Tag.1.Value",
+     "evidence"
+    ],
+    [
+     "TagSpecification.1.Tag.2.Key",
+     "team"
+    ],
+    [
+     "TagSpecification.1.Tag.2.Value",
+     "kythira"
+    ]
+   ],
+   "response_status": 200,
+   "response_code": null
+  },
+  {
+   "operation": "CreateSubnet",
+   "method": "POST",
+   "path": "/",
+   "http_version": "HTTP/1.1",
+   "content_type": "application/x-www-form-urlencoded",
+   "content_type_header": "application/x-www-form-urlencoded",
+   "headers": [
+    [
+     "content-type",
+     "application/x-www-form-urlencoded"
+    ],
+    [
+     "content-length",
+     "118"
+    ],
+    [
+     "x-amz-user-agent",
+     "aws-sdk-js/3.1165.0"
+    ],
+    [
+     "user-agent",
+     "aws-sdk-js/3.1165.0 ua/2.1 os/linux#<kernel> lang/js md/nodejs#22.23.5 api/ec2#3.1165.0 m/E,N,g"
+    ],
+    [
+     "host",
+     "127.0.0.1:<port>"
+    ],
+    [
+     "amz-sdk-invocation-id",
+     "<uuid>"
+    ],
+    [
+     "amz-sdk-request",
+     "attempt=1; max=3"
+    ],
+    [
+     "x-amz-date",
+     "<amz-date>"
+    ],
+    [
+     "x-amz-content-sha256",
+     "<sha256-hex>"
+    ],
+    [
+     "authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/ec2/aws4_request, SignedHeaders=amz-sdk-invocation-id;amz-sdk-request;content-length;content-type;host;x-amz-content-sha256;x-amz-date;x-amz-user-agent, Signature=<hex>"
+    ],
+    [
+     "Connection",
+     "keep-alive"
+    ]
+   ],
+   "body_sha256": "b951d57e775d247d9eafa91dac3a213d8a7984398b5c06c1c9a3b6e9daefaf77",
+   "form": [
+    [
+     "Action",
+     "CreateSubnet"
+    ],
+    [
+     "Version",
+     "2016-11-15"
+    ],
+    [
+     "VpcId",
+     "vpc-00000000000000001"
+    ],
+    [
+     "AvailabilityZone",
+     "us-east-1a"
+    ],
+    [
+     "CidrBlock",
+     "10.0.1.0/24"
+    ]
+   ],
+   "response_status": 200,
+   "response_code": null
+  },
+  {
+   "operation": "DescribeVpcs",
+   "method": "POST",
+   "path": "/",
+   "http_version": "HTTP/1.1",
+   "content_type": "application/x-www-form-urlencoded",
+   "content_type_header": "application/x-www-form-urlencoded",
+   "headers": [
+    [
+     "content-type",
+     "application/x-www-form-urlencoded"
+    ],
+    [
+     "content-length",
+     "119"
+    ],
+    [
+     "x-amz-user-agent",
+     "aws-sdk-js/3.1165.0"
+    ],
+    [
+     "user-agent",
+     "aws-sdk-js/3.1165.0 ua/2.1 os/linux#<kernel> lang/js md/nodejs#22.23.5 api/ec2#3.1165.0 m/E,N,g"
+    ],
+    [
+     "host",
+     "127.0.0.1:<port>"
+    ],
+    [
+     "amz-sdk-invocation-id",
+     "<uuid>"
+    ],
+    [
+     "amz-sdk-request",
+     "attempt=1; max=3"
+    ],
+    [
+     "x-amz-date",
+     "<amz-date>"
+    ],
+    [
+     "x-amz-content-sha256",
+     "<sha256-hex>"
+    ],
+    [
+     "authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/ec2/aws4_request, SignedHeaders=amz-sdk-invocation-id;amz-sdk-request;content-length;content-type;host;x-amz-content-sha256;x-amz-date;x-amz-user-agent, Signature=<hex>"
+    ],
+    [
+     "Connection",
+     "keep-alive"
+    ]
+   ],
+   "body_sha256": "ea6a7bd73d0342088da3b8b138ef5643402f7064f2cbf597e0ac949851dfb228",
+   "form": [
+    [
+     "Action",
+     "DescribeVpcs"
+    ],
+    [
+     "Version",
+     "2016-11-15"
+    ],
+    [
+     "Filter.1.Name",
+     "tag:Name"
+    ],
+    [
+     "Filter.1.Value.1",
+     "evidence"
+    ],
+    [
+     "VpcId.1",
+     "vpc-00000000000000001"
+    ]
+   ],
+   "response_status": 200,
+   "response_code": null
+  },
+  {
+   "operation": "CreateVolume",
+   "method": "POST",
+   "path": "/",
+   "http_version": "HTTP/1.1",
+   "content_type": "application/x-www-form-urlencoded",
+   "content_type_header": "application/x-www-form-urlencoded",
+   "headers": [
+    [
+     "content-type",
+     "application/x-www-form-urlencoded"
+    ],
+    [
+     "content-length",
+     "251"
+    ],
+    [
+     "x-amz-user-agent",
+     "aws-sdk-js/3.1165.0"
+    ],
+    [
+     "user-agent",
+     "aws-sdk-js/3.1165.0 ua/2.1 os/linux#<kernel> lang/js md/nodejs#22.23.5 api/ec2#3.1165.0 m/E,N,g"
+    ],
+    [
+     "host",
+     "127.0.0.1:<port>"
+    ],
+    [
+     "amz-sdk-invocation-id",
+     "<uuid>"
+    ],
+    [
+     "amz-sdk-request",
+     "attempt=1; max=3"
+    ],
+    [
+     "x-amz-date",
+     "<amz-date>"
+    ],
+    [
+     "x-amz-content-sha256",
+     "<sha256-hex>"
+    ],
+    [
+     "authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/ec2/aws4_request, SignedHeaders=amz-sdk-invocation-id;amz-sdk-request;content-length;content-type;host;x-amz-content-sha256;x-amz-date;x-amz-user-agent, Signature=<hex>"
+    ],
+    [
+     "Connection",
+     "keep-alive"
+    ]
+   ],
+   "body_sha256": "4b3a1c94683d8a2c4a96f9f3b0142b899759fbcfaac7b81d22ea835d4d44567e",
+   "form": [
+    [
+     "Action",
+     "CreateVolume"
+    ],
+    [
+     "Version",
+     "2016-11-15"
+    ],
+    [
+     "AvailabilityZone",
+     "us-east-1a"
+    ],
+    [
+     "Encrypted",
+     "true"
+    ],
+    [
+     "Size",
+     "8"
+    ],
+    [
+     "VolumeType",
+     "gp3"
+    ],
+    [
+     "TagSpecification.1.ResourceType",
+     "volume"
+    ],
+    [
+     "TagSpecification.1.Tag.1.Key",
+     "Name"
+    ],
+    [
+     "TagSpecification.1.Tag.1.Value",
+     "evidence-data"
+    ],
+    [
+     "ClientToken",
+     "evidence-volume-1"
+    ]
+   ],
+   "response_status": 200,
+   "response_code": null
+  },
+  {
+   "operation": "CreateVolume",
+   "method": "POST",
+   "path": "/",
+   "http_version": "HTTP/1.1",
+   "content_type": "application/x-www-form-urlencoded",
+   "content_type_header": "application/x-www-form-urlencoded",
+   "headers": [
+    [
+     "content-type",
+     "application/x-www-form-urlencoded"
+    ],
+    [
+     "content-length",
+     "163"
+    ],
+    [
+     "x-amz-user-agent",
+     "aws-sdk-js/3.1165.0"
+    ],
+    [
+     "user-agent",
+     "aws-sdk-js/3.1165.0 ua/2.1 os/linux#<kernel> lang/js md/nodejs#22.23.5 api/ec2#3.1165.0 m/E,N,g"
+    ],
+    [
+     "host",
+     "127.0.0.1:<port>"
+    ],
+    [
+     "amz-sdk-invocation-id",
+     "<uuid>"
+    ],
+    [
+     "amz-sdk-request",
+     "attempt=1; max=3"
+    ],
+    [
+     "x-amz-date",
+     "<amz-date>"
+    ],
+    [
+     "x-amz-content-sha256",
+     "<sha256-hex>"
+    ],
+    [
+     "authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/ec2/aws4_request, SignedHeaders=amz-sdk-invocation-id;amz-sdk-request;content-length;content-type;host;x-amz-content-sha256;x-amz-date;x-amz-user-agent, Signature=<hex>"
+    ],
+    [
+     "Connection",
+     "keep-alive"
+    ]
+   ],
+   "body_sha256": "<varies>",
+   "form": [
+    [
+     "Action",
+     "CreateVolume"
+    ],
+    [
+     "Version",
+     "2016-11-15"
+    ],
+    [
+     "AvailabilityZone",
+     "us-east-1a"
+    ],
+    [
+     "Iops",
+     "3000"
+    ],
+    [
+     "Size",
+     "16"
+    ],
+    [
+     "VolumeType",
+     "gp3"
+    ],
+    [
+     "Throughput",
+     "125"
+    ],
+    [
+     "ClientToken",
+     "<uuid>"
+    ]
+   ],
+   "response_status": 200,
+   "response_code": null
+  },
+  {
+   "operation": "DescribeVolumes",
+   "method": "POST",
+   "path": "/",
+   "http_version": "HTTP/1.1",
+   "content_type": "application/x-www-form-urlencoded",
+   "content_type_header": "application/x-www-form-urlencoded",
+   "headers": [
+    [
+     "content-type",
+     "application/x-www-form-urlencoded"
+    ],
+    [
+     "content-length",
+     "114"
+    ],
+    [
+     "x-amz-user-agent",
+     "aws-sdk-js/3.1165.0"
+    ],
+    [
+     "user-agent",
+     "aws-sdk-js/3.1165.0 ua/2.1 os/linux#<kernel> lang/js md/nodejs#22.23.5 api/ec2#3.1165.0 m/E,N,g"
+    ],
+    [
+     "host",
+     "127.0.0.1:<port>"
+    ],
+    [
+     "amz-sdk-invocation-id",
+     "<uuid>"
+    ],
+    [
+     "amz-sdk-request",
+     "attempt=1; max=3"
+    ],
+    [
+     "x-amz-date",
+     "<amz-date>"
+    ],
+    [
+     "x-amz-content-sha256",
+     "<sha256-hex>"
+    ],
+    [
+     "authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/ec2/aws4_request, SignedHeaders=amz-sdk-invocation-id;amz-sdk-request;content-length;content-type;host;x-amz-content-sha256;x-amz-date;x-amz-user-agent, Signature=<hex>"
+    ],
+    [
+     "Connection",
+     "keep-alive"
+    ]
+   ],
+   "body_sha256": "a78063b1cce9fba163f9ce62589de806fef9ae386c41ecea0631176c42a7adba",
+   "form": [
+    [
+     "Action",
+     "DescribeVolumes"
+    ],
+    [
+     "Version",
+     "2016-11-15"
+    ],
+    [
+     "Filter.1.Name",
+     "availability-zone"
+    ],
+    [
+     "Filter.1.Value.1",
+     "us-east-1a"
+    ],
+    [
+     "MaxResults",
+     "5"
+    ]
+   ],
+   "response_status": 200,
+   "response_code": null
+  },
+  {
+   "operation": "DescribeVolumes",
+   "method": "POST",
+   "path": "/",
+   "http_version": "HTTP/1.1",
+   "content_type": "application/x-www-form-urlencoded",
+   "content_type_header": "application/x-www-form-urlencoded",
+   "headers": [
+    [
+     "content-type",
+     "application/x-www-form-urlencoded"
+    ],
+    [
+     "content-length",
+     "140"
+    ],
+    [
+     "x-amz-user-agent",
+     "aws-sdk-js/3.1165.0"
+    ],
+    [
+     "user-agent",
+     "aws-sdk-js/3.1165.0 ua/2.1 os/linux#<kernel> lang/js md/nodejs#22.23.5 api/ec2#3.1165.0 m/E,N,g"
+    ],
+    [
+     "host",
+     "127.0.0.1:<port>"
+    ],
+    [
+     "amz-sdk-invocation-id",
+     "<uuid>"
+    ],
+    [
+     "amz-sdk-request",
+     "attempt=1; max=3"
+    ],
+    [
+     "x-amz-date",
+     "<amz-date>"
+    ],
+    [
+     "x-amz-content-sha256",
+     "<sha256-hex>"
+    ],
+    [
+     "authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/ec2/aws4_request, SignedHeaders=amz-sdk-invocation-id;amz-sdk-request;content-length;content-type;host;x-amz-content-sha256;x-amz-date;x-amz-user-agent, Signature=<hex>"
+    ],
+    [
+     "Connection",
+     "keep-alive"
+    ]
+   ],
+   "body_sha256": "fa104b2b8b5110efd2fd0e0d75a91a077d30c1e3a28b2f369015b14fadbe5d75",
+   "form": [
+    [
+     "Action",
+     "DescribeVolumes"
+    ],
+    [
+     "Version",
+     "2016-11-15"
+    ],
+    [
+     "Filter.1.Name",
+     "availability-zone"
+    ],
+    [
+     "Filter.1.Value.1",
+     "us-east-1a"
+    ],
+    [
+     "NextToken",
+     "evidence-page-2"
+    ],
+    [
+     "MaxResults",
+     "5"
+    ]
+   ],
+   "response_status": 200,
+   "response_code": null
+  },
+  {
+   "operation": "RunInstances",
+   "method": "POST",
+   "path": "/",
+   "http_version": "HTTP/1.1",
+   "content_type": "application/x-www-form-urlencoded",
+   "content_type_header": "application/x-www-form-urlencoded",
+   "headers": [
+    [
+     "content-type",
+     "application/x-www-form-urlencoded"
+    ],
+    [
+     "content-length",
+     "707"
+    ],
+    [
+     "x-amz-user-agent",
+     "aws-sdk-js/3.1165.0"
+    ],
+    [
+     "user-agent",
+     "aws-sdk-js/3.1165.0 ua/2.1 os/linux#<kernel> lang/js md/nodejs#22.23.5 api/ec2#3.1165.0 m/E,N,g"
+    ],
+    [
+     "host",
+     "127.0.0.1:<port>"
+    ],
+    [
+     "amz-sdk-invocation-id",
+     "<uuid>"
+    ],
+    [
+     "amz-sdk-request",
+     "attempt=1; max=3"
+    ],
+    [
+     "x-amz-date",
+     "<amz-date>"
+    ],
+    [
+     "x-amz-content-sha256",
+     "<sha256-hex>"
+    ],
+    [
+     "authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/ec2/aws4_request, SignedHeaders=amz-sdk-invocation-id;amz-sdk-request;content-length;content-type;host;x-amz-content-sha256;x-amz-date;x-amz-user-agent, Signature=<hex>"
+    ],
+    [
+     "Connection",
+     "keep-alive"
+    ]
+   ],
+   "body_sha256": "200192e4dd3650cf75036ba7d110db6a860f9c962c09630f47ab95049290f8a8",
+   "form": [
+    [
+     "Action",
+     "RunInstances"
+    ],
+    [
+     "Version",
+     "2016-11-15"
+    ],
+    [
+     "MaxCount",
+     "2"
+    ],
+    [
+     "MinCount",
+     "1"
+    ],
+    [
+     "BlockDeviceMapping.1.Ebs.DeleteOnTermination",
+     "true"
+    ],
+    [
+     "BlockDeviceMapping.1.Ebs.VolumeSize",
+     "8"
+    ],
+    [
+     "BlockDeviceMapping.1.Ebs.VolumeType",
+     "gp3"
+    ],
+    [
+     "BlockDeviceMapping.1.DeviceName",
+     "/dev/xvda"
+    ],
+    [
+     "BlockDeviceMapping.2.DeviceName",
+     "/dev/sdb"
+    ],
+    [
+     "BlockDeviceMapping.2.VirtualName",
+     "ephemeral0"
+    ],
+    [
+     "ImageId",
+     "ami-0000000000000a001"
+    ],
+    [
+     "InstanceType",
+     "t3.micro"
+    ],
+    [
+     "SubnetId",
+     "subnet-00000000000000003"
+    ],
+    [
+     "UserData",
+     "IyEvYmluL3NoCmVjaG8gaGVsbG8K"
+    ],
+    [
+     "TagSpecification.1.ResourceType",
+     "instance"
+    ],
+    [
+     "TagSpecification.1.Tag.1.Key",
+     "Name"
+    ],
+    [
+     "TagSpecification.1.Tag.1.Value",
+     "evidence"
+    ],
+    [
+     "TagSpecification.2.ResourceType",
+     "volume"
+    ],
+    [
+     "TagSpecification.2.Tag.1.Key",
+     "Name"
+    ],
+    [
+     "TagSpecification.2.Tag.1.Value",
+     "evidence-root"
+    ],
+    [
+     "ClientToken",
+     "evidence-run-1"
+    ]
+   ],
+   "response_status": 200,
+   "response_code": null
+  },
+  {
+   "operation": "RunInstances",
+   "method": "POST",
+   "path": "/",
+   "http_version": "HTTP/1.1",
+   "content_type": "application/x-www-form-urlencoded",
+   "content_type_header": "application/x-www-form-urlencoded",
+   "headers": [
+    [
+     "content-type",
+     "application/x-www-form-urlencoded"
+    ],
+    [
+     "content-length",
+     "741"
+    ],
+    [
+     "x-amz-user-agent",
+     "aws-sdk-js/3.1165.0"
+    ],
+    [
+     "user-agent",
+     "aws-sdk-js/3.1165.0 ua/2.1 os/linux#<kernel> lang/js md/nodejs#22.23.5 api/ec2#3.1165.0 m/E,N,g"
+    ],
+    [
+     "host",
+     "127.0.0.1:<port>"
+    ],
+    [
+     "amz-sdk-invocation-id",
+     "<uuid>"
+    ],
+    [
+     "amz-sdk-request",
+     "attempt=1; max=3"
+    ],
+    [
+     "x-amz-date",
+     "<amz-date>"
+    ],
+    [
+     "x-amz-content-sha256",
+     "<sha256-hex>"
+    ],
+    [
+     "authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/ec2/aws4_request, SignedHeaders=amz-sdk-invocation-id;amz-sdk-request;content-length;content-type;host;x-amz-content-sha256;x-amz-date;x-amz-user-agent, Signature=<hex>"
+    ],
+    [
+     "Connection",
+     "keep-alive"
+    ]
+   ],
+   "body_sha256": "<varies>",
+   "form": [
+    [
+     "Action",
+     "RunInstances"
+    ],
+    [
+     "Version",
+     "2016-11-15"
+    ],
+    [
+     "MaxCount",
+     "2"
+    ],
+    [
+     "MinCount",
+     "1"
+    ],
+    [
+     "BlockDeviceMapping.1.Ebs.DeleteOnTermination",
+     "true"
+    ],
+    [
+     "BlockDeviceMapping.1.Ebs.VolumeSize",
+     "8"
+    ],
+    [
+     "BlockDeviceMapping.1.Ebs.VolumeType",
+     "gp3"
+    ],
+    [
+     "BlockDeviceMapping.1.DeviceName",
+     "/dev/xvda"
+    ],
+    [
+     "BlockDeviceMapping.2.DeviceName",
+     "/dev/sdb"
+    ],
+    [
+     "BlockDeviceMapping.2.VirtualName",
+     "ephemeral0"
+    ],
+    [
+     "ImageId",
+     "ami-0000000000000a001"
+    ],
+    [
+     "InstanceType",
+     "t3.micro"
+    ],
+    [
+     "SubnetId",
+     "subnet-00000000000000003"
+    ],
+    [
+     "UserData",
+     "IyEvYmluL3NoCmVjaG8gaGVsbG8K"
+    ],
+    [
+     "TagSpecification.1.ResourceType",
+     "instance"
+    ],
+    [
+     "TagSpecification.1.Tag.1.Key",
+     "Name"
+    ],
+    [
+     "TagSpecification.1.Tag.1.Value",
+     "evidence"
+    ],
+    [
+     "TagSpecification.2.ResourceType",
+     "volume"
+    ],
+    [
+     "TagSpecification.2.Tag.1.Key",
+     "Name"
+    ],
+    [
+     "TagSpecification.2.Tag.1.Value",
+     "evidence-root"
+    ],
+    [
+     "DryRun",
+     "true"
+    ],
+    [
+     "ClientToken",
+     "<uuid>"
+    ]
+   ],
+   "response_status": 412,
+   "response_code": "DryRunOperation"
+  },
+  {
+   "operation": "DescribeInstances",
+   "method": "POST",
+   "path": "/",
+   "http_version": "HTTP/1.1",
+   "content_type": "application/x-www-form-urlencoded",
+   "content_type_header": "application/x-www-form-urlencoded",
+   "headers": [
+    [
+     "content-type",
+     "application/x-www-form-urlencoded"
+    ],
+    [
+     "content-length",
+     "193"
+    ],
+    [
+     "x-amz-user-agent",
+     "aws-sdk-js/3.1165.0"
+    ],
+    [
+     "user-agent",
+     "aws-sdk-js/3.1165.0 ua/2.1 os/linux#<kernel> lang/js md/nodejs#22.23.5 api/ec2#3.1165.0 m/E,N,g"
+    ],
+    [
+     "host",
+     "127.0.0.1:<port>"
+    ],
+    [
+     "amz-sdk-invocation-id",
+     "<uuid>"
+    ],
+    [
+     "amz-sdk-request",
+     "attempt=1; max=3"
+    ],
+    [
+     "x-amz-date",
+     "<amz-date>"
+    ],
+    [
+     "x-amz-content-sha256",
+     "<sha256-hex>"
+    ],
+    [
+     "authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/ec2/aws4_request, SignedHeaders=amz-sdk-invocation-id;amz-sdk-request;content-length;content-type;host;x-amz-content-sha256;x-amz-date;x-amz-user-agent, Signature=<hex>"
+    ],
+    [
+     "Connection",
+     "keep-alive"
+    ]
+   ],
+   "body_sha256": "5df532493bb41358f9a815874f28257c45a566fd881ff6e028f7c701ea7ead73",
+   "form": [
+    [
+     "Action",
+     "DescribeInstances"
+    ],
+    [
+     "Version",
+     "2016-11-15"
+    ],
+    [
+     "InstanceId.1",
+     "i-00000000000000007"
+    ],
+    [
+     "InstanceId.2",
+     "i-00000000000000008"
+    ],
+    [
+     "Filter.1.Name",
+     "instance-state-name"
+    ],
+    [
+     "Filter.1.Value.1",
+     "pending"
+    ],
+    [
+     "Filter.1.Value.2",
+     "running"
+    ]
+   ],
+   "response_status": 200,
+   "response_code": null
+  },
+  {
+   "operation": "CreateTags",
+   "method": "POST",
+   "path": "/",
+   "http_version": "HTTP/1.1",
+   "content_type": "application/x-www-form-urlencoded",
+   "content_type_header": "application/x-www-form-urlencoded",
+   "headers": [
+    [
+     "content-type",
+     "application/x-www-form-urlencoded"
+    ],
+    [
+     "content-length",
+     "156"
+    ],
+    [
+     "x-amz-user-agent",
+     "aws-sdk-js/3.1165.0"
+    ],
+    [
+     "user-agent",
+     "aws-sdk-js/3.1165.0 ua/2.1 os/linux#<kernel> lang/js md/nodejs#22.23.5 api/ec2#3.1165.0 m/E,N,g"
+    ],
+    [
+     "host",
+     "127.0.0.1:<port>"
+    ],
+    [
+     "amz-sdk-invocation-id",
+     "<uuid>"
+    ],
+    [
+     "amz-sdk-request",
+     "attempt=1; max=3"
+    ],
+    [
+     "x-amz-date",
+     "<amz-date>"
+    ],
+    [
+     "x-amz-content-sha256",
+     "<sha256-hex>"
+    ],
+    [
+     "authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/ec2/aws4_request, SignedHeaders=amz-sdk-invocation-id;amz-sdk-request;content-length;content-type;host;x-amz-content-sha256;x-amz-date;x-amz-user-agent, Signature=<hex>"
+    ],
+    [
+     "Connection",
+     "keep-alive"
+    ]
+   ],
+   "body_sha256": "1f74faf1a128d013e0fab4a3d70a3a18b6a83c411808eed1ce576df9e614dbee",
+   "form": [
+    [
+     "Action",
+     "CreateTags"
+    ],
+    [
+     "Version",
+     "2016-11-15"
+    ],
+    [
+     "ResourceId.1",
+     "i-00000000000000007"
+    ],
+    [
+     "ResourceId.2",
+     "vol-00000000000000004"
+    ],
+    [
+     "Tag.1.Key",
+     "stage"
+    ],
+    [
+     "Tag.1.Value",
+     "evidence"
+    ],
+    [
+     "Tag.2.Key",
+     "flag"
+    ]
+   ],
+   "response_status": 200,
+   "response_code": null
+  },
+  {
+   "operation": "DescribeTags",
+   "method": "POST",
+   "path": "/",
+   "http_version": "HTTP/1.1",
+   "content_type": "application/x-www-form-urlencoded",
+   "content_type_header": "application/x-www-form-urlencoded",
+   "headers": [
+    [
+     "content-type",
+     "application/x-www-form-urlencoded"
+    ],
+    [
+     "content-length",
+     "142"
+    ],
+    [
+     "x-amz-user-agent",
+     "aws-sdk-js/3.1165.0"
+    ],
+    [
+     "user-agent",
+     "aws-sdk-js/3.1165.0 ua/2.1 os/linux#<kernel> lang/js md/nodejs#22.23.5 api/ec2#3.1165.0 m/E,N,g"
+    ],
+    [
+     "host",
+     "127.0.0.1:<port>"
+    ],
+    [
+     "amz-sdk-invocation-id",
+     "<uuid>"
+    ],
+    [
+     "amz-sdk-request",
+     "attempt=1; max=3"
+    ],
+    [
+     "x-amz-date",
+     "<amz-date>"
+    ],
+    [
+     "x-amz-content-sha256",
+     "<sha256-hex>"
+    ],
+    [
+     "authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/ec2/aws4_request, SignedHeaders=amz-sdk-invocation-id;amz-sdk-request;content-length;content-type;host;x-amz-content-sha256;x-amz-date;x-amz-user-agent, Signature=<hex>"
+    ],
+    [
+     "Connection",
+     "keep-alive"
+    ]
+   ],
+   "body_sha256": "f6902360675b7db554ebad64d1f7696047eb6f5a515f3981150f9927ee106f25",
+   "form": [
+    [
+     "Action",
+     "DescribeTags"
+    ],
+    [
+     "Version",
+     "2016-11-15"
+    ],
+    [
+     "Filter.1.Name",
+     "resource-id"
+    ],
+    [
+     "Filter.1.Value.1",
+     "i-00000000000000007"
+    ],
+    [
+     "Filter.2.Name",
+     "key"
+    ],
+    [
+     "Filter.2.Value.1",
+     "stage"
+    ]
+   ],
+   "response_status": 200,
+   "response_code": null
+  },
+  {
+   "operation": "DeleteTags",
+   "method": "POST",
+   "path": "/",
+   "http_version": "HTTP/1.1",
+   "content_type": "application/x-www-form-urlencoded",
+   "content_type_header": "application/x-www-form-urlencoded",
+   "headers": [
+    [
+     "content-type",
+     "application/x-www-form-urlencoded"
+    ],
+    [
+     "content-length",
+     "86"
+    ],
+    [
+     "x-amz-user-agent",
+     "aws-sdk-js/3.1165.0"
+    ],
+    [
+     "user-agent",
+     "aws-sdk-js/3.1165.0 ua/2.1 os/linux#<kernel> lang/js md/nodejs#22.23.5 api/ec2#3.1165.0 m/E,N,g"
+    ],
+    [
+     "host",
+     "127.0.0.1:<port>"
+    ],
+    [
+     "amz-sdk-invocation-id",
+     "<uuid>"
+    ],
+    [
+     "amz-sdk-request",
+     "attempt=1; max=3"
+    ],
+    [
+     "x-amz-date",
+     "<amz-date>"
+    ],
+    [
+     "x-amz-content-sha256",
+     "<sha256-hex>"
+    ],
+    [
+     "authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/ec2/aws4_request, SignedHeaders=amz-sdk-invocation-id;amz-sdk-request;content-length;content-type;host;x-amz-content-sha256;x-amz-date;x-amz-user-agent, Signature=<hex>"
+    ],
+    [
+     "Connection",
+     "keep-alive"
+    ]
+   ],
+   "body_sha256": "00e52d994cb7c926f1a7c4f1ddc09945dd153b1c97945397792875cf7fd14295",
+   "form": [
+    [
+     "Action",
+     "DeleteTags"
+    ],
+    [
+     "Version",
+     "2016-11-15"
+    ],
+    [
+     "ResourceId.1",
+     "vol-00000000000000004"
+    ],
+    [
+     "Tag.1.Key",
+     "flag"
+    ]
+   ],
+   "response_status": 200,
+   "response_code": null
+  },
+  {
+   "operation": "AttachVolume",
+   "method": "POST",
+   "path": "/",
+   "http_version": "HTTP/1.1",
+   "content_type": "application/x-www-form-urlencoded",
+   "content_type_header": "application/x-www-form-urlencoded",
+   "headers": [
+    [
+     "content-type",
+     "application/x-www-form-urlencoded"
+    ],
+    [
+     "content-length",
+     "120"
+    ],
+    [
+     "x-amz-user-agent",
+     "aws-sdk-js/3.1165.0"
+    ],
+    [
+     "user-agent",
+     "aws-sdk-js/3.1165.0 ua/2.1 os/linux#<kernel> lang/js md/nodejs#22.23.5 api/ec2#3.1165.0 m/E,N,g"
+    ],
+    [
+     "host",
+     "127.0.0.1:<port>"
+    ],
+    [
+     "amz-sdk-invocation-id",
+     "<uuid>"
+    ],
+    [
+     "amz-sdk-request",
+     "attempt=1; max=3"
+    ],
+    [
+     "x-amz-date",
+     "<amz-date>"
+    ],
+    [
+     "x-amz-content-sha256",
+     "<sha256-hex>"
+    ],
+    [
+     "authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/ec2/aws4_request, SignedHeaders=amz-sdk-invocation-id;amz-sdk-request;content-length;content-type;host;x-amz-content-sha256;x-amz-date;x-amz-user-agent, Signature=<hex>"
+    ],
+    [
+     "Connection",
+     "keep-alive"
+    ]
+   ],
+   "body_sha256": "2e9d18dd4cf91b03bc38d88a732c8606c8ff6c246694c4735618def4bffd0c5a",
+   "form": [
+    [
+     "Action",
+     "AttachVolume"
+    ],
+    [
+     "Version",
+     "2016-11-15"
+    ],
+    [
+     "Device",
+     "/dev/sdf"
+    ],
+    [
+     "InstanceId",
+     "i-00000000000000007"
+    ],
+    [
+     "VolumeId",
+     "vol-00000000000000004"
+    ]
+   ],
+   "response_status": 200,
+   "response_code": null
+  },
+  {
+   "operation": "DetachVolume",
+   "method": "POST",
+   "path": "/",
+   "http_version": "HTTP/1.1",
+   "content_type": "application/x-www-form-urlencoded",
+   "content_type_header": "application/x-www-form-urlencoded",
+   "headers": [
+    [
+     "content-type",
+     "application/x-www-form-urlencoded"
+    ],
+    [
+     "content-length",
+     "69"
+    ],
+    [
+     "x-amz-user-agent",
+     "aws-sdk-js/3.1165.0"
+    ],
+    [
+     "user-agent",
+     "aws-sdk-js/3.1165.0 ua/2.1 os/linux#<kernel> lang/js md/nodejs#22.23.5 api/ec2#3.1165.0 m/E,N,g"
+    ],
+    [
+     "host",
+     "127.0.0.1:<port>"
+    ],
+    [
+     "amz-sdk-invocation-id",
+     "<uuid>"
+    ],
+    [
+     "amz-sdk-request",
+     "attempt=1; max=3"
+    ],
+    [
+     "x-amz-date",
+     "<amz-date>"
+    ],
+    [
+     "x-amz-content-sha256",
+     "<sha256-hex>"
+    ],
+    [
+     "authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/ec2/aws4_request, SignedHeaders=amz-sdk-invocation-id;amz-sdk-request;content-length;content-type;host;x-amz-content-sha256;x-amz-date;x-amz-user-agent, Signature=<hex>"
+    ],
+    [
+     "Connection",
+     "keep-alive"
+    ]
+   ],
+   "body_sha256": "64cc32603355c393cec28351cbb90cfff5ba428c1a2db1fd19534f25198e5367",
+   "form": [
+    [
+     "Action",
+     "DetachVolume"
+    ],
+    [
+     "Version",
+     "2016-11-15"
+    ],
+    [
+     "VolumeId",
+     "vol-00000000000000004"
+    ]
+   ],
+   "response_status": 200,
+   "response_code": null
+  },
+  {
+   "operation": "StopInstances",
+   "method": "POST",
+   "path": "/",
+   "http_version": "HTTP/1.1",
+   "content_type": "application/x-www-form-urlencoded",
+   "content_type_header": "application/x-www-form-urlencoded",
+   "headers": [
+    [
+     "content-type",
+     "application/x-www-form-urlencoded"
+    ],
+    [
+     "content-length",
+     "72"
+    ],
+    [
+     "x-amz-user-agent",
+     "aws-sdk-js/3.1165.0"
+    ],
+    [
+     "user-agent",
+     "aws-sdk-js/3.1165.0 ua/2.1 os/linux#<kernel> lang/js md/nodejs#22.23.5 api/ec2#3.1165.0 m/E,N,g"
+    ],
+    [
+     "host",
+     "127.0.0.1:<port>"
+    ],
+    [
+     "amz-sdk-invocation-id",
+     "<uuid>"
+    ],
+    [
+     "amz-sdk-request",
+     "attempt=1; max=3"
+    ],
+    [
+     "x-amz-date",
+     "<amz-date>"
+    ],
+    [
+     "x-amz-content-sha256",
+     "<sha256-hex>"
+    ],
+    [
+     "authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/ec2/aws4_request, SignedHeaders=amz-sdk-invocation-id;amz-sdk-request;content-length;content-type;host;x-amz-content-sha256;x-amz-date;x-amz-user-agent, Signature=<hex>"
+    ],
+    [
+     "Connection",
+     "keep-alive"
+    ]
+   ],
+   "body_sha256": "165517139bb475ad3ff09c5109c8b51ddbde897f8f6cc8515a23259a3a3366f6",
+   "form": [
+    [
+     "Action",
+     "StopInstances"
+    ],
+    [
+     "Version",
+     "2016-11-15"
+    ],
+    [
+     "InstanceId.1",
+     "i-00000000000000007"
+    ]
+   ],
+   "response_status": 200,
+   "response_code": null
+  },
+  {
+   "operation": "StartInstances",
+   "method": "POST",
+   "path": "/",
+   "http_version": "HTTP/1.1",
+   "content_type": "application/x-www-form-urlencoded",
+   "content_type_header": "application/x-www-form-urlencoded",
+   "headers": [
+    [
+     "content-type",
+     "application/x-www-form-urlencoded"
+    ],
+    [
+     "content-length",
+     "73"
+    ],
+    [
+     "x-amz-user-agent",
+     "aws-sdk-js/3.1165.0"
+    ],
+    [
+     "user-agent",
+     "aws-sdk-js/3.1165.0 ua/2.1 os/linux#<kernel> lang/js md/nodejs#22.23.5 api/ec2#3.1165.0 m/E,N,g"
+    ],
+    [
+     "host",
+     "127.0.0.1:<port>"
+    ],
+    [
+     "amz-sdk-invocation-id",
+     "<uuid>"
+    ],
+    [
+     "amz-sdk-request",
+     "attempt=1; max=3"
+    ],
+    [
+     "x-amz-date",
+     "<amz-date>"
+    ],
+    [
+     "x-amz-content-sha256",
+     "<sha256-hex>"
+    ],
+    [
+     "authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/ec2/aws4_request, SignedHeaders=amz-sdk-invocation-id;amz-sdk-request;content-length;content-type;host;x-amz-content-sha256;x-amz-date;x-amz-user-agent, Signature=<hex>"
+    ],
+    [
+     "Connection",
+     "keep-alive"
+    ]
+   ],
+   "body_sha256": "cb0b7e219ab154d947a4cae16a67ffb9d7037af2e7b38a426eb0c145a170d6c4",
+   "form": [
+    [
+     "Action",
+     "StartInstances"
+    ],
+    [
+     "Version",
+     "2016-11-15"
+    ],
+    [
+     "InstanceId.1",
+     "i-00000000000000007"
+    ]
+   ],
+   "response_status": 200,
+   "response_code": null
+  },
+  {
+   "operation": "TerminateInstances",
+   "method": "POST",
+   "path": "/",
+   "http_version": "HTTP/1.1",
+   "content_type": "application/x-www-form-urlencoded",
+   "content_type_header": "application/x-www-form-urlencoded",
+   "headers": [
+    [
+     "content-type",
+     "application/x-www-form-urlencoded"
+    ],
+    [
+     "content-length",
+     "110"
+    ],
+    [
+     "x-amz-user-agent",
+     "aws-sdk-js/3.1165.0"
+    ],
+    [
+     "user-agent",
+     "aws-sdk-js/3.1165.0 ua/2.1 os/linux#<kernel> lang/js md/nodejs#22.23.5 api/ec2#3.1165.0 m/E,N,g"
+    ],
+    [
+     "host",
+     "127.0.0.1:<port>"
+    ],
+    [
+     "amz-sdk-invocation-id",
+     "<uuid>"
+    ],
+    [
+     "amz-sdk-request",
+     "attempt=1; max=3"
+    ],
+    [
+     "x-amz-date",
+     "<amz-date>"
+    ],
+    [
+     "x-amz-content-sha256",
+     "<sha256-hex>"
+    ],
+    [
+     "authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/ec2/aws4_request, SignedHeaders=amz-sdk-invocation-id;amz-sdk-request;content-length;content-type;host;x-amz-content-sha256;x-amz-date;x-amz-user-agent, Signature=<hex>"
+    ],
+    [
+     "Connection",
+     "keep-alive"
+    ]
+   ],
+   "body_sha256": "00ff07da685075d0a1898201144e5700ebb4c9011c13388bdf5631c64ebc3f28",
+   "form": [
+    [
+     "Action",
+     "TerminateInstances"
+    ],
+    [
+     "Version",
+     "2016-11-15"
+    ],
+    [
+     "InstanceId.1",
+     "i-00000000000000007"
+    ],
+    [
+     "InstanceId.2",
+     "i-00000000000000008"
+    ]
+   ],
+   "response_status": 200,
+   "response_code": null
+  },
+  {
+   "operation": "CreateSecurityGroup",
+   "method": "POST",
+   "path": "/",
+   "http_version": "HTTP/1.1",
+   "content_type": "application/x-www-form-urlencoded",
+   "content_type_header": "application/x-www-form-urlencoded",
+   "headers": [
+    [
+     "content-type",
+     "application/x-www-form-urlencoded"
+    ],
+    [
+     "content-length",
+     "126"
+    ],
+    [
+     "x-amz-user-agent",
+     "aws-sdk-js/3.1165.0"
+    ],
+    [
+     "user-agent",
+     "aws-sdk-js/3.1165.0 ua/2.1 os/linux#<kernel> lang/js md/nodejs#22.23.5 api/ec2#3.1165.0 m/E,N,g"
+    ],
+    [
+     "host",
+     "127.0.0.1:<port>"
+    ],
+    [
+     "amz-sdk-invocation-id",
+     "<uuid>"
+    ],
+    [
+     "amz-sdk-request",
+     "attempt=1; max=3"
+    ],
+    [
+     "x-amz-date",
+     "<amz-date>"
+    ],
+    [
+     "x-amz-content-sha256",
+     "<sha256-hex>"
+    ],
+    [
+     "authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/ec2/aws4_request, SignedHeaders=amz-sdk-invocation-id;amz-sdk-request;content-length;content-type;host;x-amz-content-sha256;x-amz-date;x-amz-user-agent, Signature=<hex>"
+    ],
+    [
+     "Connection",
+     "keep-alive"
+    ]
+   ],
+   "body_sha256": "c8bacf9349ab8db140601f435db1e621e58d062463791e0e82ed0d8922299e82",
+   "form": [
+    [
+     "Action",
+     "CreateSecurityGroup"
+    ],
+    [
+     "Version",
+     "2016-11-15"
+    ],
+    [
+     "GroupDescription",
+     "evidence group"
+    ],
+    [
+     "GroupName",
+     "evidence"
+    ],
+    [
+     "VpcId",
+     "vpc-00000000000000001"
+    ]
+   ],
+   "response_status": 400,
+   "response_code": "UnsupportedOperation"
+  },
+  {
+   "operation": "DeleteVolume",
+   "method": "POST",
+   "path": "/",
+   "http_version": "HTTP/1.1",
+   "content_type": "application/x-www-form-urlencoded",
+   "content_type_header": "application/x-www-form-urlencoded",
+   "headers": [
+    [
+     "content-type",
+     "application/x-www-form-urlencoded"
+    ],
+    [
+     "content-length",
+     "69"
+    ],
+    [
+     "x-amz-user-agent",
+     "aws-sdk-js/3.1165.0"
+    ],
+    [
+     "user-agent",
+     "aws-sdk-js/3.1165.0 ua/2.1 os/linux#<kernel> lang/js md/nodejs#22.23.5 api/ec2#3.1165.0 m/E,N,g"
+    ],
+    [
+     "host",
+     "127.0.0.1:<port>"
+    ],
+    [
+     "amz-sdk-invocation-id",
+     "<uuid>"
+    ],
+    [
+     "amz-sdk-request",
+     "attempt=1; max=3"
+    ],
+    [
+     "x-amz-date",
+     "<amz-date>"
+    ],
+    [
+     "x-amz-content-sha256",
+     "<sha256-hex>"
+    ],
+    [
+     "authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/ec2/aws4_request, SignedHeaders=amz-sdk-invocation-id;amz-sdk-request;content-length;content-type;host;x-amz-content-sha256;x-amz-date;x-amz-user-agent, Signature=<hex>"
+    ],
+    [
+     "Connection",
+     "keep-alive"
+    ]
+   ],
+   "body_sha256": "0c1e0ddee628524051cbb4d89e7a8482f0dc5407ac2129a998b6cef387b30c86",
+   "form": [
+    [
+     "Action",
+     "DeleteVolume"
+    ],
+    [
+     "Version",
+     "2016-11-15"
+    ],
+    [
+     "VolumeId",
+     "vol-00000000000000004"
+    ]
+   ],
+   "response_status": 200,
+   "response_code": null
+  },
+  {
+   "operation": "DeleteVolume",
+   "method": "POST",
+   "path": "/",
+   "http_version": "HTTP/1.1",
+   "content_type": "application/x-www-form-urlencoded",
+   "content_type_header": "application/x-www-form-urlencoded",
+   "headers": [
+    [
+     "content-type",
+     "application/x-www-form-urlencoded"
+    ],
+    [
+     "content-length",
+     "69"
+    ],
+    [
+     "x-amz-user-agent",
+     "aws-sdk-js/3.1165.0"
+    ],
+    [
+     "user-agent",
+     "aws-sdk-js/3.1165.0 ua/2.1 os/linux#<kernel> lang/js md/nodejs#22.23.5 api/ec2#3.1165.0 m/E,N,g"
+    ],
+    [
+     "host",
+     "127.0.0.1:<port>"
+    ],
+    [
+     "amz-sdk-invocation-id",
+     "<uuid>"
+    ],
+    [
+     "amz-sdk-request",
+     "attempt=1; max=3"
+    ],
+    [
+     "x-amz-date",
+     "<amz-date>"
+    ],
+    [
+     "x-amz-content-sha256",
+     "<sha256-hex>"
+    ],
+    [
+     "authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/ec2/aws4_request, SignedHeaders=amz-sdk-invocation-id;amz-sdk-request;content-length;content-type;host;x-amz-content-sha256;x-amz-date;x-amz-user-agent, Signature=<hex>"
+    ],
+    [
+     "Connection",
+     "keep-alive"
+    ]
+   ],
+   "body_sha256": "c954287f3a3d337dca6dd5d94179520432580d4f58d3674f1c0a9bf818d14358",
+   "form": [
+    [
+     "Action",
+     "DeleteVolume"
+    ],
+    [
+     "Version",
+     "2016-11-15"
+    ],
+    [
+     "VolumeId",
+     "vol-00000000000000005"
+    ]
+   ],
+   "response_status": 200,
+   "response_code": null
+  },
+  {
+   "operation": "DeleteSubnet",
+   "method": "POST",
+   "path": "/",
+   "http_version": "HTTP/1.1",
+   "content_type": "application/x-www-form-urlencoded",
+   "content_type_header": "application/x-www-form-urlencoded",
+   "headers": [
+    [
+     "content-type",
+     "application/x-www-form-urlencoded"
+    ],
+    [
+     "content-length",
+     "72"
+    ],
+    [
+     "x-amz-user-agent",
+     "aws-sdk-js/3.1165.0"
+    ],
+    [
+     "user-agent",
+     "aws-sdk-js/3.1165.0 ua/2.1 os/linux#<kernel> lang/js md/nodejs#22.23.5 api/ec2#3.1165.0 m/E,N,g"
+    ],
+    [
+     "host",
+     "127.0.0.1:<port>"
+    ],
+    [
+     "amz-sdk-invocation-id",
+     "<uuid>"
+    ],
+    [
+     "amz-sdk-request",
+     "attempt=1; max=3"
+    ],
+    [
+     "x-amz-date",
+     "<amz-date>"
+    ],
+    [
+     "x-amz-content-sha256",
+     "<sha256-hex>"
+    ],
+    [
+     "authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/ec2/aws4_request, SignedHeaders=amz-sdk-invocation-id;amz-sdk-request;content-length;content-type;host;x-amz-content-sha256;x-amz-date;x-amz-user-agent, Signature=<hex>"
+    ],
+    [
+     "Connection",
+     "keep-alive"
+    ]
+   ],
+   "body_sha256": "c2f4676dd3c817431ab39a1b8c4c4469b9e951d176be794c23a1ea3f2227ac86",
+   "form": [
+    [
+     "Action",
+     "DeleteSubnet"
+    ],
+    [
+     "Version",
+     "2016-11-15"
+    ],
+    [
+     "SubnetId",
+     "subnet-00000000000000003"
+    ]
+   ],
+   "response_status": 200,
+   "response_code": null
+  },
+  {
+   "operation": "DeleteVpc",
+   "method": "POST",
+   "path": "/",
+   "http_version": "HTTP/1.1",
+   "content_type": "application/x-www-form-urlencoded",
+   "content_type_header": "application/x-www-form-urlencoded",
+   "headers": [
+    [
+     "content-type",
+     "application/x-www-form-urlencoded"
+    ],
+    [
+     "content-length",
+     "63"
+    ],
+    [
+     "x-amz-user-agent",
+     "aws-sdk-js/3.1165.0"
+    ],
+    [
+     "user-agent",
+     "aws-sdk-js/3.1165.0 ua/2.1 os/linux#<kernel> lang/js md/nodejs#22.23.5 api/ec2#3.1165.0 m/E,N,g"
+    ],
+    [
+     "host",
+     "127.0.0.1:<port>"
+    ],
+    [
+     "amz-sdk-invocation-id",
+     "<uuid>"
+    ],
+    [
+     "amz-sdk-request",
+     "attempt=1; max=3"
+    ],
+    [
+     "x-amz-date",
+     "<amz-date>"
+    ],
+    [
+     "x-amz-content-sha256",
+     "<sha256-hex>"
+    ],
+    [
+     "authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/ec2/aws4_request, SignedHeaders=amz-sdk-invocation-id;amz-sdk-request;content-length;content-type;host;x-amz-content-sha256;x-amz-date;x-amz-user-agent, Signature=<hex>"
+    ],
+    [
+     "Connection",
+     "keep-alive"
+    ]
+   ],
+   "body_sha256": "dab7dfe696331b61c8d82241006646da1ebf2500f7e834b9ad9f1ccf34c8cd73",
+   "form": [
+    [
+     "Action",
+     "DeleteVpc"
+    ],
+    [
+     "Version",
+     "2016-11-15"
+    ],
+    [
+     "VpcId",
+     "vpc-00000000000000001"
+    ]
+   ],
+   "response_status": 200,
+   "response_code": null
+  }
+ ],
+ "summary": {
+  "operations": [
+   "DescribeRegions",
+   "DescribeAvailabilityZones",
+   "CreateVpc",
+   "CreateSubnet",
+   "DescribeVpcs",
+   "CreateVolume",
+   "CreateVolume",
+   "DescribeVolumes",
+   "DescribeVolumes",
+   "RunInstances",
+   "RunInstances",
+   "DescribeInstances",
+   "CreateTags",
+   "DescribeTags",
+   "DeleteTags",
+   "AttachVolume",
+   "DetachVolume",
+   "StopInstances",
+   "StartInstances",
+   "TerminateInstances",
+   "CreateSecurityGroup",
+   "DeleteVolume",
+   "DeleteVolume",
+   "DeleteSubnet",
+   "DeleteVpc"
+  ],
+  "content_types": [
+   "application/x-www-form-urlencoded"
+  ],
+  "http_versions": [
+   "HTTP/1.1"
+  ]
+ }
+}

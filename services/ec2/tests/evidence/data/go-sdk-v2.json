@@ -1,0 +1,1939 @@
+{
+ "client": "aws-sdk-go-v2-ec2-1.350.2",
+ "requests": [
+  {
+   "operation": "DescribeRegions",
+   "method": "POST",
+   "path": "/",
+   "http_version": "HTTP/1.1",
+   "content_type": "application/x-www-form-urlencoded",
+   "content_type_header": "application/x-www-form-urlencoded",
+   "headers": [
+    [
+     "Host",
+     "127.0.0.1:<port>"
+    ],
+    [
+     "User-Agent",
+     "aws-sdk-go-v2/1.48.2 ua/2.1 os/linux lang/go#1.24.7 md/GOOS#linux md/GOARCH#amd64 api/ec2#1.350.2 m/E,g"
+    ],
+    [
+     "Content-Length",
+     "64"
+    ],
+    [
+     "Amz-Sdk-Invocation-Id",
+     "<uuid>"
+    ],
+    [
+     "Amz-Sdk-Request",
+     "attempt=1; max=3"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/ec2/aws4_request, SignedHeaders=amz-sdk-invocation-id;amz-sdk-request;content-length;content-type;host;x-amz-date, Signature=<hex>"
+    ],
+    [
+     "Content-Type",
+     "application/x-www-form-urlencoded"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "Accept-Encoding",
+     "gzip"
+    ]
+   ],
+   "body_sha256": "b0c58e7737921ce9927818c1c19b1e3e7efc4c0ab6ceaa6c9524e2e682549ec0",
+   "form": [
+    [
+     "Action",
+     "DescribeRegions"
+    ],
+    [
+     "RegionName.1",
+     "us-east-1"
+    ],
+    [
+     "Version",
+     "2016-11-15"
+    ]
+   ],
+   "response_status": 200,
+   "response_code": null
+  },
+  {
+   "operation": "DescribeAvailabilityZones",
+   "method": "POST",
+   "path": "/",
+   "http_version": "HTTP/1.1",
+   "content_type": "application/x-www-form-urlencoded",
+   "content_type_header": "application/x-www-form-urlencoded",
+   "headers": [
+    [
+     "Host",
+     "127.0.0.1:<port>"
+    ],
+    [
+     "User-Agent",
+     "aws-sdk-go-v2/1.48.2 ua/2.1 os/linux lang/go#1.24.7 md/GOOS#linux md/GOARCH#amd64 api/ec2#1.350.2 m/E,g"
+    ],
+    [
+     "Content-Length",
+     "98"
+    ],
+    [
+     "Amz-Sdk-Invocation-Id",
+     "<uuid>"
+    ],
+    [
+     "Amz-Sdk-Request",
+     "attempt=1; max=3"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/ec2/aws4_request, SignedHeaders=amz-sdk-invocation-id;amz-sdk-request;content-length;content-type;host;x-amz-date, Signature=<hex>"
+    ],
+    [
+     "Content-Type",
+     "application/x-www-form-urlencoded"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "Accept-Encoding",
+     "gzip"
+    ]
+   ],
+   "body_sha256": "89a18515404d8f746c4a77d0ca3d26bb61a678d9f5e90e57c1bc5944d63c0eab",
+   "form": [
+    [
+     "Action",
+     "DescribeAvailabilityZones"
+    ],
+    [
+     "Filter.1.Name",
+     "state"
+    ],
+    [
+     "Filter.1.Value.1",
+     "available"
+    ],
+    [
+     "Version",
+     "2016-11-15"
+    ]
+   ],
+   "response_status": 200,
+   "response_code": null
+  },
+  {
+   "operation": "CreateVpc",
+   "method": "POST",
+   "path": "/",
+   "http_version": "HTTP/1.1",
+   "content_type": "application/x-www-form-urlencoded",
+   "content_type_header": "application/x-www-form-urlencoded",
+   "headers": [
+    [
+     "Host",
+     "127.0.0.1:<port>"
+    ],
+    [
+     "User-Agent",
+     "aws-sdk-go-v2/1.48.2 ua/2.1 os/linux lang/go#1.24.7 md/GOOS#linux md/GOARCH#amd64 api/ec2#1.350.2 m/E,g"
+    ],
+    [
+     "Content-Length",
+     "242"
+    ],
+    [
+     "Amz-Sdk-Invocation-Id",
+     "<uuid>"
+    ],
+    [
+     "Amz-Sdk-Request",
+     "attempt=1; max=3"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/ec2/aws4_request, SignedHeaders=amz-sdk-invocation-id;amz-sdk-request;content-length;content-type;host;x-amz-date, Signature=<hex>"
+    ],
+    [
+     "Content-Type",
+     "application/x-www-form-urlencoded"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "Accept-Encoding",
+     "gzip"
+    ]
+   ],
+   "body_sha256": "26865c6e5a35ab8a887b41eae13be39dab2f2f21429fc52ae9297c830a2a53f7",
+   "form": [
+    [
+     "Action",
+     "CreateVpc"
+    ],
+    [
+     "CidrBlock",
+     "10.0.0.0/16"
+    ],
+    [
+     "TagSpecification.1.ResourceType",
+     "vpc"
+    ],
+    [
+     "TagSpecification.1.Tag.1.Key",
+     "Name"
+    ],
+    [
+     "TagSpecification.1.Tag.1.Value",
+     "evidence"
+    ],
+    [
+     "TagSpecification.1.Tag.2.Key",
+     "team"
+    ],
+    [
+     "TagSpecification.1.Tag.2.Value",
+     "kythira"
+    ],
+    [
+     "Version",
+     "2016-11-15"
+    ]
+   ],
+   "response_status": 200,
+   "response_code": null
+  },
+  {
+   "operation": "CreateSubnet",
+   "method": "POST",
+   "path": "/",
+   "http_version": "HTTP/1.1",
+   "content_type": "application/x-www-form-urlencoded",
+   "content_type_header": "application/x-www-form-urlencoded",
+   "headers": [
+    [
+     "Host",
+     "127.0.0.1:<port>"
+    ],
+    [
+     "User-Agent",
+     "aws-sdk-go-v2/1.48.2 ua/2.1 os/linux lang/go#1.24.7 md/GOOS#linux md/GOARCH#amd64 api/ec2#1.350.2 m/E,g"
+    ],
+    [
+     "Content-Length",
+     "118"
+    ],
+    [
+     "Amz-Sdk-Invocation-Id",
+     "<uuid>"
+    ],
+    [
+     "Amz-Sdk-Request",
+     "attempt=1; max=3"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/ec2/aws4_request, SignedHeaders=amz-sdk-invocation-id;amz-sdk-request;content-length;content-type;host;x-amz-date, Signature=<hex>"
+    ],
+    [
+     "Content-Type",
+     "application/x-www-form-urlencoded"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "Accept-Encoding",
+     "gzip"
+    ]
+   ],
+   "body_sha256": "0bf6bd9f2908dd02357e4e9436279a6fbfd3b44ccbc716c4c933eedc35e7b32b",
+   "form": [
+    [
+     "Action",
+     "CreateSubnet"
+    ],
+    [
+     "AvailabilityZone",
+     "us-east-1a"
+    ],
+    [
+     "CidrBlock",
+     "10.0.1.0/24"
+    ],
+    [
+     "Version",
+     "2016-11-15"
+    ],
+    [
+     "VpcId",
+     "vpc-00000000000000001"
+    ]
+   ],
+   "response_status": 200,
+   "response_code": null
+  },
+  {
+   "operation": "DescribeVpcs",
+   "method": "POST",
+   "path": "/",
+   "http_version": "HTTP/1.1",
+   "content_type": "application/x-www-form-urlencoded",
+   "content_type_header": "application/x-www-form-urlencoded",
+   "headers": [
+    [
+     "Host",
+     "127.0.0.1:<port>"
+    ],
+    [
+     "User-Agent",
+     "aws-sdk-go-v2/1.48.2 ua/2.1 os/linux lang/go#1.24.7 md/GOOS#linux md/GOARCH#amd64 api/ec2#1.350.2 m/E,g"
+    ],
+    [
+     "Content-Length",
+     "119"
+    ],
+    [
+     "Amz-Sdk-Invocation-Id",
+     "<uuid>"
+    ],
+    [
+     "Amz-Sdk-Request",
+     "attempt=1; max=3"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/ec2/aws4_request, SignedHeaders=amz-sdk-invocation-id;amz-sdk-request;content-length;content-type;host;x-amz-date, Signature=<hex>"
+    ],
+    [
+     "Content-Type",
+     "application/x-www-form-urlencoded"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "Accept-Encoding",
+     "gzip"
+    ]
+   ],
+   "body_sha256": "7150b576786f3a8a571bbe787a58471dc147fcc95d230d0fbb0fe7b717371dcc",
+   "form": [
+    [
+     "Action",
+     "DescribeVpcs"
+    ],
+    [
+     "Filter.1.Name",
+     "tag:Name"
+    ],
+    [
+     "Filter.1.Value.1",
+     "evidence"
+    ],
+    [
+     "Version",
+     "2016-11-15"
+    ],
+    [
+     "VpcId.1",
+     "vpc-00000000000000001"
+    ]
+   ],
+   "response_status": 200,
+   "response_code": null
+  },
+  {
+   "operation": "CreateVolume",
+   "method": "POST",
+   "path": "/",
+   "http_version": "HTTP/1.1",
+   "content_type": "application/x-www-form-urlencoded",
+   "content_type_header": "application/x-www-form-urlencoded",
+   "headers": [
+    [
+     "Host",
+     "127.0.0.1:<port>"
+    ],
+    [
+     "User-Agent",
+     "aws-sdk-go-v2/1.48.2 ua/2.1 os/linux lang/go#1.24.7 md/GOOS#linux md/GOARCH#amd64 api/ec2#1.350.2 m/E,g"
+    ],
+    [
+     "Content-Length",
+     "251"
+    ],
+    [
+     "Amz-Sdk-Invocation-Id",
+     "<uuid>"
+    ],
+    [
+     "Amz-Sdk-Request",
+     "attempt=1; max=3"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/ec2/aws4_request, SignedHeaders=amz-sdk-invocation-id;amz-sdk-request;content-length;content-type;host;x-amz-date, Signature=<hex>"
+    ],
+    [
+     "Content-Type",
+     "application/x-www-form-urlencoded"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "Accept-Encoding",
+     "gzip"
+    ]
+   ],
+   "body_sha256": "89f984f7b6426a774428b0986ebd736b94b98e5cc52c5a56ae977b95302fac17",
+   "form": [
+    [
+     "Action",
+     "CreateVolume"
+    ],
+    [
+     "AvailabilityZone",
+     "us-east-1a"
+    ],
+    [
+     "ClientToken",
+     "evidence-volume-1"
+    ],
+    [
+     "Encrypted",
+     "true"
+    ],
+    [
+     "Size",
+     "8"
+    ],
+    [
+     "TagSpecification.1.ResourceType",
+     "volume"
+    ],
+    [
+     "TagSpecification.1.Tag.1.Key",
+     "Name"
+    ],
+    [
+     "TagSpecification.1.Tag.1.Value",
+     "evidence-data"
+    ],
+    [
+     "Version",
+     "2016-11-15"
+    ],
+    [
+     "VolumeType",
+     "gp3"
+    ]
+   ],
+   "response_status": 200,
+   "response_code": null
+  },
+  {
+   "operation": "CreateVolume",
+   "method": "POST",
+   "path": "/",
+   "http_version": "HTTP/1.1",
+   "content_type": "application/x-www-form-urlencoded",
+   "content_type_header": "application/x-www-form-urlencoded",
+   "headers": [
+    [
+     "Host",
+     "127.0.0.1:<port>"
+    ],
+    [
+     "User-Agent",
+     "aws-sdk-go-v2/1.48.2 ua/2.1 os/linux lang/go#1.24.7 md/GOOS#linux md/GOARCH#amd64 api/ec2#1.350.2 m/E,g"
+    ],
+    [
+     "Content-Length",
+     "163"
+    ],
+    [
+     "Amz-Sdk-Invocation-Id",
+     "<uuid>"
+    ],
+    [
+     "Amz-Sdk-Request",
+     "attempt=1; max=3"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/ec2/aws4_request, SignedHeaders=amz-sdk-invocation-id;amz-sdk-request;content-length;content-type;host;x-amz-date, Signature=<hex>"
+    ],
+    [
+     "Content-Type",
+     "application/x-www-form-urlencoded"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "Accept-Encoding",
+     "gzip"
+    ]
+   ],
+   "body_sha256": "<varies>",
+   "form": [
+    [
+     "Action",
+     "CreateVolume"
+    ],
+    [
+     "AvailabilityZone",
+     "us-east-1a"
+    ],
+    [
+     "ClientToken",
+     "<uuid>"
+    ],
+    [
+     "Iops",
+     "3000"
+    ],
+    [
+     "Size",
+     "16"
+    ],
+    [
+     "Throughput",
+     "125"
+    ],
+    [
+     "Version",
+     "2016-11-15"
+    ],
+    [
+     "VolumeType",
+     "gp3"
+    ]
+   ],
+   "response_status": 200,
+   "response_code": null
+  },
+  {
+   "operation": "DescribeVolumes",
+   "method": "POST",
+   "path": "/",
+   "http_version": "HTTP/1.1",
+   "content_type": "application/x-www-form-urlencoded",
+   "content_type_header": "application/x-www-form-urlencoded",
+   "headers": [
+    [
+     "Host",
+     "127.0.0.1:<port>"
+    ],
+    [
+     "User-Agent",
+     "aws-sdk-go-v2/1.48.2 ua/2.1 os/linux lang/go#1.24.7 md/GOOS#linux md/GOARCH#amd64 api/ec2#1.350.2 m/E,g"
+    ],
+    [
+     "Content-Length",
+     "114"
+    ],
+    [
+     "Amz-Sdk-Invocation-Id",
+     "<uuid>"
+    ],
+    [
+     "Amz-Sdk-Request",
+     "attempt=1; max=3"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/ec2/aws4_request, SignedHeaders=amz-sdk-invocation-id;amz-sdk-request;content-length;content-type;host;x-amz-date, Signature=<hex>"
+    ],
+    [
+     "Content-Type",
+     "application/x-www-form-urlencoded"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "Accept-Encoding",
+     "gzip"
+    ]
+   ],
+   "body_sha256": "a98ecbe8589159148c0582377efed67b8144003f7bb3f7651a0d1a52a62b22b6",
+   "form": [
+    [
+     "Action",
+     "DescribeVolumes"
+    ],
+    [
+     "Filter.1.Name",
+     "availability-zone"
+    ],
+    [
+     "Filter.1.Value.1",
+     "us-east-1a"
+    ],
+    [
+     "MaxResults",
+     "5"
+    ],
+    [
+     "Version",
+     "2016-11-15"
+    ]
+   ],
+   "response_status": 200,
+   "response_code": null
+  },
+  {
+   "operation": "DescribeVolumes",
+   "method": "POST",
+   "path": "/",
+   "http_version": "HTTP/1.1",
+   "content_type": "application/x-www-form-urlencoded",
+   "content_type_header": "application/x-www-form-urlencoded",
+   "headers": [
+    [
+     "Host",
+     "127.0.0.1:<port>"
+    ],
+    [
+     "User-Agent",
+     "aws-sdk-go-v2/1.48.2 ua/2.1 os/linux lang/go#1.24.7 md/GOOS#linux md/GOARCH#amd64 api/ec2#1.350.2 m/E,g"
+    ],
+    [
+     "Content-Length",
+     "140"
+    ],
+    [
+     "Amz-Sdk-Invocation-Id",
+     "<uuid>"
+    ],
+    [
+     "Amz-Sdk-Request",
+     "attempt=1; max=3"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/ec2/aws4_request, SignedHeaders=amz-sdk-invocation-id;amz-sdk-request;content-length;content-type;host;x-amz-date, Signature=<hex>"
+    ],
+    [
+     "Content-Type",
+     "application/x-www-form-urlencoded"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "Accept-Encoding",
+     "gzip"
+    ]
+   ],
+   "body_sha256": "7f89ebe9f6e9bdf1132825cb5b7a2fd852d0f39a29cbae8d8678ab7cbf26eb23",
+   "form": [
+    [
+     "Action",
+     "DescribeVolumes"
+    ],
+    [
+     "Filter.1.Name",
+     "availability-zone"
+    ],
+    [
+     "Filter.1.Value.1",
+     "us-east-1a"
+    ],
+    [
+     "MaxResults",
+     "5"
+    ],
+    [
+     "NextToken",
+     "evidence-page-2"
+    ],
+    [
+     "Version",
+     "2016-11-15"
+    ]
+   ],
+   "response_status": 200,
+   "response_code": null
+  },
+  {
+   "operation": "RunInstances",
+   "method": "POST",
+   "path": "/",
+   "http_version": "HTTP/1.1",
+   "content_type": "application/x-www-form-urlencoded",
+   "content_type_header": "application/x-www-form-urlencoded",
+   "headers": [
+    [
+     "Host",
+     "127.0.0.1:<port>"
+    ],
+    [
+     "User-Agent",
+     "aws-sdk-go-v2/1.48.2 ua/2.1 os/linux lang/go#1.24.7 md/GOOS#linux md/GOARCH#amd64 api/ec2#1.350.2 m/E,g"
+    ],
+    [
+     "Content-Length",
+     "707"
+    ],
+    [
+     "Amz-Sdk-Invocation-Id",
+     "<uuid>"
+    ],
+    [
+     "Amz-Sdk-Request",
+     "attempt=1; max=3"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/ec2/aws4_request, SignedHeaders=amz-sdk-invocation-id;amz-sdk-request;content-length;content-type;host;x-amz-date, Signature=<hex>"
+    ],
+    [
+     "Content-Type",
+     "application/x-www-form-urlencoded"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "Accept-Encoding",
+     "gzip"
+    ]
+   ],
+   "body_sha256": "75668309459211351fc3a7869b0fea71436e62a5f0300b0f2ce0d2cde82b2e7a",
+   "form": [
+    [
+     "Action",
+     "RunInstances"
+    ],
+    [
+     "BlockDeviceMapping.1.DeviceName",
+     "/dev/xvda"
+    ],
+    [
+     "BlockDeviceMapping.1.Ebs.DeleteOnTermination",
+     "true"
+    ],
+    [
+     "BlockDeviceMapping.1.Ebs.VolumeSize",
+     "8"
+    ],
+    [
+     "BlockDeviceMapping.1.Ebs.VolumeType",
+     "gp3"
+    ],
+    [
+     "BlockDeviceMapping.2.DeviceName",
+     "/dev/sdb"
+    ],
+    [
+     "BlockDeviceMapping.2.VirtualName",
+     "ephemeral0"
+    ],
+    [
+     "ClientToken",
+     "evidence-run-1"
+    ],
+    [
+     "ImageId",
+     "ami-0000000000000a001"
+    ],
+    [
+     "InstanceType",
+     "t3.micro"
+    ],
+    [
+     "MaxCount",
+     "2"
+    ],
+    [
+     "MinCount",
+     "1"
+    ],
+    [
+     "SubnetId",
+     "subnet-00000000000000003"
+    ],
+    [
+     "TagSpecification.1.ResourceType",
+     "instance"
+    ],
+    [
+     "TagSpecification.1.Tag.1.Key",
+     "Name"
+    ],
+    [
+     "TagSpecification.1.Tag.1.Value",
+     "evidence"
+    ],
+    [
+     "TagSpecification.2.ResourceType",
+     "volume"
+    ],
+    [
+     "TagSpecification.2.Tag.1.Key",
+     "Name"
+    ],
+    [
+     "TagSpecification.2.Tag.1.Value",
+     "evidence-root"
+    ],
+    [
+     "UserData",
+     "IyEvYmluL3NoCmVjaG8gaGVsbG8K"
+    ],
+    [
+     "Version",
+     "2016-11-15"
+    ]
+   ],
+   "response_status": 200,
+   "response_code": null
+  },
+  {
+   "operation": "RunInstances",
+   "method": "POST",
+   "path": "/",
+   "http_version": "HTTP/1.1",
+   "content_type": "application/x-www-form-urlencoded",
+   "content_type_header": "application/x-www-form-urlencoded",
+   "headers": [
+    [
+     "Host",
+     "127.0.0.1:<port>"
+    ],
+    [
+     "User-Agent",
+     "aws-sdk-go-v2/1.48.2 ua/2.1 os/linux lang/go#1.24.7 md/GOOS#linux md/GOARCH#amd64 api/ec2#1.350.2 m/E,g"
+    ],
+    [
+     "Content-Length",
+     "741"
+    ],
+    [
+     "Amz-Sdk-Invocation-Id",
+     "<uuid>"
+    ],
+    [
+     "Amz-Sdk-Request",
+     "attempt=1; max=3"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/ec2/aws4_request, SignedHeaders=amz-sdk-invocation-id;amz-sdk-request;content-length;content-type;host;x-amz-date, Signature=<hex>"
+    ],
+    [
+     "Content-Type",
+     "application/x-www-form-urlencoded"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "Accept-Encoding",
+     "gzip"
+    ]
+   ],
+   "body_sha256": "<varies>",
+   "form": [
+    [
+     "Action",
+     "RunInstances"
+    ],
+    [
+     "BlockDeviceMapping.1.DeviceName",
+     "/dev/xvda"
+    ],
+    [
+     "BlockDeviceMapping.1.Ebs.DeleteOnTermination",
+     "true"
+    ],
+    [
+     "BlockDeviceMapping.1.Ebs.VolumeSize",
+     "8"
+    ],
+    [
+     "BlockDeviceMapping.1.Ebs.VolumeType",
+     "gp3"
+    ],
+    [
+     "BlockDeviceMapping.2.DeviceName",
+     "/dev/sdb"
+    ],
+    [
+     "BlockDeviceMapping.2.VirtualName",
+     "ephemeral0"
+    ],
+    [
+     "ClientToken",
+     "<uuid>"
+    ],
+    [
+     "DryRun",
+     "true"
+    ],
+    [
+     "ImageId",
+     "ami-0000000000000a001"
+    ],
+    [
+     "InstanceType",
+     "t3.micro"
+    ],
+    [
+     "MaxCount",
+     "2"
+    ],
+    [
+     "MinCount",
+     "1"
+    ],
+    [
+     "SubnetId",
+     "subnet-00000000000000003"
+    ],
+    [
+     "TagSpecification.1.ResourceType",
+     "instance"
+    ],
+    [
+     "TagSpecification.1.Tag.1.Key",
+     "Name"
+    ],
+    [
+     "TagSpecification.1.Tag.1.Value",
+     "evidence"
+    ],
+    [
+     "TagSpecification.2.ResourceType",
+     "volume"
+    ],
+    [
+     "TagSpecification.2.Tag.1.Key",
+     "Name"
+    ],
+    [
+     "TagSpecification.2.Tag.1.Value",
+     "evidence-root"
+    ],
+    [
+     "UserData",
+     "IyEvYmluL3NoCmVjaG8gaGVsbG8K"
+    ],
+    [
+     "Version",
+     "2016-11-15"
+    ]
+   ],
+   "response_status": 412,
+   "response_code": "DryRunOperation"
+  },
+  {
+   "operation": "DescribeInstances",
+   "method": "POST",
+   "path": "/",
+   "http_version": "HTTP/1.1",
+   "content_type": "application/x-www-form-urlencoded",
+   "content_type_header": "application/x-www-form-urlencoded",
+   "headers": [
+    [
+     "Host",
+     "127.0.0.1:<port>"
+    ],
+    [
+     "User-Agent",
+     "aws-sdk-go-v2/1.48.2 ua/2.1 os/linux lang/go#1.24.7 md/GOOS#linux md/GOARCH#amd64 api/ec2#1.350.2 m/E,g"
+    ],
+    [
+     "Content-Length",
+     "193"
+    ],
+    [
+     "Amz-Sdk-Invocation-Id",
+     "<uuid>"
+    ],
+    [
+     "Amz-Sdk-Request",
+     "attempt=1; max=3"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/ec2/aws4_request, SignedHeaders=amz-sdk-invocation-id;amz-sdk-request;content-length;content-type;host;x-amz-date, Signature=<hex>"
+    ],
+    [
+     "Content-Type",
+     "application/x-www-form-urlencoded"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "Accept-Encoding",
+     "gzip"
+    ]
+   ],
+   "body_sha256": "439db98cc95d8c010e24d71d7fb2c4088b5f57a1f53633d359bc86bc0e2dfcb2",
+   "form": [
+    [
+     "Action",
+     "DescribeInstances"
+    ],
+    [
+     "Filter.1.Name",
+     "instance-state-name"
+    ],
+    [
+     "Filter.1.Value.1",
+     "pending"
+    ],
+    [
+     "Filter.1.Value.2",
+     "running"
+    ],
+    [
+     "InstanceId.1",
+     "i-00000000000000007"
+    ],
+    [
+     "InstanceId.2",
+     "i-00000000000000008"
+    ],
+    [
+     "Version",
+     "2016-11-15"
+    ]
+   ],
+   "response_status": 200,
+   "response_code": null
+  },
+  {
+   "operation": "CreateTags",
+   "method": "POST",
+   "path": "/",
+   "http_version": "HTTP/1.1",
+   "content_type": "application/x-www-form-urlencoded",
+   "content_type_header": "application/x-www-form-urlencoded",
+   "headers": [
+    [
+     "Host",
+     "127.0.0.1:<port>"
+    ],
+    [
+     "User-Agent",
+     "aws-sdk-go-v2/1.48.2 ua/2.1 os/linux lang/go#1.24.7 md/GOOS#linux md/GOARCH#amd64 api/ec2#1.350.2 m/E,g"
+    ],
+    [
+     "Content-Length",
+     "156"
+    ],
+    [
+     "Amz-Sdk-Invocation-Id",
+     "<uuid>"
+    ],
+    [
+     "Amz-Sdk-Request",
+     "attempt=1; max=3"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/ec2/aws4_request, SignedHeaders=amz-sdk-invocation-id;amz-sdk-request;content-length;content-type;host;x-amz-date, Signature=<hex>"
+    ],
+    [
+     "Content-Type",
+     "application/x-www-form-urlencoded"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "Accept-Encoding",
+     "gzip"
+    ]
+   ],
+   "body_sha256": "85b1e2ad7d88dd87abbb760138b37b2db9c491664a3ba7f57bc35439fcd30897",
+   "form": [
+    [
+     "Action",
+     "CreateTags"
+    ],
+    [
+     "ResourceId.1",
+     "i-00000000000000007"
+    ],
+    [
+     "ResourceId.2",
+     "vol-00000000000000004"
+    ],
+    [
+     "Tag.1.Key",
+     "stage"
+    ],
+    [
+     "Tag.1.Value",
+     "evidence"
+    ],
+    [
+     "Tag.2.Key",
+     "flag"
+    ],
+    [
+     "Version",
+     "2016-11-15"
+    ]
+   ],
+   "response_status": 200,
+   "response_code": null
+  },
+  {
+   "operation": "DescribeTags",
+   "method": "POST",
+   "path": "/",
+   "http_version": "HTTP/1.1",
+   "content_type": "application/x-www-form-urlencoded",
+   "content_type_header": "application/x-www-form-urlencoded",
+   "headers": [
+    [
+     "Host",
+     "127.0.0.1:<port>"
+    ],
+    [
+     "User-Agent",
+     "aws-sdk-go-v2/1.48.2 ua/2.1 os/linux lang/go#1.24.7 md/GOOS#linux md/GOARCH#amd64 api/ec2#1.350.2 m/E,g"
+    ],
+    [
+     "Content-Length",
+     "142"
+    ],
+    [
+     "Amz-Sdk-Invocation-Id",
+     "<uuid>"
+    ],
+    [
+     "Amz-Sdk-Request",
+     "attempt=1; max=3"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/ec2/aws4_request, SignedHeaders=amz-sdk-invocation-id;amz-sdk-request;content-length;content-type;host;x-amz-date, Signature=<hex>"
+    ],
+    [
+     "Content-Type",
+     "application/x-www-form-urlencoded"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "Accept-Encoding",
+     "gzip"
+    ]
+   ],
+   "body_sha256": "213bdbf11262c8af4cedb1078c8249abd781ebefe415be2f75d742cb5f30beb3",
+   "form": [
+    [
+     "Action",
+     "DescribeTags"
+    ],
+    [
+     "Filter.1.Name",
+     "resource-id"
+    ],
+    [
+     "Filter.1.Value.1",
+     "i-00000000000000007"
+    ],
+    [
+     "Filter.2.Name",
+     "key"
+    ],
+    [
+     "Filter.2.Value.1",
+     "stage"
+    ],
+    [
+     "Version",
+     "2016-11-15"
+    ]
+   ],
+   "response_status": 200,
+   "response_code": null
+  },
+  {
+   "operation": "DeleteTags",
+   "method": "POST",
+   "path": "/",
+   "http_version": "HTTP/1.1",
+   "content_type": "application/x-www-form-urlencoded",
+   "content_type_header": "application/x-www-form-urlencoded",
+   "headers": [
+    [
+     "Host",
+     "127.0.0.1:<port>"
+    ],
+    [
+     "User-Agent",
+     "aws-sdk-go-v2/1.48.2 ua/2.1 os/linux lang/go#1.24.7 md/GOOS#linux md/GOARCH#amd64 api/ec2#1.350.2 m/E,g"
+    ],
+    [
+     "Content-Length",
+     "86"
+    ],
+    [
+     "Amz-Sdk-Invocation-Id",
+     "<uuid>"
+    ],
+    [
+     "Amz-Sdk-Request",
+     "attempt=1; max=3"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/ec2/aws4_request, SignedHeaders=amz-sdk-invocation-id;amz-sdk-request;content-length;content-type;host;x-amz-date, Signature=<hex>"
+    ],
+    [
+     "Content-Type",
+     "application/x-www-form-urlencoded"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "Accept-Encoding",
+     "gzip"
+    ]
+   ],
+   "body_sha256": "c20ecdc2beacfdd6440cd528e8245351f72b0bff502802f728a6c7fe9f3208a8",
+   "form": [
+    [
+     "Action",
+     "DeleteTags"
+    ],
+    [
+     "ResourceId.1",
+     "vol-00000000000000004"
+    ],
+    [
+     "Tag.1.Key",
+     "flag"
+    ],
+    [
+     "Version",
+     "2016-11-15"
+    ]
+   ],
+   "response_status": 200,
+   "response_code": null
+  },
+  {
+   "operation": "AttachVolume",
+   "method": "POST",
+   "path": "/",
+   "http_version": "HTTP/1.1",
+   "content_type": "application/x-www-form-urlencoded",
+   "content_type_header": "application/x-www-form-urlencoded",
+   "headers": [
+    [
+     "Host",
+     "127.0.0.1:<port>"
+    ],
+    [
+     "User-Agent",
+     "aws-sdk-go-v2/1.48.2 ua/2.1 os/linux lang/go#1.24.7 md/GOOS#linux md/GOARCH#amd64 api/ec2#1.350.2 m/E,g"
+    ],
+    [
+     "Content-Length",
+     "120"
+    ],
+    [
+     "Amz-Sdk-Invocation-Id",
+     "<uuid>"
+    ],
+    [
+     "Amz-Sdk-Request",
+     "attempt=1; max=3"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/ec2/aws4_request, SignedHeaders=amz-sdk-invocation-id;amz-sdk-request;content-length;content-type;host;x-amz-date, Signature=<hex>"
+    ],
+    [
+     "Content-Type",
+     "application/x-www-form-urlencoded"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "Accept-Encoding",
+     "gzip"
+    ]
+   ],
+   "body_sha256": "dae15147eadaca8bfe81869a26d1e59fd3f3eace82a080711e2b4c4f68fc3790",
+   "form": [
+    [
+     "Action",
+     "AttachVolume"
+    ],
+    [
+     "Device",
+     "/dev/sdf"
+    ],
+    [
+     "InstanceId",
+     "i-00000000000000007"
+    ],
+    [
+     "Version",
+     "2016-11-15"
+    ],
+    [
+     "VolumeId",
+     "vol-00000000000000004"
+    ]
+   ],
+   "response_status": 200,
+   "response_code": null
+  },
+  {
+   "operation": "DetachVolume",
+   "method": "POST",
+   "path": "/",
+   "http_version": "HTTP/1.1",
+   "content_type": "application/x-www-form-urlencoded",
+   "content_type_header": "application/x-www-form-urlencoded",
+   "headers": [
+    [
+     "Host",
+     "127.0.0.1:<port>"
+    ],
+    [
+     "User-Agent",
+     "aws-sdk-go-v2/1.48.2 ua/2.1 os/linux lang/go#1.24.7 md/GOOS#linux md/GOARCH#amd64 api/ec2#1.350.2 m/E,g"
+    ],
+    [
+     "Content-Length",
+     "69"
+    ],
+    [
+     "Amz-Sdk-Invocation-Id",
+     "<uuid>"
+    ],
+    [
+     "Amz-Sdk-Request",
+     "attempt=1; max=3"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/ec2/aws4_request, SignedHeaders=amz-sdk-invocation-id;amz-sdk-request;content-length;content-type;host;x-amz-date, Signature=<hex>"
+    ],
+    [
+     "Content-Type",
+     "application/x-www-form-urlencoded"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "Accept-Encoding",
+     "gzip"
+    ]
+   ],
+   "body_sha256": "64cc32603355c393cec28351cbb90cfff5ba428c1a2db1fd19534f25198e5367",
+   "form": [
+    [
+     "Action",
+     "DetachVolume"
+    ],
+    [
+     "Version",
+     "2016-11-15"
+    ],
+    [
+     "VolumeId",
+     "vol-00000000000000004"
+    ]
+   ],
+   "response_status": 200,
+   "response_code": null
+  },
+  {
+   "operation": "StopInstances",
+   "method": "POST",
+   "path": "/",
+   "http_version": "HTTP/1.1",
+   "content_type": "application/x-www-form-urlencoded",
+   "content_type_header": "application/x-www-form-urlencoded",
+   "headers": [
+    [
+     "Host",
+     "127.0.0.1:<port>"
+    ],
+    [
+     "User-Agent",
+     "aws-sdk-go-v2/1.48.2 ua/2.1 os/linux lang/go#1.24.7 md/GOOS#linux md/GOARCH#amd64 api/ec2#1.350.2 m/E,g"
+    ],
+    [
+     "Content-Length",
+     "72"
+    ],
+    [
+     "Amz-Sdk-Invocation-Id",
+     "<uuid>"
+    ],
+    [
+     "Amz-Sdk-Request",
+     "attempt=1; max=3"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/ec2/aws4_request, SignedHeaders=amz-sdk-invocation-id;amz-sdk-request;content-length;content-type;host;x-amz-date, Signature=<hex>"
+    ],
+    [
+     "Content-Type",
+     "application/x-www-form-urlencoded"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "Accept-Encoding",
+     "gzip"
+    ]
+   ],
+   "body_sha256": "42e0f75edb19809e3c5221db5212e6c65508678023ae4fee2ff283547c5a3d52",
+   "form": [
+    [
+     "Action",
+     "StopInstances"
+    ],
+    [
+     "InstanceId.1",
+     "i-00000000000000007"
+    ],
+    [
+     "Version",
+     "2016-11-15"
+    ]
+   ],
+   "response_status": 200,
+   "response_code": null
+  },
+  {
+   "operation": "StartInstances",
+   "method": "POST",
+   "path": "/",
+   "http_version": "HTTP/1.1",
+   "content_type": "application/x-www-form-urlencoded",
+   "content_type_header": "application/x-www-form-urlencoded",
+   "headers": [
+    [
+     "Host",
+     "127.0.0.1:<port>"
+    ],
+    [
+     "User-Agent",
+     "aws-sdk-go-v2/1.48.2 ua/2.1 os/linux lang/go#1.24.7 md/GOOS#linux md/GOARCH#amd64 api/ec2#1.350.2 m/E,g"
+    ],
+    [
+     "Content-Length",
+     "73"
+    ],
+    [
+     "Amz-Sdk-Invocation-Id",
+     "<uuid>"
+    ],
+    [
+     "Amz-Sdk-Request",
+     "attempt=1; max=3"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/ec2/aws4_request, SignedHeaders=amz-sdk-invocation-id;amz-sdk-request;content-length;content-type;host;x-amz-date, Signature=<hex>"
+    ],
+    [
+     "Content-Type",
+     "application/x-www-form-urlencoded"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "Accept-Encoding",
+     "gzip"
+    ]
+   ],
+   "body_sha256": "90eda54a86ead84c825b6a2b57cb8c04624ae3b0bb9200f4fc6c29def7d39e27",
+   "form": [
+    [
+     "Action",
+     "StartInstances"
+    ],
+    [
+     "InstanceId.1",
+     "i-00000000000000007"
+    ],
+    [
+     "Version",
+     "2016-11-15"
+    ]
+   ],
+   "response_status": 200,
+   "response_code": null
+  },
+  {
+   "operation": "TerminateInstances",
+   "method": "POST",
+   "path": "/",
+   "http_version": "HTTP/1.1",
+   "content_type": "application/x-www-form-urlencoded",
+   "content_type_header": "application/x-www-form-urlencoded",
+   "headers": [
+    [
+     "Host",
+     "127.0.0.1:<port>"
+    ],
+    [
+     "User-Agent",
+     "aws-sdk-go-v2/1.48.2 ua/2.1 os/linux lang/go#1.24.7 md/GOOS#linux md/GOARCH#amd64 api/ec2#1.350.2 m/E,g"
+    ],
+    [
+     "Content-Length",
+     "110"
+    ],
+    [
+     "Amz-Sdk-Invocation-Id",
+     "<uuid>"
+    ],
+    [
+     "Amz-Sdk-Request",
+     "attempt=1; max=3"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/ec2/aws4_request, SignedHeaders=amz-sdk-invocation-id;amz-sdk-request;content-length;content-type;host;x-amz-date, Signature=<hex>"
+    ],
+    [
+     "Content-Type",
+     "application/x-www-form-urlencoded"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "Accept-Encoding",
+     "gzip"
+    ]
+   ],
+   "body_sha256": "c3120f3c5f2b0279f3631bfeb80f38610c90e7b399ede84059ef00d245bd04c6",
+   "form": [
+    [
+     "Action",
+     "TerminateInstances"
+    ],
+    [
+     "InstanceId.1",
+     "i-00000000000000007"
+    ],
+    [
+     "InstanceId.2",
+     "i-00000000000000008"
+    ],
+    [
+     "Version",
+     "2016-11-15"
+    ]
+   ],
+   "response_status": 200,
+   "response_code": null
+  },
+  {
+   "operation": "CreateSecurityGroup",
+   "method": "POST",
+   "path": "/",
+   "http_version": "HTTP/1.1",
+   "content_type": "application/x-www-form-urlencoded",
+   "content_type_header": "application/x-www-form-urlencoded",
+   "headers": [
+    [
+     "Host",
+     "127.0.0.1:<port>"
+    ],
+    [
+     "User-Agent",
+     "aws-sdk-go-v2/1.48.2 ua/2.1 os/linux lang/go#1.24.7 md/GOOS#linux md/GOARCH#amd64 api/ec2#1.350.2 m/E,g"
+    ],
+    [
+     "Content-Length",
+     "124"
+    ],
+    [
+     "Amz-Sdk-Invocation-Id",
+     "<uuid>"
+    ],
+    [
+     "Amz-Sdk-Request",
+     "attempt=1; max=3"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/ec2/aws4_request, SignedHeaders=amz-sdk-invocation-id;amz-sdk-request;content-length;content-type;host;x-amz-date, Signature=<hex>"
+    ],
+    [
+     "Content-Type",
+     "application/x-www-form-urlencoded"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "Accept-Encoding",
+     "gzip"
+    ]
+   ],
+   "body_sha256": "3118c96054f622da4a257d0cde6bef4de09ee7a38989c7f03418b56ac4c22343",
+   "form": [
+    [
+     "Action",
+     "CreateSecurityGroup"
+    ],
+    [
+     "GroupDescription",
+     "evidence group"
+    ],
+    [
+     "GroupName",
+     "evidence"
+    ],
+    [
+     "Version",
+     "2016-11-15"
+    ],
+    [
+     "VpcId",
+     "vpc-00000000000000001"
+    ]
+   ],
+   "response_status": 400,
+   "response_code": "UnsupportedOperation"
+  },
+  {
+   "operation": "DeleteVolume",
+   "method": "POST",
+   "path": "/",
+   "http_version": "HTTP/1.1",
+   "content_type": "application/x-www-form-urlencoded",
+   "content_type_header": "application/x-www-form-urlencoded",
+   "headers": [
+    [
+     "Host",
+     "127.0.0.1:<port>"
+    ],
+    [
+     "User-Agent",
+     "aws-sdk-go-v2/1.48.2 ua/2.1 os/linux lang/go#1.24.7 md/GOOS#linux md/GOARCH#amd64 api/ec2#1.350.2 m/E,g"
+    ],
+    [
+     "Content-Length",
+     "69"
+    ],
+    [
+     "Amz-Sdk-Invocation-Id",
+     "<uuid>"
+    ],
+    [
+     "Amz-Sdk-Request",
+     "attempt=1; max=3"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/ec2/aws4_request, SignedHeaders=amz-sdk-invocation-id;amz-sdk-request;content-length;content-type;host;x-amz-date, Signature=<hex>"
+    ],
+    [
+     "Content-Type",
+     "application/x-www-form-urlencoded"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "Accept-Encoding",
+     "gzip"
+    ]
+   ],
+   "body_sha256": "0c1e0ddee628524051cbb4d89e7a8482f0dc5407ac2129a998b6cef387b30c86",
+   "form": [
+    [
+     "Action",
+     "DeleteVolume"
+    ],
+    [
+     "Version",
+     "2016-11-15"
+    ],
+    [
+     "VolumeId",
+     "vol-00000000000000004"
+    ]
+   ],
+   "response_status": 200,
+   "response_code": null
+  },
+  {
+   "operation": "DeleteVolume",
+   "method": "POST",
+   "path": "/",
+   "http_version": "HTTP/1.1",
+   "content_type": "application/x-www-form-urlencoded",
+   "content_type_header": "application/x-www-form-urlencoded",
+   "headers": [
+    [
+     "Host",
+     "127.0.0.1:<port>"
+    ],
+    [
+     "User-Agent",
+     "aws-sdk-go-v2/1.48.2 ua/2.1 os/linux lang/go#1.24.7 md/GOOS#linux md/GOARCH#amd64 api/ec2#1.350.2 m/E,g"
+    ],
+    [
+     "Content-Length",
+     "69"
+    ],
+    [
+     "Amz-Sdk-Invocation-Id",
+     "<uuid>"
+    ],
+    [
+     "Amz-Sdk-Request",
+     "attempt=1; max=3"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/ec2/aws4_request, SignedHeaders=amz-sdk-invocation-id;amz-sdk-request;content-length;content-type;host;x-amz-date, Signature=<hex>"
+    ],
+    [
+     "Content-Type",
+     "application/x-www-form-urlencoded"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "Accept-Encoding",
+     "gzip"
+    ]
+   ],
+   "body_sha256": "c954287f3a3d337dca6dd5d94179520432580d4f58d3674f1c0a9bf818d14358",
+   "form": [
+    [
+     "Action",
+     "DeleteVolume"
+    ],
+    [
+     "Version",
+     "2016-11-15"
+    ],
+    [
+     "VolumeId",
+     "vol-00000000000000005"
+    ]
+   ],
+   "response_status": 200,
+   "response_code": null
+  },
+  {
+   "operation": "DeleteSubnet",
+   "method": "POST",
+   "path": "/",
+   "http_version": "HTTP/1.1",
+   "content_type": "application/x-www-form-urlencoded",
+   "content_type_header": "application/x-www-form-urlencoded",
+   "headers": [
+    [
+     "Host",
+     "127.0.0.1:<port>"
+    ],
+    [
+     "User-Agent",
+     "aws-sdk-go-v2/1.48.2 ua/2.1 os/linux lang/go#1.24.7 md/GOOS#linux md/GOARCH#amd64 api/ec2#1.350.2 m/E,g"
+    ],
+    [
+     "Content-Length",
+     "72"
+    ],
+    [
+     "Amz-Sdk-Invocation-Id",
+     "<uuid>"
+    ],
+    [
+     "Amz-Sdk-Request",
+     "attempt=1; max=3"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/ec2/aws4_request, SignedHeaders=amz-sdk-invocation-id;amz-sdk-request;content-length;content-type;host;x-amz-date, Signature=<hex>"
+    ],
+    [
+     "Content-Type",
+     "application/x-www-form-urlencoded"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "Accept-Encoding",
+     "gzip"
+    ]
+   ],
+   "body_sha256": "b6c29b0021cbe32a24653ac0258d57ef6694988b21cdc94ab5df5e77fcaee93d",
+   "form": [
+    [
+     "Action",
+     "DeleteSubnet"
+    ],
+    [
+     "SubnetId",
+     "subnet-00000000000000003"
+    ],
+    [
+     "Version",
+     "2016-11-15"
+    ]
+   ],
+   "response_status": 200,
+   "response_code": null
+  },
+  {
+   "operation": "DeleteVpc",
+   "method": "POST",
+   "path": "/",
+   "http_version": "HTTP/1.1",
+   "content_type": "application/x-www-form-urlencoded",
+   "content_type_header": "application/x-www-form-urlencoded",
+   "headers": [
+    [
+     "Host",
+     "127.0.0.1:<port>"
+    ],
+    [
+     "User-Agent",
+     "aws-sdk-go-v2/1.48.2 ua/2.1 os/linux lang/go#1.24.7 md/GOOS#linux md/GOARCH#amd64 api/ec2#1.350.2 m/E,g"
+    ],
+    [
+     "Content-Length",
+     "63"
+    ],
+    [
+     "Amz-Sdk-Invocation-Id",
+     "<uuid>"
+    ],
+    [
+     "Amz-Sdk-Request",
+     "attempt=1; max=3"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/ec2/aws4_request, SignedHeaders=amz-sdk-invocation-id;amz-sdk-request;content-length;content-type;host;x-amz-date, Signature=<hex>"
+    ],
+    [
+     "Content-Type",
+     "application/x-www-form-urlencoded"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "Accept-Encoding",
+     "gzip"
+    ]
+   ],
+   "body_sha256": "dab7dfe696331b61c8d82241006646da1ebf2500f7e834b9ad9f1ccf34c8cd73",
+   "form": [
+    [
+     "Action",
+     "DeleteVpc"
+    ],
+    [
+     "Version",
+     "2016-11-15"
+    ],
+    [
+     "VpcId",
+     "vpc-00000000000000001"
+    ]
+   ],
+   "response_status": 200,
+   "response_code": null
+  }
+ ],
+ "summary": {
+  "operations": [
+   "DescribeRegions",
+   "DescribeAvailabilityZones",
+   "CreateVpc",
+   "CreateSubnet",
+   "DescribeVpcs",
+   "CreateVolume",
+   "CreateVolume",
+   "DescribeVolumes",
+   "DescribeVolumes",
+   "RunInstances",
+   "RunInstances",
+   "DescribeInstances",
+   "CreateTags",
+   "DescribeTags",
+   "DeleteTags",
+   "AttachVolume",
+   "DetachVolume",
+   "StopInstances",
+   "StartInstances",
+   "TerminateInstances",
+   "CreateSecurityGroup",
+   "DeleteVolume",
+   "DeleteVolume",
+   "DeleteSubnet",
+   "DeleteVpc"
+  ],
+  "content_types": [
+   "application/x-www-form-urlencoded"
+  ],
+  "http_versions": [
+   "HTTP/1.1"
+  ]
+ }
+}

@@ -26,6 +26,7 @@ Built when `CONFIG_EC2=y` (`services/ec2/Kconfig`, off by default).
 | `implemented-operations.txt` | operations the gateway implements | 1 onward |
 | `doc/unsupported.md` | every other operation, with the task that takes it (or the Requirement 14 refusal, or out of scope), the reason and the exact error it returns | 1 onward |
 | `tools/check_coverage.py`, `tools/test_check_coverage.py` | the coverage check (Requirement 2.1) and its fixture tests | 1 |
+| `tests/evidence/` | the recording stub and checked-in wire evidence from the AWS CLI v2, boto3 and the Java, JS and Go SDKs, with what the gateway must accept (`tests/evidence/README.md`) | 1 |
 | `cmd/ec2_node/` | the daemon; a placeholder whose `--self-test` checks the operation table, until the gateway serves requests | 1 |
 
 ## Core pieces used

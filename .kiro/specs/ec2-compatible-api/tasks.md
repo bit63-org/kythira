@@ -35,9 +35,15 @@ is one PR unless noted.
     test, and the coverage test: 75 operations planned in tasks 4 and
     10-14, 156 refused or answered empty under Requirements 10.6 and 14,
     580 out of scope, all answered with `UnsupportedOperation` until
-    implemented. Still open: the antikythera `src/proto/` port with the
-    test-vector test (the `antikythera-proto` overlay port arrives with
-    the khold module), and the recording stub with the wire evidence.
+    implemented.
+  - Part done (November 27, 2026): the recording stub and wire evidence
+    from the AWS CLI v2, boto3 and the Java, JS and Go SDKs, one
+    25-request scenario each, checked by `ec2_wire_evidence`
+    (`services/ec2/tests/evidence/README.md`). Still open: the
+    antikythera `src/proto/` port with the test-vector test (the
+    `antikythera-proto` overlay port arrives with the khold module), and
+    Terraform's recording, which needs a much larger stub and joins task
+    18's Terraform suite.
 
 - [ ] 2. EC2 query protocol codec
   - Core `aws_ec2_protocol.hpp`: `Name.N` flattening, EC2 response and

@@ -1,0 +1,9 @@
+{
+  "name": "ec2-evidence-js-sdk-v3",
+  "private": true,
+  "type": "module",
+  "description": "The EC2 evidence scenario through the AWS SDK for JavaScript v3 (see ../../README.md).",
+  "dependencies": {
+    "@aws-sdk/client-ec2": "3.1166.0"
+  }
+}

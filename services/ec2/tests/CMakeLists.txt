@@ -31,6 +31,14 @@ add_test(NAME ec2_operations_up_to_date
             "${_ec2_dir}model/service-2.json"
             "${_ec2_dir}include/kythira/ec2/model/operations.hpp" --check)
 
+# Task 1: the recorded wire evidence (tests/evidence/README.md) is
+# well-formed, uses only model actions, and decodes to one scenario across
+# every client.
+add_test(NAME ec2_wire_evidence
+    COMMAND "${Python3_EXECUTABLE}" "${_ec2_dir}tests/evidence/check_evidence.py"
+            "${_ec2_dir}model/service-2.json"
+            "${_ec2_dir}tests/evidence/data")
+
 # Task 1: ec2_node links and runs.
 add_test(NAME ec2_node_self_test COMMAND ec2_node --self-test)
 
@@ -38,6 +46,7 @@ set_tests_properties(
     ec2_model_coverage
     ec2_model_coverage_checker
     ec2_operations_up_to_date
+    ec2_wire_evidence
     ec2_node_self_test
     PROPERTIES LABELS "unit;ec2;ec2-module" TIMEOUT 60)
 
