@@ -2540,6 +2540,84 @@ BOOST_AUTO_TEST_CASE(multi_key_commands, *boost::unit_test::timeout(120)) {
     BOOST_CHECK(call({"MSETNX", "a", "1", "b"}).starts_with("-ERR wrong number of arguments"));
 }
 
+// Task 7: hashes end to end, from a follower (writes go to the leader as
+// exec records, reads are forwarded), with type errors both ways, the
+// collection limits and RESP2/RESP3 shapes.
+BOOST_AUTO_TEST_CASE(hash_commands, *boost::unit_test::timeout(120)) {
+    if constexpr (gateway_type::k_node_format_level < k_redis_typed_values_level) {
+        return;
+    }
+    redis_gateway_config cfg;
+    cfg._max_collection_elements = 3;
+    auto c = typed_cluster(cfg);
+    resp_client r(c->port(c->a_follower_of(k_sccache_group)));
+    BOOST_REQUIRE_EQUAL(r.auth("ops", "ops-secret"), "+OK\r\n");
+    const auto call = [&](const std::vector<std::string>& argv) { return r.call(argv); };
+    const std::string wrongtype =
+        "-WRONGTYPE Operation against a key holding the wrong kind of value\r\n";
+
+    BOOST_CHECK_EQUAL(call({"HSET", "sccache/h", "b", "2", "a", "1"}), ":2\r\n");
+    BOOST_CHECK_EQUAL(call({"HSETNX", "sccache/h", "a", "x"}), ":0\r\n");
+    BOOST_CHECK_EQUAL(call({"HMSET", "sccache/h", "a", "one"}), "+OK\r\n");
+    BOOST_CHECK_EQUAL(call({"HGET", "sccache/h", "a"}), bulk("one"));
+    BOOST_CHECK_EQUAL(call({"HMGET", "sccache/h", "a", "zz"}), "*2\r\n$3\r\none\r\n$-1\r\n");
+    BOOST_CHECK_EQUAL(call({"HLEN", "sccache/h"}), ":2\r\n");
+    BOOST_CHECK_EQUAL(call({"HEXISTS", "sccache/h", "b"}), ":1\r\n");
+    BOOST_CHECK_EQUAL(call({"HSTRLEN", "sccache/h", "a"}), ":3\r\n");
+    BOOST_CHECK_EQUAL(call({"HKEYS", "sccache/h"}), "*2\r\n$1\r\na\r\n$1\r\nb\r\n");
+    BOOST_CHECK_EQUAL(call({"HVALS", "sccache/h"}), "*2\r\n$3\r\none\r\n$1\r\n2\r\n");
+    BOOST_CHECK_EQUAL(call({"HGETALL", "sccache/h"}),
+                      "*4\r\n$1\r\na\r\n$3\r\none\r\n$1\r\nb\r\n$1\r\n2\r\n");
+    BOOST_CHECK_EQUAL(call({"HINCRBY", "sccache/h", "n", "5"}), ":5\r\n");
+    BOOST_CHECK_EQUAL(call({"HINCRBY", "sccache/h", "n", "x"}),
+                      "-ERR value is not an integer or out of range\r\n");
+    BOOST_CHECK_EQUAL(call({"HINCRBYFLOAT", "sccache/h", "n", "0.5"}), bulk("5.5"));
+    BOOST_CHECK_EQUAL(call({"TYPE", "sccache/h"}), "+hash\r\n");
+    BOOST_CHECK_EQUAL(call({"OBJECT", "ENCODING", "sccache/h"}), bulk("listpack"));
+    // The element limit is the record's: a fourth field is refused.
+    BOOST_CHECK_EQUAL(call({"HSET", "sccache/h", "d", "4"}),
+                      "-ERR collection exceeds the configured maximum of 3 elements\r\n");
+    // HRANDFIELD picks on the serving node; every pick is a field.
+    const auto pick = call({"HRANDFIELD", "sccache/h"});
+    BOOST_CHECK(pick == bulk("a") || pick == bulk("b") || pick == bulk("n"));
+    BOOST_CHECK(call({"HRANDFIELD", "sccache/h", "5"}).starts_with("*3\r\n"));
+    BOOST_CHECK(call({"HRANDFIELD", "sccache/h", "-5", "withvalues"}).starts_with("*10\r\n"));
+    BOOST_CHECK_EQUAL(call({"HRANDFIELD", "sccache/h", "1", "VALUES"}), "-ERR syntax error\r\n");
+
+    // Type errors both ways change nothing.
+    BOOST_CHECK_EQUAL(call({"SET", "sccache/s", "v"}), "+OK\r\n");
+    BOOST_CHECK_EQUAL(call({"HSET", "sccache/s", "f", "v"}), wrongtype);
+    BOOST_CHECK_EQUAL(call({"HGET", "sccache/s", "f"}), wrongtype);
+    BOOST_CHECK_EQUAL(call({"GET", "sccache/h"}), wrongtype);
+    BOOST_CHECK_EQUAL(call({"STRLEN", "sccache/h"}), wrongtype);
+    BOOST_CHECK_EQUAL(call({"INCR", "sccache/h"}), wrongtype);
+    BOOST_CHECK_EQUAL(call({"APPEND", "sccache/h", "x"}), wrongtype);
+    BOOST_CHECK_EQUAL(call({"GET", "sccache/s"}), bulk("v"));
+
+    // Deadlines, renames and deletes keep or drop the whole hash.
+    BOOST_CHECK_EQUAL(call({"EXPIRE", "sccache/h", "1000"}), ":1\r\n");
+    BOOST_CHECK_EQUAL(call({"HDEL", "sccache/h", "n"}), ":1\r\n");
+    BOOST_CHECK(call({"PTTL", "sccache/h"}) != ":-1\r\n");
+    BOOST_CHECK_EQUAL(call({"RENAME", "sccache/h", "sccache/h2"}), "+OK\r\n");
+    BOOST_CHECK_EQUAL(call({"HGET", "sccache/h2", "b"}), bulk("2"));
+    BOOST_CHECK_EQUAL(call({"HDEL", "sccache/h2", "a", "b"}), ":2\r\n");
+    BOOST_CHECK_EQUAL(call({"EXISTS", "sccache/h2"}), ":0\r\n");
+    BOOST_CHECK_EQUAL(call({"HGETALL", "sccache/h2"}), "*0\r\n");
+    BOOST_CHECK_EQUAL(call({"HGET", "sccache/h2", "a"}), "$-1\r\n");
+
+    // A collection does not cross groups until task 11.
+    BOOST_CHECK_EQUAL(call({"HSET", "a/h", "f", "v"}), ":1\r\n");
+    BOOST_CHECK_EQUAL(call({"RENAME", "a/h", "sccache/x"}),
+                      "-CROSSSLOT Keys in request don't hash to the same slot\r\n");
+
+    // RESP3: HGETALL is a map; HRANDFIELD WITHVALUES gives pairs.
+    BOOST_CHECK(call({"HELLO", "3"}).starts_with("%"));
+    BOOST_CHECK_EQUAL(call({"HGETALL", "a/h"}), "%1\r\n$1\r\nf\r\n$1\r\nv\r\n");
+    BOOST_CHECK_EQUAL(call({"HRANDFIELD", "a/h", "1", "WITHVALUES"}),
+                      "*1\r\n*2\r\n$1\r\nf\r\n$1\r\nv\r\n");
+    BOOST_CHECK(call({"HSCAN", "a/h", "0"}).starts_with("-ERR unknown command"));
+}
+
 // Requirement 5.4: the rule is decided in apply(), so writers racing to
 // create one key cannot both pass: exactly one INCR creates it and every
 // other one finds it existing. In a mutable prefix every INCR counts.

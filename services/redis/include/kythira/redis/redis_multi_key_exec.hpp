@@ -33,6 +33,7 @@
 #include <kythira/redis/redis_kv_commands.hpp>
 #include <kythira/redis/redis_reply.hpp>
 #include <kythira/redis/redis_string_exec.hpp>
+#include <kythira/redis/redis_value.hpp>
 
 #include <cstddef>
 #include <cstdint>
@@ -165,7 +166,7 @@ auto apply_redis_multi_key_exec(Store& store, const redis_kv_exec_command& c, st
                 return conflict();
             }
         }
-        store.put(dst, from->_value, from->_expire_at_ms);
+        redis_store_put_copy(store, dst, *from, from->_expire_at_ms);
         return redis_reply::integer(1);
     }
     if (!from) {
@@ -181,11 +182,10 @@ auto apply_redis_multi_key_exec(Store& store, const redis_kv_exec_command& c, st
     if (!may_mutate_key(c, 0) || (to && !may_mutate_key(c, 1))) {
         return conflict();
     }
-    // Copy the entry out before erasing it: `from` may be the store's own.
-    auto value = from->_value;
-    const auto expire = from->_expire_at_ms;
+    // `from` is a handle, so it outlives the erase; the copy keeps the
+    // value's type and deadline (Requirement 3.7).
     (void)store.erase(src);
-    store.put(dst, std::move(value), expire);
+    redis_store_put_copy(store, dst, *from, from->_expire_at_ms);
     return id == redis_command_id::rename ? redis_reply::simple("OK") : redis_reply::integer(1);
 }
 

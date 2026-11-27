@@ -505,6 +505,11 @@ auto from_env() -> node_options {
         to_u64("KYTHIRA_REDIS_TXN_MAX_RETRIES", get_opt("KYTHIRA_REDIS_TXN_MAX_RETRIES", "2"));
     g._max_value_bytes = to_u64("KYTHIRA_REDIS_MAX_VALUE_BYTES",
                                 get_opt("KYTHIRA_REDIS_MAX_VALUE_BYTES", "8388608"));
+    g._max_collection_bytes = to_u64("KYTHIRA_REDIS_MAX_COLLECTION_BYTES",
+                                     get_opt("KYTHIRA_REDIS_MAX_COLLECTION_BYTES", "67108864"));
+    g._max_collection_elements =
+        to_u64("KYTHIRA_REDIS_MAX_COLLECTION_ELEMENTS",
+               get_opt("KYTHIRA_REDIS_MAX_COLLECTION_ELEMENTS", "4194304"));
     g._max_clients =
         to_u64("KYTHIRA_REDIS_MAX_CLIENTS", get_opt("KYTHIRA_REDIS_MAX_CLIENTS", "1024"));
     g._idle_timeout =

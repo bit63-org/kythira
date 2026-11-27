@@ -135,6 +135,12 @@ struct redis_gateway_config {
     bool _allow_anonymous = false;
     redis_read_consistency _read_consistency = redis_read_consistency::leader;
     std::size_t _max_value_bytes = 8u * 1024u * 1024u;
+    /// Bounds on one collection (redis-general-data-types Requirement 9.4):
+    /// its total bytes (each element's bytes plus a fixed overhead) and its
+    /// element count. Carried in each collection write's record, so every
+    /// replica refuses the same write.
+    std::size_t _max_collection_bytes = 64u * 1024u * 1024u;
+    std::size_t _max_collection_elements = 4u * 1024u * 1024u;
     std::size_t _max_clients = 1024;
     std::chrono::milliseconds _idle_timeout{300000};
     std::chrono::milliseconds _command_timeout{5000};
@@ -660,6 +666,11 @@ protected:
                           const std::string& mutable_bits) -> std::string;
     /// `DEL`, `UNLINK`, `RENAME`, `RENAMENX`, `COPY`, `MSETNX` with several
     /// keys: syntax checks and normal form (task 6).
+    /// Every shipped hash command (task 7): writes as `exec` records with
+    /// the configured collection limits, reads evaluated on the entry
+    /// handle after the node lock is released (redis_hash_exec.hpp).
+    auto handle_hash(session& s, const redis_command_info& info, const resp_command& cmd)
+        -> std::string;
     auto handle_multi_key_write(session& s, std::string_view upper, const resp_command& cmd)
         -> std::string;
     /// Whether a plain `SET` or `SETEX` of `key` goes as an `exec` record:
@@ -673,6 +684,10 @@ protected:
     auto typed_ready(const std::string& key) -> bool;
     /// The deadline of `src` for a cross-group `RENAME` or `COPY`.
     auto source_deadline(session& s, const std::string& src) -> std::optional<std::uint64_t>;
+    /// Whether `src` holds a string (or nothing), for the same commands:
+    /// a cross-group copy of a collection waits for typed values in
+    /// transactions (task 11). `nullopt` when no replica answered.
+    auto source_is_string(session& s, const std::string& src) -> std::optional<bool>;
     /// `KYTHIRA.EXEC <command id> <mutable bits> <may grow 0|1> <args...>`:
     /// the internal hop of an `exec` record whose leader is on this node.
     auto handle_internal_exec(session& s, const resp_command& cmd) -> std::string;

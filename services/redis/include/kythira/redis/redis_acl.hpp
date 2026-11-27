@@ -243,13 +243,15 @@ enum class acl_decision : std::uint8_t {
     if (upper_name == "EXISTS" || upper_name == "TYPE" || upper_name == "TTL" ||
         upper_name == "PTTL" || upper_name == "EXPIRETIME" || upper_name == "PEXPIRETIME" ||
         upper_name == "TOUCH" || upper_name == "OBJECT" || upper_name == "STRLEN" ||
-        upper_name == "WATCH") {
+        upper_name == "WATCH" || upper_name == "HLEN" || upper_name == "HEXISTS" ||
+        upper_name == "HSTRLEN") {
         return none;
     }
     if (upper_name == "GETSET" || upper_name == "GETDEL" || upper_name == "GETEX" ||
         upper_name == "INCR" || upper_name == "DECR" || upper_name == "INCRBY" ||
         upper_name == "DECRBY" || upper_name == "INCRBYFLOAT" || upper_name == "RENAME" ||
-        upper_name == "RENAMENX" || upper_name == "COPY") {
+        upper_name == "RENAMENX" || upper_name == "COPY" || upper_name == "HINCRBY" ||
+        upper_name == "HINCRBYFLOAT") {
         return read | write;
     }
     const auto* info = find_redis_command(upper_name);

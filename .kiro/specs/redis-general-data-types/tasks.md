@@ -100,7 +100,7 @@ is extended as the rest land.
     no-transaction builds, and a split between routing and submission
   - _Requirements: 3.7, 6.1-6.6_
 
-- [ ] 7. Typed value model and hashes
+- [x] 7. Typed value model and hashes
   - `redis_value` with chunked collections; `WRONGTYPE`; empty collection
     deletes the key; collection limits; incremental size accounting;
     shared-handle reads for `HGETALL`
