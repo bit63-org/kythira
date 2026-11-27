@@ -27,13 +27,14 @@ Built when `CONFIG_EC2=y` (`services/ec2/Kconfig`, off by default).
 | `doc/unsupported.md` | every other operation, with the task that takes it (or the Requirement 14 refusal, or out of scope), the reason and the exact error it returns | 1 onward |
 | `tools/check_coverage.py`, `tools/test_check_coverage.py` | the coverage check (Requirement 2.1) and its fixture tests | 1 |
 | `tests/evidence/` | the recording stub and checked-in wire evidence from the AWS CLI v2, boto3 and the Java, JS and Go SDKs, with what the gateway must accept (`tests/evidence/README.md`) | 1 |
+| `tests/ec2_protocol_evidence_test.cpp` | every recorded request through the core EC2 query codec (`include/raft/aws_ec2_protocol.hpp`, with its own `aws_ec2_protocol_test` and fuzz target in `tests/`) | 2 |
 | `cmd/ec2_node/` | the daemon; a placeholder whose `--self-test` checks the operation table, until the gateway serves requests | 1 |
 
 ## Core pieces used
 
 | From core | Used for |
 |---|---|
-| `kythira_core_headers` | the public headers; from task 2 the query codec beside `aws_query_protocol.hpp`, later SigV4, the authorizer and the multi-raft host |
+| `kythira_core_headers` | the public headers; `aws_ec2_protocol.hpp` (the EC2 query codec, task 2) over `aws_query_protocol.hpp`; later SigV4, the authorizer and the multi-raft host |
 | `OpenSSL::Crypto` | SigV4, the link's TLS |
 | `cmake/kythira_test_helpers.cmake` | `kythira_scale_test_timeouts()` |
 

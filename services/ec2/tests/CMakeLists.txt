@@ -50,4 +50,24 @@ set_tests_properties(
     ec2_node_self_test
     PROPERTIES LABELS "unit;ec2;ec2-module" TIMEOUT 60)
 
+# A C++ module test: Boost.Test through add_raft_completion_test, linked to
+# the module's headers.
+function(kythira_ec2_test test_name source_file)
+    add_raft_completion_test(${test_name} ${source_file})
+    target_link_libraries(${test_name} PRIVATE kythira_ec2)
+    set_target_properties(${test_name} PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests")
+    set_tests_properties(${test_name} PROPERTIES
+        WORKING_DIRECTORY "${CMAKE_BINARY_DIR}/tests"
+        LABELS "unit;ec2;ec2-module"
+        TIMEOUT 120)
+endfunction()
+
+# Task 2, Requirement 3.1: every recorded client request through the core
+# EC2 query codec (include/raft/aws_ec2_protocol.hpp), which must decode them
+# all to one scenario.
+kythira_ec2_test(ec2_protocol_evidence_test ec2_protocol_evidence_test.cpp)
+target_compile_definitions(ec2_protocol_evidence_test PRIVATE
+    KYTHIRA_EC2_EVIDENCE_DIR="${_ec2_dir}tests/evidence/data")
+
 kythira_scale_test_timeouts()

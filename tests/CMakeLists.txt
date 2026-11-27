@@ -5388,6 +5388,26 @@ set_tests_properties(aws_query_protocol_test PROPERTIES
     LABELS "unit;aws;iam"
 )
 
+# EC2 spec task 2: the EC2 query protocol codec (Name.N flattening at every
+# depth, filters, tags and tag specifications, the answer and error
+# documents), and its fuzz target over mutated recorded requests. Core, like
+# the query codec beside it; the EC2 module decodes every recording with it
+# in ec2_protocol_evidence_test. Labelled ec2, not ec2-module: they exist
+# with the module off.
+foreach(_ec2_codec_test IN ITEMS aws_ec2_protocol_test aws_ec2_protocol_fuzz_test)
+    add_executable(${_ec2_codec_test} ${_ec2_codec_test}.cpp)
+    target_link_libraries(${_ec2_codec_test} PRIVATE
+        Boost::unit_test_framework
+        OpenSSL::Crypto
+    )
+    target_compile_features(${_ec2_codec_test} PRIVATE cxx_std_23)
+    add_test(NAME ${_ec2_codec_test} COMMAND ${_ec2_codec_test})
+    set_tests_properties(${_ec2_codec_test} PROPERTIES
+        TIMEOUT 120
+        LABELS "unit;aws;ec2"
+    )
+endforeach()
+
 # DynamoDB spec task 2: the AWS JSON protocol codec shared by the DynamoDB
 # and Kinesis modules (framing, the generated shape tables, AWS's two-pass
 # validation, the standard response headers, dispatch), on a fixture model.

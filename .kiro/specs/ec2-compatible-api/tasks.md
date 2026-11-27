@@ -51,6 +51,18 @@ is one PR unless noted.
     and marker sealer; unit tests against the recorded evidence and a
     fuzz target
   - _Requirements: 3.1_
+  - Done (November 27, 2026): `include/raft/aws_ec2_protocol.hpp` with
+    `params` (`Name.N` lists and nested structures at any depth, booleans,
+    bounded integers, a sorted re-encoding), `read_request` (Action and
+    Version), filters, tags, tag specifications, `MaxResults`, sealed
+    `NextToken` through the query codec's marker sealer, the answer and
+    error documents, `item_list`/`tag_set`, time stamps and the HTTP
+    status per error code. Every decoder returns the value or the EC2
+    error to answer with. Tests: `aws_ec2_protocol_test` (cases copied
+    from the recordings), `aws_ec2_protocol_fuzz_test` (mutated recorded
+    bodies, round-trip and accounting properties, run under the sanitizer
+    legs) and the module's `ec2_protocol_evidence_test` (every recorded
+    request decodes, and all five clients decode to the same requests).
 
 - [ ] 3. Gateway, authorization and profile
   - SigV4; `ec2` action table with every resource and condition key per
