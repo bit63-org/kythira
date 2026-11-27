@@ -12,17 +12,20 @@ CopyObject
 CreateBucket
 CreateMultipartUpload
 DeleteBucket
+DeleteBucketCors
 DeleteBucketEncryption
 DeleteBucketLifecycle
 DeleteBucketOwnershipControls
 DeleteBucketPolicy
 DeleteBucketReplication
 DeleteBucketTagging
+DeleteBucketWebsite
 DeleteObject
 DeleteObjectTagging
 DeleteObjects
 DeletePublicAccessBlock
 GetBucketAcl
+GetBucketCors
 GetBucketEncryption
 GetBucketLifecycle
 GetBucketLifecycleConfiguration
@@ -37,6 +40,7 @@ GetBucketReplication
 GetBucketRequestPayment
 GetBucketTagging
 GetBucketVersioning
+GetBucketWebsite
 GetObject
 GetObjectAcl
 GetObjectAttributes
@@ -54,6 +58,7 @@ ListObjects
 ListObjectsV2
 ListParts
 PutBucketAcl
+PutBucketCors
 PutBucketEncryption
 PutBucketLifecycle
 PutBucketLifecycleConfiguration
@@ -65,6 +70,7 @@ PutBucketPolicy
 PutBucketReplication
 PutBucketTagging
 PutBucketVersioning
+PutBucketWebsite
 PutObject
 PutObjectAcl
 PutObjectLegalHold
