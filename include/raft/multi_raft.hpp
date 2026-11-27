@@ -1100,6 +1100,42 @@ public:
                 return f(sm, g->_descriptor);
             });
     }
+
+    /// @brief `with_group_state_machine`, but only on a replica that has
+    ///        caught up with its group (`node::with_current_state_machine`):
+    ///        empty as well when this host's replica of `group` is a leader
+    ///        that has not applied an entry of its term yet, or a follower
+    ///        or learner that has not been caught up since it started (or
+    ///        not within `max_staleness`, when one is given).
+    ///
+    /// For reads that answer "no such thing" from what the replica holds: a
+    /// learner still being sent its snapshot would answer that for
+    /// everything its group created.
+    template<typename F>
+    auto with_current_group_state_machine(
+        const GroupId& group, F&& f,
+        std::optional<std::chrono::steady_clock::duration> max_staleness = std::nullopt)
+        -> std::optional<
+            std::invoke_result_t<F&, typename Types::state_machine_type&, const descriptor_type&>> {
+        using result =
+            std::invoke_result_t<F&, typename Types::state_machine_type&, const descriptor_type&>;
+        auto g = find_group(group);
+        if (!g || g->_destroyed.load(std::memory_order_acquire)) {
+            return std::nullopt;
+        }
+        auto out = g->_node->with_current_state_machine(
+            [&](typename Types::state_machine_type& sm) -> std::optional<result> {
+                if (g->_destroyed.load(std::memory_order_acquire)) {
+                    return std::nullopt;
+                }
+                return f(sm, g->_descriptor);
+            },
+            max_staleness);
+        if (!out) {
+            return std::nullopt;
+        }
+        return std::move(*out);
+    }
     /// @}
 
     /// @name Client surface (Requirement 16)

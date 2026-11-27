@@ -357,6 +357,67 @@ BOOST_AUTO_TEST_CASE(last_caught_up_advances_with_heartbeats_and_stops_without_t
     node2.stop();
 }
 
+// with_current_state_machine() refuses a learner that has never caught up
+// (an empty state machine read as current answers "no such thing" for all
+// its group holds), serves it once a heartbeat leaves it caught up, refuses
+// it again once max_staleness passes without one, and serves the leader
+// once it has applied an entry of its term.
+BOOST_AUTO_TEST_CASE(with_current_state_machine_waits_for_a_caught_up_replica,
+                     *boost::unit_test::timeout(30)) {
+    sim_t sim;
+    sim.start();
+    auto net1 = sim.create_node("1");
+    auto net2 = sim.create_node("2");
+    connect_all(sim, {"1", "2"});
+
+    auto cfg = make_fast_config();
+    test_node node1{make_node_config(1, net1, cfg)};
+    test_node node2{make_node_config(2, net2, cfg)};
+    node1.set_cluster_configuration({1});
+    node2.set_cluster_configuration({1}, {2});
+    node1.start();
+    node2.start();
+    const auto read = [](test_node& n,
+                         std::optional<std::chrono::steady_clock::duration> staleness =
+                             std::nullopt) {
+        return n.with_current_state_machine([](auto& /*sm*/) { return true; }, staleness)
+            .has_value();
+    };
+    BOOST_CHECK(!read(node1));
+    BOOST_CHECK(!read(node2));
+
+    BOOST_REQUIRE(wait_until([&] {
+        std::this_thread::sleep_for(cfg._election_timeout_max + std::chrono::milliseconds{20});
+        node1.check_election_timeout();
+        return wait_until([&] { return node1.is_leader(); }, std::chrono::milliseconds{1000});
+    }));
+    // The election no-op applied: the leader's state machine is current.
+    BOOST_REQUIRE(wait_until([&] {
+        node1.check_heartbeat_timeout();
+        return read(node1);
+    }));
+
+    auto add_fut = node1.add_learner(2);
+    bool add_done = false;
+    std::move(add_fut)
+        .thenValue([&](std::vector<std::byte>) { add_done = true; })
+        .thenError([&](const std::exception_ptr&) { add_done = true; })
+        .detach();
+    BOOST_REQUIRE(wait_until([&] {
+        node1.check_heartbeat_timeout();
+        return add_done && node2.last_caught_up().has_value();
+    }));
+    BOOST_CHECK(read(node2));
+
+    // The leader gone: still served with no bound, refused past one.
+    node1.stop();
+    std::this_thread::sleep_for(std::chrono::milliseconds{200});
+    BOOST_CHECK(read(node2));
+    BOOST_CHECK(!read(node2, std::chrono::milliseconds{100}));
+
+    node2.stop();
+}
+
 BOOST_AUTO_TEST_SUITE_END()
 
 // ── add_learner() / remove_learner() ────────────────────────────────────────
