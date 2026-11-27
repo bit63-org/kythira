@@ -490,11 +490,18 @@ public:
     /// The Redis format level this node reports (redis-general-data-types
     /// Requirement 14.3): the binary's level when its store reads the newer
     /// formats, else the base level, so a cluster whose store does not
-    /// (the engine and multi-version stores until tasks 10 and 11) can
-    /// never pass the gate.
+    /// (the disk-backed cache, and the multi-version store until task 11)
+    /// can never pass the gate.
     static constexpr std::uint16_t k_node_format_level = requires(const kv_store_type& kv) {
         kv.format_level();
     } ? k_redis_format_level : k_redis_base_format_level;
+
+    /// Whether the store holds only strings: the disk-backed build cache,
+    /// whose entries are chunk manifests. Every command that needs the
+    /// typed-values level answers `k_redis_string_only_store_error` there
+    /// instead of the format-gate error, since no upgrade will change it
+    /// (redis-general-data-types Requirement 13.3).
+    static constexpr bool k_string_only_store = !std::is_same_v<entry_type, redis_kv_value_entry>;
 
     redis_front_end(Host& host, redis_acl& acl, Logger& logger, Metrics& metrics,
                     redis_gateway_config config, endpoint_resolver resolver);

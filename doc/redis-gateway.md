@@ -676,10 +676,31 @@ not take the whole link. It is refused in the other modes, where it would do
 nothing: file mode catches a follower up by fetching chunks, at
 `KYTHIRA_CACHE_FETCH_BYTES_PER_SEC`.
 
+After the format gate (*Format level and the rolling upgrade*) the engine
+store holds hashes, sets and lists as well as strings. A string is one row,
+as before. A collection is a header row (type, deadline, element count,
+size and, for a list, its first position) followed by one row per element,
+so writing one field, member or list element rewrites that row and the
+header, never the whole collection, and the rows of a key always travel
+together in a split, a merge or a snapshot transfer. Pushing or popping at
+either end of a list, `LSET` and `LTRIM` write O(1) rows; `LINSERT` and
+`LREM` in the middle move the shorter side. A node keeps up to 64 MiB of
+recently written collections decoded in memory, so a run of writes to one
+large collection reads its rows once.
+
+Keys containing a NUL byte are stored escaped once a shard has passed the
+gate (the gate itself rewrites the few that exist). For the same reason the
+engine store never splits a shard at such a key, and a shard whose bounds
+contain one (only possible from a split made by an older build) refuses the
+gate, so its typed commands keep answering the gate error until it is merged
+with a neighbour. An older build refuses a gated shard's metadata at
+startup instead of misreading it.
+
 `services/redis/docker/engine-chaos-compose.yml` runs three nodes this way,
 and `docker-engine-chaos-tests` SIGKILLs and restarts them under load
-(the history must be linearizable) and kills a follower in the middle of a
-snapshot transfer (it must still catch up), under Docker and rootless Podman.
+(the history, which covers strings, hashes and lists, must be linearizable)
+and kills a follower in the middle of a snapshot transfer (it must still
+catch up), under Docker and rootless Podman.
 
 ## Strings
 
@@ -766,10 +787,13 @@ are on, refused elsewhere.
 
 `HSET`, `HSETNX`, `HMSET`, `HGET`, `HMGET`, `HDEL`, `HEXISTS`, `HLEN`,
 `HSTRLEN`, `HKEYS`, `HVALS`, `HGETALL`, `HINCRBY`, `HINCRBYFLOAT` and
-`HRANDFIELD` behave as in Redis 7, with the in-memory store
-(`KYTHIRA_CACHE_PERSISTENCE=memory`) once a shard has passed format level 3;
-the engine store follows with a later release, and the disk-backed cache
-stays string-only. `HSCAN` arrives with `SCAN`.
+`HRANDFIELD` behave as in Redis 7, with the in-memory and engine stores
+(`KYTHIRA_CACHE_PERSISTENCE=memory` or `engine`) once a shard has passed
+format level 3. The disk-backed cache (`file`) stays string-only: there,
+every command of `.kiro/specs/redis-general-data-types/` other than a plain
+`SET`, `GET` or `DEL` answers `-ERR this command needs
+KYTHIRA_CACHE_PERSISTENCE=memory or engine`, and its formats never change.
+`HSCAN` arrives with `SCAN`.
 
 - A key holds one type. A hash command on a string, or a string command
   (`GET`, `INCR`, `APPEND`, ...) on a hash, answers `-WRONGTYPE Operation
@@ -999,8 +1023,8 @@ and snapshot format (`0x03` records, the `KRV3` snapshot marker). A binary's
 records, level 3 adds the typed-value records. Each node reports its level
 as `kythira_format_level` in `INFO`, as the module's `format_level` health
 metric, and to `KYTHIRA.FORMAT LEVEL`. A node whose store does not read the
-newer formats yet (the engine and multi-version stores, until their tasks
-land) reports level 2.
+newer formats (the disk-backed cache, and the multi-version store until its
+task lands) reports level 2.
 
 A group writes the newer formats only after a **format gate** has applied
 on it. To enable them on a running cluster:

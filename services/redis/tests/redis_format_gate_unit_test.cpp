@@ -139,10 +139,20 @@ BOOST_AUTO_TEST_CASE(stores_without_typed_values_refuse_every_v3_record,
     BOOST_CHECK_THROW((void)mvcc.apply(gate(3), 1), redis_kv_codec_error);
     BOOST_CHECK_THROW((void)mvcc.apply(exec_record(), 1), redis_kv_codec_error);
     BOOST_CHECK_THROW((void)mvcc.apply(future, 1), redis_format_too_new);
+}
 
+// The engine store reads format 0x03 since task 10: the gate applies, and a
+// newer record still halts.
+BOOST_AUTO_TEST_CASE(the_engine_store_passes_the_gate_and_refuses_newer_records,
+                     *boost::unit_test::timeout(10)) {
+    auto future = exec_record();
+    future[0] = std::byte{k_redis_format_level + 1};
     memory_kv_engine engine;
     persistent_kv_state_machine<memory_kv_engine> engine_sm("ns/");
     engine_sm.open(engine, key_range{.start = "", .end = std::nullopt});
-    BOOST_CHECK_THROW((void)engine_sm.apply(gate(3), 1), redis_kv_codec_error);
-    BOOST_CHECK_THROW((void)engine_sm.apply(future, 1), redis_format_too_new);
+    BOOST_CHECK(engine_sm.apply(gate(3), 1) ==
+                redis_v3_apply_result(redis_v3_apply_status::changed));
+    BOOST_CHECK_EQUAL(engine_sm.format_level(), 3U);
+    BOOST_CHECK_THROW((void)engine_sm.apply(future, 2), redis_format_too_new);
+    BOOST_CHECK_EQUAL(engine_sm.applied_index(), 1U);
 }
