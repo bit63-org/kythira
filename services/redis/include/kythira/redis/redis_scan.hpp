@@ -20,6 +20,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <map>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -233,6 +234,58 @@ struct redis_scan_page {
     bool _exhausted = false;
     std::optional<std::string> _range_end;
     std::uint64_t _approximate_keys = 0;
+    /// The group's keys with a deadline (`INFO keyspace`'s `expires=`).
+    std::uint64_t _expiring_keys = 0;
+};
+
+/// The bucket `KYTHIRA.USAGE` counts `key` in (Requirement 8.4): the key up
+/// to and including its `depth`-th `delim`, or the whole key when it has
+/// fewer. An empty delimiter or a depth of 0 puts every key in one bucket,
+/// the empty string.
+[[nodiscard]] inline auto redis_usage_bucket(std::string_view key, std::size_t depth,
+                                             std::string_view delim) -> std::string {
+    if (depth == 0 || delim.empty()) {
+        return {};
+    }
+    std::size_t at = 0;
+    for (std::size_t seen = 0; seen < depth; ++seen) {
+        const auto found = key.find(delim, at);
+        if (found == std::string_view::npos) {
+            return std::string(key);
+        }
+        at = found + delim.size();
+    }
+    return std::string(key.substr(0, at));
+}
+
+/// One page of a group's usage: keys and bytes per bucket, those past the
+/// bucket limit in `_other`, and where the walk stopped, as for a SCAN page.
+struct redis_usage_page {
+    struct tally {
+        std::uint64_t _keys = 0;
+        std::uint64_t _bytes = 0;
+    };
+    std::map<std::string, tally> _buckets;
+    tally _other;
+    std::optional<std::string> _last;
+    bool _exhausted = false;
+    std::optional<std::string> _range_end;
+
+    /// Adds to `bucket`, or to `_other` once `max_buckets` exist.
+    auto add(const std::string& bucket, std::uint64_t keys, std::uint64_t bytes,
+             std::size_t max_buckets) -> void {
+        auto it = _buckets.find(bucket);
+        if (it == _buckets.end()) {
+            if (_buckets.size() >= max_buckets) {
+                _other._keys += keys;
+                _other._bytes += bytes;
+                return;
+            }
+            it = _buckets.emplace(bucket, tally{}).first;
+        }
+        it->second._keys += keys;
+        it->second._bytes += bytes;
+    }
 };
 
 namespace redis_scan_detail {
@@ -267,7 +320,7 @@ public:
 private:
     auto take(std::uint64_t n) -> std::string_view {
         if (_in.size() < n) {
-            throw std::runtime_error("truncated KYTHIRA.DATA PAGE reply");
+            throw std::runtime_error("truncated KYTHIRA.DATA reply");
         }
         auto out = _in.substr(0, n);
         _in.remove_prefix(n);
@@ -279,7 +332,8 @@ private:
 }  // namespace redis_scan_detail
 
 /// The `KYTHIRA.DATA PAGE` reply body: flags (bit 0 exhausted, bit 1 a
-/// last key, bit 2 a range end), the approximate count, the examined count,
+/// last key, bit 2 a range end), the approximate count, the expiring
+/// count, the examined count,
 /// the last key and
 /// range end when present, the key count and the keys.
 [[nodiscard]] inline auto encode_redis_scan_page(const redis_scan_page& p) -> std::string {
@@ -288,6 +342,7 @@ private:
     out.push_back(
         static_cast<char>((p._exhausted ? 1 : 0) | (p._last ? 2 : 0) | (p._range_end ? 4 : 0)));
     put_u64(out, p._approximate_keys);
+    put_u64(out, p._expiring_keys);
     put_u64(out, p._examined);
     if (p._last) {
         put_text(out, *p._last);
@@ -308,6 +363,7 @@ private:
     const auto flags = c.u8();
     p._exhausted = (flags & 1U) != 0;
     p._approximate_keys = c.u64();
+    p._expiring_keys = c.u64();
     p._examined = c.u64();
     if ((flags & 2U) != 0) {
         p._last = c.text();
@@ -325,6 +381,61 @@ private:
     }
     if (!c.empty()) {
         throw std::runtime_error("trailing bytes after a KYTHIRA.DATA PAGE reply");
+    }
+    return p;
+}
+
+/// The `KYTHIRA.DATA USAGE` reply body: flags (bit 0 exhausted, bit 1 a
+/// last key, bit 2 a range end), the other tally, the last key and range
+/// end when present, the bucket count, and each bucket with its tally.
+[[nodiscard]] inline auto encode_redis_usage_page(const redis_usage_page& p) -> std::string {
+    using namespace redis_scan_detail;
+    std::string out;
+    out.push_back(
+        static_cast<char>((p._exhausted ? 1 : 0) | (p._last ? 2 : 0) | (p._range_end ? 4 : 0)));
+    put_u64(out, p._other._keys);
+    put_u64(out, p._other._bytes);
+    if (p._last) {
+        put_text(out, *p._last);
+    }
+    if (p._range_end) {
+        put_text(out, *p._range_end);
+    }
+    put_u64(out, p._buckets.size());
+    for (const auto& [bucket, t] : p._buckets) {
+        put_text(out, bucket);
+        put_u64(out, t._keys);
+        put_u64(out, t._bytes);
+    }
+    return out;
+}
+
+[[nodiscard]] inline auto decode_redis_usage_page(std::string_view in) -> redis_usage_page {
+    redis_scan_detail::cursor c(in);
+    redis_usage_page p;
+    const auto flags = c.u8();
+    p._exhausted = (flags & 1U) != 0;
+    p._other._keys = c.u64();
+    p._other._bytes = c.u64();
+    if ((flags & 2U) != 0) {
+        p._last = c.text();
+    }
+    if ((flags & 4U) != 0) {
+        p._range_end = c.text();
+    }
+    const auto n = c.u64();
+    if (n > in.size()) {
+        throw std::runtime_error("KYTHIRA.DATA USAGE reply names more buckets than it holds");
+    }
+    for (std::uint64_t i = 0; i < n; ++i) {
+        auto bucket = c.text();
+        redis_usage_page::tally t;
+        t._keys = c.u64();
+        t._bytes = c.u64();
+        p._buckets.insert_or_assign(std::move(bucket), t);
+    }
+    if (!c.empty()) {
+        throw std::runtime_error("trailing bytes after a KYTHIRA.DATA USAGE reply");
     }
     return p;
 }

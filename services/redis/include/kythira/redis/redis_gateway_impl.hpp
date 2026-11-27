@@ -951,7 +951,9 @@ auto redis_gateway<Host, Logger, Metrics>::execute(session& s, const resp_comman
         return std::nullopt;
     };
     auto finish = [&](std::string reply) {
-        emit_duration("redis.command.latency", upper, std::chrono::steady_clock::now() - started);
+        const auto elapsed = std::chrono::steady_clock::now() - started;
+        emit_duration("redis.command.latency", upper, elapsed);
+        record_command(s, upper, cmd, reply, elapsed);
         return reply;
     };
 

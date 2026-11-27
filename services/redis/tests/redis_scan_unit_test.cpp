@@ -161,6 +161,7 @@ BOOST_AUTO_TEST_CASE(the_page_codec_round_trips) {
         redis_scan_page p;
         p._exhausted = (rng() & 1U) != 0;
         p._approximate_keys = rng();
+        p._expiring_keys = rng();
         p._examined = rng() % 1000;
         if ((rng() & 1U) != 0) {
             p._last = std::string(rng() % 20, static_cast<char>(rng()));
@@ -176,6 +177,7 @@ BOOST_AUTO_TEST_CASE(the_page_codec_round_trips) {
         BOOST_CHECK_EQUAL(back._exhausted, p._exhausted);
         BOOST_CHECK_EQUAL(back._approximate_keys, p._approximate_keys);
         BOOST_CHECK_EQUAL(back._examined, p._examined);
+        BOOST_CHECK_EQUAL(back._expiring_keys, p._expiring_keys);
         BOOST_CHECK(back._last == p._last);
         BOOST_CHECK(back._range_end == p._range_end);
         BOOST_CHECK(back._keys == p._keys);
@@ -186,6 +188,39 @@ BOOST_AUTO_TEST_CASE(the_page_codec_round_trips) {
         BOOST_CHECK_THROW((void)decode_redis_scan_page(bytes + "x"), std::runtime_error);
     }
     BOOST_CHECK_THROW((void)decode_redis_scan_page(""), std::runtime_error);
+}
+
+BOOST_AUTO_TEST_CASE(usage_buckets_cut_keys_at_the_delimiter) {
+    BOOST_CHECK_EQUAL(redis_usage_bucket("user:42:name", 1, ":"), "user:");
+    BOOST_CHECK_EQUAL(redis_usage_bucket("user:42:name", 2, ":"), "user:42:");
+    BOOST_CHECK_EQUAL(redis_usage_bucket("user:42:name", 3, ":"), "user:42:name");
+    BOOST_CHECK_EQUAL(redis_usage_bucket("plain", 1, ":"), "plain");
+    BOOST_CHECK_EQUAL(redis_usage_bucket("a::b", 2, "::"), "a::b");
+    BOOST_CHECK_EQUAL(redis_usage_bucket("a::b::c", 2, "::"), "a::b::");
+    BOOST_CHECK_EQUAL(redis_usage_bucket("anything", 0, ":"), "");
+    BOOST_CHECK_EQUAL(redis_usage_bucket("anything", 1, ""), "");
+
+    redis_usage_page p;
+    p.add("a", 1, 10, 2);
+    p.add("b", 2, 20, 2);
+    p.add("a", 1, 5, 2);
+    p.add("c", 4, 40, 2);  // past the limit: other
+    BOOST_CHECK_EQUAL(p._buckets.size(), 2u);
+    BOOST_CHECK_EQUAL(p._buckets.at("a")._keys, 2u);
+    BOOST_CHECK_EQUAL(p._buckets.at("a")._bytes, 15u);
+    BOOST_CHECK_EQUAL(p._other._keys, 4u);
+    p._last = std::string("k\0z", 3);
+    p._range_end = "m";
+    const auto bytes = encode_redis_usage_page(p);
+    const auto back = decode_redis_usage_page(bytes);
+    BOOST_CHECK(back._last == p._last);
+    BOOST_CHECK(back._range_end == p._range_end);
+    BOOST_CHECK_EQUAL(back._exhausted, p._exhausted);
+    BOOST_CHECK_EQUAL(back._other._bytes, 40u);
+    BOOST_CHECK_EQUAL(back._buckets.at("b")._bytes, 20u);
+    BOOST_CHECK_THROW((void)decode_redis_usage_page(bytes.substr(0, bytes.size() - 1)),
+                      std::runtime_error);
+    BOOST_CHECK_THROW((void)decode_redis_usage_page(bytes + "x"), std::runtime_error);
 }
 
 BOOST_AUTO_TEST_CASE(each_store_walks_its_keys_in_order) {

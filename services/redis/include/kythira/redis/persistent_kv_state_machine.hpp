@@ -92,6 +92,7 @@
 #include <kythira/redis/redis_kv_state_machine.hpp>
 #include <kythira/redis/redis_reply.hpp>
 #include <kythira/redis/redis_exec_appliers.hpp>
+#include <kythira/redis/redis_range_delete.hpp>
 #include <kythira/redis/redis_typed_read.hpp>
 #include <kythira/redis/redis_value.hpp>
 #include <raft/types.hpp>
@@ -932,8 +933,13 @@ private:
         if (const auto* exec = std::get_if<redis_kv_exec_command>(&record)) {
             return apply_exec(*exec);
         }
-        // range_delete and remove_members are not proposed yet (tasks 13
-        // and 8 use exec records); they change nothing, as in memory.
+        if (const auto* range = std::get_if<redis_kv_range_delete_command>(&record)) {
+            return apply_redis_range_delete(
+                *range, [this](const auto& lo, const auto& hi, auto&& f) { scan_keys(lo, hi, f); },
+                [this](const key_type& key) { return erase(key); });
+        }
+        // remove_members is not proposed (sets use exec records); it
+        // changes nothing, as in memory.
         return redis_v3_apply_result(redis_v3_apply_status::unchanged);
     }
 

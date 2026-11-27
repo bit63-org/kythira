@@ -16,6 +16,7 @@
 #include <algorithm>
 #include <array>
 #include <charconv>
+#include <cstdio>
 #include <cstring>
 #include <exception>
 #include <filesystem>
@@ -1181,6 +1182,18 @@ auto redis_front_end<Host, Logger, Metrics>::execute_command(session& s, std::st
         }
         return handle_key_read(s, upper, cmd);
     }
+    if (upper == "MEMORY") {
+        if (auto e = arity(2, 5)) {
+            return *e;
+        }
+        return handle_memory(s, cmd);
+    }
+    if (upper == "KYTHIRA.USAGE") {
+        if (auto e = arity(1, 8)) {
+            return *e;
+        }
+        return handle_usage(s, cmd);
+    }
     if (upper == "UNLINK" || upper == "DEL") {
         if ((s._txn_view != nullptr && cmd._argv.size() >= 2) ||
             (cmd._argv.size() > 2 && typed_ready(cmd._argv[1]))) {
@@ -1242,8 +1255,20 @@ auto redis_front_end<Host, Logger, Metrics>::execute_command(session& s, std::st
         }
         return handle_randomkey(s);
     }
-    if (upper == "KYTHIRA.DATA") {
-        return handle_internal_page(s, cmd);
+    if (upper == "KYTHIRA.DELPREFIX") {
+        if (auto e = arity(2, 2)) {
+            return *e;
+        }
+        return handle_delprefix(s, cmd);
+    }
+    if (upper == "FLUSHDB" || upper == "FLUSHALL") {
+        if (auto e = arity(1, 2)) {
+            return *e;
+        }
+        return handle_flush(s, upper, cmd);
+    }
+    if (upper == "KYTHIRA.RANGEDEL") {
+        return handle_internal_rangedel(s, cmd);
     }
     if (upper == "KYTHIRA.CURSOR") {
         return handle_internal_cursor(s, cmd);
@@ -1266,7 +1291,16 @@ auto redis_front_end<Host, Logger, Metrics>::execute_command(session& s, std::st
         if (auto e = authorize(s, upper, {})) {
             return *e;
         }
-        return handle_info(s);
+        return handle_info(s, cmd);
+    }
+    if (upper == "SLOWLOG") {
+        if (auto e = arity(2, 3)) {
+            return *e;
+        }
+        if (auto e = authorize(s, upper, {})) {
+            return *e;
+        }
+        return handle_slowlog(s, cmd);
     }
     if (upper == "DBSIZE") {
         if (auto e = authorize(s, upper, {})) {
@@ -1663,20 +1697,33 @@ auto redis_front_end<Host, Logger, Metrics>::handle_del(session& s, const resp_c
     return s._writer.integer(live ? 1 : 0);
 }
 
+/// `DBSIZE`, exact (task 13, Requirement 8.5): each group's key count, read
+/// from the group at the connection's consistency, walking the groups in
+/// key order so a split or merge never counts a range twice. As in Redis,
+/// keys past their deadline but not yet swept count.
 template<typename Host, typename Logger, typename Metrics>
 auto redis_front_end<Host, Logger, Metrics>::handle_dbsize(session& s) -> std::string {
-    std::size_t keys = 0;
-    for (const auto& g : _data.local_groups()) {
-        if (auto* node = _data.local_replica(g)) {
-            keys += node->with_state_machine(
-                [](auto& sm) { return redis_gateway_detail::kv_of(sm).approximate_key_count(); });
+    std::uint64_t keys = 0;
+    std::string from;
+    const redis_scan_filter all;
+    for (;;) {
+        std::string error;
+        auto page = fetch_page(s, from, std::nullopt, 0, 0, all, error);
+        if (!page) {
+            return error;
         }
+        keys += page->_approximate_keys;
+        if (!page->_range_end || *page->_range_end <= from) {
+            break;
+        }
+        from = *page->_range_end;
     }
     return s._writer.integer(static_cast<std::int64_t>(keys));
 }
 
 template<typename Host, typename Logger, typename Metrics>
-auto redis_front_end<Host, Logger, Metrics>::handle_info(session& s) -> std::string {
+auto redis_front_end<Host, Logger, Metrics>::handle_info(session& s, const resp_command& cmd)
+    -> std::string {
     std::size_t keys = 0;
     std::size_t expiring = 0;
     std::size_t bytes = 0;
@@ -1700,58 +1747,132 @@ auto redis_front_end<Host, Logger, Metrics>::handle_info(session& s) -> std::str
     }
     auto uptime = std::chrono::duration_cast<std::chrono::seconds>(
         std::chrono::steady_clock::now() - _started_at);
-    std::ostringstream out;
-    out << "# Server\r\n"
-        << "redis_version:" << _config._redis_compat_version << "\r\n"
-        << "server_name:kythira\r\n"
-        << "kythira_version:" << _config._kythira_version << "\r\n"
-        << "kythira_gateway:1\r\n"
-        << "kythira_format_level:" << reported_format_level() << "\r\n"
-        << "redis_mode:" << server_mode() << "\r\n"
-        << "uptime_in_seconds:" << uptime.count() << "\r\n"
-        << "kythira_roles:" << _config._layer_roles.to_string() << "\r\n"
-        << "kythira_membership:" << membership_mode_name() << "\r\n"
-        << "kythira_member_drain:" << layers::to_string(_member_drain.load()) << "\r\n"
-        << "kythira_front_end_index:" << _config._front_end_index << "\r\n"
-        << "kythira_front_end_calls_served:" << _stats._front_end_calls_served.load() << "\r\n"
-        << "\r\n# Clients\r\n"
-        << "connected_clients:" << _stats._connections_current.load() << "\r\n"
-        << "maxclients:" << _config._max_clients << "\r\n"
-        << "rejected_connections:" << _stats._connections_rejected.load() << "\r\n"
-        << "\r\n# Memory\r\n"
-        << "used_memory_dataset:" << bytes << "\r\n"
-        << "\r\n# Keyspace\r\n"
-        << "local_shards:" << shards << "\r\n"
-        << "local_shards_led:" << led << "\r\n"
-        << "db0:keys=" << keys << ",expires=" << expiring << ",avg_ttl=0\r\n"
-        << "\r\n# Stats\r\n"
-        << "total_commands_processed:" << _stats._commands.load() << "\r\n"
-        << "total_connections_received:" << _stats._connections_accepted.load() << "\r\n"
-        << "total_net_input_bytes:" << _stats._bytes_in.load() << "\r\n"
-        << "total_net_output_bytes:" << _stats._bytes_out.load() << "\r\n"
-        << "keyspace_hits:" << _stats._hits.load() << "\r\n"
-        << "keyspace_misses:" << _stats._misses.load() << "\r\n"
-        << "evicted_keys:" << _stats._evictions.load() << "\r\n"
-        << "expired_keys:" << _stats._expirations.load() << "\r\n"
-        << "kythira_writes:" << _stats._writes.load() << "\r\n"
-        << "kythira_deletes:" << _stats._deletes.load() << "\r\n"
-        << "kythira_value_conflicts:" << _stats._value_conflicts.load() << "\r\n"
-        << "kythira_oversize_rejections:" << _stats._oversize_rejections.load() << "\r\n"
-        << "kythira_auth_failures:" << _stats._auth_failures.load() << "\r\n"
-        << "kythira_auth_busy:" << _stats._auth_busy.load() << "\r\n"
-        << "kythira_authz_denials:" << _stats._authz_denials.load() << "\r\n"
-        << "kythira_forwards:" << _stats._forwards.load() << "\r\n"
-        << "kythira_forward_failures:" << _stats._forward_failures.load() << "\r\n"
-        << "kythira_shed:" << _stats._shed.load() << "\r\n"
-        << "kythira_output_stalls:" << _stats._output_stalls.load() << "\r\n";
-    if (_cache_hooks._advisory || _cache_hooks._write_refusal) {
-        out << "kythira_space_refusals:" << _stats._space_refusals.load() << "\r\n"
-            << "kythira_advisories_sent:" << _stats._advisories_sent.load() << "\r\n"
-            << "kythira_advisory_failures:" << _stats._advisory_failures.load() << "\r\n"
-            << "kythira_advisories_received:" << _stats._advisories_received.load() << "\r\n"
-            << "kythira_touches_dropped:" << _stats._touches_dropped.load() << "\r\n";
+    // The sections asked for (Redis 7 takes several); none is `default`.
+    std::set<std::string> want;
+    for (std::size_t i = 1; i < cmd._argv.size(); ++i) {
+        std::string lower = cmd._argv[i];
+        for (auto& c : lower) {
+            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        }
+        want.insert(lower);
     }
-    if (_cache_hooks._info) {
+    if (want.empty()) {
+        want.insert("default");
+    }
+    const bool all = want.contains("all") || want.contains("everything");
+    const bool by_default = all || want.contains("default");
+    const auto wanted = [&](std::string_view name, bool in_default) {
+        return (in_default && by_default) || all || want.contains(std::string(name));
+    };
+    std::ostringstream out;
+    const auto section = [&](std::string_view title) {
+        if (out.tellp() > 0) {
+            out << "\r\n";
+        }
+        out << "# " << title << "\r\n";
+    };
+    if (wanted("server", true)) {
+        section("Server");
+        out << "redis_version:" << _config._redis_compat_version << "\r\n"
+            << "server_name:kythira\r\n"
+            << "kythira_version:" << _config._kythira_version << "\r\n"
+            << "kythira_gateway:1\r\n"
+            << "kythira_format_level:" << reported_format_level() << "\r\n"
+            << "redis_mode:" << server_mode() << "\r\n"
+            << "uptime_in_seconds:" << uptime.count() << "\r\n"
+            << "kythira_roles:" << _config._layer_roles.to_string() << "\r\n"
+            << "kythira_membership:" << membership_mode_name() << "\r\n"
+            << "kythira_member_drain:" << layers::to_string(_member_drain.load()) << "\r\n"
+            << "kythira_front_end_index:" << _config._front_end_index << "\r\n"
+            << "kythira_front_end_calls_served:" << _stats._front_end_calls_served.load() << "\r\n";
+    }
+    if (wanted("clients", true)) {
+        section("Clients");
+        out << "connected_clients:" << _stats._connections_current.load() << "\r\n"
+            << "maxclients:" << _config._max_clients << "\r\n"
+            << "rejected_connections:" << _stats._connections_rejected.load() << "\r\n";
+    }
+    if (wanted("memory", true)) {
+        section("Memory");
+        out << "used_memory_dataset:" << bytes << "\r\n";
+    }
+    if (wanted("stats", true)) {
+        section("Stats");
+        out << "total_commands_processed:" << _stats._commands.load() << "\r\n"
+            << "total_connections_received:" << _stats._connections_accepted.load() << "\r\n"
+            << "total_net_input_bytes:" << _stats._bytes_in.load() << "\r\n"
+            << "total_net_output_bytes:" << _stats._bytes_out.load() << "\r\n"
+            << "keyspace_hits:" << _stats._hits.load() << "\r\n"
+            << "keyspace_misses:" << _stats._misses.load() << "\r\n"
+            << "evicted_keys:" << _stats._evictions.load() << "\r\n"
+            << "expired_keys:" << _stats._expirations.load() << "\r\n"
+            << "kythira_writes:" << _stats._writes.load() << "\r\n"
+            << "kythira_deletes:" << _stats._deletes.load() << "\r\n"
+            << "kythira_value_conflicts:" << _stats._value_conflicts.load() << "\r\n"
+            << "kythira_oversize_rejections:" << _stats._oversize_rejections.load() << "\r\n"
+            << "kythira_auth_failures:" << _stats._auth_failures.load() << "\r\n"
+            << "kythira_auth_busy:" << _stats._auth_busy.load() << "\r\n"
+            << "kythira_authz_denials:" << _stats._authz_denials.load() << "\r\n"
+            << "kythira_forwards:" << _stats._forwards.load() << "\r\n"
+            << "kythira_forward_failures:" << _stats._forward_failures.load() << "\r\n"
+            << "kythira_shed:" << _stats._shed.load() << "\r\n"
+            << "kythira_output_stalls:" << _stats._output_stalls.load() << "\r\n";
+        if (_cache_hooks._advisory || _cache_hooks._write_refusal) {
+            out << "kythira_space_refusals:" << _stats._space_refusals.load() << "\r\n"
+                << "kythira_advisories_sent:" << _stats._advisories_sent.load() << "\r\n"
+                << "kythira_advisory_failures:" << _stats._advisory_failures.load() << "\r\n"
+                << "kythira_advisories_received:" << _stats._advisories_received.load() << "\r\n"
+                << "kythira_touches_dropped:" << _stats._touches_dropped.load() << "\r\n";
+        }
+    }
+    if (wanted("commandstats", false)) {
+        section("Commandstats");
+        out << commandstats_text();
+    }
+    if (wanted("errorstats", true)) {
+        section("Errorstats");
+        out << errorstats_text();
+    }
+    if (wanted("keyspace", true)) {
+        // The whole keyspace, each group read once in key order, as DBSIZE
+        // reads it; this node's own replicas follow. INFO is what health
+        // checks and operators read, so a group it cannot page (no leader,
+        // or a peer from before KYTHIRA.DATA PAGE during a rolling upgrade)
+        // must not turn the whole answer into an error: db0 then counts
+        // this node's replicas, as INFO did before, and
+        // kythira_keyspace_scope says which count it is.
+        std::uint64_t all_keys = 0;
+        std::uint64_t all_expiring = 0;
+        bool whole = true;
+        std::string from;
+        const redis_scan_filter none;
+        for (;;) {
+            std::string error;
+            auto page = fetch_page(s, from, std::nullopt, 0, 0, none, error);
+            if (!page) {
+                whole = false;
+                break;
+            }
+            all_keys += page->_approximate_keys;
+            all_expiring += page->_expiring_keys;
+            if (!page->_range_end || *page->_range_end <= from) {
+                break;
+            }
+            from = *page->_range_end;
+        }
+        if (!whole) {
+            all_keys = keys;
+            all_expiring = expiring;
+        }
+        section("Keyspace");
+        out << "db0:keys=" << all_keys << ",expires=" << all_expiring << ",avg_ttl=0\r\n"
+            << "kythira_keyspace_scope:" << (whole ? "cluster" : "local") << "\r\n"
+            << "local_shards:" << shards << "\r\n"
+            << "local_shards_led:" << led << "\r\n"
+            << "local_keys:" << keys << "\r\n"
+            << "local_expires:" << expiring << "\r\n";
+    }
+    if (_cache_hooks._info && by_default) {
         out << "\r\n" << _cache_hooks._info();
     }
     return s._writer.bulk(out.str());
@@ -3189,6 +3310,11 @@ auto redis_front_end<Host, Logger, Metrics>::handle_data(session& s, const resp_
     }
     if (cmd._argv.size() < 3) {
         return s._writer.error("ERR wrong number of arguments for 'kythira.data' command");
+    }
+    // The scan family's pages and the usage walk (tasks 12-13) share the
+    // command name with the data-layer API.
+    if (const auto first = resp_to_upper(cmd._argv[1]); first == "PAGE" || first == "USAGE") {
+        return handle_internal_page(s, cmd);
     }
     if (!_data.running()) {
         return s._writer.error("LOADING Kythira is loading the dataset in memory");
@@ -5284,6 +5410,7 @@ auto redis_front_end<Host, Logger, Metrics>::find_cursor(std::uint64_t cursor,
     const auto now = std::chrono::steady_clock::now();
     if (now - it->second._touched > _config._cursor_idle) {
         _cursors.erase(it);
+        emit("redis.cursors_expired", "SCAN");
         return std::nullopt;
     }
     if (it->second._user != user) {
@@ -5303,7 +5430,7 @@ template<typename Host, typename Logger, typename Metrics>
 auto redis_front_end<Host, Logger, Metrics>::forward_cursor(session& s, std::uint64_t cursor,
                                                             const resp_command& cmd)
     -> std::string {
-    const auto invalid = s._writer.error("ERR invalid cursor");
+    auto invalid = s._writer.error("ERR invalid cursor");
     if (s._internal) {
         return invalid;  // one hop: the issuer never forwards again
     }
@@ -5381,6 +5508,9 @@ auto redis_front_end<Host, Logger, Metrics>::handle_internal_page(session& s,
         return s._writer.error("NOPERM KYTHIRA.DATA is internal to the gateways");
     }
     const auto& a = cmd._argv;
+    if (a.size() == 9 && resp_to_upper(a[1]) == "USAGE") {
+        return handle_internal_usage(s, cmd);
+    }
     if (a.size() != 10 || resp_to_upper(a[1]) != "PAGE" || (a[3] != "0" && a[3] != "1")) {
         return s._writer.error("ERR syntax error");
     }
@@ -5802,6 +5932,652 @@ auto redis_front_end<Host, Logger, Metrics>::handle_randomkey(session& s) -> std
         }
     }
     return s._writer.null();
+}
+
+// ── admin tools (redis-general-data-types task 13) ──────────────────────────
+
+namespace redis_gateway_detail {
+/// The internal `KYTHIRA.RANGEDEL` reply body: the count, then a space and
+/// the last key removed when there is one.
+inline auto encode_range_delete(std::uint64_t count, const std::optional<std::string>& last)
+    -> std::string {
+    auto out = std::to_string(count);
+    if (last) {
+        out += ' ';
+        out += *last;
+    }
+    return out;
+}
+
+/// `bytes` for an audit line: printable ASCII as it is, anything else and
+/// the backslash as `\xHH`.
+inline auto printable_bytes(std::string_view bytes) -> std::string {
+    static constexpr std::string_view k_hex = "0123456789abcdef";
+    std::string out;
+    for (const char c : bytes) {
+        const auto u = static_cast<unsigned char>(c);
+        if (u >= 0x20 && u < 0x7F && c != '\\') {
+            out.push_back(c);
+        } else {
+            out += "\\x";
+            out.push_back(k_hex[u >> 4U]);
+            out.push_back(k_hex[u & 0xFU]);
+        }
+    }
+    return out;
+}
+}  // namespace redis_gateway_detail
+
+template<typename Host, typename Logger, typename Metrics>
+auto redis_front_end<Host, Logger, Metrics>::range_delete_page(session& s, const std::string& lo,
+                                                               const std::optional<std::string>& hi,
+                                                               std::string& error)
+    -> std::optional<range_delete_result> {
+    if constexpr (k_string_only_store) {
+        error = s._writer.error(std::string(k_redis_string_only_store_error));
+        return std::nullopt;
+    } else {
+        const auto max_keys = std::max<std::uint32_t>(_config._range_delete_keys, 1);
+        std::optional<node_id_type> forward_to;
+        auto* node = locate(lo, error, forward_to);
+        if (node != nullptr && !node->is_leader()) {
+            forward_to = node->known_leader();
+            error = s._writer.error("ERR shard has no reachable leader, retry");
+            node = nullptr;
+        }
+        const auto via_peer = [&]() -> std::optional<range_delete_result> {
+            if (!forward_to || s._internal) {
+                return std::nullopt;
+            }
+            auto reply = forward_argv({"KYTHIRA.RANGEDEL", lo, hi ? "1" : "0", hi.value_or("")},
+                                      *forward_to, "KYTHIRA.RANGEDEL");
+            if (!reply) {
+                return std::nullopt;
+            }
+            const auto parsed = redis_gateway_detail::parse_peer_reply(*reply);
+            if (parsed._kind != redis_gateway_detail::peer_reply::kind::bulk) {
+                if (parsed._kind == redis_gateway_detail::peer_reply::kind::error) {
+                    error = s._writer.error(parsed._body);
+                }
+                return std::nullopt;
+            }
+            const auto space = parsed._body.find(' ');
+            const auto count = redis_string_detail::parse_u64(parsed._body.substr(0, space));
+            if (!count) {
+                error = s._writer.error("ERR malformed KYTHIRA.RANGEDEL reply");
+                return std::nullopt;
+            }
+            range_delete_result r{*count, std::nullopt};
+            if (space != std::string::npos) {
+                r._last = parsed._body.substr(space + 1);
+            }
+            return r;
+        };
+        if (node == nullptr) {
+            return via_peer();
+        }
+        if (auto refused = format_refusal(s, lo, k_redis_typed_values_level)) {
+            error = *refused;
+            return std::nullopt;
+        }
+        const auto record = encode_redis_kv_command(
+            redis_kv_range_delete_command{lo, lo, hi.value_or(std::string{}), max_keys});
+        std::vector<std::byte> result;
+        if (!submit(s, lo, record, error, forward_to, &result)) {
+            return via_peer();
+        }
+        if (result.size() == 1 &&
+            result[0] == static_cast<std::byte>(redis_v3_apply_status::refused_before_gate)) {
+            error = s._writer.error(std::string(k_redis_format_gate_error));
+            return std::nullopt;
+        }
+        try {
+            const auto reply = decode_redis_reply(result);
+            if (reply._elements.size() != 2) {
+                throw redis_reply_error("range delete reply is not a pair");
+            }
+            range_delete_result r{static_cast<std::uint64_t>(reply._elements[0]._integer),
+                                  std::nullopt};
+            if (reply._elements[1]._kind != redis_reply_kind::null) {
+                r._last = reply._elements[1]._text;
+            }
+            return r;
+        } catch (const std::exception& e) {
+            _logger.log(log_level::error, "redis gateway: undecodable range delete reply",
+                        {{"error", e.what()}});
+            error = s._writer.error("ERR internal error decoding the reply");
+            return std::nullopt;
+        }
+    }
+}
+
+/// Design Component 7 "Prefix delete": the group owning `from` deletes up
+/// to `_range_delete_keys` keys of `[from, min(hi, its range end))`; a full
+/// entry goes again from its last key, a short one moves on to the next
+/// group. The next group starts where the group owning `from` ends after
+/// the entry applied, so a split that moved part of the range away
+/// between routing and apply sends the walk on to the child rather than
+/// past it.
+template<typename Host, typename Logger, typename Metrics>
+auto redis_front_end<Host, Logger, Metrics>::range_delete(session& s, const std::string& lo,
+                                                          const std::optional<std::string>& hi,
+                                                          std::uint64_t& deleted,
+                                                          std::string& error) -> bool {
+    const auto max_keys = std::max<std::uint32_t>(_config._range_delete_keys, 1);
+    std::string from = lo;
+    const auto end_of =
+        [this](const std::string& key) -> std::optional<std::optional<std::string>> {
+        auto desc = _data.route(key);
+        if (!desc) {
+            return std::nullopt;
+        }
+        return desc->range()._end;
+    };
+    const auto earlier = [](const std::optional<std::string>& a,
+                            const std::optional<std::string>& b) {
+        if (!a) {
+            return b;
+        }
+        if (!b) {
+            return a;
+        }
+        return std::min(*a, *b) == *a ? a : b;
+    };
+    for (;;) {
+        const auto end = end_of(from);
+        if (!end) {
+            error = s._writer.error("ERR no shard owns this key");
+            return false;
+        }
+        const auto bound = earlier(hi, *end);
+        auto page = range_delete_page(s, from, bound, error);
+        if (!page) {
+            return false;
+        }
+        deleted += page->_count;
+        emit("redis.prefix_delete_keys", "KYTHIRA.DELPREFIX",
+             static_cast<std::int64_t>(page->_count));
+        if (page->_count >= max_keys && page->_last) {
+            from = *page->_last + '\0';
+            continue;
+        }
+        const auto now = end_of(from);
+        const auto next = now ? earlier(bound, *now) : bound;
+        if (!next || (hi && *next >= *hi)) {
+            return true;
+        }
+        from = *next;
+    }
+}
+
+template<typename Host, typename Logger, typename Metrics>
+auto redis_front_end<Host, Logger, Metrics>::handle_delprefix(session& s, const resp_command& cmd)
+    -> std::string {
+    if (auto e = authorize(s, "KYTHIRA.DELPREFIX", {})) {
+        return *e;
+    }
+    const auto& prefix = cmd._argv[1];
+    if (prefix.empty()) {
+        return s._writer.error("ERR KYTHIRA.DELPREFIX needs a non-empty prefix; use FLUSHALL");
+    }
+    std::uint64_t deleted = 0;
+    std::string error;
+    const bool ok = range_delete(s, prefix, redis_prefix_successor(prefix), deleted, error);
+    audit(s, "KYTHIRA.DELPREFIX",
+          "prefix=" + redis_gateway_detail::printable_bytes(prefix) +
+              " deleted=" + std::to_string(deleted) + (ok ? "" : " failed"));
+    if (!ok) {
+        return error;
+    }
+    return s._writer.integer(static_cast<std::int64_t>(deleted));
+}
+
+template<typename Host, typename Logger, typename Metrics>
+auto redis_front_end<Host, Logger, Metrics>::handle_flush(session& s, std::string_view upper,
+                                                          const resp_command& cmd) -> std::string {
+    if (auto e = authorize(s, upper, {})) {
+        return *e;
+    }
+    if (cmd._argv.size() == 2) {
+        const auto mode = resp_to_upper(cmd._argv[1]);
+        if (mode != "ASYNC" && mode != "SYNC") {
+            return s._writer.error("ERR syntax error");
+        }
+    }
+    if (!_config._allow_flush) {
+        audit(s, upper, "refused: KYTHIRA_REDIS_ALLOW_FLUSH is off");
+        return s._writer.error("ERR " + std::string(upper) +
+                               " is disabled on this cluster (KYTHIRA_REDIS_ALLOW_FLUSH)");
+    }
+    std::uint64_t deleted = 0;
+    std::string error;
+    const bool ok = range_delete(s, std::string{}, std::nullopt, deleted, error);
+    audit(s, upper, "range=all deleted=" + std::to_string(deleted) + (ok ? "" : " failed"));
+    if (!ok) {
+        return error;
+    }
+    return s._writer.simple_string("OK");
+}
+
+template<typename Host, typename Logger, typename Metrics>
+auto redis_front_end<Host, Logger, Metrics>::handle_internal_rangedel(session& s,
+                                                                      const resp_command& cmd)
+    -> std::string {
+    if (!s._internal) {
+        audit(s, "KYTHIRA.RANGEDEL", "internal command from a client");
+        return s._writer.error("NOPERM KYTHIRA.RANGEDEL is internal to the gateways");
+    }
+    const auto& a = cmd._argv;
+    if (a.size() != 4 || (a[2] != "0" && a[2] != "1")) {
+        return s._writer.error("ERR syntax error");
+    }
+    const std::optional<std::string> hi = a[2] == "1" ? std::optional(a[3]) : std::nullopt;
+    std::string error;
+    auto page = range_delete_page(s, a[1], hi, error);
+    if (!page) {
+        return error.empty() ? s._writer.error("ERR shard has no reachable leader, retry") : error;
+    }
+    return s._writer.bulk(redis_gateway_detail::encode_range_delete(page->_count, page->_last));
+}
+
+template<typename Host, typename Logger, typename Metrics>
+auto redis_front_end<Host, Logger, Metrics>::fetch_usage(session& s, const std::string& from,
+                                                         const std::optional<std::string>& to,
+                                                         std::size_t depth,
+                                                         const std::string& delim,
+                                                         std::string& error)
+    -> std::optional<redis_usage_page> {
+    const bool any_replica = _config._read_consistency == redis_read_consistency::any_replica;
+    const auto& identity = *s._identity;
+    const auto keep = [&](const std::string& key) {
+        return redis_acl::key_permits(identity, key, redis_key_access::read);
+    };
+    const auto deadline = std::chrono::steady_clock::now() + _config._command_timeout;
+    std::string last = "no reachable leader for the key's shard";
+    for (;;) {
+        auto outcome = _data.usage(from, to, k_usage_page_keys, any_replica, now_ms(), depth, delim,
+                                   k_usage_max_buckets, keep);
+        if (outcome._status == redis_data_status::ok) {
+            return std::move(outcome._page);
+        }
+        if (outcome._leader && *outcome._leader != _data.self() && !s._internal) {
+            auto reply =
+                forward_argv({"KYTHIRA.DATA", "USAGE", from, to ? "1" : "0", to.value_or(""),
+                              std::to_string(depth), delim, identity._user, "0"},
+                             *outcome._leader, "KYTHIRA.DATA");
+            if (reply) {
+                auto parsed = redis_gateway_detail::parse_peer_reply(*reply);
+                using kind = redis_gateway_detail::peer_reply::kind;
+                if (parsed._kind == kind::bulk) {
+                    try {
+                        return decode_redis_usage_page(parsed._body);
+                    } catch (const std::exception& e) {
+                        error = s._writer.error(std::string("ERR ") + e.what());
+                        return std::nullopt;
+                    }
+                }
+                if (parsed._kind != kind::error ||
+                    parsed._body.find("retry") == std::string::npos) {
+                    error =
+                        s._writer.error("ERR peer gateway refused a usage page: " + parsed._body);
+                    return std::nullopt;
+                }
+                last = parsed._body;
+            }
+        }
+        if (!_running.load() || std::chrono::steady_clock::now() >= deadline) {
+            error = s._writer.error("ERR " + last + ", retry");
+            return std::nullopt;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds{10});
+    }
+}
+
+/// `KYTHIRA.DATA USAGE from has_to to depth delim user 0`.
+template<typename Host, typename Logger, typename Metrics>
+auto redis_front_end<Host, Logger, Metrics>::handle_internal_usage(session& s,
+                                                                   const resp_command& cmd)
+    -> std::string {
+    const auto& a = cmd._argv;
+    const auto depth = redis_string_detail::parse_u64(a[5]);
+    if ((a[3] != "0" && a[3] != "1") || !depth) {
+        return s._writer.error("ERR syntax error");
+    }
+    auto identity = _acl.identity_of(a[7]);
+    if (!identity) {
+        return s._writer.error("ERR unknown user");
+    }
+    const auto keep = [&](const std::string& key) {
+        return redis_acl::key_permits(*identity, key, redis_key_access::read);
+    };
+    const std::optional<std::string> to = a[3] == "1" ? std::optional(a[4]) : std::nullopt;
+    auto outcome =
+        _data.usage(a[2], to, k_usage_page_keys,
+                    _config._read_consistency == redis_read_consistency::any_replica, now_ms(),
+                    static_cast<std::size_t>(*depth), a[6], k_usage_max_buckets, keep);
+    if (outcome._status != redis_data_status::ok) {
+        return s._writer.error("ERR shard has no reachable leader, retry");
+    }
+    return s._writer.bulk(encode_redis_usage_page(outcome._page));
+}
+
+/// `KYTHIRA.USAGE [prefix] [DEPTH d] [DELIM c]` (Requirement 8.4): keys and
+/// approximate bytes (key plus value) per bucket, the key cut after its
+/// `d`-th `c`, over the prefix's range, read from each group's replica
+/// without a log entry and merged here. Buckets past `k_usage_max_buckets`
+/// are summed in a last row whose name is nil. Rows come largest first.
+template<typename Host, typename Logger, typename Metrics>
+auto redis_front_end<Host, Logger, Metrics>::handle_usage(session& s, const resp_command& cmd)
+    -> std::string {
+    if (auto e = authorize(s, "KYTHIRA.USAGE", {})) {
+        return *e;
+    }
+    const auto& a = cmd._argv;
+    std::string prefix;
+    std::size_t first = 1;
+    if (a.size() % 2 == 0) {
+        prefix = a[1];
+        first = 2;
+    }
+    std::size_t depth = 1;
+    std::string delim = ":";
+    for (std::size_t i = first; i + 1 < a.size(); i += 2) {
+        const auto opt = resp_to_upper(a[i]);
+        if (opt == "DEPTH") {
+            const auto d = redis_string_detail::parse_u64(a[i + 1]);
+            if (!d || *d > 1024) {
+                return s._writer.error("ERR value is not an integer or out of range");
+            }
+            depth = static_cast<std::size_t>(*d);
+        } else if (opt == "DELIM") {
+            delim = a[i + 1];
+        } else {
+            return s._writer.error("ERR syntax error");
+        }
+    }
+    std::string from = prefix;
+    const std::optional<std::string> to =
+        prefix.empty() ? std::nullopt : redis_prefix_successor(prefix);
+    redis_usage_page total;
+    for (;;) {
+        std::string error;
+        auto page = fetch_usage(s, from, to, depth, delim, error);
+        if (!page) {
+            return error;
+        }
+        for (const auto& [bucket, t] : page->_buckets) {
+            total.add(bucket, t._keys, t._bytes, k_usage_max_buckets);
+        }
+        total._other._keys += page->_other._keys;
+        total._other._bytes += page->_other._bytes;
+        if (!page->_exhausted && page->_last) {
+            from = *page->_last + '\0';
+            continue;
+        }
+        if (!page->_range_end || (to && *page->_range_end >= *to) || *page->_range_end <= from) {
+            break;
+        }
+        from = *page->_range_end;
+    }
+    std::vector<std::pair<std::string, redis_usage_page::tally>> rows(total._buckets.begin(),
+                                                                      total._buckets.end());
+    std::stable_sort(rows.begin(), rows.end(), [](const auto& x, const auto& y) {
+        return x.second._bytes > y.second._bytes;
+    });
+    std::vector<std::string> out;
+    out.reserve(rows.size() + 1);
+    for (const auto& [bucket, t] : rows) {
+        out.push_back(s._writer.array({s._writer.bulk(bucket),
+                                       s._writer.integer(static_cast<std::int64_t>(t._keys)),
+                                       s._writer.integer(static_cast<std::int64_t>(t._bytes))}));
+    }
+    if (total._other._keys > 0) {
+        out.push_back(s._writer.array(
+            {s._writer.null(), s._writer.integer(static_cast<std::int64_t>(total._other._keys)),
+             s._writer.integer(static_cast<std::int64_t>(total._other._bytes))}));
+    }
+    audit(s, "KYTHIRA.USAGE",
+          "prefix=" + redis_gateway_detail::printable_bytes(prefix) +
+              " buckets=" + std::to_string(rows.size()));
+    return s._writer.array(out);
+}
+
+/// `MEMORY USAGE key [SAMPLES n]` (Requirement 8.5): the key's and its
+/// value's bytes plus 16, as collections count each element; nil for a
+/// missing key. Other `MEMORY` subcommands are not offered.
+template<typename Host, typename Logger, typename Metrics>
+auto redis_front_end<Host, Logger, Metrics>::handle_memory(session& s, const resp_command& cmd)
+    -> std::string {
+    const auto& a = cmd._argv;
+    if (resp_to_upper(a[1]) != "USAGE" || (a.size() != 3 && a.size() != 5)) {
+        return s._writer.error("ERR unknown subcommand or wrong number of arguments for '" + a[1] +
+                               "'. Try MEMORY HELP.");
+    }
+    if (a.size() == 5 &&
+        (resp_to_upper(a[3]) != "SAMPLES" || !redis_string_detail::parse_int64(a[4]))) {
+        return s._writer.error("ERR syntax error");
+    }
+    const auto& key = a[2];
+    if (auto e = authorize(s, "MEMORY", {key})) {
+        return *e;
+    }
+    auto r = read_local(s, key);
+    if (!r._error.empty()) {
+        if (r._forward_to) {
+            if (auto reply = forward(s, cmd, *r._forward_to)) {
+                return *reply;
+            }
+        }
+        return r._error;
+    }
+    if (!r._entry || is_expired(*r._entry)) {
+        return s._writer.null();
+    }
+    return s._writer.integer(
+        static_cast<std::int64_t>(key.size() + redis_gateway_detail::entry_bytes(*r._entry) + 16));
+}
+
+// ── commandstats, errorstats and the slow log (task 13, Requirement 22) ─────
+
+namespace redis_gateway_detail {
+/// The first word of an error reply (`ERR`, `WRONGTYPE`, ...), or nothing
+/// when `reply` is not an error.
+inline auto error_code(const std::string& reply) -> std::optional<std::string> {
+    if (reply.empty() || reply[0] != '-') {
+        return std::nullopt;
+    }
+    const auto end = reply.find_first_of(" \r", 1);
+    return reply.substr(1, (end == std::string::npos ? reply.size() : end) - 1);
+}
+
+/// Whether an error refused the command before it ran (Redis's
+/// `rejected_calls`) rather than during it (`failed_calls`).
+inline auto is_rejection(const std::string& reply) -> bool {
+    return reply.starts_with("-NOAUTH") || reply.starts_with("-NOPERM") ||
+           reply.starts_with("-ERR wrong number of arguments") ||
+           reply.starts_with("-ERR unknown command") || reply.starts_with("-EXECABORT");
+}
+
+/// A slow-log argument list: the command name and its keys as sent, every
+/// other argument (values, options, credentials) replaced, at most 32
+/// arguments of at most 128 bytes, as Redis truncates them.
+inline auto slowlog_args(const redis_command_info* info, const std::vector<std::string>& argv)
+    -> std::vector<std::string> {
+    std::vector<std::string> out;
+    const auto n = static_cast<std::ptrdiff_t>(argv.size());
+    std::vector<bool> is_key(argv.size(), false);
+    if (info != nullptr && info->first_key > 0) {
+        const auto first = static_cast<std::ptrdiff_t>(static_cast<unsigned char>(info->first_key));
+        const std::ptrdiff_t last = info->last_key < 0 ? n + info->last_key : info->last_key;
+        const std::ptrdiff_t step = std::max<std::ptrdiff_t>(info->step, 1);
+        for (std::ptrdiff_t i = first; i <= last && i < n; i += step) {
+            is_key[static_cast<std::size_t>(i)] = true;
+        }
+    }
+    for (std::size_t i = 0; i < argv.size(); ++i) {
+        if (out.size() == 31 && argv.size() > 32) {
+            out.push_back("... (" + std::to_string(argv.size() - 31) + " more arguments)");
+            break;
+        }
+        if (i == 0 || is_key[i]) {
+            const auto& a = argv[i];
+            out.push_back(a.size() > 128 ? a.substr(0, 128) + "... (" +
+                                               std::to_string(a.size() - 128) + " more bytes)"
+                                         : a);
+        } else {
+            out.emplace_back("(redacted)");
+        }
+    }
+    return out;
+}
+}  // namespace redis_gateway_detail
+
+template<typename Host, typename Logger, typename Metrics>
+auto redis_front_end<Host, Logger, Metrics>::record_command(
+    const session& s, std::string_view upper, const resp_command& cmd, const std::string& reply,
+    std::chrono::steady_clock::duration elapsed) -> void {
+    const auto usec = static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(elapsed).count());
+    const auto* info = find_redis_command(upper);
+    const auto code = redis_gateway_detail::error_code(reply);
+    if (info != nullptr) {
+        auto& t = _command_tallies[static_cast<std::size_t>(info - k_redis_commands.data())];
+        if (code && redis_gateway_detail::is_rejection(reply)) {
+            t._rejected.fetch_add(1, std::memory_order_relaxed);
+        } else {
+            t._calls.fetch_add(1, std::memory_order_relaxed);
+            t._usec.fetch_add(usec, std::memory_order_relaxed);
+            if (code) {
+                t._failed.fetch_add(1, std::memory_order_relaxed);
+            }
+        }
+    }
+    if (code) {
+        std::lock_guard lock(_errorstats_mutex);
+        // Bounded as Redis bounds it: past 128 codes only known ones count.
+        if (auto it = _errorstats.find(*code); it != _errorstats.end()) {
+            ++it->second;
+        } else if (_errorstats.size() < 128) {
+            _errorstats.emplace(*code, 1);
+        }
+    }
+    const auto threshold = _config._slowlog_slower_than_us;
+    if (threshold < 0 || usec < static_cast<std::uint64_t>(threshold) || upper == "SLOWLOG" ||
+        upper == "AUTH" || upper == "HELLO" || _config._slowlog_max_len == 0) {
+        return;
+    }
+    slowlog_entry e;
+    e._usec = usec;
+    e._unix_seconds = std::chrono::duration_cast<std::chrono::seconds>(
+                          std::chrono::system_clock::now().time_since_epoch())
+                          .count();
+    e._args = redis_gateway_detail::slowlog_args(info, cmd._argv);
+    e._client = s._source;
+    e._name = s._client_name;
+    std::lock_guard lock(_slowlog_mutex);
+    e._id = _slowlog_next_id++;
+    _slowlog.push_front(std::move(e));
+    while (_slowlog.size() > _config._slowlog_max_len) {
+        _slowlog.pop_back();
+    }
+}
+
+template<typename Host, typename Logger, typename Metrics>
+auto redis_front_end<Host, Logger, Metrics>::commandstats_text() const -> std::string {
+    std::ostringstream out;
+    for (std::size_t i = 0; i < k_redis_commands.size(); ++i) {
+        const auto& t = _command_tallies[i];
+        const auto calls = t._calls.load(std::memory_order_relaxed);
+        const auto rejected = t._rejected.load(std::memory_order_relaxed);
+        if (calls == 0 && rejected == 0) {
+            continue;
+        }
+        std::string name(k_redis_commands[i].name);
+        for (auto& c : name) {
+            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        }
+        const auto usec = t._usec.load(std::memory_order_relaxed);
+        char per_call[32];
+        std::snprintf(per_call, sizeof(per_call), "%.2f",
+                      calls == 0 ? 0.0 : static_cast<double>(usec) / static_cast<double>(calls));
+        out << "cmdstat_" << name << ":calls=" << calls << ",usec=" << usec
+            << ",usec_per_call=" << per_call << ",rejected_calls=" << rejected
+            << ",failed_calls=" << t._failed.load(std::memory_order_relaxed) << "\r\n";
+    }
+    return out.str();
+}
+
+template<typename Host, typename Logger, typename Metrics>
+auto redis_front_end<Host, Logger, Metrics>::errorstats_text() const -> std::string {
+    std::ostringstream out;
+    std::lock_guard lock(_errorstats_mutex);
+    for (const auto& [code, count] : _errorstats) {
+        out << "errorstat_" << code << ":count=" << count << "\r\n";
+    }
+    return out.str();
+}
+
+/// `SLOWLOG GET [n] | LEN | RESET | HELP`, as Redis answers it: each entry
+/// is `[id, unix time, microseconds, [arguments], client address, client
+/// name]`, newest first, with values never shown.
+template<typename Host, typename Logger, typename Metrics>
+auto redis_front_end<Host, Logger, Metrics>::handle_slowlog(session& s, const resp_command& cmd)
+    -> std::string {
+    const auto sub = resp_to_upper(cmd._argv[1]);
+    if (sub == "LEN" && cmd._argv.size() == 2) {
+        std::lock_guard lock(_slowlog_mutex);
+        return s._writer.integer(static_cast<std::int64_t>(_slowlog.size()));
+    }
+    if (sub == "RESET" && cmd._argv.size() == 2) {
+        {
+            std::lock_guard lock(_slowlog_mutex);
+            _slowlog.clear();
+        }
+        audit(s, "SLOWLOG", "reset");
+        return s._writer.simple_string("OK");
+    }
+    if (sub == "GET") {
+        std::size_t count = 10;
+        if (cmd._argv.size() == 3) {
+            const auto n = redis_string_detail::parse_int64(cmd._argv[2]);
+            if (!n || *n < -1) {
+                return s._writer.error("ERR count should be greater than or equal to -1");
+            }
+            count =
+                *n == -1 ? std::numeric_limits<std::size_t>::max() : static_cast<std::size_t>(*n);
+        }
+        std::vector<std::string> entries;
+        std::lock_guard lock(_slowlog_mutex);
+        for (const auto& e : _slowlog) {
+            if (entries.size() >= count) {
+                break;
+            }
+            std::vector<std::string> args;
+            args.reserve(e._args.size());
+            for (const auto& a : e._args) {
+                args.push_back(s._writer.bulk(a));
+            }
+            entries.push_back(s._writer.array(
+                {s._writer.integer(static_cast<std::int64_t>(e._id)),
+                 s._writer.integer(e._unix_seconds),
+                 s._writer.integer(static_cast<std::int64_t>(e._usec)), s._writer.array(args),
+                 s._writer.bulk(e._client), s._writer.bulk(e._name)}));
+        }
+        return s._writer.array(entries);
+    }
+    if (sub == "HELP" && cmd._argv.size() == 2) {
+        std::vector<std::string> lines;
+        for (const auto* l :
+             {"SLOWLOG <subcommand> [<arg> [value] [opt] ...]. Subcommands are:", "GET [<count>]",
+              "    Return top <count> entries from the slowlog (default: 10, -1 mean all).", "LEN",
+              "    Return the length of the slowlog.", "RESET", "    Reset the slowlog.", "HELP",
+              "    Print this help."}) {
+            lines.push_back(s._writer.simple_string(l));
+        }
+        return s._writer.array(lines);
+    }
+    return s._writer.error("ERR unknown subcommand or wrong number of arguments for '" +
+                           cmd._argv[1] + "'. Try SLOWLOG HELP.");
 }
 
 }  // namespace kythira

@@ -544,6 +544,35 @@ auto from_env() -> node_options {
         to_u64("KYTHIRA_REDIS_MAX_CURSORS", get_opt("KYTHIRA_REDIS_MAX_CURSORS", "100000"));
     g._keys_limit =
         to_u64("KYTHIRA_REDIS_KEYS_LIMIT", get_opt("KYTHIRA_REDIS_KEYS_LIMIT", "10000"));
+    {
+        const auto slower = get_opt("KYTHIRA_REDIS_SLOWLOG_SLOWER_THAN_US", "10000");
+        try {
+            std::size_t used = 0;
+            g._slowlog_slower_than_us = std::stoll(slower, &used);
+            if (used != slower.size()) {
+                throw std::invalid_argument(slower);
+            }
+        } catch (const std::exception&) {
+            throw std::invalid_argument(
+                "redis_gateway_node: KYTHIRA_REDIS_SLOWLOG_SLOWER_THAN_US must be an integer, got "
+                "'" +
+                slower + "'");
+        }
+    }
+    g._slowlog_max_len =
+        to_u64("KYTHIRA_REDIS_SLOWLOG_MAX_LEN", get_opt("KYTHIRA_REDIS_SLOWLOG_MAX_LEN", "128"));
+    g._allow_flush =
+        to_bool("KYTHIRA_REDIS_ALLOW_FLUSH", get_opt("KYTHIRA_REDIS_ALLOW_FLUSH", "false"));
+    {
+        const auto keys = to_u64("KYTHIRA_REDIS_RANGE_DELETE_KEYS",
+                                 get_opt("KYTHIRA_REDIS_RANGE_DELETE_KEYS", "1000"));
+        if (keys == 0 || keys > 1000000) {
+            throw std::invalid_argument(
+                "redis_gateway_node: KYTHIRA_REDIS_RANGE_DELETE_KEYS must be between 1 and "
+                "1000000");
+        }
+        g._range_delete_keys = static_cast<std::uint32_t>(keys);
+    }
     g._max_clients =
         to_u64("KYTHIRA_REDIS_MAX_CLIENTS", get_opt("KYTHIRA_REDIS_MAX_CLIENTS", "1024"));
     g._idle_timeout =

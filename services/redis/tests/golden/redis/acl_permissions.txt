@@ -224,7 +224,7 @@ user ad1
   KYTHIRA.TXN allow allow allow allow
   INFO allow allow allow allow
   KYTHIRA.ADVISE no-command no-command no-command no-command
-  FLUSHALL no-command no-command no-command no-command
+  FLUSHALL allow allow allow allow
 user ad2
   role admin
   GET allow allow no-key no-key
@@ -256,7 +256,7 @@ user ad2
   KYTHIRA.TXN allow allow no-key no-key
   INFO allow allow no-key no-key
   KYTHIRA.ADVISE no-command no-command no-command no-command
-  FLUSHALL no-command no-command no-command no-command
+  FLUSHALL allow allow no-key no-key
 user cert1
   role read_write
   GET allow allow no-key no-key

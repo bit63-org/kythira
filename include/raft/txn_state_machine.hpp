@@ -665,6 +665,21 @@ private:
             locked->_status = txn_result_status::key_locked;
             return *locked;
         }
+        // A partitioner may say a command writes a whole range (a range
+        // delete): any key a transaction holds in it refuses the command,
+        // reported as the first such key, so the caller resolves that lock
+        // and proposes again.
+        if constexpr (requires { _partitioner.range_of(op._command); }) {
+            if (const auto range = _partitioner.range_of(op._command); range.has_value()) {
+                for (auto it = _intents.lower_bound(range->first);
+                     it != _intents.end() && (!range->second || it->first < *range->second); ++it) {
+                    if (auto locked = conflict_on(it->first, nullptr); locked.has_value()) {
+                        locked->_status = txn_result_status::key_locked;
+                        return *locked;
+                    }
+                }
+            }
+        }
         result_type res;
         res._payload = apply_inner(op._command, 0, index);
         return res;

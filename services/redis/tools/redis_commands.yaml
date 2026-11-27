@@ -1259,7 +1259,7 @@ commands:
     acl: [keyspace, write, admin, slow, dangerous]
     keys: [0, 0, 0]
     path: A
-    status: planned
+    status: shipped
     task: 13
   - name: KYTHIRA.USAGE
     id: 113
@@ -1270,7 +1270,7 @@ commands:
     acl: [keyspace, read, admin, slow]
     keys: [0, 0, 0]
     path: F
-    status: planned
+    status: shipped
     task: 13
   - name: FLUSHDB
     id: 114
@@ -1281,7 +1281,7 @@ commands:
     acl: [keyspace, write, slow, dangerous]
     keys: [0, 0, 0]
     path: A
-    status: planned
+    status: shipped
     task: 13
   - name: FLUSHALL
     id: 115
@@ -1292,7 +1292,7 @@ commands:
     acl: [keyspace, write, slow, dangerous]
     keys: [0, 0, 0]
     path: A
-    status: planned
+    status: shipped
     task: 13
   - name: MEMORY
     id: 116
@@ -1303,7 +1303,7 @@ commands:
     acl: [slow]
     keys: [0, 0, 0]
     path: R
-    status: planned
+    status: shipped
     task: 13
   - name: SLOWLOG
     id: 117
@@ -1311,10 +1311,10 @@ commands:
     since: 2.2.12
     arity: -2
     flags: []
-    acl: [slow]
+    acl: [admin, slow, dangerous]
     keys: [0, 0, 0]
     path: L
-    status: planned
+    status: shipped
     task: 13
   - name: KYTHIRA.INSTALL
     id: 118

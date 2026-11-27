@@ -30,6 +30,7 @@
 #include <kythira/redis/redis_format_level.hpp>
 #include <kythira/redis/redis_hash_exec.hpp>
 #include <kythira/redis/redis_exec_appliers.hpp>
+#include <kythira/redis/redis_range_delete.hpp>
 #include <kythira/redis/redis_list_exec.hpp>
 #include <kythira/redis/redis_set_exec.hpp>
 #include <kythira/redis/redis_typed_read.hpp>
@@ -222,7 +223,13 @@ public:
             if (const auto* exec = std::get_if<redis_kv_exec_command>(&record)) {
                 return apply_exec(*exec);
             }
-            // range_delete and remove_members: tasks 6 and 8.
+            if (const auto* range = std::get_if<redis_kv_range_delete_command>(&record)) {
+                return apply_redis_range_delete(
+                    *range,
+                    [this](const auto& lo, const auto& hi, auto&& f) { scan_keys(lo, hi, f); },
+                    [this](const key_type& key) { return erase(key); });
+            }
+            // remove_members is not proposed (sets use exec records).
             return redis_v3_apply_result(redis_v3_apply_status::unchanged);
         }
         auto decoded = decode_redis_kv_command(command);
