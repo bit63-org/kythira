@@ -673,6 +673,23 @@ allowed. `COMMAND`, `COMMAND INFO` and `COMMAND DOCS` describe exactly the
 commands the node accepts, from the command registry
 (`services/redis/tools/redis_commands.yaml`).
 
+### Expiry
+
+| Command | Notes |
+|---|---|
+| `EXPIRE` `PEXPIRE` `EXPIREAT` `PEXPIREAT key n [NX\|XX\|GT\|LT]` | 1 when the deadline was set (or the key deleted), 0 when the key is missing or the condition fails |
+| `PERSIST` | 1 when a deadline was removed |
+| `TTL` `PTTL` `EXPIRETIME` `PEXPIRETIME` | -2 missing, -1 no deadline |
+
+The node that receives the command checks the options and the number and
+turns a relative time into an absolute deadline with its own clock; the
+log decides the rest at the entry's command time. A deadline at or before
+that time deletes the key and answers 1, as Redis does. `GT` treats a key
+without a deadline as never expiring (it never passes there) and `LT`
+always passes there. The leader's expiry sweep names each key with the
+deadline it saw, so an `EXPIRE` or `PERSIST` that lands in the log after
+the sweep was built and before it applied keeps the key alive.
+
 ## Transactions
 
 A daemon built with `CONFIG_REDIS_GATEWAY_TRANSACTIONS=y` and run with

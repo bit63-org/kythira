@@ -2476,6 +2476,70 @@ BOOST_AUTO_TEST_CASE(immutable_values_refuse_string_mutations, *boost::unit_test
     BOOST_CHECK_GE(c.gateway(c.leader_of(k_sccache_group)).stats()._value_conflicts.load(), 2U);
 }
 
+// Task 4: the expiry family through the front end, from a follower so the
+// writes forward and the reads may answer locally or forward.
+BOOST_AUTO_TEST_CASE(expiry_family, *boost::unit_test::timeout(120)) {
+    if constexpr (gateway_type::k_node_format_level < k_redis_typed_values_level) {
+        return;
+    }
+    auto c = typed_cluster();
+    resp_client r(c->port(c->a_follower_of(k_sccache_group)));
+    BOOST_REQUIRE_EQUAL(r.auth("farm", "farm-secret"), "+OK\r\n");
+    const auto call = [&](const std::vector<std::string>& argv) { return r.call(argv); };
+    const auto integer = [](const std::string& reply) {
+        BOOST_REQUIRE(reply.starts_with(':'));
+        return std::stoll(reply.substr(1));
+    };
+
+    BOOST_CHECK_EQUAL(call({"EXPIRE", "sccache/x", "100"}), ":0\r\n");
+    BOOST_CHECK_EQUAL(call({"PTTL", "sccache/x"}), ":-2\r\n");
+    BOOST_CHECK_EQUAL(call({"SET", "sccache/x", "v"}), "+OK\r\n");
+    BOOST_CHECK_EQUAL(call({"PTTL", "sccache/x"}), ":-1\r\n");
+    BOOST_CHECK_EQUAL(call({"EXPIRETIME", "sccache/x"}), ":-1\r\n");
+    BOOST_CHECK_EQUAL(call({"EXPIRE", "sccache/x", "100", "XX"}), ":0\r\n");
+    BOOST_CHECK_EQUAL(call({"EXPIRE", "sccache/x", "100", "nx"}), ":1\r\n");
+    const auto pttl = integer(call({"PTTL", "sccache/x"}));
+    BOOST_CHECK(pttl > 90'000 && pttl <= 100'000);
+    BOOST_CHECK_EQUAL(call({"PEXPIRE", "sccache/x", "50000", "GT"}), ":0\r\n");
+    BOOST_CHECK_EQUAL(call({"PEXPIRE", "sccache/x", "50000", "LT"}), ":1\r\n");
+    BOOST_CHECK_EQUAL(call({"EXPIREAT", "sccache/x", "4102444800"}), ":1\r\n");
+    BOOST_CHECK_EQUAL(call({"EXPIRETIME", "sccache/x"}), ":4102444800\r\n");
+    BOOST_CHECK_EQUAL(call({"PEXPIREAT", "sccache/x", "4102444800123"}), ":1\r\n");
+    BOOST_CHECK_EQUAL(call({"PEXPIRETIME", "sccache/x"}), ":4102444800123\r\n");
+    BOOST_CHECK_EQUAL(call({"PERSIST", "sccache/x"}), ":1\r\n");
+    BOOST_CHECK_EQUAL(call({"PERSIST", "sccache/x"}), ":0\r\n");
+    BOOST_CHECK_EQUAL(call({"TTL", "sccache/x"}), ":-1\r\n");
+
+    // A deadline already past deletes the key and answers 1.
+    BOOST_CHECK_EQUAL(call({"EXPIRE", "sccache/x", "-1"}), ":1\r\n");
+    BOOST_CHECK_EQUAL(call({"EXISTS", "sccache/x"}), ":0\r\n");
+    BOOST_CHECK_EQUAL(call({"SET", "sccache/x", "v"}), "+OK\r\n");
+    BOOST_CHECK_EQUAL(call({"PEXPIREAT", "sccache/x", "1"}), ":1\r\n");
+    BOOST_CHECK_EQUAL(call({"GET", "sccache/x"}), "$-1\r\n");
+
+    // Refusals the front end answers without a proposal.
+    BOOST_CHECK_EQUAL(call({"EXPIRE", "sccache/x", "10", "NX", "GT"}),
+                      "-ERR NX and XX, GT or LT options at the same time are not compatible\r\n");
+    BOOST_CHECK_EQUAL(call({"EXPIRE", "sccache/x", "10", "GT", "LT"}),
+                      "-ERR GT and LT options at the same time are not compatible\r\n");
+    BOOST_CHECK_EQUAL(call({"EXPIRE", "sccache/x", "10", "SOON"}),
+                      "-ERR Unsupported option SOON\r\n");
+    BOOST_CHECK_EQUAL(call({"EXPIRE", "sccache/x", "ten"}),
+                      "-ERR value is not an integer or out of range\r\n");
+    BOOST_CHECK_EQUAL(call({"EXPIRE", "sccache/x", "9223372036854775807"}),
+                      "-ERR invalid expire time in 'expire' command\r\n");
+    BOOST_CHECK_EQUAL(call({"PEXPIRE", "sccache/x", "9223372036854775807"}),
+                      "-ERR invalid expire time in 'pexpire' command\r\n");
+    BOOST_CHECK(call({"PERSIST"}).starts_with("-ERR wrong number of arguments"));
+    BOOST_CHECK(call({"PTTL", "a", "b"}).starts_with("-ERR wrong number of arguments"));
+
+    // The read-only role may read deadlines but not change them.
+    resp_client ro(c->port(c->a_follower_of(k_sccache_group)));
+    BOOST_REQUIRE_EQUAL(ro.auth("reader", "reader-secret"), "+OK\r\n");
+    BOOST_CHECK_EQUAL(ro.call({"PTTL", "sccache/x"}), ":-2\r\n");
+    BOOST_CHECK(ro.call({"PERSIST", "sccache/x"}).starts_with("-NOPERM"));
+}
+
 BOOST_AUTO_TEST_CASE(only_peer_gateways_may_advise, *boost::unit_test::timeout(120)) {
     auto log = std::make_shared<hook_log>();
     cluster c({}, true, hooks_into(log));

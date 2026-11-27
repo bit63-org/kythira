@@ -22,6 +22,9 @@
 /// | `GETRANGE`   | start end               | bulk (Redis 7 clamping)      |
 /// | `EXISTS`     |                         | 1 or 0                       |
 /// | `TTL`        |                         | seconds, -1, or -2           |
+/// | `PTTL`       |                         | milliseconds, -1, or -2      |
+/// | `EXPIRETIME` |                         | unix seconds, -1, or -2      |
+/// | `PEXPIRETIME`|                         | unix milliseconds, -1, or -2 |
 /// | `TYPE`       |                         | `string` or `none`           |
 /// | `OBJECT`     | (`ENCODING`)            | `int`, `embstr`, `raw`, nil  |
 
@@ -39,6 +42,34 @@
 #include <vector>
 
 namespace kythira {
+
+/// The reply of `TTL`, `PTTL`, `EXPIRETIME` or `PEXPIRETIME` for a key that
+/// is `present` with deadline `expire_at_ms` (0: never) at `now_ms`, as
+/// Redis's `ttlGenericCommand` gives it: -2 absent, -1 no deadline, else the
+/// remaining or absolute time, seconds rounded to the nearest. `nullopt`
+/// for any other id.
+[[nodiscard]] inline auto redis_expiry_read_reply(redis_command_id id, bool present,
+                                                  std::uint64_t expire_at_ms, std::uint64_t now_ms)
+    -> std::optional<redis_reply> {
+    const bool ms = id == redis_command_id::pttl || id == redis_command_id::pexpiretime;
+    const bool absolute = id == redis_command_id::expiretime || id == redis_command_id::pexpiretime;
+    if (!ms && !absolute && id != redis_command_id::ttl) {
+        return std::nullopt;
+    }
+    if (!present) {
+        return redis_reply::integer(-2);
+    }
+    if (expire_at_ms == 0) {
+        return redis_reply::integer(-1);
+    }
+    std::uint64_t v = 0;
+    if (absolute) {
+        v = expire_at_ms;
+    } else if (expire_at_ms > now_ms) {
+        v = expire_at_ms - now_ms;
+    }
+    return redis_reply::integer(static_cast<std::int64_t>(ms ? v : (v + 500) / 1000));
+}
 
 /// The read of `id` on a string entry. `entry` is the stored entry or null;
 /// it must have `_value` (contiguous bytes) and `_expire_at_ms` (0: never).
@@ -63,17 +94,11 @@ auto evaluate_redis_string_read(const Entry* entry, redis_command_id id,
             return redis_reply::integer(present ? 1 : 0);
         case redis_command_id::type:
             return redis_reply::simple(present ? "string" : "none");
-        case redis_command_id::ttl: {
-            if (!present) {
-                return redis_reply::integer(-2);
-            }
-            if (entry->_expire_at_ms == 0) {
-                return redis_reply::integer(-1);
-            }
-            // Redis rounds the remaining milliseconds to the nearest second.
-            const auto left = entry->_expire_at_ms - now_ms;
-            return redis_reply::integer(static_cast<std::int64_t>((left + 500) / 1000));
-        }
+        case redis_command_id::ttl:
+        case redis_command_id::pttl:
+        case redis_command_id::expiretime:
+        case redis_command_id::pexpiretime:
+            return redis_expiry_read_reply(id, present, present ? entry->_expire_at_ms : 0, now_ms);
         case redis_command_id::object: {
             if (!present) {
                 return redis_reply::null();

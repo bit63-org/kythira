@@ -48,7 +48,7 @@ is extended as the rest land.
     this spec takes over
   - _Requirements: introduction_
 
-- [ ] 1. Command registry, `exec` record and command time
+- [x] 1. Command registry, `exec` record and command time
   - `services/redis/tools/redis_commands.yaml` → generated
     `redis_command_ids.hpp` with a CI freshness check
   - Format `0x03`: `exec`, `range_delete`, `format_gate`,
@@ -62,14 +62,14 @@ is extended as the rest land.
     compatibility mode; golden replies updated
   - _Requirements: 1.5-1.7, 2.1-2.6, 14.1, 14.2, 14.6_
 
-- [ ] 2. Format level and gate
+- [x] 2. Format level and gate
   - Level in every node's health answer; `KYTHIRA.FORMAT STATUS|UPGRADE`;
     gate apply, inheritance through split, refusal before gate, stop on a
     record above the binary's level
   - In-process test: three nodes, one old-level binary blocks the gate
   - _Requirements: 14.3-14.5_
 
-- [ ] 3. Tier 1 string commands (memory store)
+- [x] 3. Tier 1 string commands (memory store)
   - `INCR` family, `INCRBYFLOAT`/`HINCRBYFLOAT` in binary128 with the
     in-tree decimal conversion and amd64/arm64 golden replies (D1), `SET` options, `SETNX`, `PSETEX`,
     `GETSET`, `GETDEL`, `GETEX`, `APPEND`, `SETRANGE`, `TYPE`, `UNLINK`
@@ -78,7 +78,7 @@ is extended as the rest land.
     every command so far
   - _Requirements: 1.3, 3.1-3.6, 3.8, 3.9_
 
-- [ ] 4. Expiry family
+- [x] 4. Expiry family
   - `EXPIRE`/`PEXPIRE`/`EXPIREAT`/`PEXPIREAT` with `NX|XX|GT|LT`,
     `PERSIST`, `PTTL`, `EXPIRETIME`, `PEXPIRETIME`; past deadline deletes;
     sweep vs `EXPIRE`/`PERSIST` race test

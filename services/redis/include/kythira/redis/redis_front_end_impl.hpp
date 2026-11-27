@@ -1071,7 +1071,19 @@ auto redis_front_end<Host, Logger, Metrics>::execute_command(session& s, std::st
         }
         return handle_string_write(s, upper, cmd);
     }
-    if (upper == "TYPE") {
+    if (upper == "EXPIRE" || upper == "PEXPIRE" || upper == "EXPIREAT" || upper == "PEXPIREAT") {
+        if (auto e = arity(3, std::numeric_limits<std::size_t>::max())) {
+            return *e;
+        }
+        return handle_string_write(s, upper, cmd);
+    }
+    if (upper == "PERSIST") {
+        if (auto e = arity(2, 2)) {
+            return *e;
+        }
+        return handle_string_write(s, upper, cmd);
+    }
+    if (upper == "TYPE" || upper == "PTTL" || upper == "EXPIRETIME" || upper == "PEXPIRETIME") {
         if (auto e = arity(2, 2)) {
             return *e;
         }
@@ -4012,6 +4024,49 @@ auto redis_front_end<Host, Logger, Metrics>::handle_string_write(session& s, std
         }
         return propose_exec(s, cmd, key, redis_command_id::append, {key, a[2], max_bytes}, true);
     }
+    if (upper == "EXPIRE" || upper == "PEXPIRE" || upper == "EXPIREAT" || upper == "PEXPIREAT") {
+        // Redis order: options, then the integer, then overflow.
+        unsigned flags = 0;
+        std::vector<std::string> names;
+        for (std::size_t i = 3; i < a.size(); ++i) {
+            const auto f = redis_expiry_detail::parse_expire_flag(a[i]);
+            if (!f) {
+                return s._writer.error("ERR Unsupported option " + a[i]);
+            }
+            flags |= *f;
+            names.push_back(resp_to_upper(a[i]));
+        }
+        if (const auto conflict = redis_expiry_detail::expire_flags_conflict(flags);
+            !conflict.empty()) {
+            return s._writer.error(std::string(conflict));
+        }
+        const auto v = redis_string_detail::parse_int64(a[2]);
+        if (!v) {
+            return s._writer.error("ERR value is not an integer or out of range");
+        }
+        constexpr auto k_max = std::numeric_limits<std::int64_t>::max();
+        constexpr auto k_min = std::numeric_limits<std::int64_t>::min();
+        auto when = *v;
+        if (upper == "EXPIRE" || upper == "EXPIREAT") {
+            if (when > k_max / 1000 || when < k_min / 1000) {
+                return bad_expire();
+            }
+            when *= 1000;
+        }
+        if (upper == "EXPIRE" || upper == "PEXPIRE") {
+            const auto now = static_cast<std::int64_t>(now_ms());
+            if (when > k_max - now) {
+                return bad_expire();
+            }
+            when += now;
+        }
+        std::vector<std::string> args{key, std::to_string(when)};
+        args.insert(args.end(), names.begin(), names.end());
+        return propose_exec(s, cmd, key, redis_command_id::pexpireat, std::move(args), false);
+    }
+    if (upper == "PERSIST") {
+        return propose_exec(s, cmd, key, redis_command_id::persist, {key}, false);
+    }
     if (upper == "SETRANGE") {
         const auto offset = redis_string_detail::parse_int64(a[2]);
         if (!offset) {
@@ -4074,6 +4129,14 @@ auto redis_front_end<Host, Logger, Metrics>::handle_key_read(session& s, std::st
             return r._error;
         }
         const bool present = r._entry && !is_expired(*r._entry);
+        if (upper == "PTTL" || upper == "EXPIRETIME" || upper == "PEXPIRETIME") {
+            const auto id = upper == "PTTL"         ? redis_command_id::pttl
+                            : upper == "EXPIRETIME" ? redis_command_id::expiretime
+                                                    : redis_command_id::pexpiretime;
+            const auto reply = redis_expiry_read_reply(
+                id, present, present ? r._entry->_expire_at_ms : 0, now_ms());
+            return render_redis_reply(*reply, s._writer.version());
+        }
         if (upper == "TYPE") {
             return s._writer.simple_string(present ? "string" : "none");
         }

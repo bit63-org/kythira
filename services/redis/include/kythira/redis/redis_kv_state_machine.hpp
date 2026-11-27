@@ -26,6 +26,7 @@
 ///     An 8 MiB compiler artefact copied under that mutex would stall every
 ///     AppendEntries for the shard.
 
+#include <kythira/redis/redis_expiry_exec.hpp>
 #include <kythira/redis/redis_format_level.hpp>
 #include <kythira/redis/redis_kv_commands.hpp>
 #include <kythira/redis/redis_string_exec.hpp>
@@ -438,6 +439,9 @@ private:
             auto erase(const key_type& key) -> bool { return _sm.erase(key); }
         } ops{*this};
         auto reply = apply_redis_string_exec(ops, c, t);
+        if (!reply) {
+            reply = apply_redis_expiry_exec(ops, c, t);
+        }
         if (!reply) {
             throw redis_unknown_command_id(c._command_id);
         }

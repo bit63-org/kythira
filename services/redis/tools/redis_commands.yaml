@@ -544,7 +544,7 @@ commands:
     acl: [keyspace, write, fast]
     keys: [1, 1, 1]
     path: W
-    status: planned
+    status: shipped
     task: 4
   - name: PEXPIRE
     id: 48
@@ -555,7 +555,7 @@ commands:
     acl: [keyspace, write, fast]
     keys: [1, 1, 1]
     path: W
-    status: planned
+    status: shipped
     task: 4
   - name: EXPIREAT
     id: 49
@@ -566,7 +566,7 @@ commands:
     acl: [keyspace, write, fast]
     keys: [1, 1, 1]
     path: W
-    status: planned
+    status: shipped
     task: 4
   - name: PEXPIREAT
     id: 50
@@ -577,7 +577,7 @@ commands:
     acl: [keyspace, write, fast]
     keys: [1, 1, 1]
     path: W
-    status: planned
+    status: shipped
     task: 4
   - name: PERSIST
     id: 51
@@ -588,7 +588,7 @@ commands:
     acl: [keyspace, write, fast]
     keys: [1, 1, 1]
     path: W
-    status: planned
+    status: shipped
     task: 4
   - name: PTTL
     id: 52
@@ -599,7 +599,7 @@ commands:
     acl: [keyspace, read, fast]
     keys: [1, 1, 1]
     path: R
-    status: planned
+    status: shipped
     task: 4
   - name: EXPIRETIME
     id: 53
@@ -610,7 +610,7 @@ commands:
     acl: [keyspace, read, fast]
     keys: [1, 1, 1]
     path: R
-    status: planned
+    status: shipped
     task: 4
   - name: PEXPIRETIME
     id: 54
@@ -621,7 +621,7 @@ commands:
     acl: [keyspace, read, fast]
     keys: [1, 1, 1]
     path: R
-    status: planned
+    status: shipped
     task: 4
   - name: RENAME
     id: 55
