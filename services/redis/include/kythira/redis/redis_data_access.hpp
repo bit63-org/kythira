@@ -36,8 +36,8 @@
 
 #include <kythira/redis/redis_gateway_value_access.hpp>
 #include <kythira/redis/redis_remote_data_access.hpp>
-#include <raft/future_default.hpp>
 #include <kythira/redis/redis_scan.hpp>
+#include <raft/future_default.hpp>
 #include <raft/route_cache.hpp>
 #include <raft/shard_exceptions.hpp>
 #include <raft/txn_state_machine.hpp>
@@ -49,6 +49,7 @@
 #include <exception>
 #include <memory>
 #include <optional>
+#include <span>
 #include <string>
 #include <tuple>
 #include <type_traits>
@@ -624,6 +625,17 @@ public:
         }
         return result;
     }
+    /// As the local one. Keys whose group has no replica here go to the data
+    /// node as one proposal for the first key's group: the planner put every
+    /// key in that group, and the data node refuses the entry if the group's
+    /// version moved since.
+    auto propose_keys(const std::vector<std::string>& keys, const std::vector<std::byte>& entry,
+                      std::chrono::milliseconds timeout) -> future_type {
+        if (keys.empty() || !remote_for(keys.front())) {
+            return local_type::propose_keys(keys, entry, timeout);
+        }
+        return propose(keys.front(), entry, timeout);
+    }
     /// A transaction participant message. For a group with no replica here
     /// this raises `unknown_shard_exception`, which sends the coordinator to
     /// the group's leader over `KYTHIRA.TXN`, as it does today for a group
@@ -697,6 +709,16 @@ public:
                 std::transform(answer->value.begin(), answer->value.end(), entry->_value.begin(),
                                [](char c) { return static_cast<std::byte>(c); });
                 entry->_expire_at_ms = answer->expire_at_ms;
+                if (answer->type != 0) {
+                    try {
+                        redis_kv_detail::reader body(
+                            std::as_bytes(std::span(answer->body.data(), answer->body.size())));
+                        redis_kv_detail::read_collection_body(body, answer->type, *entry);
+                    } catch (const std::exception&) {
+                        out._status = redis_data_status::no_leader;  // the retry error
+                        return out;
+                    }
+                }
                 out._entry = std::move(entry);
             }
         }

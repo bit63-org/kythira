@@ -1122,8 +1122,14 @@ auto redis_front_end<Host, Logger, Metrics>::execute_command(session& s, std::st
         if (auto e = arity(3, std::numeric_limits<std::size_t>::max())) {
             return *e;
         }
-        if (cmd._argv.size() > 3 || s._txn_view != nullptr || mutable_exec(s, cmd._argv[1])) {
+        if (cmd._argv.size() > 3 || s._txn_view != nullptr) {
             return handle_string_write(s, upper, cmd);
+        }
+        if (mutable_exec(s, cmd._argv[1])) {
+            auto reply = handle_string_write(s, upper, cmd);
+            if (!refused_by_remote_gate(cmd._argv[1], reply)) {
+                return reply;
+            }
         }
         return handle_set(s, cmd, false);
     }
@@ -1195,9 +1201,15 @@ auto redis_front_end<Host, Logger, Metrics>::execute_command(session& s, std::st
         return handle_usage(s, cmd);
     }
     if (upper == "UNLINK" || upper == "DEL") {
-        if ((s._txn_view != nullptr && cmd._argv.size() >= 2) ||
-            (cmd._argv.size() > 2 && typed_ready(cmd._argv[1]))) {
+        if (s._txn_view != nullptr && cmd._argv.size() >= 2) {
             return handle_multi_key_write(s, upper, cmd);
+        }
+        if (cmd._argv.size() > 2 && typed_ready(cmd._argv[1])) {
+            auto reply = handle_multi_key_write(s, upper, cmd);
+            if (_config._transactions && refused_by_remote_gate(cmd._argv[1], reply)) {
+                return execute_txn_command(s, upper, cmd);
+            }
+            return reply;
         }
         if (auto e = arity(2, 2)) {
             return *e;
@@ -1226,8 +1238,14 @@ auto redis_front_end<Host, Logger, Metrics>::execute_command(session& s, std::st
         if (auto e = arity(4, 4)) {
             return *e;
         }
-        if (s._txn_view != nullptr || mutable_exec(s, cmd._argv[1])) {
+        if (s._txn_view != nullptr) {
             return handle_string_write(s, upper, cmd);
+        }
+        if (mutable_exec(s, cmd._argv[1])) {
+            auto reply = handle_string_write(s, upper, cmd);
+            if (!refused_by_remote_gate(cmd._argv[1], reply)) {
+                return reply;
+            }
         }
         return handle_set(s, cmd, true);
     }
@@ -3497,9 +3515,19 @@ auto redis_front_end<Host, Logger, Metrics>::data_read(redis_data_wire::read_mod
         return redis_data_wire::encode_read_miss();  // as read_local(): unvouched bytes
     }
     const auto view = bytes->view();
-    return redis_data_wire::encode_read_value(
-        outcome._entry->_expire_at_ms,
-        std::string_view(reinterpret_cast<const char*>(view.data()), view.size()));
+    const std::string_view value(reinterpret_cast<const char*>(view.data()), view.size());
+    if constexpr (!k_string_only_store) {
+        // A hash, set or list travels whole, so the front end evaluates the
+        // typed read as a co-located one would.
+        if (const auto type = redis_entry_type(*outcome._entry); type != redis_value_type::string) {
+            std::vector<std::byte> body;
+            redis_kv_detail::put_collection_body(body, *outcome._entry);
+            return redis_data_wire::encode_read_value(
+                outcome._entry->_expire_at_ms, value, static_cast<std::uint8_t>(type),
+                std::string_view(reinterpret_cast<const char*>(body.data()), body.size()));
+        }
+    }
+    return redis_data_wire::encode_read_value(outcome._entry->_expire_at_ms, value);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -3948,6 +3976,20 @@ auto redis_front_end<Host, Logger, Metrics>::typed_ready(const std::string& key)
     return !have || *have >= k_redis_typed_values_level;
 }
 
+/// typed_ready() cannot see the gate of a group with no replica here (a
+/// front end without data), so it guesses the gate is up and the command
+/// takes its typed path. If the data node then refused the record before
+/// its gate, nothing was applied, and the caller retries on the path a node
+/// that could see the gate would have taken.
+template<typename Host, typename Logger, typename Metrics>
+auto redis_front_end<Host, Logger, Metrics>::refused_by_remote_gate(const std::string& key,
+                                                                    std::string_view reply)
+    -> bool {
+    return !group_format_level(key) && reply.size() == k_redis_format_gate_error.size() + 3 &&
+           reply.front() == '-' &&
+           reply.substr(1, k_redis_format_gate_error.size()) == k_redis_format_gate_error;
+}
+
 /// The `KYTHIRA.FORMAT STATUS` reply, encoded as RESP2 bulk text: this
 /// node's level, then each local replica's gate.
 template<typename Host, typename Logger, typename Metrics>
@@ -4233,24 +4275,32 @@ auto redis_front_end<Host, Logger, Metrics>::propose_exec(
     }
     std::string error;
     std::optional<node_id_type> forward_to;
-    auto* node = locate(key, error, forward_to);
-    if (node != nullptr && !node->is_leader()) {
-        forward_to = node->known_leader();
-        error = s._writer.error("ERR shard has no reachable leader, retry");
-        node = nullptr;
-    }
-    if (node == nullptr) {
-        if (forward_to) {
-            if (auto reply = forward(s, hop, *forward_to)) {
-                return *reply;
-            }
+    // No replica here (a front end without data, task 16): the record goes
+    // to the data node over KYTHIRA.DATA PROPOSE, where apply() refuses it
+    // before the gate as it would locally.
+    const bool remote = _data.remote_for(key);
+    if (!remote) {
+        auto* node = locate(key, error, forward_to);
+        if (node != nullptr && !node->is_leader()) {
+            forward_to = node->known_leader();
+            error = s._writer.error("ERR shard has no reachable leader, retry");
+            node = nullptr;
         }
-        return error;
+        if (node == nullptr) {
+            if (forward_to) {
+                if (auto reply = forward(s, hop, *forward_to)) {
+                    return *reply;
+                }
+            }
+            return error;
+        }
     }
     if (auto refused = format_refusal(s, key, k_redis_typed_values_level)) {
         return *refused;
     }
-    if (may_grow) {
+    // The space hooks belong to the disk-backed store, which a front end
+    // without data cannot run.
+    if (may_grow && !remote) {
         if (auto refused = space_refusal(key)) {
             ++_stats._space_refusals;
             emit("redis.space_refusals", name);

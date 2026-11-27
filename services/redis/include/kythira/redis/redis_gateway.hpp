@@ -814,6 +814,9 @@ protected:
     /// Whether `key`'s group has the typed-values gate (or no replica here
     /// says otherwise): the multi-key commands plan as `exec` records.
     auto typed_ready(const std::string& key) -> bool;
+    /// Whether `reply` is a data node's refusal before its gate for a group
+    /// with no replica here, whose gate typed_ready() could only guess.
+    auto refused_by_remote_gate(const std::string& key, std::string_view reply) -> bool;
     /// The `KYTHIRA.FORMAT STATUS` reply (RESP2): this node's level and
     /// each local replica's gate.
     auto format_status_text() -> std::string;
