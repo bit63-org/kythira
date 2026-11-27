@@ -275,7 +275,10 @@ auto acl_text() -> std::string {
            // IAM task 21: an IAM-only user (no password, still enabled) and
            // one that takes either.
            "user iamfarm disabled read_write sccache/ auth=iam\n" + "user bothfarm " +
-           redis_acl::hash_secret("both-secret", k_kdf_iters) + " read_write sccache/ auth=both\n";
+           redis_acl::hash_secret("both-secret", k_kdf_iters) + " read_write sccache/ auth=both\n" +
+           // redis-general-data-types task 5: a user whose counters may change.
+           "user counter " + redis_acl::hash_secret("counter-secret", k_kdf_iters) +
+           " read_write sccache/ mutable~sccache/counters/*\n";
 }
 
 // ── a throwaway PKI for the TLS cases ────────────────────────────────────────
@@ -2472,8 +2475,99 @@ BOOST_AUTO_TEST_CASE(immutable_values_refuse_string_mutations, *boost::unit_test
     BOOST_CHECK_EQUAL(r.call({"APPEND", "sccache/n", "x"}),
                       "-ERR value conflict for an existing key\r\n");
     BOOST_CHECK_EQUAL(r.call({"SET", "sccache/n", "1", "XX", "GET"}), bulk("1"));
-    BOOST_CHECK_EQUAL(r.call({"GETDEL", "sccache/n"}), bulk("1"));
+    // Requirement 5.2: the deadline and the key itself are protected too.
+    BOOST_CHECK_EQUAL(r.call({"EXPIRE", "sccache/n", "100"}),
+                      "-ERR value conflict for an existing key\r\n");
+    BOOST_CHECK_EQUAL(r.call({"GETDEL", "sccache/n"}),
+                      "-ERR value conflict for an existing key\r\n");
+    BOOST_CHECK_EQUAL(r.call({"DEL", "sccache/n"}), ":1\r\n");
     BOOST_CHECK_GE(c.gateway(c.leader_of(k_sccache_group)).stats()._value_conflicts.load(), 2U);
+
+    // A user's mutable prefix may change, through exec records and plain SET.
+    resp_client m(c.port(c.a_follower_of(k_sccache_group)));
+    BOOST_REQUIRE_EQUAL(m.auth("counter", "counter-secret"), "+OK\r\n");
+    BOOST_CHECK_EQUAL(m.call({"INCR", "sccache/counters/a"}), ":1\r\n");
+    BOOST_CHECK_EQUAL(m.call({"INCR", "sccache/counters/a"}), ":2\r\n");
+    BOOST_CHECK_EQUAL(m.call({"SET", "sccache/counters/a", "7"}), "+OK\r\n");
+    BOOST_CHECK_EQUAL(m.call({"EXPIRE", "sccache/counters/a", "100"}), ":1\r\n");
+    BOOST_CHECK_EQUAL(m.call({"GETDEL", "sccache/counters/a"}), bulk("7"));
+    BOOST_CHECK_EQUAL(m.call({"SET", "sccache/plain", "1"}), "+OK\r\n");
+    BOOST_CHECK_EQUAL(m.call({"SET", "sccache/plain", "2"}),
+                      "-ERR value conflict for an existing key\r\n");
+    // The same prefix is not mutable for a user without it.
+    BOOST_CHECK_EQUAL(r.call({"SET", "sccache/counters/b", "1"}), "+OK\r\n");
+    BOOST_CHECK_EQUAL(r.call({"INCR", "sccache/counters/b"}),
+                      "-ERR value conflict for an existing key\r\n");
+}
+
+// Requirement 5.4: the rule is decided in apply(), so writers racing to
+// create one key cannot both pass: exactly one INCR creates it and every
+// other one finds it existing. In a mutable prefix every INCR counts.
+BOOST_AUTO_TEST_CASE(racing_writers_under_the_immutable_rule, *boost::unit_test::timeout(180)) {
+    if constexpr (gateway_type::k_node_format_level < k_redis_typed_values_level) {
+        return;
+    }
+    cluster c;
+    BOOST_REQUIRE(c.await_all_leaders(std::chrono::seconds{20}));
+    {
+        resp_client ops(c.port(1));
+        BOOST_REQUIRE_EQUAL(ops.auth("ops", "ops-secret"), "+OK\r\n");
+        BOOST_REQUIRE_EQUAL(ops.call({"KYTHIRA.FORMAT", "UPGRADE", "3"}), "+OK\r\n");
+    }
+    constexpr int k_writers = 8;
+    const auto race = [&](const std::string& user, const std::string& secret,
+                          const std::string& key) {
+        // Log in first, one at a time (the AUTH limiter counts concurrent
+        // attempts per address), spread over every node: followers forward.
+        std::vector<std::unique_ptr<resp_client>> clients;
+        for (int i = 0; i < k_writers; ++i) {
+            clients.push_back(
+                std::make_unique<resp_client>(c.port(static_cast<node_id_t>(1 + (i % 3)))));
+            BOOST_REQUIRE_EQUAL(clients.back()->auth(user, secret), "+OK\r\n");
+        }
+        std::vector<std::string> replies(k_writers);
+        std::vector<std::thread> threads;
+        std::atomic<int> ready{0};
+        for (int i = 0; i < k_writers; ++i) {
+            threads.emplace_back([&, i] {
+                ready.fetch_add(1);
+                while (ready.load() < k_writers) {
+                    std::this_thread::yield();
+                }
+                // A forward the leader could not take is refused before
+                // anything is proposed, and says to retry.
+                auto& reply = replies[static_cast<std::size_t>(i)];
+                for (int attempt = 0; attempt < 50; ++attempt) {
+                    reply = clients[static_cast<std::size_t>(i)]->call({"INCR", key});
+                    if (reply != "-ERR shard has no reachable leader, retry\r\n") {
+                        break;
+                    }
+                    std::this_thread::sleep_for(std::chrono::milliseconds{20});
+                }
+            });
+        }
+        for (auto& t : threads) {
+            t.join();
+        }
+        return replies;
+    };
+    const auto fixed = race("farm", "farm-secret", "sccache/race");
+    BOOST_CHECK_EQUAL(std::ranges::count(fixed, std::string(":1\r\n")), 1);
+    BOOST_CHECK_EQUAL(
+        std::ranges::count(fixed, std::string("-ERR value conflict for an existing key\r\n")),
+        k_writers - 1);
+    auto counted = race("counter", "counter-secret", "sccache/counters/race");
+    std::ranges::sort(counted);
+    std::vector<std::string> expected;
+    for (int i = 1; i <= k_writers; ++i) {
+        expected.push_back(":" + std::to_string(i) + "\r\n");
+    }
+    std::ranges::sort(expected);
+    std::string got;
+    for (const auto& r : counted) {
+        got += r;
+    }
+    BOOST_CHECK_MESSAGE(counted == expected, "replies: " << got);
 }
 
 // Task 4: the expiry family through the front end, from a follower so the

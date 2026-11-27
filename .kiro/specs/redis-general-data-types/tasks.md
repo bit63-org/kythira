@@ -84,7 +84,7 @@ is extended as the rest land.
     sweep vs `EXPIRE`/`PERSIST` race test
   - _Requirements: 4.1-4.4_
 
-- [ ] 5. Mutability policy and ACL categories
+- [x] 5. Mutability policy and ACL categories
   - ACL file: categories, single commands, `%R~`/`%W~`/`~` scopes,
     mutable prefixes; today's roles as category sets; old lines parse
     identically (golden ACL fixtures)

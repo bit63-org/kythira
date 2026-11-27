@@ -31,12 +31,15 @@ struct fixture {
     }
 
     auto exec(redis_command_id id, std::vector<std::string> args, std::uint64_t now = 1000,
-              std::uint8_t policy = 0) -> redis_reply {
+              std::uint8_t policy = 0, bool mutable_key = false) -> redis_reply {
         redis_kv_exec_command c;
         c._key = args.empty() ? "" : args[0];
         c._command_id = static_cast<std::uint16_t>(id);
         c._now_ms = now;
         c._policy = policy;
+        if (mutable_key) {
+            c._mutable_keys = {std::byte{0x01}};
+        }
         c._args = std::move(args);
         return decode_redis_reply(sm.apply(encode_redis_kv_command(c), ++index));
     }
@@ -155,14 +158,29 @@ BOOST_FIXTURE_TEST_CASE(a_past_deadline_deletes_the_key, fixture) {
     BOOST_CHECK_EQUAL(sm.approximate_key_count(), 0U);
 }
 
-BOOST_FIXTURE_TEST_CASE(deadlines_change_under_the_immutable_rule, fixture) {
+// Requirement 5.2: outside a mutable prefix the rule also keeps a live
+// key's deadline, and GETDEL may not take the key away; a command that
+// would change nothing still answers as usual.
+BOOST_FIXTURE_TEST_CASE(the_immutable_rule_keeps_deadlines_and_keys, fixture) {
     using id = redis_command_id;
     const auto rule = redis_kv_exec_policy::immutable_rule;
-    BOOST_CHECK(exec(id::set, {"k", "v"}, 1000, rule) == redis_reply::simple("OK"));
-    BOOST_CHECK(exec(id::pexpireat, {"k", "9000"}, 1000, rule) == redis_reply::integer(1));
-    BOOST_CHECK(exec(id::persist, {"k"}, 1000, rule) == redis_reply::integer(1));
-    BOOST_CHECK(exec(id::pexpireat, {"k", "0"}, 1000, rule) == redis_reply::integer(1));
-    BOOST_CHECK(read(id::exists, "k") == redis_reply::integer(0));
+    const auto conflict = redis_reply::error("ERR value conflict for an existing key");
+    BOOST_CHECK(exec(id::set, {"k", "v", "PXAT", "9000"}, 1000, rule) == redis_reply::simple("OK"));
+    BOOST_CHECK(exec(id::pexpireat, {"k", "8000"}, 1000, rule) == conflict);
+    BOOST_CHECK(exec(id::pexpireat, {"k", "8000", "GT"}, 1000, rule) == redis_reply::integer(0));
+    BOOST_CHECK(exec(id::persist, {"k"}, 1000, rule) == conflict);
+    BOOST_CHECK(exec(id::getex, {"k", "PERSIST"}, 1000, rule) == conflict);
+    BOOST_CHECK(exec(id::getex, {"k", "PXAT", "9000"}, 1000, rule) == redis_reply::bulk("v"));
+    BOOST_CHECK(exec(id::getex, {"k", "PXAT", "9500"}, 1000, rule) == conflict);
+    BOOST_CHECK(exec(id::getdel, {"k"}, 1000, rule) == conflict);
+    BOOST_CHECK(read(id::pexpiretime, "k") == redis_reply::integer(9000));
+    // Absent keys are not a conflict.
+    BOOST_CHECK(exec(id::getdel, {"none"}, 1000, rule) == redis_reply::null());
+    BOOST_CHECK(exec(id::persist, {"none"}, 1000, rule) == redis_reply::integer(0));
+    // In a mutable prefix everything may change.
+    BOOST_CHECK(exec(id::pexpireat, {"k", "8000"}, 1000, rule, true) == redis_reply::integer(1));
+    BOOST_CHECK(exec(id::persist, {"k"}, 1000, rule, true) == redis_reply::integer(1));
+    BOOST_CHECK(exec(id::getdel, {"k"}, 1000, rule, true) == redis_reply::bulk("v"));
 }
 
 BOOST_FIXTURE_TEST_CASE(replicas_agree_on_expiry_replies, fixture) {

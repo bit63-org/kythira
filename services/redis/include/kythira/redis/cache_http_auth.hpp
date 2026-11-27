@@ -233,7 +233,7 @@ public:
         const auto table = acl.snapshot();
         for (const auto& u : table->users()) {
             if (u._enabled && !u._secret.empty() && redis_acl::verify_secret(u._secret, token)) {
-                return redis_identity{u._name, u._role, u._key_prefixes};
+                return redis_identity_of(u);
             }
         }
         // Pay one more derivation so a miss costs no less than a late match.

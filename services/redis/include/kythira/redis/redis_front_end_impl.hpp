@@ -505,12 +505,13 @@ auto redis_front_end<Host, Logger, Metrics>::audit(session& s, std::string_view 
 
 template<typename Host, typename Logger, typename Metrics>
 auto redis_front_end<Host, Logger, Metrics>::authorize(session& s, std::string_view upper,
-                                                       const std::vector<std::string_view>& keys)
+                                                       const std::vector<std::string_view>& keys,
+                                                       std::optional<unsigned> access)
     -> std::optional<std::string> {
     if (!s._identity) {
         return s._writer.error("NOAUTH Authentication required.");
     }
-    switch (redis_acl::authorize(*s._identity, upper, keys)) {
+    switch (redis_acl::authorize(*s._identity, upper, keys, access)) {
         case acl_decision::allow:
             return std::nullopt;
         case acl_decision::deny_command:
@@ -1041,7 +1042,7 @@ auto redis_front_end<Host, Logger, Metrics>::execute_command(session& s, std::st
         if (auto e = arity(3, std::numeric_limits<std::size_t>::max())) {
             return *e;
         }
-        if (cmd._argv.size() > 3) {
+        if (cmd._argv.size() > 3 || mutable_exec(s, cmd._argv[1])) {
             return handle_string_write(s, upper, cmd);
         }
         return handle_set(s, cmd, false);
@@ -1112,6 +1113,9 @@ auto redis_front_end<Host, Logger, Metrics>::execute_command(session& s, std::st
         if (auto e = arity(4, 4)) {
             return *e;
         }
+        if (mutable_exec(s, cmd._argv[1])) {
+            return handle_string_write(s, upper, cmd);
+        }
         return handle_set(s, cmd, true);
     }
     if (upper == "DEL") {
@@ -1140,6 +1144,9 @@ auto redis_front_end<Host, Logger, Metrics>::execute_command(session& s, std::st
     }
     if (upper == "KYTHIRA.FORMAT") {
         return handle_format(s, cmd);
+    }
+    if (upper == "KYTHIRA.EXEC") {
+        return handle_internal_exec(s, cmd);
     }
 
     // Requirement 1.8: unknown commands are an error, not a disconnect.
@@ -1379,7 +1386,7 @@ auto redis_front_end<Host, Logger, Metrics>::handle_set(session& s, const resp_c
         }
     }
 
-    if (_config._immutable_values) {
+    if (_config._immutable_values && !redis_acl::key_is_mutable(*s._identity, key)) {
         // sccache keys are content hashes, so a rewrite is either the same
         // bytes (sccache rewriting its `.sccache_check` probe) or a bug
         // somewhere. The first is a free no-op; the second is refused.
@@ -2412,7 +2419,7 @@ auto redis_front_end<Host, Logger, Metrics>::handle_mset(session& s, const resp_
             }
             std::size_t bytes = 0;
             for (const auto& [key, value] : pairs) {
-                if (_config._immutable_values) {
+                if (_config._immutable_values && !redis_acl::key_is_mutable(*s._identity, key)) {
                     if (auto existing = coordinator.get(key)) {
                         if (redis_gateway_detail::to_string(*existing) == value) {
                             continue;
@@ -2636,7 +2643,7 @@ auto redis_front_end<Host, Logger, Metrics>::handle_exec(session& s) -> std::str
                 return std::nullopt;
             };
             auto conflicts = [&](const std::string& key, const std::string& value) {
-                if (!_config._immutable_values) {
+                if (!_config._immutable_values || redis_acl::key_is_mutable(*s._identity, key)) {
                     return false;
                 }
                 auto existing = view(key);
@@ -3568,6 +3575,17 @@ auto redis_front_end<Host, Logger, Metrics>::format_refusal(session& s, const st
     return std::nullopt;
 }
 
+template<typename Host, typename Logger, typename Metrics>
+auto redis_front_end<Host, Logger, Metrics>::mutable_exec(const session& s, const std::string& key)
+    -> bool {
+    if (!_config._immutable_values || !s._identity ||
+        !redis_acl::key_is_mutable(*s._identity, key)) {
+        return false;
+    }
+    const auto have = group_format_level(key);
+    return !have || *have >= k_redis_typed_values_level;
+}
+
 /// `KYTHIRA.FORMAT STATUS`: this node's level and each local group's gate.
 /// `KYTHIRA.FORMAT LEVEL`: this node's level, as an integer (what peers ask).
 /// `KYTHIRA.FORMAT UPGRADE <level>`: see `format_upgrade`.
@@ -3757,12 +3775,19 @@ auto redis_front_end<Host, Logger, Metrics>::format_upgrade(session& s, std::uin
 // ── tier 1 strings (redis-general-data-types task 3) ────────────────────────
 
 template<typename Host, typename Logger, typename Metrics>
-auto redis_front_end<Host, Logger, Metrics>::propose_exec(session& s, const resp_command& cmd,
-                                                          const std::string& key,
-                                                          redis_command_id id,
-                                                          std::vector<std::string> args,
-                                                          bool may_grow) -> std::string {
+auto redis_front_end<Host, Logger, Metrics>::propose_exec(
+    session& s, const resp_command& cmd, const std::string& key, redis_command_id id,
+    std::vector<std::string> args, bool may_grow, std::optional<bool> mutable_key) -> std::string {
     const auto name = resp_to_upper(cmd._argv[0]);
+    // Requirement 5: whether the key is in one of the user's mutable
+    // prefixes. apply() decides against the stored value.
+    const bool is_mutable = mutable_key.value_or(s._identity.has_value() &&
+                                                 redis_acl::key_is_mutable(*s._identity, key));
+    // The hop to a leader elsewhere carries the record, not the command.
+    resp_command hop;
+    hop._argv = {"KYTHIRA.EXEC", std::to_string(static_cast<unsigned>(id)), is_mutable ? "1" : "0",
+                 may_grow ? "1" : "0"};
+    hop._argv.insert(hop._argv.end(), args.begin(), args.end());
     std::string error;
     std::optional<node_id_type> forward_to;
     auto* node = locate(key, error, forward_to);
@@ -3773,7 +3798,7 @@ auto redis_front_end<Host, Logger, Metrics>::propose_exec(session& s, const resp
     }
     if (node == nullptr) {
         if (forward_to) {
-            if (auto reply = forward(s, cmd, *forward_to)) {
+            if (auto reply = forward(s, hop, *forward_to)) {
                 return *reply;
             }
         }
@@ -3796,12 +3821,15 @@ auto redis_front_end<Host, Logger, Metrics>::propose_exec(session& s, const resp
     // (design Component 1).
     exec._now_ms = now_ms();
     exec._policy = _config._immutable_values ? redis_kv_exec_policy::immutable_rule : 0;
+    if (_config._immutable_values && is_mutable) {
+        exec._mutable_keys = {std::byte{0x01}};
+    }
     exec._args = std::move(args);
     const auto encoded = encode_redis_kv_command(exec);
     std::vector<std::byte> result;
     if (!submit(s, key, encoded, error, forward_to, &result)) {
         if (forward_to) {
-            if (auto reply = forward(s, cmd, *forward_to)) {
+            if (auto reply = forward(s, hop, *forward_to)) {
                 return *reply;
             }
         }
@@ -3864,6 +3892,32 @@ inline auto absolute_deadline(std::string_view text, std::uint64_t unit_ms, bool
 }  // namespace redis_gateway_detail
 
 template<typename Host, typename Logger, typename Metrics>
+auto redis_front_end<Host, Logger, Metrics>::handle_internal_exec(session& s,
+                                                                  const resp_command& cmd)
+    -> std::string {
+    if (!s._internal) {
+        audit(s, "KYTHIRA.EXEC", "internal command from a client");
+        return s._writer.error("NOPERM KYTHIRA.EXEC is internal to the gateways");
+    }
+    const auto& a = cmd._argv;
+    if (a.size() < 5 || (a[2] != "0" && a[2] != "1") || (a[3] != "0" && a[3] != "1")) {
+        return s._writer.error("ERR syntax error");
+    }
+    const auto id = redis_string_detail::parse_u64(a[1]);
+    if (!id || *id > 0xFFFFU) {
+        return s._writer.error("ERR syntax error");
+    }
+    const auto command = static_cast<redis_command_id>(*id);
+    const auto* info = find_redis_command(command);
+    if (info == nullptr || info->status != redis_command_status::shipped) {
+        return s._writer.error("ERR unknown command id " + a[1]);
+    }
+    std::vector<std::string> args(a.begin() + 4, a.end());
+    const auto key = args[0];
+    return propose_exec(s, cmd, key, command, std::move(args), a[3] == "1", a[2] == "1");
+}
+
+template<typename Host, typename Logger, typename Metrics>
 auto redis_front_end<Host, Logger, Metrics>::handle_string_write(session& s, std::string_view upper,
                                                                  const resp_command& cmd)
     -> std::string {
@@ -3922,6 +3976,12 @@ auto redis_front_end<Host, Logger, Metrics>::handle_string_write(session& s, std
                 return syntax();
             }
         }
+        if (get) {
+            if (auto e =
+                    authorize(s, upper, {key}, redis_key_access::read | redis_key_access::write)) {
+                return *e;
+            }
+        }
         if (auto e = oversize(a[2].size())) {
             return *e;
         }
@@ -3954,6 +4014,17 @@ auto redis_front_end<Host, Logger, Metrics>::handle_string_write(session& s, std
             return *e;
         }
         return propose_exec(s, cmd, key, redis_command_id::set, {key, a[2], "GET"}, true);
+    }
+    if (upper == "SETEX") {
+        const auto pxat = absolute_deadline(a[2], 1000, false, now_ms());
+        if (!pxat) {
+            return bad_expire();
+        }
+        if (auto e = oversize(a[3].size())) {
+            return *e;
+        }
+        return propose_exec(s, cmd, key, redis_command_id::set,
+                            {key, a[3], "PXAT", std::to_string(*pxat)}, true);
     }
     if (upper == "PSETEX") {
         const auto pxat = absolute_deadline(a[2], 1, false, now_ms());

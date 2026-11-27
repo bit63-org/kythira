@@ -33,12 +33,15 @@
 /// record so every replica refuses the same oversized result
 /// (Requirement 3.8).
 ///
-/// The immutable-value rule (redis-compatible-kv Requirement 11, D11): with
-/// the record's `immutable_rule` policy bit set and the key's bit clear in
-/// the mutable-key bitmap, a command that would change the bytes of a live
-/// value answers `ERR value conflict for an existing key` and changes
-/// nothing. Creating a key, rewriting identical bytes, deleting and changing
-/// a deadline are allowed, as they are for today's `SET` and `DEL`.
+/// The immutable-value rule (redis-compatible-kv Requirement 11, D11;
+/// this spec's Requirement 5): with the record's `immutable_rule` policy
+/// bit set and the key's bit clear in the mutable-key bitmap (the key is
+/// outside the user's mutable prefixes), a command that would change a live
+/// key's bytes or deadline, or delete it as `GETDEL` does, answers
+/// `ERR value conflict for an existing key` and changes nothing. Creating a
+/// key and rewriting identical bytes stay allowed, and `SET` keeps its
+/// original behaviour: identical bytes answer as a success and change
+/// nothing, deadline included.
 
 #include <kythira/redis/redis_command_ids.hpp>
 #include <kythira/redis/redis_float128.hpp>
@@ -143,6 +146,20 @@ inline constexpr std::string_view k_syntax = "ERR syntax error";
     return v.size() == s.size() && (s.empty() || std::memcmp(v.data(), s.data(), s.size()) == 0);
 }
 
+/// Whether the immutable-value rule lets record `c` change its `n`th key
+/// argument: the rule is off, or bit `n` of the mutable-key bitmap (bit
+/// `n % 8` of byte `n / 8`, least significant first) is set.
+[[nodiscard]] inline auto may_mutate_key(const redis_kv_exec_command& c, std::size_t n) noexcept
+    -> bool {
+    if ((c._policy & redis_kv_exec_policy::immutable_rule) == 0) {
+        return true;
+    }
+    if (n / 8 >= c._mutable_keys.size()) {
+        return false;
+    }
+    return ((std::to_integer<unsigned>(c._mutable_keys[n / 8]) >> (n % 8)) & 1U) != 0;
+}
+
 }  // namespace redis_string_detail
 
 /// Applies one tier 1 string `exec` record at command time `t`. `Store`
@@ -170,9 +187,7 @@ auto apply_redis_string_exec(Store& store, const redis_kv_exec_command& c, std::
     if (live && live->_expire_at_ms != 0 && live->_expire_at_ms <= t) {
         live = nullptr;
     }
-    const bool may_mutate =
-        (c._policy & redis_kv_exec_policy::immutable_rule) == 0 ||
-        (!c._mutable_keys.empty() && (static_cast<std::uint8_t>(c._mutable_keys[0]) & 0x01U) != 0);
+    const bool may_mutate = may_mutate_key(c, 0);
     auto old_value = [&]() -> redis_reply {
         return live ? redis_reply::bulk(to_string(live->_value)) : redis_reply::null();
     };
@@ -300,6 +315,9 @@ auto apply_redis_string_exec(Store& store, const redis_kv_exec_command& c, std::
                 return redis_reply::error(std::string(k_syntax));
             }
             auto reply = old_value();
+            if (live && !may_mutate) {
+                return redis_reply::error(std::string(k_conflict));
+            }
             if (live) {
                 (void)store.erase(key);
             }
@@ -315,6 +333,9 @@ auto apply_redis_string_exec(Store& store, const redis_kv_exec_command& c, std::
             }
             if (a.size() == 2 && a[1] == "PERSIST") {
                 if (live->_expire_at_ms != 0) {
+                    if (!may_mutate) {
+                        return redis_reply::error(std::string(k_conflict));
+                    }
                     store.put(key, live->_value, 0);
                 }
                 return reply;
@@ -323,6 +344,9 @@ auto apply_redis_string_exec(Store& store, const redis_kv_exec_command& c, std::
                 const auto pxat = parse_u64(a[2]);
                 if (!pxat) {
                     return redis_reply::error(std::string(k_syntax));
+                }
+                if (*pxat != live->_expire_at_ms && !may_mutate) {
+                    return redis_reply::error(std::string(k_conflict));
                 }
                 if (*pxat <= t) {
                     (void)store.erase(key);
