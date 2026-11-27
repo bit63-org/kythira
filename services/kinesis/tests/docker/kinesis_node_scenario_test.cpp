@@ -1623,21 +1623,39 @@ BOOST_AUTO_TEST_CASE(kpl_and_kcl_run_through_the_migration_path_both_ways) {
                               "evacuate " << body << " never finished: " << evacuation_views());
     };
     // Starts a store move on kin-3 and waits for it; the answer's report.
+    // A move refused because kin-3 cannot reach the volume yet is started
+    // again, as an operator would once the segment node is back: kin-3's
+    // calls to a segment node that was just restarted keep failing for some
+    // seconds after it answers again (seen on rootless Podman: ten seconds
+    // after kin-seg-3 was ready), and kin-3 answering ListStreams says
+    // nothing about that.
     const auto store_move = [&](const std::string& body) {
-        BOOST_REQUIRE_MESSAGE(admin("kin-3", "POST", "store-move", body).has_value(),
-                              "store-move " << body << " was refused");
         boost::json::object report;
-        BOOST_REQUIRE_MESSAGE(eventually(
-                                  [&] {
-                                      const auto st = admin("kin-3", "GET", "store-move");
-                                      if (!st || text_at(*st, {"state"}) == "running") {
-                                          return false;
-                                      }
-                                      report = *st;
-                                      return true;
-                                  },
-                                  300s),
-                              "store-move " << body << " never finished");
+        const auto until = std::chrono::steady_clock::now() + 300s;
+        for (;;) {
+            BOOST_REQUIRE_MESSAGE(admin("kin-3", "POST", "store-move", body).has_value(),
+                                  "store-move " << body << " was refused");
+            BOOST_REQUIRE_MESSAGE(eventually(
+                                      [&] {
+                                          const auto st = admin("kin-3", "GET", "store-move");
+                                          if (!st || text_at(*st, {"state"}) == "running") {
+                                              return false;
+                                          }
+                                          report = *st;
+                                          return true;
+                                      },
+                                      300s),
+                                  "store-move " << body << " never finished");
+            const bool unreachable =
+                text_at(report, {"state"}) == "refused" &&
+                text_at(report, {"message"}).find("unreachable") != std::string::npos;
+            if (!unreachable || std::chrono::steady_clock::now() >= until) {
+                break;
+            }
+            BOOST_TEST_MESSAGE("store-move " << body << " refused, trying again: "
+                                             << boost::json::serialize(report));
+            std::this_thread::sleep_for(2s);
+        }
         BOOST_REQUIRE_MESSAGE(text_at(report, {"state"}) == "done",
                               "store-move " << body << ": " << boost::json::serialize(report));
         BOOST_TEST_MESSAGE("store-move " << body << ": " << boost::json::serialize(report));
