@@ -221,6 +221,30 @@ is one PR unless noted.
     Docker and rootless Podman, compose services addressed by name
   - _Requirements: 16.3, 16.4, 17.4_
 
+- [ ] 17a. Internet gateways, public addresses and NAT
+  - Public pools in region configuration; edge servers in the inventory,
+    kept free of guests; edge peers flagged in `TunnelPeers` version 2
+  - Internet and egress-only gateways, routes with `GatewayId`,
+    `EgressOnlyInternetGatewayId` and `NatGatewayId` (`blackhole` when
+    the gateway goes); `VpcConfig` version 3
+  - Elastic IPs and public IPs on launch; public addresses in the
+    describes; `InstanceMetadata` version 2
+  - The regional `edge` group: edge-table sequence, ordered deltas and
+    snapshots to edge servers, `edge_applied` tracking and the wait
+    before associations, NAT gateways and blocks go live; NIC moves
+    updating edge entries with the `MapUpdate`
+  - NAT gateways with port block grants, pressure-driven growth and
+    revocation in the safe order
+  - `edge_usage` and `nat_usage` metering, public address and NAT gateway
+    hours, `ErrorPortAllocation`
+  - Tests against antikythera's codecs on the simulated backend: an
+    association never reported done before every edge applied it, a
+    block never given to a server before the edge has it, a NIC move
+    updating the edge in the same commit, a snapshot after a reported
+    gap
+  - This is antikythera vpc-internet-gateways task 13
+  - _Requirements: 14.1, 19.1-19.12_
+
 - [ ] 18. Client suites in CI
   - CLI, boto3, the Java, Go and JavaScript SDKs, Terraform's AWS
     provider, and Kythira's `aws_ec2_quorum_manager` and

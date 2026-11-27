@@ -65,10 +65,11 @@ side only (quorum management and peer discovery against real AWS).
 - Antikythera's own wire formats, hull, helm and the oars. They are
   specified in antikythera; this module consumes its `src/proto/` codecs
   and test vectors.
-- Security groups, Elastic IPs, internet and NAT gateways, routes to
-  anything but a network interface, Spot, Auto Scaling, load balancers,
-  placement groups and dedicated hosts. They are refused (Requirement 14) until antikythera
-  backs them.
+- Security groups, routes to anything but a network interface or the
+  gateways of Requirement 19, peering, transit gateways, VPN, endpoints,
+  private NAT gateways, bring-your-own-IP calls, Spot, Auto Scaling,
+  load balancers, placement groups and dedicated hosts. They are refused
+  (Requirement 14) until antikythera backs them.
 - Prices. Usage is metered and exported (Requirement 12); prices are
   billing configuration.
 
@@ -544,14 +545,16 @@ and keep it from being abused (controller-interface Requirement 7).
 1. Features with no backing yet SHALL be refused with
    `UnsupportedOperation`, never silently accepted: security groups
    (`CreateSecurityGroup`, and `SecurityGroupIds` on launch or on an
-   interface), routes to targets other than a network interface
-   (`GatewayId`, `NatGatewayId`, `VpcPeeringConnectionId`,
-   `TransitGatewayId`, `VpcEndpointId`, `EgressOnlyInternetGatewayId` and
-   the rest), Elastic IPs, internet, NAT and transit gateways, Spot, placement groups, dedicated hosts,
+   interface), routes to targets other than a network interface or the
+   gateways of Requirement 19 (`VpcPeeringConnectionId`,
+   `TransitGatewayId`, `VpcEndpointId`, `GatewayId` naming a virtual
+   private gateway, and the rest), transit gateways, private NAT
+   gateways (`ConnectivityType=private`), bring-your-own-IP calls
+   (`ProvisionByoipCidr` and the rest), Spot, placement groups, dedicated hosts,
    `RebootInstances` until hull has a reset command, and the EBS
    features of controller-interface Requirement 9.10.
 2. Read-only calls for refused features (`DescribeSecurityGroups`,
-   `DescribeAddresses`, `DescribeInternetGateways` and the like) SHALL
+   `DescribeTransitGateways` and the like) SHALL
    answer empty lists, so tools that list before they act keep working.
 
 ### Requirement 15: Independent layers
@@ -646,3 +649,82 @@ and co-located by default.
    the link and its certificates, signing keys and rotation, instance
    types, images, volumes and keys, the refusals, metering exports and
    the migration runbook.
+
+### Requirement 19: Internet gateways, public addresses and NAT
+
+**User Story:** As a Kythira user, I want EC2's ways in and out of a
+VPC: internet and egress-only gateways, Elastic IPs and public IPs on
+launch, and NAT gateways (antikythera vpc-internet-gateways).
+
+#### Acceptance Criteria
+
+1. The region SHALL be configured with public pools: IPv4 and IPv6
+   prefixes, any prefix including RFC 1918 and ULA ranges, none
+   overlapping each other or an allocated VPC block. Elastic IPs, public
+   IPs and NAT gateway addresses SHALL come from the IPv4 pools and VPC
+   IPv6 /56 blocks from the IPv6 pools. Without an IPv4 pool,
+   `AllocateAddress`, public IPs on launch and `CreateNatGateway` SHALL be
+   refused with `AddressLimitExceeded`.
+2. The controller SHALL keep edge servers (antikythera's edge class) in
+   its inventory with their zone and outside mode, SHALL NOT place guests
+   on them, and SHALL list every edge VTEP, flagged edge, in the
+   `TunnelPeers` version 2 of every server hosting a NIC in a VPC with a
+   gateway, and every such server in each edge VTEP's.
+3. `CreateInternetGateway`, `DeleteInternetGateway`,
+   `AttachInternetGateway`, `DetachInternetGateway`,
+   `DescribeInternetGateways`, `CreateEgressOnlyInternetGateway`,
+   `DeleteEgressOnlyInternetGateway` and
+   `DescribeEgressOnlyInternetGateways` SHALL be served with EC2's rules:
+   at most one internet gateway attached per VPC, detach refused with
+   `DependencyViolation` while the VPC has public addresses or NAT
+   gateways, delete refused while attached.
+4. `CreateRoute` and `ReplaceRoute` SHALL accept `GatewayId` naming the
+   VPC's attached internet gateway (any destination) or its egress-only
+   gateway (`EgressOnlyInternetGatewayId`, IPv6 destinations), and
+   `NatGatewayId` naming an available NAT gateway of the VPC (IPv4
+   destinations). `DescribeRouteTables` SHALL show such a route
+   `blackhole` while its gateway is detached or deleted.
+5. `AllocateAddress` (domain `vpc`), `AssociateAddress` (with
+   `AllowReassociation`), `DisassociateAddress`, `ReleaseAddress` and
+   `DescribeAddresses` SHALL be served; an association needs an attached
+   internet gateway; `ReleaseAddress` SHALL be refused while associated.
+   `MapPublicIpOnLaunch` on a subnet and `AssociatePublicIpAddress` on a
+   launch interface SHALL give the primary private address a public IP,
+   released at stop and terminate. `DescribeInstances` and
+   `DescribeNetworkInterfaces` SHALL show public addresses.
+6. `CreateNatGateway` (public connectivity, an `AllocationId`, up to seven
+   secondary allocation IDs), `DeleteNatGateway` and
+   `DescribeNatGateways` SHALL be served with EC2's states (`pending`,
+   `available`, `deleting`, `deleted`), at most 16 per VPC; the NAT
+   gateway's private addresses SHALL come from its subnet.
+7. Gateways, routes to them and each server's NAT port blocks SHALL be
+   sent in `VpcConfig` version 3, under the rules of Requirement 11.10.
+8. The controller SHALL keep the region's edge table (pools, gateways,
+   address associations with each NIC's current server, NAT port blocks)
+   under one committed regional sequence, and SHALL send it to every edge
+   server as signed `EdgeMapping` frames: a snapshot in parts when an
+   edge server joins or reports a gap, deltas for every change, and a new
+   snapshot at least every 100,000 changes. A NIC moving to another
+   server SHALL update its entries in the same commit as its
+   `MapUpdate`.
+9. An association, a NAT gateway becoming `available` and a port block
+   being given to a server SHALL wait until every edge server in service
+   has reported `edge_applied` for the change's sequence; a
+   disassociation SHALL be applied on every edge server before the
+   address can be associated again.
+10. The controller SHALL give each server one port block of a NAT
+    gateway when the server first hosts a NIC in a subnet routing to it,
+    a further block when its `nat_usage` shows the busiest destination
+    above 75% of its ports or new `drop_nat_ports`, at most 16 per server
+    and gateway, and SHALL take a block back after ten minutes with no
+    such NIC on the server, removing it from the server's `VpcConfig`
+    first and from the edge table once `nat_usage` no longer lists it.
+11. Instance metadata (`InstanceMetadata` version 2) SHALL carry each
+    interface's address associations for `public-ipv4`, `public-ipv4s`
+    and `ipv4-associations/<public-ip>`.
+12. `edge_usage` and `nat_usage` readings SHALL become per-account
+    hourly deltas as in Requirement 12.4: data out and in per public
+    address and bytes processed per NAT gateway; hours each public
+    address is allocated (associated or idle) and each NAT gateway exists
+    SHALL come from controller state. `drop_nat_ports` SHALL be exported
+    as the NAT gateway's `ErrorPortAllocation` metric.
