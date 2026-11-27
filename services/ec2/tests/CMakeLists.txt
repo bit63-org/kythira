@@ -31,6 +31,13 @@ add_test(NAME ec2_operations_up_to_date
             "${_ec2_dir}model/service-2.json"
             "${_ec2_dir}include/kythira/ec2/model/operations.hpp" --check)
 
+# Task 3: the action table matches the pinned Service Authorization
+# Reference entry, so a reference upgrade carries its regenerated header.
+add_test(NAME ec2_actions_up_to_date
+    COMMAND "${Python3_EXECUTABLE}" "${_ec2_dir}tools/gen_ec2_actions.py"
+            "${_ec2_dir}tools/ec2-service-reference.json"
+            "${_ec2_dir}include/kythira/ec2/ec2_actions.hpp" --check)
+
 # Task 1: the recorded wire evidence (tests/evidence/README.md) is
 # well-formed, uses only model actions, and decodes to one scenario across
 # every client.
@@ -46,6 +53,7 @@ set_tests_properties(
     ec2_model_coverage
     ec2_model_coverage_checker
     ec2_operations_up_to_date
+    ec2_actions_up_to_date
     ec2_wire_evidence
     ec2_node_self_test
     PROPERTIES LABELS "unit;ec2;ec2-module" TIMEOUT 60)
@@ -69,5 +77,12 @@ endfunction()
 kythira_ec2_test(ec2_protocol_evidence_test ec2_protocol_evidence_test.cpp)
 target_compile_definitions(ec2_protocol_evidence_test PRIVATE
     KYTHIRA_EC2_EVIDENCE_DIR="${_ec2_dir}tests/evidence/data")
+
+# Task 3, Requirements 2.2, 2.3 and 3.2-3.5: the front end (SigV4, the
+# codec's errors, authorization on every resource, DryRun, encoded
+# authorization messages, admission) and what it is configured with (the
+# action table, throttling buckets, the aws profile).
+kythira_ec2_test(ec2_front_end_test ec2_front_end_test.cpp)
+kythira_ec2_test(ec2_gateway_inputs_test ec2_gateway_inputs_test.cpp)
 
 kythira_scale_test_timeouts()
