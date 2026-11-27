@@ -37,21 +37,38 @@
 /// below `sp` is dropped altogether, since every such read finds nothing
 /// either way. Reads below the safe point are refused before they get here
 /// (`snapshot_too_old`, task 13).
+///
+/// **Typed values** (.kiro/specs/redis-general-data-types/ task 11,
+/// Requirement 13.5). After the group's format gate, format-0x03 `exec`
+/// records apply here as in `redis_kv_state_machine`, through the same
+/// appliers, each at its commit timestamp: a write reads the newest version
+/// at or below it and writes a new version there. A collection's new value
+/// is built from the old one's chunks (redis_value.hpp), so one element
+/// write adds one chunk and the chunk vector, not a copy of the collection;
+/// the versions share every chunk the write did not touch. `collect_garbage`
+/// drops versions, and a chunk is freed with the last version that holds
+/// it. Snapshots of a gated group start with `KMV3`, its level and its
+/// applied command time, and carry collections as their own version kind.
 
 #include <raft/multi_version_state_machine.hpp>
 #include <kythira/redis/redis_format_level.hpp>
 #include <kythira/redis/redis_kv_commands.hpp>
+#include <kythira/redis/redis_exec_appliers.hpp>
 #include <kythira/redis/redis_kv_state_machine.hpp>
+#include <kythira/redis/redis_reply.hpp>
+#include <kythira/redis/redis_typed_read.hpp>
 #include <raft/shard_types.hpp>
 #include <raft/splittable_state_machine.hpp>
 #include <raft/types.hpp>
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <map>
 #include <memory>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -92,17 +109,26 @@ public:
     /// count`, and per version, newest first, `u64 BE commit_ts, u8 kind`
     /// (0 = deletion, 1 = value) and for a value `u64 BE expire_at_ms,
     /// u32 BE len, value`. Every `split_state` blob has this format too.
+    ///
+    /// Once the group has passed a format gate the blob starts with `KMV3`,
+    /// `u16 BE` level and `u64 BE` applied command time, and a collection is
+    /// version kind 2: `u64 BE expire_at_ms, u8 type`, then its body
+    /// (`redis_kv_detail::put_collection_body`). A blob without the marker
+    /// is the earlier format, byte for byte.
     [[nodiscard]] auto get_state() const -> std::vector<std::byte> {
-        return serialize_store(_store.begin(), _store.end(), _store.size(), _max_commit_ts);
+        return serialize_store(_store.begin(), _store.end(), _store.size(), _max_commit_ts,
+                               header());
     }
 
     auto restore_from_snapshot(const std::vector<std::byte>& snapshot_data, LogIndex index)
         -> void {
         store_type incoming;
         std::uint64_t max_ts = 0;
-        deserialize_store(snapshot_data, incoming, max_ts);
+        const auto head = deserialize_store(snapshot_data, incoming, max_ts);
         _store = std::move(incoming);
         _max_commit_ts = max_ts;
+        _format_level = head._format_level;
+        _applied_time_ms = head._applied_time_ms;
         recount();
         _last_applied_index = index;
     }
@@ -118,9 +144,13 @@ public:
     auto apply_at(const std::vector<std::byte>& command, std::uint64_t commit_ts)
         -> std::vector<std::byte> {
         // A record from a newer format halts the group rather than being
-        // skipped (redis-general-data-types Requirement 14.4). This store
-        // reads no format-0x03 record yet: decoding refuses one.
+        // skipped (redis-general-data-types Requirement 14.4).
         require_redis_record_level(command);
+        if (is_redis_kv_v3_record(command)) {
+            auto reply = apply_v3(decode_redis_kv_v3_command(command), commit_ts);
+            _max_commit_ts = std::max(_max_commit_ts, commit_ts);
+            return reply;
+        }
         auto decoded = decode_redis_kv_command(command);
         const bool changed =
             std::visit([this, commit_ts](auto& c) { return apply_one(c, commit_ts); }, decoded);
@@ -264,10 +294,10 @@ public:
                 ++it;
                 ++n;
             }
-            out.push_back(serialize_store(begin, it, n, _max_commit_ts));
+            out.push_back(serialize_store(begin, it, n, _max_commit_ts, header()));
         }
         const auto n = static_cast<std::size_t>(std::distance(it, _store.end()));
-        out.push_back(serialize_store(it, _store.end(), n, _max_commit_ts));
+        out.push_back(serialize_store(it, _store.end(), n, _max_commit_ts, header()));
         return out;
     }
 
@@ -278,11 +308,13 @@ public:
                 [[maybe_unused]] const shard_range<key_type>& range) -> void {
         store_type incoming;
         std::uint64_t max_ts = 0;
-        deserialize_store(other_state, incoming, max_ts);
+        const auto head = deserialize_store(other_state, incoming, max_ts);
         for (auto& [key, versions] : incoming) {
             _store[key] = std::move(versions);
         }
         _max_commit_ts = std::max(_max_commit_ts, max_ts);
+        enable_format(head._format_level);
+        advance_command_time(head._applied_time_ms);
         recount();
     }
 
@@ -320,12 +352,58 @@ public:
         }
     }
 
+    /// The reply to a read of `key`'s newest value at the serving node's
+    /// time `now_ms`, as `redis_kv_state_machine::evaluate_read`.
+    [[nodiscard]] auto evaluate_read(redis_command_id id, const key_type& key,
+                                     std::span<const std::string> args, std::uint64_t now_ms) const
+        -> redis_reply {
+        const auto entry = lookup(key);
+        if (auto reply = evaluate_redis_read(entry.get(), id, args, now_ms)) {
+            return *reply;
+        }
+        return redis_reply::error("ERR command id " + std::to_string(static_cast<int>(id)) +
+                                  " is not a read of this store");
+    }
+
+    // ---- command time and format level (redis-general-data-types) ---------
+
+    /// As in `redis_kv_state_machine`: `max(entry_now_ms, applied time)`,
+    /// which becomes the new applied time (Requirement 2.2-2.3).
+    auto advance_command_time(std::uint64_t entry_now_ms) noexcept -> std::uint64_t {
+        _applied_time_ms = std::max(_applied_time_ms, entry_now_ms);
+        return _applied_time_ms;
+    }
+
+    [[nodiscard]] auto applied_time_ms() const noexcept -> std::uint64_t {
+        return _applied_time_ms;
+    }
+
+    /// The format level the group has passed a gate for; 0 before any.
+    [[nodiscard]] auto format_level() const noexcept -> std::uint16_t { return _format_level; }
+
+    /// Raises the group's level (one way), for `apply_redis_v3_common`.
+    auto enable_format(std::uint16_t level) noexcept -> void {
+        _format_level = std::max(_format_level, level);
+    }
+
     // ---- codec, public so tests can check the split/absorb law -------------
+
+    /// The level and command time a gated blob starts with.
+    struct state_header {
+        std::uint16_t _format_level = 0;
+        std::uint64_t _applied_time_ms = 0;
+    };
 
     template<typename It>
     [[nodiscard]] static auto serialize_store(It begin, It end, std::size_t count,
-                                              std::uint64_t max_ts) -> std::vector<std::byte> {
+                                              std::uint64_t max_ts, state_header head = {})
+        -> std::vector<std::byte> {
         std::vector<std::byte> out;
+        if (head._format_level > 0) {
+            redis_kv_detail::put_bytes(out, k_state_marker);
+            redis_kv_detail::put_u16(out, head._format_level);
+            redis_kv_detail::put_u64(out, head._applied_time_ms);
+        }
         redis_kv_detail::put_u64(out, max_ts);
         redis_kv_detail::put_u32(out, static_cast<std::uint32_t>(count));
         for (auto it = begin; it != end; ++it) {
@@ -335,21 +413,48 @@ public:
             redis_kv_detail::put_u32(out, static_cast<std::uint32_t>(versions.size()));
             for (const auto& v : versions) {
                 redis_kv_detail::put_u64(out, v._commit_ts);
-                out.push_back(v._entry ? std::byte{1} : std::byte{0});
-                if (v._entry) {
+                if (!v._entry) {
+                    out.push_back(std::byte{0});
+                } else if (redis_entry_type(*v._entry) == redis_value_type::string) {
+                    out.push_back(std::byte{1});
                     redis_kv_detail::put_u64(out, v._entry->_expire_at_ms);
                     redis_kv_detail::put_u32(out,
                                              static_cast<std::uint32_t>(v._entry->_value.size()));
                     redis_kv_detail::put_bytes(out, v._entry->_value);
+                } else {
+                    if (head._format_level < k_redis_typed_values_level) {
+                        throw redis_kv_codec_error(
+                            "a typed value in a state blob without a format level");
+                    }
+                    out.push_back(std::byte{2});
+                    redis_kv_detail::put_u64(out, v._entry->_expire_at_ms);
+                    out.push_back(static_cast<std::byte>(v._entry->_type));
+                    redis_kv_detail::put_collection_body(out, *v._entry);
                 }
             }
         }
         return out;
     }
 
+    /// Reads both formats. An earlier blob starts with its `u64 BE` newest
+    /// commit timestamp; `KMV3` read as one is above 5.4e18, which no
+    /// oracle timestamp reaches, so the marker cannot be mistaken for one.
     static auto deserialize_store(const std::vector<std::byte>& blob, store_type& into,
-                                  std::uint64_t& max_ts) -> void {
+                                  std::uint64_t& max_ts) -> state_header {
         redis_kv_detail::reader in(blob);
+        state_header head;
+        if (blob.size() >= k_state_marker.size() &&
+            std::equal(k_state_marker.begin(), k_state_marker.end(), blob.begin())) {
+            (void)in.bytes(k_state_marker.size());
+            head._format_level = in.u16();
+            head._applied_time_ms = in.u64();
+            if (head._format_level == 0) {
+                throw redis_kv_codec_error("redis kv mvcc state marker with format level 0");
+            }
+            if (head._format_level > k_redis_format_level) {
+                throw redis_format_too_new(head._format_level);
+            }
+        }
         max_ts = in.u64();
         auto count = in.u32();
         for (std::uint32_t i = 0; i < count; ++i) {
@@ -361,7 +466,7 @@ public:
                 version v;
                 v._commit_ts = in.u64();
                 const auto kind = in.u8();
-                if (kind > 1) {
+                if (kind > 2 || (kind == 2 && head._format_level < k_redis_typed_values_level)) {
                     throw redis_kv_codec_error("unknown version kind in redis kv mvcc state");
                 }
                 if (kind == 1) {
@@ -369,6 +474,11 @@ public:
                     entry->_expire_at_ms = in.u64();
                     auto bytes = in.bytes(in.u32());
                     entry->_value.assign(bytes.begin(), bytes.end());
+                    v._entry = std::move(entry);
+                } else if (kind == 2) {
+                    auto entry = std::make_shared<redis_kv_value_entry>();
+                    entry->_expire_at_ms = in.u64();
+                    redis_kv_detail::read_collection_body(in, in.u8(), *entry);
                     v._entry = std::move(entry);
                 }
                 if (!versions.empty() && versions.back()._commit_ts <= v._commit_ts) {
@@ -383,9 +493,59 @@ public:
         if (in.remaining() != 0) {
             throw redis_kv_codec_error("trailing bytes after redis kv mvcc state blob");
         }
+        return head;
     }
 
 private:
+    static constexpr std::array<std::byte, 4> k_state_marker{std::byte{'K'}, std::byte{'M'},
+                                                             std::byte{'V'}, std::byte{'3'}};
+
+    [[nodiscard]] auto header() const noexcept -> state_header {
+        return {_format_level, _applied_time_ms};
+    }
+
+    /// A format-0x03 record at `ts`: the gate and the refusal before it are
+    /// shared with every store; an `exec` runs the appliers.
+    auto apply_v3(const redis_kv_v3_command& record, std::uint64_t ts) -> std::vector<std::byte> {
+        if (auto status = apply_redis_v3_common(*this, record)) {
+            return redis_v3_apply_result(*status);
+        }
+        if (const auto* exec = std::get_if<redis_kv_exec_command>(&record)) {
+            return apply_exec(*exec, ts);
+        }
+        return redis_v3_apply_result(redis_v3_apply_status::unchanged);
+    }
+
+    /// An `exec` record committed at `ts`: each key reads its version at or
+    /// below `ts` (its own earlier writes in this record included, since they
+    /// are versions at `ts`) and writes a version at `ts`.
+    auto apply_exec(const redis_kv_exec_command& c, std::uint64_t ts) -> std::vector<std::byte> {
+        const auto t = advance_command_time(c._now_ms);
+        struct store_ops {
+            redis_kv_mvcc_state_machine& _sm;
+            std::uint64_t _ts;
+            [[nodiscard]] auto find(const key_type& key) const -> entry_handle {
+                return _sm.read_at(key, _ts);
+            }
+            auto put(const key_type& key, std::vector<std::byte> value, std::uint64_t expire_at_ms)
+                -> void {
+                auto entry = std::make_shared<redis_kv_value_entry>();
+                entry->_value = std::move(value);
+                entry->_expire_at_ms = expire_at_ms;
+                _sm.put_version(key, _ts, std::move(entry));
+            }
+            auto put_entry(const key_type& key, entry_handle entry) -> void {
+                _sm.put_version(key, _ts, std::move(entry));
+            }
+            auto erase(const key_type& key) -> bool { return _sm.delete_at(key, _ts); }
+        } ops{*this, ts};
+        auto reply = apply_redis_exec(ops, c, t);
+        if (!reply) {
+            throw redis_unknown_command_id(c._command_id);
+        }
+        return encode_redis_reply(*reply);
+    }
+
     auto apply_one(redis_kv_set_command& c, std::uint64_t ts) -> bool {
         auto entry = std::make_shared<redis_kv_value_entry>();
         entry->_value = std::move(c._value);
@@ -459,13 +619,16 @@ private:
         _expiring = _expiring - (was_expiring ? 1 : 0) + (is_expiring ? 1 : 0);
     }
 
+    /// A version counts its key and its value's bytes. Versions that share
+    /// a collection's chunks each count the whole collection: the size is
+    /// what a split would move, and a split writes every version out.
     auto count(const key_type& key, const version& v) -> void {
-        _bytes += key.size() + (v._entry ? v._entry->_value.size() : 0);
+        _bytes += key.size() + (v._entry ? redis_entry_bytes(*v._entry) : 0);
         ++_versions;
     }
 
     auto uncount(const key_type& key, const version& v) -> void {
-        _bytes -= key.size() + (v._entry ? v._entry->_value.size() : 0);
+        _bytes -= key.size() + (v._entry ? redis_entry_bytes(*v._entry) : 0);
         --_versions;
     }
 
@@ -494,6 +657,8 @@ private:
     std::size_t _versions{0};
     std::size_t _live{0};
     std::size_t _expiring{0};
+    std::uint16_t _format_level{0};
+    std::uint64_t _applied_time_ms{0};
     LogIndex _last_applied_index{};
 };
 

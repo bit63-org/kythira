@@ -42,6 +42,7 @@
 #include <chrono>
 #include <cstdint>
 #include <memory>
+#include <random>
 #include <string>
 #include <thread>
 #include <vector>
@@ -489,6 +490,188 @@ BOOST_AUTO_TEST_CASE(watch_aborts_an_exec_when_a_watched_key_changed,
     BOOST_CHECK_EQUAL(farm.call({"WATCH", "a/1"}), "+OK\r\n");
 }
 
+/// redis-general-data-types task 11: a typed write bumps the key's version,
+/// so WATCH sees it, and an EXEC of typed commands reads and writes at its
+/// snapshot like any other.
+BOOST_AUTO_TEST_CASE(watch_covers_typed_values, *boost::unit_test::timeout(180)) {
+    cluster c(gc_tuning{._mutable_values = true});
+    BOOST_REQUIRE(c.await_all_leaders(std::chrono::seconds{20}));
+    resp_client client(c.port(1));
+    resp_client other(c.port(2));
+    BOOST_REQUIRE_EQUAL(client.call({"AUTH", "ops", "ops-secret"}), "+OK\r\n");
+    BOOST_REQUIRE_EQUAL(other.call({"AUTH", "ops", "ops-secret"}), "+OK\r\n");
+    BOOST_REQUIRE_EQUAL(client.call({"KYTHIRA.FORMAT", "UPGRADE", "3"}), "+OK\r\n");
+    BOOST_REQUIRE_EQUAL(client.call({"HSET", "a/h", "n", "1"}), ":1\r\n");
+
+    // A field changed after the WATCH: a null array, nothing applied.
+    BOOST_CHECK_EQUAL(client.call({"WATCH", "a/h"}), "+OK\r\n");
+    BOOST_CHECK_EQUAL(other.call({"HINCRBY", "a/h", "n", "10"}), ":11\r\n");
+    BOOST_CHECK_EQUAL(client.call({"MULTI"}), "+OK\r\n");
+    BOOST_CHECK_EQUAL(client.call({"HINCRBY", "a/h", "n", "1"}), "+QUEUED\r\n");
+    BOOST_CHECK_EQUAL(client.call({"RPUSH", "z/l", "x"}), "+QUEUED\r\n");
+    BOOST_CHECK_EQUAL(client.call({"EXEC"}), "*-1\r\n");
+    BOOST_CHECK_EQUAL(client.call({"HGET", "a/h", "n"}), bulk("11"));
+    BOOST_CHECK_EQUAL(client.call({"EXISTS", "z/l"}), ":0\r\n");
+
+    // Unchanged: the EXEC reads the watched hash and commits.
+    BOOST_CHECK_EQUAL(client.call({"WATCH", "a/h"}), "+OK\r\n");
+    BOOST_CHECK_EQUAL(client.call({"MULTI"}), "+OK\r\n");
+    BOOST_CHECK_EQUAL(client.call({"HINCRBY", "a/h", "n", "1"}), "+QUEUED\r\n");
+    BOOST_CHECK_EQUAL(client.call({"RPUSH", "z/l", "x"}), "+QUEUED\r\n");
+    BOOST_CHECK_EQUAL(client.call({"EXEC"}), "*2\r\n:12\r\n:1\r\n");
+    BOOST_CHECK_EQUAL(other.call({"LINDEX", "z/l", "0"}), bulk("x"));
+}
+
+/// The bulk strings of a reply, in order (a flat array of them).
+auto bulks_of(const std::string& reply) -> std::vector<std::string> {
+    std::vector<std::string> out;
+    std::size_t pos = 0;
+    while ((pos = reply.find('$', pos)) != std::string::npos) {
+        const auto eol = reply.find("\r\n", pos);
+        const auto len = std::stol(reply.substr(pos + 1, eol - pos - 1));
+        if (len < 0) {
+            pos = eol + 2;
+            continue;
+        }
+        out.push_back(reply.substr(eol + 2, static_cast<std::size_t>(len)));
+        pos = eol + 2 + static_cast<std::size_t>(len) + 2;
+    }
+    return out;
+}
+
+/// The bank workload over hashes (redis-general-data-types task 11): each
+/// transfer is a MULTI of two HINCRBYs on fields of hashes in different
+/// groups, evaluated against the transaction's snapshot and committed as
+/// the resulting hashes. First committer wins, so a transfer that lost a
+/// race aborts and is retried; a MULTI reading both hashes always sums to
+/// the total.
+BOOST_AUTO_TEST_CASE(hash_bank_keeps_its_total, *boost::unit_test::timeout(300)) {
+    cluster c(gc_tuning{._mutable_values = true});
+    BOOST_REQUIRE(c.await_all_leaders(std::chrono::seconds{20}));
+    const std::vector<std::string> keys{"a/bank", "z/bank"};
+    constexpr int k_fields = 4;
+    constexpr long k_each = 100;
+    const long total = static_cast<long>(keys.size()) * k_fields * k_each;
+    {
+        resp_client seed(c.port(1));
+        BOOST_REQUIRE_EQUAL(seed.call({"AUTH", "ops", "ops-secret"}), "+OK\r\n");
+        BOOST_REQUIRE_EQUAL(seed.call({"KYTHIRA.FORMAT", "UPGRADE", "3"}), "+OK\r\n");
+        for (const auto& k : keys) {
+            std::vector<std::string> hset{"HSET", k};
+            for (int f = 0; f < k_fields; ++f) {
+                hset.push_back("f" + std::to_string(f));
+                hset.push_back(std::to_string(k_each));
+            }
+            BOOST_REQUIRE_EQUAL(seed.call(hset), ":" + std::to_string(k_fields) + "\r\n");
+        }
+    }
+    const auto sum_of = [](const std::string& reply) {
+        long sum = 0;
+        const auto b = bulks_of(reply);
+        for (std::size_t i = 1; i < b.size(); i += 2) {
+            sum += std::stol(b[i]);
+        }
+        return sum;
+    };
+    std::atomic<bool> stop{false};
+    std::atomic<int> committed{0};
+    std::atomic<int> aborted{0};
+    std::atomic<int> reads{0};
+    std::atomic<int> bad_reads{0};
+    std::vector<std::thread> workers;
+    for (node_id_t id = 1; id <= k_node_count; ++id) {
+        workers.emplace_back([&, id] {
+            resp_client w(c.port(id));
+            if (w.call({"AUTH", "ops", "ops-secret"}) != "+OK\r\n") {
+                return;
+            }
+            std::mt19937 rng(id);
+            for (int i = 0; i < 25; ++i) {
+                const auto& from = keys[rng() % keys.size()];
+                const auto& to = keys[rng() % keys.size()];
+                const auto ff = "f" + std::to_string(rng() % k_fields);
+                const auto tf = "f" + std::to_string(rng() % k_fields);
+                const auto amount = std::to_string(1 + rng() % 5);
+                for (int attempt = 0; attempt < 50; ++attempt) {
+                    (void)w.call({"MULTI"});
+                    (void)w.call({"HINCRBY", from, ff, "-" + amount});
+                    (void)w.call({"HINCRBY", to, tf, amount});
+                    const auto reply = w.call({"EXEC"});
+                    if (reply.starts_with("*2\r\n:")) {
+                        ++committed;
+                        break;
+                    }
+                    ++aborted;
+                }
+            }
+        });
+    }
+    std::thread reader([&] {
+        resp_client r(c.port(2));
+        if (r.call({"AUTH", "ops", "ops-secret"}) != "+OK\r\n") {
+            return;
+        }
+        while (!stop.load()) {
+            (void)r.call({"MULTI"});
+            (void)r.call({"HGETALL", keys[0]});
+            (void)r.call({"HGETALL", keys[1]});
+            const auto reply = r.call({"EXEC"});
+            if (!reply.starts_with("*2\r\n")) {
+                continue;
+            }
+            ++reads;
+            if (sum_of(reply) != total) {
+                ++bad_reads;
+            }
+        }
+    });
+    for (auto& t : workers) {
+        t.join();
+    }
+    stop = true;
+    reader.join();
+    BOOST_TEST_MESSAGE("committed " << committed.load() << ", aborted " << aborted.load()
+                                    << ", reads " << reads.load());
+    BOOST_CHECK_EQUAL(committed.load(), 25 * static_cast<int>(k_node_count));
+    BOOST_CHECK_GT(reads.load(), 0);
+    BOOST_CHECK_EQUAL(bad_reads.load(), 0);
+    resp_client check(c.port(3));
+    BOOST_REQUIRE_EQUAL(check.call({"AUTH", "ops", "ops-secret"}), "+OK\r\n");
+    BOOST_CHECK_EQUAL(
+        sum_of(check.call({"HGETALL", keys[0]})) + sum_of(check.call({"HGETALL", keys[1]})), total);
+}
+
+/// Write skew over hashes (redis-general-data-types task 11): two doctors,
+/// each on call in a hash in a different group. Each client WATCHes both,
+/// reads both, sees two on call, and takes itself off. Under snapshot
+/// isolation alone both would commit and leave nobody on call; the WATCH
+/// makes each EXEC serializable from its WATCH, so the second fails.
+BOOST_AUTO_TEST_CASE(watch_prevents_write_skew_over_hashes, *boost::unit_test::timeout(180)) {
+    cluster c(gc_tuning{._mutable_values = true});
+    BOOST_REQUIRE(c.await_all_leaders(std::chrono::seconds{20}));
+    resp_client alice(c.port(1));
+    resp_client bob(c.port(2));
+    BOOST_REQUIRE_EQUAL(alice.call({"AUTH", "ops", "ops-secret"}), "+OK\r\n");
+    BOOST_REQUIRE_EQUAL(bob.call({"AUTH", "ops", "ops-secret"}), "+OK\r\n");
+    BOOST_REQUIRE_EQUAL(alice.call({"KYTHIRA.FORMAT", "UPGRADE", "3"}), "+OK\r\n");
+    BOOST_REQUIRE_EQUAL(alice.call({"HSET", "a/oncall", "alice", "1"}), ":1\r\n");
+    BOOST_REQUIRE_EQUAL(alice.call({"HSET", "z/oncall", "bob", "1"}), ":1\r\n");
+
+    for (auto* doctor : {&alice, &bob}) {
+        BOOST_CHECK_EQUAL(doctor->call({"WATCH", "a/oncall", "z/oncall"}), "+OK\r\n");
+        BOOST_CHECK_EQUAL(doctor->call({"HGET", "a/oncall", "alice"}), bulk("1"));
+        BOOST_CHECK_EQUAL(doctor->call({"HGET", "z/oncall", "bob"}), bulk("1"));
+    }
+    BOOST_CHECK_EQUAL(alice.call({"MULTI"}), "+OK\r\n");
+    BOOST_CHECK_EQUAL(alice.call({"HSET", "a/oncall", "alice", "0"}), "+QUEUED\r\n");
+    BOOST_CHECK_EQUAL(alice.call({"EXEC"}), "*1\r\n:0\r\n");
+    BOOST_CHECK_EQUAL(bob.call({"MULTI"}), "+OK\r\n");
+    BOOST_CHECK_EQUAL(bob.call({"HSET", "z/oncall", "bob", "0"}), "+QUEUED\r\n");
+    BOOST_CHECK_EQUAL(bob.call({"EXEC"}), "*-1\r\n");
+    BOOST_CHECK_EQUAL(bob.call({"HGET", "z/oncall", "bob"}), bulk("1"));
+    BOOST_CHECK_EQUAL(bob.call({"HGET", "a/oncall", "alice"}), bulk("0"));
+}
+
 BOOST_AUTO_TEST_CASE(every_gateway_writes_and_reads_under_snapshot,
                      *boost::unit_test::timeout(180)) {
     cluster c;
@@ -616,9 +799,10 @@ BOOST_AUTO_TEST_CASE(kythira_txn_ts_and_readat_are_internal_and_one_hop,
     const auto shard_leader = c.leader_of(1);
     resp_client at_leader(c.port(shard_leader));
     BOOST_REQUIRE_EQUAL(at_leader.call({"AUTH", "kythira-internal", "internal-secret"}), "+OK\r\n");
-    // Present, then three bytes, then no intent.
+    // Present, then three bytes, then no intent, then the typed extension
+    // (redis-general-data-types task 11): 'T', no deadline, a string.
     BOOST_CHECK_EQUAL(at_leader.call({"KYTHIRA.TXN", "READAT", ts, "a/v"}),
-                      bulk(std::string("\1\0\0\0\3one\0", 9)));
+                      bulk(std::string("\1\0\0\0\3one\0T\0\0\0\0\0\0\0\0\0", 19)));
     const auto other = shard_leader == 1 ? 2 : 1;
     resp_client at_other(c.port(other));
     BOOST_REQUIRE_EQUAL(at_other.call({"AUTH", "kythira-internal", "internal-secret"}), "+OK\r\n");

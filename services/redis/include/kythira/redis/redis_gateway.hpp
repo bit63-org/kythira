@@ -39,6 +39,7 @@
 #include <kythira/redis/redis_expiry_exec.hpp>
 #include <kythira/redis/redis_string_exec.hpp>
 #include <kythira/redis/redis_string_read.hpp>
+#include <kythira/redis/redis_txn_view.hpp>
 #include <kythira/redis/redis_server_identity.hpp>
 #include <kythira/redis/redis_layer_membership.hpp>
 #include <kythira/redis/redis_layer_roles.hpp>
@@ -445,6 +446,15 @@ template<typename SM, bool = is_transactional_state_machine_v<SM>>
 struct is_mvcc : std::false_type {};
 template<typename SM> struct is_mvcc<SM, true> : std::bool_constant<SM::k_mvcc == mvcc::on> {};
 template<typename SM> inline constexpr bool is_mvcc_v = is_mvcc<SM>::value;
+/// A transactional read and, for a live key, the entry behind it
+/// (redis-general-data-types task 11): a typed command in a transaction is
+/// evaluated against the whole value, its type and its deadline, not only
+/// the string bytes the coordinator sees.
+struct txn_typed_read {
+    txn_read_result<std::string> _read;
+    std::shared_ptr<const redis_kv_value_entry> _entry;
+};
+
 }  // namespace redis_gateway_detail
 
 /// The front-end layer (.kiro/specs/redis-general-data-types/ design
@@ -600,6 +610,10 @@ protected:
         /// to (empty until the first call).
         std::uint64_t _conn_id = 0;
         std::string _pinned;
+        /// While `EXEC` (or a cross-group write) evaluates commands inside
+        /// a transaction (task 11): the transaction's view. Reads come from
+        /// it and `exec` records apply to it, nothing is proposed.
+        redis_txn_view* _txn_view = nullptr;
     };
 
     /// The coordinator's view of the shards (`txn_participant_client`):
@@ -633,8 +647,18 @@ protected:
             -> txn_read_result<std::string>
         requires k_snapshot;
 
+        /// The entry the last read of `key` found (task 11): null when it
+        /// was absent, or when the shard answered without the typed
+        /// extension (a gateway from before it).
+        [[nodiscard]] auto entry_of(const std::string& key) const
+            -> std::shared_ptr<const redis_kv_value_entry>;
+
     private:
+        auto keep(const std::string& key, redis_gateway_detail::txn_typed_read r)
+            -> txn_read_result<std::string>;
+
         redis_front_end& _front_end;
+        std::map<std::string, std::shared_ptr<const redis_kv_value_entry>> _entries;
     };
     friend class txn_client;
     using coordinator_type = transaction_coordinator<txn_client, std::string>;
@@ -706,12 +730,9 @@ protected:
     /// Whether `key`'s group has the typed-values gate (or no replica here
     /// says otherwise): the multi-key commands plan as `exec` records.
     auto typed_ready(const std::string& key) -> bool;
-    /// The deadline of `src` for a cross-group `RENAME` or `COPY`.
-    auto source_deadline(session& s, const std::string& src) -> std::optional<std::uint64_t>;
-    /// Whether `src` holds a string (or nothing), for the same commands:
-    /// a cross-group copy of a collection waits for typed values in
-    /// transactions (task 11). `nullopt` when no replica answered.
-    auto source_is_string(session& s, const std::string& src) -> std::optional<bool>;
+    /// The `KYTHIRA.FORMAT STATUS` reply (RESP2): this node's level and
+    /// each local replica's gate.
+    auto format_status_text() -> std::string;
     /// `KYTHIRA.EXEC <command id> <mutable bits> <may grow 0|1> <args...>`:
     /// the internal hop of an `exec` record whose leader is on this node.
     auto handle_internal_exec(session& s, const resp_command& cmd) -> std::string;
@@ -758,6 +779,21 @@ protected:
     auto handle_mget(session& s, const resp_command& cmd) -> std::string;
     auto handle_multi_del(session& s, const resp_command& cmd) -> std::string;
     auto handle_exec(session& s) -> std::string;
+    /// Inside a transaction (`s._txn_view` set): `exec` record `id` with
+    /// `args` evaluated against the view, and its reply rendered.
+    auto txn_view_exec(session& s, std::string_view name, const std::string& key,
+                       redis_command_id id, const std::vector<std::string>& args,
+                       const std::string& mutable_bits) -> std::string;
+    /// `MSET` and `MGET` inside a transaction, against the view.
+    auto txn_view_mset_mget(session& s, std::string_view upper, const resp_command& cmd)
+        -> std::string;
+    /// The view over `coordinator`'s reads, with each read's entry from
+    /// `client` (task 11).
+    auto make_txn_view(coordinator_type& coordinator, txn_client& client) -> redis_txn_view;
+    /// Puts each write the view holds into `coordinator`, as its record.
+    /// The refusal reply when a collection's group lacks the gate.
+    auto stage_txn_writes(session& s, coordinator_type& coordinator, const redis_txn_view& view)
+        -> std::optional<std::string>;
     auto handle_isolation(session& s, const resp_command& cmd) -> std::string;
     auto handle_watch(session& s, const resp_command& cmd) -> std::string;
     auto handle_internal_txn(session& s, const resp_command& cmd) -> std::string;
@@ -836,10 +872,12 @@ protected:
     /// Send one envelope to the shard owning `keys`; the encoded result.
     auto txn_send(const std::vector<std::string>& keys, const std::vector<std::byte>& envelope,
                   std::chrono::milliseconds timeout) -> std::vector<std::byte>;
+    /// The read and, for a live key, its entry (task 11).
     auto txn_read(const std::string& key, std::chrono::milliseconds timeout)
-        -> txn_read_result<std::string>;
+        -> redis_gateway_detail::txn_typed_read;
     /// The read on this replica, or nullopt when it does not lead the shard.
-    auto txn_read_local(const std::string& key) -> std::optional<txn_read_result<std::string>>;
+    auto txn_read_local(const std::string& key)
+        -> std::optional<redis_gateway_detail::txn_typed_read>;
     /// `n` timestamps from the host's oracle, or from the oracle leader's
     /// gateway over `KYTHIRA.TXN TS` (tier 2).
     auto txn_allocate_timestamps(std::size_t n, std::chrono::milliseconds timeout)
@@ -848,12 +886,12 @@ protected:
     /// the shard leader after a read-index round (tier 2).
     /// @throws snapshot_too_old_exception below the shard's safe point.
     auto txn_read_at(const std::string& key, std::uint64_t ts, std::chrono::milliseconds timeout)
-        -> txn_read_result<std::string>;
+        -> redis_gateway_detail::txn_typed_read;
     /// That read on this replica, or nullopt when it does not lead the
     /// shard (or lost it, or the key moved, during the read).
     auto txn_read_at_local(const std::string& key, std::uint64_t ts,
                            std::chrono::milliseconds timeout)
-        -> std::optional<txn_read_result<std::string>>;
+        -> std::optional<redis_gateway_detail::txn_typed_read>;
     /// Who to ask about `key`'s shard when this replica does not lead it.
     auto txn_leader_of(const std::string& key) -> std::optional<node_id_type>;
     /// A plain write met `holder`'s lock: finish that transaction if its

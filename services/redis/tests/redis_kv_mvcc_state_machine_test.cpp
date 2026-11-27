@@ -17,7 +17,9 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <map>
+#include <memory>
 #include <optional>
 #include <random>
 #include <string>
@@ -382,6 +384,234 @@ BOOST_AUTO_TEST_CASE(rejects_corrupt_snapshots, *boost::unit_test::timeout(10)) 
         std::swap(bad[first + i], bad[second + i]);
     }
     BOOST_CHECK_THROW(other.restore_from_snapshot(bad, 0), redis_kv_codec_error);
+}
+
+BOOST_AUTO_TEST_SUITE_END()
+
+// ---- typed values (redis-general-data-types task 11) -----------------------
+
+namespace {
+
+using mem_type = redis_kv_state_machine<std::uint64_t>;
+
+const std::string k_max_bytes = "1000000";
+const std::string k_max_count = "100000";
+
+auto gate_cmd() -> std::vector<std::byte> {
+    return encode_redis_kv_command(redis_kv_format_gate_command{"", 3});
+}
+
+auto exec_cmd(redis_command_id id, std::vector<std::string> args, std::uint64_t now = 1000)
+    -> std::vector<std::byte> {
+    redis_kv_exec_command c;
+    c._key = args.empty() ? "" : args[0];
+    c._command_id = static_cast<std::uint16_t>(id);
+    c._now_ms = now;
+    c._args = std::move(args);
+    return encode_redis_kv_command(c);
+}
+
+/// A value's type, deadline and elements.
+auto describe(const sm_type::entry_handle& h) -> std::string {
+    if (!h) {
+        return "<none>";
+    }
+    std::string out = std::string(redis_value_type_name(redis_entry_type(*h))) + "@" +
+                      std::to_string(h->_expire_at_ms) + ":";
+    switch (redis_entry_type(*h)) {
+        case redis_value_type::string:
+            out += text(h);
+            break;
+        case redis_value_type::hash:
+            h->_hash->for_each(
+                [&](const std::string& f, const std::string& v) { out += f + "=" + v + ","; });
+            break;
+        case redis_value_type::set:
+            h->_set->for_each([&](const std::string& m) { out += m + ","; });
+            break;
+        case redis_value_type::list:
+            h->_list->visit(0, h->_list->size() - 1, [&](std::size_t, const std::string& v) {
+                out += v + ",";
+                return true;
+            });
+            break;
+    }
+    return out;
+}
+
+auto random_typed(std::mt19937_64& rng, std::uint64_t now) -> std::vector<std::byte> {
+    const std::vector<std::string> keys{"a", "b", "c", "d"};
+    auto pick = [&] { return keys[rng() % keys.size()]; };
+    auto item = [&] { return std::string(1, static_cast<char>('a' + rng() % 8)); };
+    switch (rng() % 12) {
+        case 0:
+            return exec_cmd(redis_command_id::set, {pick(), item()}, now);
+        case 1:
+        case 2: {
+            const auto k = pick();
+            const auto f = item();
+            return exec_cmd(redis_command_id::hset, {k, k_max_bytes, k_max_count, f, item()}, now);
+        }
+        case 3: {
+            const auto k = pick();
+            return exec_cmd(redis_command_id::hdel, {k, item()}, now);
+        }
+        case 4: {
+            const auto k = pick();
+            return exec_cmd(redis_command_id::sadd, {k, k_max_bytes, k_max_count, item()}, now);
+        }
+        case 5: {
+            const auto k = pick();
+            return exec_cmd(redis_command_id::srem, {k, item()}, now);
+        }
+        case 6: {
+            const auto k = pick();
+            return exec_cmd(redis_command_id::rpush, {k, k_max_bytes, k_max_count, item()}, now);
+        }
+        case 7: {
+            const auto k = pick();
+            return exec_cmd(redis_command_id::lpop, {k, "0", "1"}, now);
+        }
+        case 8: {
+            const auto src = pick();
+            const auto dst = pick();
+            return exec_cmd(redis_command_id::rename, {src, dst}, now);
+        }
+        case 9: {
+            const auto k = pick();
+            return exec_cmd(redis_command_id::pexpireat, {k, std::to_string(now + rng() % 20)},
+                            now);
+        }
+        case 10: {
+            const auto k = pick();
+            const auto dst = pick();
+            return exec_cmd(redis_command_id::smove, {k, dst, k_max_bytes, k_max_count, item()},
+                            now);
+        }
+        default:
+            return del_cmd(pick());
+    }
+}
+
+}  // namespace
+
+BOOST_AUTO_TEST_SUITE(redis_kv_mvcc_typed)
+
+// The newest versions follow the single-version store exactly, and every
+// older version stays readable at its own timestamp.
+BOOST_AUTO_TEST_CASE(typed_writes_match_the_single_version_store_at_every_timestamp,
+                     *boost::unit_test::timeout(60)) {
+    for (std::uint64_t seed = 1; seed <= 20; ++seed) {
+        std::mt19937_64 rng(seed);
+        sm_type sm;
+        mem_type mem;
+        (void)sm.apply_at(gate_cmd(), 1, 1);
+        (void)mem.apply(gate_cmd(), 1);
+        std::map<std::uint64_t, std::map<std::string, std::string>> seen;  // ts -> key -> value
+        std::uint64_t now = 1000;
+        for (std::uint64_t i = 2; i < 300; ++i) {
+            now += rng() % 3;
+            const auto cmd = random_typed(rng, now);
+            const std::uint64_t ts = i * 10;
+            BOOST_REQUIRE_MESSAGE(sm.apply_at(cmd, ts, i) == mem.apply(cmd, i),
+                                  "reply differs at seed " << seed << " step " << i);
+            for (const auto* k : {"a", "b", "c", "d"}) {
+                seen[ts][k] = describe(mem.lookup(k));
+                BOOST_REQUIRE_EQUAL(describe(sm.lookup(k)), seen[ts][k]);
+            }
+            BOOST_REQUIRE_EQUAL(sm.approximate_key_count(), mem.approximate_key_count());
+            BOOST_REQUIRE_EQUAL(sm.expiring_key_count(), mem.expiring_key_count());
+        }
+        for (const auto& [ts, keys] : seen) {
+            for (const auto& [k, v] : keys) {
+                BOOST_REQUIRE_EQUAL(describe(sm.read_at(k, ts)), v);
+            }
+        }
+        BOOST_REQUIRE_EQUAL(sm.applied_time_ms(), mem.applied_time_ms());
+
+        // A snapshot and a split keep every version, the level and the time.
+        sm_type restored;
+        restored.restore_from_snapshot(sm.get_state(), 300);
+        BOOST_REQUIRE(restored.get_state() == sm.get_state());
+        BOOST_REQUIRE_EQUAL(restored.format_level(), 3U);
+        const auto parts = sm.split_state({"c"});
+        sm_type lower;
+        lower.restore_from_snapshot(parts[0], 300);
+        lower.absorb(parts[1], shard_range<std::string>{});
+        BOOST_REQUIRE(lower.get_state() == sm.get_state());
+        for (const auto& [ts, keys] : seen) {
+            for (const auto& [k, v] : keys) {
+                BOOST_REQUIRE_EQUAL(describe(restored.read_at(k, ts)), v);
+            }
+        }
+    }
+}
+
+// One element write makes a version that shares every untouched chunk with
+// the one before it; garbage collection frees the chunks only the dropped
+// version held (Requirement 13.5).
+BOOST_AUTO_TEST_CASE(versions_share_chunks_and_gc_frees_the_unshared_ones,
+                     *boost::unit_test::timeout(30)) {
+    sm_type sm;
+    (void)sm.apply_at(gate_cmd(), 1, 1);
+    std::vector<std::string> args{"h", k_max_bytes, k_max_count};
+    for (int i = 0; i < 1000; ++i) {
+        char field[8];
+        std::snprintf(field, sizeof field, "f%04d", i);
+        args.emplace_back(field);
+        args.emplace_back("v");
+    }
+    (void)sm.apply_at(exec_cmd(redis_command_id::hset, args), 10, 2);
+    (void)sm.apply_at(
+        exec_cmd(redis_command_id::hset, {"h", k_max_bytes, k_max_count, "f0500", "w"}), 20, 3);
+    std::weak_ptr<const redis_hash::chunk> replaced;
+    std::weak_ptr<const redis_hash::chunk> kept;
+    {
+        // A copy of the version list holds references; it goes out of scope
+        // before the collection.
+        const auto versions = sm.versions_of("h");
+        BOOST_REQUIRE_EQUAL(versions.size(), 2U);
+        const auto& newer = versions[0]._entry->_hash->chunks();
+        const auto& older = versions[1]._entry->_hash->chunks();
+        BOOST_REQUIRE_EQUAL(newer.size(), older.size());
+        std::size_t shared = 0;
+        for (std::size_t i = 0; i < newer.size(); ++i) {
+            if (newer[i] == older[i]) {
+                ++shared;
+            } else {
+                replaced = older[i];
+            }
+        }
+        BOOST_TEST(shared == newer.size() - 1);
+        kept = newer.front();
+    }
+    BOOST_TEST(*sm.read_at("h", 15)->_hash->find("f0500") == "v");
+    BOOST_TEST(*sm.read_at("h", 25)->_hash->find("f0500") == "w");
+    BOOST_REQUIRE(!replaced.expired());
+    BOOST_TEST(sm.collect_garbage(20) == 1U);
+    BOOST_TEST(replaced.expired());  // only the old version held it
+    BOOST_TEST(!kept.expired());
+    BOOST_TEST(sm.version_count() == 1U);
+}
+
+BOOST_AUTO_TEST_CASE(a_typed_blob_needs_its_marker, *boost::unit_test::timeout(10)) {
+    sm_type sm;
+    (void)sm.apply_at(set_cmd("s", "v"), 5, 1);
+    const auto before_gate = sm.get_state();
+    (void)sm.apply_at(gate_cmd(), 6, 2);
+    (void)sm.apply_at(exec_cmd(redis_command_id::sadd, {"t", k_max_bytes, k_max_count, "m"}), 7, 3);
+    const auto blob = sm.get_state();
+    BOOST_TEST(std::string(reinterpret_cast<const char*>(blob.data()), 4) == "KMV3");
+    // Before any gate the blob is the earlier format, byte for byte.
+    sm_type plain;
+    (void)plain.apply_at(set_cmd("s", "v"), 5, 1);
+    BOOST_TEST((plain.get_state() == before_gate));
+    // A newer level halts the restore.
+    auto newer = blob;
+    newer[4] = std::byte{0};
+    newer[5] = std::byte{k_redis_format_level + 1};
+    sm_type other;
+    BOOST_CHECK_THROW(other.restore_from_snapshot(newer, 3), redis_format_too_new);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

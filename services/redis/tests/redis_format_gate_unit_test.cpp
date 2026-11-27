@@ -130,15 +130,21 @@ BOOST_AUTO_TEST_CASE(newer_records_and_snapshots_stop_the_group, *boost::unit_te
     BOOST_CHECK_THROW(other.restore_from_snapshot(blob, 3), redis_format_too_new);
 }
 
-BOOST_AUTO_TEST_CASE(stores_without_typed_values_refuse_every_v3_record,
+// The multi-version store reads format 0x03 since task 11: a typed record
+// before its gate is refused, the gate applies, and a newer record halts.
+BOOST_AUTO_TEST_CASE(the_mvcc_store_passes_the_gate_and_refuses_newer_records,
                      *boost::unit_test::timeout(10)) {
     auto future = exec_record();
     future[0] = std::byte{k_redis_format_level + 1};
 
     redis_kv_mvcc_state_machine<std::uint64_t> mvcc;
-    BOOST_CHECK_THROW((void)mvcc.apply(gate(3), 1), redis_kv_codec_error);
-    BOOST_CHECK_THROW((void)mvcc.apply(exec_record(), 1), redis_kv_codec_error);
-    BOOST_CHECK_THROW((void)mvcc.apply(future, 1), redis_format_too_new);
+    BOOST_CHECK(status_of(mvcc.apply(exec_record(), 1)) ==
+                redis_v3_apply_status::refused_before_gate);
+    BOOST_CHECK(status_of(mvcc.apply(gate(3), 2)) == redis_v3_apply_status::changed);
+    BOOST_CHECK_EQUAL(mvcc.format_level(), 3U);
+    BOOST_CHECK(decode_redis_reply(mvcc.apply(exec_record(), 3)) == redis_reply::simple("OK"));
+    BOOST_CHECK(mvcc.lookup("k") != nullptr);
+    BOOST_CHECK_THROW((void)mvcc.apply(future, 4), redis_format_too_new);
 }
 
 // The engine store reads format 0x03 since task 10: the gate applies, and a

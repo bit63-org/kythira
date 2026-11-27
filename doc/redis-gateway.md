@@ -788,8 +788,9 @@ KYTHIRA_CACHE_PERSISTENCE=memory or engine`, and its formats never change.
   thresholds) report it.
 - `HDEL` of the last field deletes the key. Field writes keep the key's
   deadline; `EXPIRE`, `PERSIST`, `RENAME`, `COPY` and `DEL` work on a hash as
-  on a string. A hash does not move between shards yet: a `RENAME` or `COPY`
-  whose keys are in different shards answers `-CROSSSLOT`.
+  on a string. A `RENAME` or `COPY` whose keys are in different shards
+  moves the whole hash in one transaction where transactions are on, and
+  answers `-CROSSSLOT` elsewhere, as for a string.
 - Fields come back in byte order of the field, on every replica. Redis
   promises no order for `HGETALL`, `HKEYS` or `HVALS`; byte order is
   Kythira's.
@@ -837,8 +838,9 @@ deadlines, chunking and immutable-value rule. `SSCAN` arrives with `SCAN`.
   same member twice.
 - `SMOVE` and the `*STORE` forms are multi-key writes: their keys in one
   shard make one log entry. A `*STORE` replaces its destination whatever
-  it held and deletes it when the result is empty. Until collections join
-  transactions, keys in several shards answer `-CROSSSLOT`.
+  it held and deletes it when the result is empty. Keys in several shards
+  run as one transaction where transactions are on, and answer
+  `-CROSSSLOT` elsewhere.
 - `SINTER`, `SUNION`, `SDIFF` and `SINTERCARD` read each key where it
   lives, at the connection's consistency, and combine them on the node
   that received the command, so their keys may be in different shards.
@@ -857,8 +859,8 @@ immutable-value rule. The blocking forms (`BLPOP`, `BRPOP`, `BLMOVE`,
   at either end copies one chunk and the list of chunks, never the
   elements; an index operation walks chunks from the nearer end.
 - `LMOVE`, `RPOPLPUSH` and `LMPOP` are multi-key writes: their keys in one
-  shard make one log entry; keys in several shards answer `-CROSSSLOT`
-  until collections join transactions.
+  shard make one log entry; keys in several shards run as one transaction
+  where transactions are on, and answer `-CROSSSLOT` elsewhere.
 - `OBJECT ENCODING` reports `quicklist`, as Redis 7.0 does for every list.
 
 ## Transactions
@@ -882,7 +884,7 @@ command`, and `DEL` takes one key, as before.
 | `MSET k v [k v ...]` | Every pair, all or none. Under `KYTHIRA_REDIS_IMMUTABLE_VALUES` a key that already holds the same bytes is left out, and one holding other bytes refuses the whole command |
 | `MGET k [k ...]` | Each key's committed value at the connection's isolation, or a null |
 | `DEL k [k ...]` | Deletes, in one transaction, every key that was present; replies with how many. `DEL` with one key is the plain single-key command |
-| `MULTI` ... `EXEC` | Queues `GET`, `MGET`, `EXISTS`, `SET`, `SETEX`, `MSET` and `DEL`, then runs them as one transaction. Reads run at `EXEC` and see the transaction's own earlier writes. If the commit does not commit, `EXEC` answers with that error and nothing applied. A command refused while queuing (unsupported, bad arguments, not permitted) makes `EXEC` answer `EXECABORT`, as in Redis |
+| `MULTI` ... `EXEC` | Queues every string, keyspace, hash, set and list command that names its keys (not `SCAN`, `KEYS`, `RANDOMKEY`, server, connection or `KYTHIRA.*` commands), then runs them as one transaction. Each runs at `EXEC` and sees the transaction's own earlier writes. A command's runtime error (`WRONGTYPE`, a value conflict, a bad option) is its element of the reply and writes nothing, as in Redis. If the commit does not commit, `EXEC` answers with that error and nothing applied. A command refused while queuing (one `EXEC` cannot run, the wrong number of arguments, not permitted) makes `EXEC` answer `EXECABORT`, as in Redis |
 | `DISCARD` | Drops the queue |
 | `KYTHIRA.ISOLATION [level]` | Shows or sets this connection's isolation |
 | `WATCH k [k ...]`, `UNWATCH` | Snapshot build only (refused on the tier-1 build). The next `EXEC` commits only if no watched key changed since the first `WATCH`; otherwise it answers a null array and applies nothing. `EXEC`, `DISCARD` and `UNWATCH` clear the watch. See below |
@@ -909,6 +911,34 @@ as `KYTHIRA_REDIS_INTERNAL_USER` and never forwards it again, so transactions
 need forwarding configured the same way plain forwarding does (an internal
 secret, and TLS or the plaintext opt-in). The host's background resolver uses
 the same link to finish transactions whose coordinator died.
+
+### Typed values in transactions
+
+Inside `EXEC`, and for a multi-key write whose keys are in several shards,
+the gateway evaluates each command itself, with the same code a shard runs
+when it applies a log entry, against the transaction's view of each key:
+the value the transaction read, with its own earlier writes on top. Each
+reply is therefore known before the commit, and the commit writes, for
+every key the transaction changed, the resulting value: a delete, a string
+(with its deadline) as before, or a hash, set or list as one internal
+`KYTHIRA.INSTALL` record that replaces the key's value whole. No shard
+evaluates anything again at the commit, so what was replied is what is
+installed. A client cannot send `KYTHIRA.INSTALL`.
+
+- A string-only transaction commits the same records it always did, so it
+  works before the format gate; a transaction that leaves a hash, set or
+  list in a shard needs that shard past level 3, like the command that
+  made it.
+- The commit carries each changed collection whole, so a transaction's
+  collections are bounded by the transaction layer's command size. Plain
+  single-shard writes keep sharing chunks between versions.
+- Transactional reads (`KYTHIRA.TXN READ` and `READAT`) carry each key's
+  type, deadline and, for a collection, its elements after the fields they
+  always had. A gateway from before this ignores them and sees a
+  collection as present, so a rolling upgrade finishes before typed
+  commands are used in transactions.
+- `WATCH` covers every type: a typed write makes a new version of the key
+  like any other write.
 
 ### Snapshot isolation
 
@@ -1019,9 +1049,12 @@ on it. To enable them on a running cluster:
 2. `KYTHIRA.FORMAT UPGRADE 3` (admin) on any node. It asks every node that
    holds a replica of any group for its level and refuses, naming each node
    that is below 3 or does not answer; then it proposes the gate to every
-   group, through each group's leader, until each has applied it. A group
-   that splits afterwards passes its level to its children. Repeating the
-   command is harmless.
+   group, through each group's leader, until each has applied it, and
+   waits (within four command timeouts) until every node reports every
+   replica it holds at the level, so a node whose follower replica lags
+   does not keep refusing typed commands after `OK`. A group that splits
+   afterwards passes its level to its children. Repeating the command is
+   harmless.
 3. `KYTHIRA.FORMAT STATUS` (admin) shows this node's level and the gate each
    of its local groups has passed.
 
