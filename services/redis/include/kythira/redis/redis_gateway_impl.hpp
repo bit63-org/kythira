@@ -2079,9 +2079,15 @@ auto redis_gateway<Host, Logger, Metrics>::handle_evacuate(session& s, const res
     // answers. The reply passes through as it came; every form it can take (an
     // error, +OK, a bulk string, an array of bulk strings) reads the same
     // in RESP2 and RESP3.
+    //
+    // A data node answers START only after asking every other data node,
+    // and a silent one costs it a whole forward deadline. Waiting just one
+    // deadline here gave up on a START that had begun and sent it to the
+    // next node as well, so the wait covers the fan-out and a margin.
     const auto next = this->remote_front_ends() ? front_end_candidates() : _config._data_nodes;
+    const auto budget = 3 * _config._command_timeout;
     for (const auto& endpoint : next) {
-        auto r = this->exchange(cmd._argv, endpoint);
+        auto r = this->exchange(cmd._argv, endpoint, budget);
         if (r._kind == front_end::exchange_result::kind::answered) {
             return std::move(r._reply);
         }

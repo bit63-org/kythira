@@ -5,6 +5,14 @@ current list of outstanding work, see [TODO.md](TODO.md).
 
 ### What Changed (November 26, 2026)
 
+- **`KYTHIRA.EVACUATE` asks the other data nodes at once.** START,
+  STATUS and CANCEL used to ask them one after another, and a peer that
+  does not answer costs a whole forward deadline. A joining node, a
+  restarting one and the evacuee are often silent together, so START
+  could take three deadlines: past the deadline of a gateway without
+  data that relayed it, which then sent the same START to the next data
+  node, and past the admin's client. A gateway now waits three forward
+  deadlines for a relayed `KYTHIRA.EVACUATE`.
 - **A gateway apart from its front ends ends a transaction at EXEC even
   when the front end is lost under it.** It answered the client's EXEC
   with `-ERR outcome unknown` but kept the connection in `MULTI`, so

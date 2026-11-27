@@ -49,6 +49,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <future>
 #include <map>
 #include <mutex>
 #include <optional>
@@ -472,9 +473,7 @@ public:
             _evacuator.cancel();
             log("redis evacuation: cancelled");
             if (!local) {
-                for (const auto& [id, gw] : _hooks._peers()) {
-                    (void)_hooks._call(gw, {"KYTHIRA.EVACUATE", "CANCEL", "LOCAL"});
-                }
+                (void)ask_peers({"KYTHIRA.EVACUATE", "CANCEL", "LOCAL"});
             }
             return answer::ok();
         }
@@ -561,8 +560,8 @@ public:
     [[nodiscard]] auto cluster_status() -> cluster_view {
         std::vector<node_view> views{local_view()};
         const auto no_data = "-" + std::string{k_evacuate_no_data};
-        for (const auto& [id, gw] : _hooks._peers()) {
-            const auto reply = _hooks._call(gw, {"KYTHIRA.EVACUATE", "STATUS", "LOCAL"});
+        for (const auto& [peer, reply] : ask_peers({"KYTHIRA.EVACUATE", "STATUS", "LOCAL"})) {
+            const auto& [id, gw] = peer;
             if (reply && reply->rfind(no_data, 0) == 0) {
                 continue;  // no data there, so no part in the job
             }
@@ -618,6 +617,32 @@ private:
         if (_hooks._log) {
             _hooks._log(line);
         }
+    }
+
+    /// Sends `argv` to every other data node at once and returns each
+    /// peer with its reply (nullopt when it did not answer), in the order
+    /// `_peers` lists them. A peer that does not answer costs a whole
+    /// forward deadline, and a joining node, a restarting one and the
+    /// evacuee are often silent together: asked in turn, three of them
+    /// held START past the deadline of the gateway that relayed it and of
+    /// the admin's client. Asked at once, the slowest one sets the wait.
+    auto ask_peers(const std::vector<std::string>& argv) -> std::vector<
+        std::pair<std::pair<node_id_type, std::string>, std::optional<std::string>>> {
+        auto peers = _hooks._peers();
+        std::vector<std::future<std::optional<std::string>>> pending;
+        pending.reserve(peers.size());
+        for (const auto& p : peers) {
+            pending.push_back(std::async(std::launch::async, [this, &argv, gw = p.second] {
+                return _hooks._call(gw, argv);
+            }));
+        }
+        std::vector<std::pair<std::pair<node_id_type, std::string>, std::optional<std::string>>>
+            out;
+        out.reserve(peers.size());
+        for (std::size_t i = 0; i < peers.size(); ++i) {
+            out.emplace_back(std::move(peers[i]), pending[i].get());
+        }
+        return out;
     }
 
     auto start(const std::vector<std::string>& rest) -> answer {
@@ -701,8 +726,8 @@ private:
             std::vector<std::string> missed;
             std::vector<std::string> silent;
             const auto no_data = "-" + std::string{k_evacuate_no_data};
-            for (const auto& [id, gw] : _hooks._peers()) {
-                const auto reply = _hooks._call(gw, argv);
+            for (const auto& [peer, reply] : ask_peers(argv)) {
+                const auto& [id, gw] = peer;
                 if (!reply) {
                     silent.push_back(text(id) + "@" + gw);
                 } else if (reply->rfind("+OK", 0) != 0 && reply->rfind(no_data, 0) != 0) {

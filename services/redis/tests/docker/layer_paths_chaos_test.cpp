@@ -100,12 +100,12 @@ std::uint16_t port(int id) {
     return g_ports.at(static_cast<std::size_t>(id));
 }
 
-int dial(std::uint16_t p) {
+int dial(std::uint16_t p, std::chrono::seconds wait) {
     int fd = ::socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) {
         return -1;
     }
-    timeval tv{.tv_sec = 10, .tv_usec = 0};
+    timeval tv{.tv_sec = static_cast<time_t>(wait.count()), .tv_usec = 0};
     ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
     ::setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
     int one = 1;
@@ -123,7 +123,8 @@ int dial(std::uint16_t p) {
 
 class resp_client {
 public:
-    explicit resp_client(std::uint16_t p) : _fd(dial(p)) {
+    explicit resp_client(std::uint16_t p, std::chrono::seconds wait = std::chrono::seconds{10})
+        : _fd(dial(p, wait)) {
         if (_fd < 0) {
             throw std::runtime_error("connect to 127.0.0.1:" + std::to_string(p) + " refused");
         }
@@ -608,9 +609,12 @@ bool await(const std::function<bool()>& pred, std::chrono::milliseconds timeout)
 }
 
 /// One call on a fresh connection to `id`, or the error as a reply.
-std::string on(int id, const std::vector<std::string>& argv) {
+/// `wait` bounds each read; a reply that needs other nodes first (START
+/// asks every data node) takes a longer one.
+std::string on(int id, const std::vector<std::string>& argv,
+               std::chrono::seconds wait = std::chrono::seconds{10}) {
     try {
-        resp_client c(port(id));
+        resp_client c(port(id), wait);
         return c.call(argv);
     } catch (const std::exception& e) {
         return std::string("-ERR ") + e.what();
@@ -711,7 +715,9 @@ BOOST_FIXTURE_TEST_CASE(full_path_both_ways_killing_one_node_per_layer, LayerPat
             "KYTHIRA.EVACUATE", "START",   std::to_string(from), "TO",
             std::to_string(to), "ADDRESS", std::to_string(to),   "http://" + service(to) + ":7000",
             gateway_of(to)};
-        const auto start = on(admin, start_argv);
+        // START on a node without data is relayed to a data node, which
+        // asks every other data node before it answers.
+        const auto start = on(admin, start_argv, 60s);
         BOOST_REQUIRE_MESSAGE(start == "+OK\r\n",
                               "START " << from << " TO " << to << ": " << first_line(start));
         std::string status;
@@ -734,7 +740,7 @@ BOOST_FIXTURE_TEST_CASE(full_path_both_ways_killing_one_node_per_layer, LayerPat
                 if (now >= next_start && status.find(bulk("done 1")) == std::string::npos) {
                     next_start += 20s;
                     BOOST_TEST_MESSAGE("  START " << from << " TO " << to << " again: "
-                                                  << first_line(on(admin, start_argv)));
+                                                  << first_line(on(admin, start_argv, 60s)));
                 }
                 // The first line, exactly: each node's own line ends in
                 // "done 0" or "done 1" too.
@@ -750,7 +756,7 @@ BOOST_FIXTURE_TEST_CASE(full_path_both_ways_killing_one_node_per_layer, LayerPat
                                           << " s");
     };
     auto cancel = [&](int admin) {
-        BOOST_REQUIRE_EQUAL(on(admin, {"KYTHIRA.EVACUATE", "CANCEL"}), "+OK\r\n");
+        BOOST_REQUIRE_EQUAL(on(admin, {"KYTHIRA.EVACUATE", "CANCEL"}, 60s), "+OK\r\n");
     };
     auto release = [&](int evacuee) {
         const auto r = on(evacuee, {"KYTHIRA.EVACUATE", "RELEASE"});
