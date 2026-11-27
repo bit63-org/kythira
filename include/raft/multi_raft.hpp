@@ -133,6 +133,10 @@ struct tick_report {
     std::chrono::nanoseconds _apply_duration{};
     std::chrono::nanoseconds _policy_duration{};
 
+    /// @brief Time since the previous `tick()` started; zero on the first.
+    /// Not part of `total_duration()`: it is the caller's time, not the tick's.
+    std::chrono::nanoseconds _gap_since_last_tick{};
+
     /// @brief Whether the policy phase ran this tick (it runs on its own interval).
     bool _policy_ran{false};
 
@@ -1509,6 +1513,12 @@ public:
     /// time in the state machine).
     auto tick() -> tick_report;
 
+    /// @brief Ticks so far that took, or followed a gap of, half an election
+    /// timeout or more (each one also logged as "Slow tick").
+    [[nodiscard]] auto slow_tick_count() const -> std::uint64_t {
+        return _slow_ticks.load(std::memory_order_relaxed);
+    }
+
     /// @brief Queue work to run on `group`'s stripe during the next apply phase.
     ///
     /// The apply phase exists because `node<Types>` applies committed entries
@@ -1872,6 +1882,9 @@ private:
     /// One barrier per phase across groups, with per-group serialisation
     /// inside it. Posting all of them and waiting once is what keeps a phase's
     /// wall time proportional to the slowest group rather than to their sum.
+    /// @brief Log a tick that starved this host's leaders of heartbeats.
+    auto warn_if_slow_tick(const tick_report& report) -> void;
+
     auto run_phase(const std::vector<group_ptr>& ready, const std::function<void(group_state&)>& fn)
         -> void;
 
@@ -2158,6 +2171,10 @@ private:
     std::mutex _driver_reports_mutex;
     std::vector<pending_driver_report> _driver_reports;
     std::chrono::steady_clock::time_point _last_policy_run{};
+    /// When the latest `tick()` started, as steady_clock ticks; 0 before the first.
+    std::atomic<std::chrono::steady_clock::rep> _last_tick_started_ns{0};
+    /// Ticks `warn_if_slow_tick()` reported, for `slow_tick_count()`.
+    std::atomic<std::uint64_t> _slow_ticks{0};
 
     // ── leader-side transaction resolver (multi-raft-transactions task 7) ────
     //
