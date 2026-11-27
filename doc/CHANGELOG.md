@@ -19,6 +19,14 @@ current list of outstanding work, see [TODO.md](TODO.md).
   address a name resolves to. Front ends publish the 14-bit index their
   `SCAN` cursors will carry (`.kiro/specs/redis-general-data-types/`
   task 18).
+- **The build cache no longer refuses a burst of writes when its
+  credential cache entry expires.** The HTTP front end remembers a
+  successful login for five minutes. When the entry lapsed under 32
+  concurrent writers, each request paid its own PBKDF2 check, and past
+  the limit of four concurrent checks the rest were answered 503: the
+  container matrix's 32 x 2 MiB cell lost 19 of 64 PUTs on main.
+  Concurrent checks of the same credentials now share one derivation,
+  and the matrix reports each failed PUT's status code.
 - **A Redis gateway can run apart from the front end, and nodes of
   different layers prove who they are.** `KYTHIRA_REDIS_ROLES=gateway`
   with `KYTHIRA_REDIS_FRONT_ENDS` holds client connections, their protocol,

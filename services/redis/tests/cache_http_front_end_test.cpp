@@ -799,6 +799,51 @@ BOOST_AUTO_TEST_CASE(auth_cache_hits_flushes_and_bounds, *boost::unit_test::time
     BOOST_CHECK(!kythira::cache_http_auth_cache::verify_bearer(acl, "nope"));
 }
 
+// Requests in flight when an entry expires share one derivation instead of
+// each paying the KDF, which past the limiter's concurrency cap answered
+// 503 (the write_throughput_matrix 32 x 2M cell lost 19 of 64 PUTs that
+// way). A wrong secret is not shared: every waiter checks for itself.
+BOOST_AUTO_TEST_CASE(auth_cache_coalesces_concurrent_misses, *boost::unit_test::timeout(30)) {
+    redis_acl acl;
+    acl.reload(acl_text());
+    kythira::cache_http_auth_cache cache(std::chrono::seconds{300}, 8);
+    constexpr int k_callers = 16;
+    std::atomic<int> runs{0};
+    std::atomic<int> ok{0};
+    auto storm = [&](const std::string& secret) {
+        std::vector<std::thread> callers;
+        callers.reserve(k_callers);
+        for (int i = 0; i < k_callers; ++i) {
+            callers.emplace_back([&] {
+                auto creds = kythira::parse_cache_http_authorization(basic("farm", secret));
+                auto id = cache.authenticate(acl, *creds, [&] {
+                    ++runs;
+                    // Long enough for every caller to arrive while it runs.
+                    std::this_thread::sleep_for(std::chrono::milliseconds{300});
+                    return acl.authenticate("farm", secret);
+                });
+                if (id) {
+                    ++ok;
+                }
+            });
+        }
+        for (auto& t : callers) {
+            t.join();
+        }
+    };
+    storm("farm-secret");
+    BOOST_CHECK_EQUAL(ok.load(), k_callers);
+    BOOST_CHECK_EQUAL(runs.load(), 1);
+    // A caller that starts after the leader finished hits the cache instead.
+    BOOST_CHECK_GE(cache.coalesced(), 1U);
+
+    runs = 0;
+    ok = 0;
+    storm("wrong");
+    BOOST_CHECK_EQUAL(ok.load(), 0);
+    BOOST_CHECK_EQUAL(runs.load(), k_callers);
+}
+
 BOOST_AUTO_TEST_CASE(put_get_head_range_and_miss, *boost::unit_test::timeout(120)) {
     cluster c(3, small_chunks());
     BOOST_REQUIRE(c.await_leaders(std::chrono::seconds{20}));
