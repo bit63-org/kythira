@@ -21,6 +21,15 @@
 /// empties itself the first time it sees a different one, so `reload()` of
 /// the ACL file (a revoked user, a rotated secret) takes effect on the next
 /// request rather than after `ttl`.
+///
+/// Concurrent misses for the same credentials share one derivation: the
+/// first runs `verify`, the rest wait for it and take its success from the
+/// cache. Without that, every request in flight when an entry expires paid
+/// its own KDF, and past the limiter's `max_concurrent` the rest were
+/// refused with 503: 32 sccache writers lost a third of their PUTs each
+/// time the entry lapsed under them. Only successes are shared; a waiter
+/// whose leader failed runs its own check, so each wrong guess is still
+/// charged to the limiter.
 
 #include <kythira/redis/redis_acl.hpp>
 #include <raft/credential_verifier.hpp>
@@ -30,9 +39,11 @@
 #include <openssl/hmac.h>
 #include <openssl/rand.h>
 
+#include <algorithm>
 #include <array>
 #include <cctype>
 #include <chrono>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -40,6 +51,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -150,15 +162,44 @@ public:
     /// Authenticate `creds` against `acl`, from the cache when it can. On a
     /// miss, `verify` is told and must return the identity or `nullopt`; it
     /// is where the caller runs the KDF under its rate limiter. A `verify`
-    /// that throws leaves the cache unchanged.
+    /// that throws leaves the cache unchanged. While one call verifies some
+    /// credentials, other calls with the same credentials wait for it
+    /// instead of verifying too (see the file comment).
     template<typename Verify>
     auto authenticate(const redis_acl& acl, const cache_http_credentials& creds, Verify&& verify,
                       clock::time_point now = clock::now()) -> std::optional<redis_identity> {
         const auto table = acl.snapshot();
         const auto key = digest_of(creds);
-        if (auto hit = lookup(table, key, now)) {
-            return hit;
+        {
+            std::unique_lock lock(_mu);
+            for (bool waited = false;; waited = true) {
+                if (waited) {
+                    now = std::max(now, clock::now());
+                }
+                if (auto hit = lookup_locked(table, key, now)) {
+                    return hit;
+                }
+                if (!_verifying.contains(key)) {
+                    break;
+                }
+                if (!waited) {
+                    ++_coalesced;
+                }
+                _settled.wait(lock);
+            }
+            _verifying.insert(key);
         }
+        struct release {
+            cache_http_auth_cache& self;
+            const digest& key;
+            ~release() {
+                {
+                    const std::lock_guard lock(self._mu);
+                    self._verifying.erase(key);
+                }
+                self._settled.notify_all();
+            }
+        } const done{*this, key};
         std::optional<redis_identity> id = verify();
         if (id) {
             insert(table, key, *id, now);
@@ -177,6 +218,11 @@ public:
     [[nodiscard]] auto flushes() const -> std::uint64_t {
         const std::lock_guard lock(_mu);
         return _flushes;
+    }
+    /// Calls that waited for another call's check of the same credentials.
+    [[nodiscard]] auto coalesced() const -> std::uint64_t {
+        const std::lock_guard lock(_mu);
+        return _coalesced;
     }
 
     /// Bearer tokens name no user, so the ACL is searched: each enabled
@@ -229,9 +275,9 @@ private:
 
     using table_ptr = std::shared_ptr<const redis_acl_table>;
 
-    auto lookup(const table_ptr& table, const digest& key, clock::time_point now)
+    /// Called under `_mu`.
+    auto lookup_locked(const table_ptr& table, const digest& key, clock::time_point now)
         -> std::optional<redis_identity> {
-        const std::lock_guard lock(_mu);
         check_table(table);
         auto it = _entries.find(key);
         if (it == _entries.end()) {
@@ -284,8 +330,13 @@ private:
     mutable std::mutex _mu;
     table_ptr _table;
     std::map<digest, entry> _entries;
+    /// Credentials some call is verifying now; `_settled` wakes the calls
+    /// waiting on them.
+    std::set<digest> _verifying;
+    std::condition_variable _settled;
     std::uint64_t _hits = 0;
     std::uint64_t _flushes = 0;
+    std::uint64_t _coalesced = 0;
 };
 
 }  // namespace kythira

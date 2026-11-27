@@ -256,12 +256,17 @@ matrix_cell() {
     begin=$(date +%s.%N)
     statuses=$(xargs -P "$writers" -L 1 bash -c 'matrix_put "$@"' _ < "$jobs")
     end=$(date +%s.%N)
-    local ok
+    local ok failed_codes
     ok=$(grep -c '^201$' <<<"$statuses")
+    # Each status other than 201, with its count (000 is a curl failure), so
+    # a short cell says why: "503x19" or "000x2,500x1"; "none" when all
+    # succeeded.
+    failed_codes=$(grep -v '^201$' <<<"$statuses" | grep . | sort | uniq -c |
+        awk '{ printf "%s%sx%s", (NR > 1 ? "," : ""), $2, $1 }')
     local seconds rate
     seconds=$(awk -v a="$begin" -v b="$end" 'BEGIN{printf "%.2f", b - a}')
     rate=$(awk -v n="$ok" -v s="$bytes" -v t="$seconds" 'BEGIN{printf "%.2f", (t > 0 ? n * s / t / 1048576 : 0)}')
-    echo "KYTHIRA_MATRIX writers=${writers} size=${size} bytes=${bytes} puts=${count} ok=${ok} seconds=${seconds} mib_per_s=${rate}"
+    echo "KYTHIRA_MATRIX writers=${writers} size=${size} bytes=${bytes} puts=${count} ok=${ok} failed=${failed_codes:-none} seconds=${seconds} mib_per_s=${rate}"
     while read -r node _ key; do
         curl -sS -o /dev/null -u "${user}:${password}" -X DELETE "${node}/${key}" 2>/dev/null || true
     done < "$jobs"

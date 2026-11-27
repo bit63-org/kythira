@@ -694,7 +694,10 @@ BOOST_AUTO_TEST_CASE(write_throughput_matrix, *boost::unit_test::timeout(1800)) 
         BOOST_TEST_MESSAGE("writers=" << c.at("writers") << " size=" << c.at("size") << ": "
                                       << c.at("mib_per_s") << " MiB/s (" << c.at("ok") << "/"
                                       << c.at("puts") << " PUTs in " << c.at("seconds") << " s)");
-        BOOST_TEST(c.at("ok") == c.at("puts"));
+        // `failed` lists each other status and its count, e.g. 503x19.
+        BOOST_TEST(c.at("ok") == c.at("puts"),
+                   "writers=" << c.at("writers") << " size=" << c.at("size") << " failed "
+                              << (c.contains("failed") ? c.at("failed") : "?"));
     }
     const auto nodes = r.all("AMPLIFICATION");
     BOOST_REQUIRE_EQUAL(nodes.size(), 3u);

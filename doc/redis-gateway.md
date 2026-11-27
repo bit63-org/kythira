@@ -424,7 +424,7 @@ The design is `.kiro/specs/disk-backed-build-cache/`.
 | `KYTHIRA_CACHE_HTTPS_LISTEN` | empty | TLS listener |
 | `KYTHIRA_CACHE_HTTPS_CERT` / `_HTTPS_KEY` | `KYTHIRA_REDIS_TLS_CERT` / `_TLS_KEY` | PEM certificate and key for the TLS listener |
 | `KYTHIRA_CACHE_PEER_HTTP` | each peer's host with this node's listener port | `id=host:port,...` of every peer's HTTP front end, the kind this node forwards over (TLS when `KYTHIRA_REDIS_FORWARD_TLS` is on) |
-| `KYTHIRA_CACHE_AUTH_CACHE_SECONDS` | `300` | How long a successful authentication is remembered |
+| `KYTHIRA_CACHE_AUTH_CACHE_SECONDS` | `300` | How long a successful authentication is remembered. Requests that arrive while the same credentials are being checked wait for that check rather than starting their own |
 
 Two gateway variables change meaning in file mode:
 
