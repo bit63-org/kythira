@@ -79,16 +79,31 @@
 /// | `KYTHIRA_DYNAMODB_STRONG_HEARTBEAT_MS` | `250` | strong groups' heartbeat |
 /// | `KYTHIRA_DYNAMODB_STRONG_ELECTION_MIN_MS`, `_MAX_MS` | `2500`, `5000` | election timeouts |
 /// | `KYTHIRA_DYNAMODB_ROLES` | all four | the layers this node runs (below) |
+/// | `KYTHIRA_DYNAMODB_DATA_NODES` | | `host:port,...`: data nodes' gateways a front end without
+/// the data role asks for routes first |
+/// | `KYTHIRA_DYNAMODB_FRONT_ENDS` | the voters | how many front ends share each capacity limit |
 ///
 /// `KYTHIRA_DYNAMODB_ROLES` (.kiro/specs/dynamodb-independent-layers/
 /// task 1) is a `,`-separated subset of `gateway`, `front_end`, `data` and
 /// `segments`. Unset, a node runs all four, exactly as before. This build
-/// serves two sets: all four, and `data,segments`, a data node that is a
+/// serves three sets: all four; `data,segments`, a data node that is a
 /// Raft voter and runs the leader-side workers, takes ops forwarded from
-/// the other voters' gateways, and answers clients 404. Every other set
-/// stops the node at start, naming the part it lacks. The set shows on
-/// `GET /` as the `x-kythira-roles` header, and in kythira_node's
-/// `/healthz` and `/metrics`.
+/// the other voters' gateways, and answers clients 404; and
+/// `gateway,front_end`, a front end with no replica (task 4) that learns
+/// the routes from the data nodes in `KYTHIRA_DYNAMODB_DATA_NODES` and
+/// sends each op to its group's leader over the forward channel
+/// (`remote_backend.hpp`), so it needs `KYTHIRA_DYNAMODB_FORWARD_SECRET`
+/// and no `PEERS`. Every other set stops the node at start, naming the
+/// part it lacks. The set shows on `GET /` as the `x-kythira-roles`
+/// header, and in kythira_node's `/healthz` and `/metrics`.
+///
+/// Each front end admits `1 / KYTHIRA_DYNAMODB_FRONT_ENDS` of every
+/// capacity limit (one over the voters when unset, as before), so the
+/// limits hold exactly when clients spread requests over the gateways and
+/// are stricter when they do not. Set it to the same count on every node
+/// that serves clients, voters included. Data nodes answer routes with
+/// each voter's `PEER_GATEWAYS` address; list a node's own gateway there
+/// too, or its `ADVERTISED_ENDPOINT` names it.
 ///
 /// Without a backup store a single node keeps backups in memory, and a
 /// cluster refuses `CreateBackup` (`backup.hpp`) and
@@ -193,9 +208,15 @@ struct cluster_config {
     std::map<std::string, std::string> peers;
     std::string raft_bind = "0.0.0.0";
     std::uint16_t raft_port = 7000;
-    /// Every other voter's gateway listener, for forwarded ops.
+    /// Every other voter's gateway listener, for forwarded ops (and this
+    /// node's own, when listed, which routes name it by).
     std::map<std::string, forward_peer> peer_gateways;
     std::string forward_secret;
+    /// A front end without the data role: the data nodes' gateways it asks
+    /// for routes first (.kiro/specs/dynamodb-independent-layers/ task 4).
+    std::vector<forward_peer> data_nodes;
+    /// How many front ends share each capacity limit; 0 is the voters.
+    std::size_t front_ends = 0;
     /// PEM bundle the peers' gateway certificates chain to; empty uses the
     /// system's.
     std::string forward_ca_path;
@@ -211,6 +232,11 @@ struct cluster_config {
     static constexpr std::uint64_t k_default_split_keys = 960'000;
 
     [[nodiscard]] auto enabled() const -> bool { return !peers.empty(); }
+    /// Each front end's share of a capacity limit (Requirement 5.2).
+    [[nodiscard]] auto capacity_share() const -> double {
+        const auto n = front_ends != 0 ? front_ends : std::max<std::size_t>(peers.size(), 1);
+        return 1.0 / static_cast<double>(n);
+    }
     [[nodiscard]] auto splits_enabled() const -> bool {
         return split_bytes != 0 || split_keys != 0;
     }
@@ -542,7 +568,13 @@ inline constexpr std::string_view k_gateway_env_help =
     "                                        range (2500, 5000)\n"
     "  KYTHIRA_DYNAMODB_ROLES                layers this node runs: all four\n"
     "                                        (gateway,front_end,data,segments, the\n"
-    "                                        default) or data,segments\n";
+    "                                        default), data,segments, or\n"
+    "                                        gateway,front_end (with DATA_NODES)\n"
+    "  KYTHIRA_DYNAMODB_DATA_NODES           host:port,... data nodes' gateways a\n"
+    "                                        front end without the data role asks\n"
+    "                                        for routes first\n"
+    "  KYTHIRA_DYNAMODB_FRONT_ENDS           front ends sharing each capacity\n"
+    "                                        limit (the voters)\n";
 
 /// The header `GET /` and a data node's refusals carry the node's role set
 /// in.
@@ -594,6 +626,35 @@ namespace gateway_detail {
 [[nodiscard]] inline auto cluster_from_env(const env_lookup& env, gateway_config& c)
     -> std::optional<std::string> {
     auto& k = c.cluster;
+    if (auto v = env("KYTHIRA_DYNAMODB_FRONT_ENDS")) {
+        const auto n = number<std::size_t>(trim(*v));
+        if (!n || *n == 0) {
+            return "KYTHIRA_DYNAMODB_FRONT_ENDS: not a positive count: '" + *v + "'";
+        }
+        k.front_ends = *n;
+    }
+    if (auto v = env("KYTHIRA_DYNAMODB_DATA_NODES"); v && !trim(*v).empty()) {
+        std::string_view rest = *v;
+        while (!rest.empty()) {
+            const auto comma = rest.find(',');
+            const auto entry = trim(rest.substr(0, comma));
+            rest = comma == std::string_view::npos ? std::string_view{} : rest.substr(comma + 1);
+            if (entry.empty()) {
+                continue;
+            }
+            const auto hp = parse_host_port(entry);
+            if (!hp) {
+                return "KYTHIRA_DYNAMODB_DATA_NODES: '" + std::string(entry) + "' is not host:port";
+            }
+            k.data_nodes.push_back(*hp);
+        }
+        k.forward_secret = env("KYTHIRA_DYNAMODB_FORWARD_SECRET").value_or("");
+        if (k.forward_secret.size() < k_min_forward_secret) {
+            return "KYTHIRA_DYNAMODB_FORWARD_SECRET is required with KYTHIRA_DYNAMODB_DATA_NODES, "
+                   "and needs " +
+                   std::to_string(k_min_forward_secret) + " or more characters";
+        }
+    }
     const auto peers = env("KYTHIRA_DYNAMODB_PEERS");
     if (!peers || trim(*peers).empty()) {
         if (c.engine != "memory") {
@@ -702,9 +763,34 @@ namespace gateway_detail {
     }
     const auto named = "KYTHIRA_DYNAMODB_ROLES=" + c.roles.to_string() + ": ";
     if (!c.roles.has(role::data)) {
-        return named +
-               "a node without the data role needs a remote backend to reach the data nodes, "
-               "which this build does not have yet; add data";
+        // A front end with no replica (task 4).
+        if (c.roles.has(role::segments)) {
+            return named +
+                   "the segments role without data needs segment volumes, which this build "
+                   "does not have yet; drop segments or add data";
+        }
+        if (c.roles.has(role::gateway) != c.roles.has(role::front_end)) {
+            return named +
+                   "a gateway apart from its front end needs the authenticated-call handoff, "
+                   "which this build does not have yet; run both or neither";
+        }
+        if (c.cluster.enabled()) {
+            return named +
+                   "a node without the data role holds no replica, so it is no voter: unset "
+                   "KYTHIRA_DYNAMODB_PEERS and list the data nodes' gateways in "
+                   "KYTHIRA_DYNAMODB_DATA_NODES";
+        }
+        if (c.cluster.data_nodes.empty()) {
+            return named +
+                   "a node without the data role reaches the data nodes through their gateways: "
+                   "set KYTHIRA_DYNAMODB_DATA_NODES (and KYTHIRA_DYNAMODB_FORWARD_SECRET)";
+        }
+        if (c.cluster.front_ends == 0) {
+            return named +
+                   "a front end without the data role must know its share of each capacity "
+                   "limit: set KYTHIRA_DYNAMODB_FRONT_ENDS to the number of front ends";
+        }
+        return std::nullopt;
     }
     if (!c.roles.has(role::segments)) {
         return named +
@@ -1169,6 +1255,12 @@ namespace gateway_detail {
     if (auto e = gateway_detail::roles_from_env(env, c)) {
         return *e;
     }
+    if (!c.cluster.data_nodes.empty() && c.roles.has(kythira::layers::role::data)) {
+        return std::string(
+            "KYTHIRA_DYNAMODB_DATA_NODES is for a front end without the data role "
+            "(KYTHIRA_DYNAMODB_ROLES=gateway,front_end); a data node finds the others through "
+            "KYTHIRA_DYNAMODB_PEERS");
+    }
     c.backup_dir = env("KYTHIRA_DYNAMODB_BACKUP_DIR").value_or("");
     c.backup_s3_bucket = env("KYTHIRA_DYNAMODB_BACKUP_S3_BUCKET").value_or("");
     c.backup_s3_prefix = env("KYTHIRA_DYNAMODB_BACKUP_S3_PREFIX").value_or("");
@@ -1410,6 +1502,27 @@ public:
         // role (.kiro/specs/dynamodb-independent-layers/ task 2): a front end
         // without it runs none, and its hints above go nowhere, since the
         // data node's next pass finds the work anyway.
+        // A backend with no replica (`remote_backend`, task 4) never has
+        // the data role.
+        if constexpr (k_holds_data) {
+            start_workers(store, buckets);
+        }
+        _ready.store(true);
+        _stopping = false;
+        if (_workers) {
+            _workers->start();
+        }
+        if (_config.key_ring && _keys.configured()) {
+            _key_thread = std::thread([this] { key_loop(); });
+        }
+    }
+
+    /// Whether this gateway's node runs the leader-side workers: only with
+    /// the data role.
+    [[nodiscard]] auto runs_workers() const -> bool { return _workers && _workers->running(); }
+
+private:
+    void start_workers(const std::shared_ptr<backup_store>& store, const bucket_resolver& buckets) {
         if (_config.roles.has(kythira::layers::role::data) && !_workers) {
             data_worker_settings<Backend> w;
             w.compat = _config.compat;
@@ -1446,20 +1559,9 @@ public:
             w.table_keys = [this] { (void)_key_watch.pass(_backend.now_ms()); };
             _workers = std::make_unique<data_workers<Backend>>(_backend, std::move(w), _log);
         }
-        _ready.store(true);
-        _stopping = false;
-        if (_workers) {
-            _workers->start();
-        }
-        if (_config.key_ring && _keys.configured()) {
-            _key_thread = std::thread([this] { key_loop(); });
-        }
     }
 
-    /// Whether this gateway's node runs the leader-side workers: only with
-    /// the data role.
-    [[nodiscard]] auto runs_workers() const -> bool { return _workers && _workers->running(); }
-
+public:
     void stop() {
         if (_workers) {
             _workers->stop();
@@ -1656,6 +1758,10 @@ private:
             _sweep_cv.wait_for(lock, std::chrono::milliseconds{250}, [this] { return _stopping; });
         }
     }
+
+    /// Whether the backend holds the data itself; `remote_backend` (a front
+    /// end without the data role) does not.
+    static constexpr bool k_holds_data = !requires { Backend::k_no_replica; };
 
     /// A `raft_backend`, which runs ops peers forward to this node.
     static constexpr bool serves_ops = requires(Backend& b, std::string_view op) {

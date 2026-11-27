@@ -136,8 +136,16 @@ public:
         if (it == _peers.end()) {
             return std::nullopt;
         }
+        return send_to(it->second, op);
+    }
+
+    /// The same, to a gateway named by address rather than by node id (a
+    /// front end without the data role, which knows data nodes only by the
+    /// addresses their routes name).
+    [[nodiscard]] auto send_to(const forward_peer& peer, const std::string& op) const
+        -> std::optional<std::string> {
         try {
-            return _config.tls ? exchange_tls(it->second, op) : exchange_plain(it->second, op);
+            return _config.tls ? exchange_tls(peer, op) : exchange_plain(peer, op);
         } catch (const std::exception&) {
             return std::nullopt;
         }
