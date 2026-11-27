@@ -1778,7 +1778,11 @@ auto redis_front_end<Host, Logger, Metrics>::handle_info(session& s, const resp_
             << "kythira_version:" << _config._kythira_version << "\r\n"
             << "kythira_gateway:1\r\n"
             << "kythira_format_level:" << reported_format_level() << "\r\n"
-            << "redis_mode:" << server_mode() << "\r\n"
+            << "redis_mode:" << server_mode()
+            << "\r\n"
+            // Client test suites and tools read these two unconditionally
+            // (redis-py's conftest indexes both), so they are always here.
+            << "arch_bits:" << (sizeof(void*) * 8) << "\r\n"
             << "uptime_in_seconds:" << uptime.count() << "\r\n"
             << "kythira_roles:" << _config._layer_roles.to_string() << "\r\n"
             << "kythira_membership:" << membership_mode_name() << "\r\n"
@@ -1832,6 +1836,10 @@ auto redis_front_end<Host, Logger, Metrics>::handle_info(session& s, const resp_
     if (wanted("errorstats", true)) {
         section("Errorstats");
         out << errorstats_text();
+    }
+    if (wanted("cluster", true)) {
+        section("Cluster");
+        out << "cluster_enabled:" << (_config._cluster_compat_mode ? 1 : 0) << "\r\n";
     }
     if (wanted("keyspace", true)) {
         // The whole keyspace, each group read once in key order, as DBSIZE
@@ -1942,9 +1950,15 @@ auto redis_front_end<Host, Logger, Metrics>::handle_command(session& s, const re
                                                       {"keystep", w.integer(c.step)},
                                                       {"limit", w.integer(0)}})}})}}));
         }
+        std::vector<std::string> tips;
+        for (std::string_view rest = c.tips; !rest.empty();) {
+            const auto space = rest.find(' ');
+            tips.push_back(w.bulk(rest.substr(0, space)));
+            rest = space == std::string_view::npos ? std::string_view{} : rest.substr(space + 1);
+        }
         return w.array({w.bulk(lower(c.name)), w.integer(c.arity), w.array(flags),
                         w.integer(c.first_key), w.integer(c.last_key), w.integer(c.step),
-                        w.array(categories), w.array({}), w.array(key_specs), w.array({})});
+                        w.array(categories), w.array(tips), w.array(key_specs), w.array({})});
     };
     const auto docs = [&](const redis_command_info& c) {
         return w.map({{"since", w.bulk(c.since)}, {"group", w.bulk(c.group)}});
@@ -2838,12 +2852,17 @@ auto redis_front_end<Host, Logger, Metrics>::queue_in_multi(session& s, std::str
     const bool keyed_group =
         info != nullptr && (info->group == "string" || info->group == "generic" ||
                             info->group == "hash" || info->group == "set" || info->group == "list");
+    // PING and ECHO touch no data and answer the same inside EXEC; Redis
+    // queues them, and clients put them in a transaction to check the
+    // connection (go-redis's TxPipeline "supports custom command").
+    const bool keyless = upper == "PING" || upper == "ECHO";
     const bool queueable =
-        keyed_group && info->status == redis_command_status::shipped &&
-        (info->flags & redis_command_flag::no_multi) == 0 &&
-        (info->flags & redis_command_flag::blocking) == 0 &&
-        (info->first_key > 0 || (info->flags & redis_command_flag::movablekeys) != 0) &&
-        !k_string_only_store;
+        info != nullptr && !k_string_only_store &&
+        (keyless ||
+         (keyed_group && info->status == redis_command_status::shipped &&
+          (info->flags & redis_command_flag::no_multi) == 0 &&
+          (info->flags & redis_command_flag::blocking) == 0 &&
+          (info->first_key > 0 || (info->flags & redis_command_flag::movablekeys) != 0)));
     if (!queueable) {
         return refuse(s._writer.error("ERR " + std::string(upper) +
                                       " is not supported inside MULTI on this gateway"));
@@ -3967,7 +3986,11 @@ auto redis_front_end<Host, Logger, Metrics>::format_status_text() -> std::string
         << "binary_level:" << k_redis_format_level << "\r\n";
     for (const auto& g : _data.local_groups()) {
         auto* node = _data.local_replica(g);
-        if (node == nullptr) {
+        // Only key-range groups hold Redis data. The snapshot-isolation
+        // build's timestamp oracle group owns no keys and never takes the
+        // gate; listing it at level 2 made UPGRADE wait out its whole
+        // budget for a group that will never change.
+        if (node == nullptr || !_data.holds_keys(g)) {
             continue;
         }
         std::uint16_t level = 0;

@@ -47,6 +47,7 @@ public:
         : _gw(gw), _strand(boost::asio::make_strand(gw._io)), _idle_timer(_strand) {
         boost::system::error_code ec;
         (void)socket.set_option(tcp::no_delay(true), ec);
+        _session._client_id = ++gw._next_client_id;
         auto remote = socket.remote_endpoint(ec);
         if (!ec) {
             _session._rate_key = redis_auth_limiter::rate_key(remote.address());
@@ -1283,7 +1284,7 @@ auto redis_gateway<Host, Logger, Metrics>::handle_client(session& s, const resp_
         return s._client_name.empty() ? s._writer.null() : s._writer.bulk(s._client_name);
     }
     if (sub == "ID") {
-        return s._writer.integer(0);
+        return s._writer.integer(static_cast<std::int64_t>(s._client_id));
     }
     return s._writer.error("ERR unknown subcommand '" + cmd._argv[1] + "'. Try CLIENT HELP.");
 }

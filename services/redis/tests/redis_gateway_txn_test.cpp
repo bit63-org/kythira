@@ -632,6 +632,13 @@ BOOST_AUTO_TEST_CASE(multi_exec_and_discard, *boost::unit_test::timeout(180)) {
         BOOST_CHECK_EQUAL(peek.call({"MGET", "a/m" + n, "z/m" + n, "z/n" + n}),
                           "*3\r\n" + bulk("1") + bulk("2") + "$-1\r\n");
 
+        // PING and ECHO queue and answer inside the EXEC, as in Redis.
+        BOOST_CHECK_EQUAL(client.call({"MULTI"}), "+OK\r\n");
+        BOOST_CHECK_EQUAL(client.call({"PING"}), "+QUEUED\r\n");
+        BOOST_CHECK_EQUAL(client.call({"ECHO", "hi"}), "+QUEUED\r\n");
+        BOOST_CHECK_EQUAL(client.call({"GET", "a/m" + n}), "+QUEUED\r\n");
+        BOOST_CHECK_EQUAL(client.call({"EXEC"}), "*3\r\n+PONG\r\n" + bulk("hi") + bulk("1"));
+
         // DISCARD drops the queue.
         BOOST_CHECK_EQUAL(client.call({"MULTI"}), "+OK\r\n");
         BOOST_CHECK_EQUAL(client.call({"DEL", "a/m" + n}), "+QUEUED\r\n");

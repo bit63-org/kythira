@@ -1021,6 +1021,15 @@ BOOST_AUTO_TEST_CASE(hello_3_switches_the_reply_encoding, *boost::unit_test::tim
     BOOST_CHECK(hello.find("$5\r\nproto\r\n:3\r\n") != std::string::npos);
     BOOST_CHECK_EQUAL(client.call({"GET", "sccache/none"}), "_\r\n");
     BOOST_CHECK_EQUAL(client.call({"CLIENT", "GETNAME"}), bulk("t"));
+    // CLIENT ID is positive and differs between connections, as Redis's
+    // does: clients key client-side caching and redirection on it.
+    const auto id = client.call({"CLIENT", "ID"});
+    BOOST_CHECK(id.starts_with(":") && id != ":0\r\n");
+    resp_client other(c.port(c.leader_of(1)));
+    BOOST_REQUIRE_EQUAL(other.auth("farm", "farm-secret"), "+OK\r\n");
+    const auto other_id = other.call({"CLIENT", "ID"});
+    BOOST_CHECK(other_id.starts_with(":") && other_id != ":0\r\n");
+    BOOST_CHECK_NE(id, other_id);
 
     BOOST_CHECK_EQUAL(client.call({"RESET"}), "+RESET\r\n");
     BOOST_CHECK_EQUAL(client.call({"GET", "sccache/none"}), "-NOAUTH Authentication required.\r\n");
@@ -1108,6 +1117,11 @@ BOOST_AUTO_TEST_CASE(authentication_and_authorization, *boost::unit_test::timeou
         BOOST_CHECK_EQUAL(ops.call({"COMMAND", "COUNT"}), ":" + std::to_string(shipped) + "\r\n");
         BOOST_CHECK(ops.call({"COMMAND", "INFO", "incr", "nosuch"})
                         .starts_with("*2\r\n*10\r\n$4\r\nincr\r\n:2\r\n"));
+        // Redis 7.2's tips, bulk strings as Redis sends them: go-redis
+        // routes and aggregates by them.
+        BOOST_CHECK(ops.call({"COMMAND", "INFO", "touch"})
+                        .find("*2\r\n$26\r\nrequest_policy:multi_shard\r\n"
+                              "$23\r\nresponse_policy:agg_sum\r\n") != std::string::npos);
     }
 }
 
@@ -2050,6 +2064,10 @@ BOOST_AUTO_TEST_CASE(hello_and_info_identify_kythira, *boost::unit_test::timeout
     BOOST_CHECK(info.find("\r\nkythira_version:9.8.7+gabc1234\r\n") != std::string::npos);
     BOOST_CHECK(info.find("\r\nredis_mode:standalone\r\n") != std::string::npos);
     BOOST_CHECK(info.find("-kythira") == std::string::npos);
+    // Read unconditionally by client test suites (redis-py's conftest).
+    BOOST_CHECK(info.find("\r\narch_bits:" + std::to_string(sizeof(void*) * 8) + "\r\n") !=
+                std::string::npos);
+    BOOST_CHECK(info.find("\r\n# Cluster\r\ncluster_enabled:0\r\n") != std::string::npos);
 }
 
 // The Cluster compatibility mode (phase 2) is the only thing that makes the
@@ -2065,7 +2083,9 @@ BOOST_AUTO_TEST_CASE(cluster_mode_only_with_the_compatibility_mode,
     BOOST_REQUIRE_EQUAL(ops.auth("ops", "ops-secret"), "+OK\r\n");
     BOOST_CHECK(ops.call({"HELLO", "2"}).find("$4\r\nmode\r\n$7\r\ncluster\r\n") !=
                 std::string::npos);
-    BOOST_CHECK(ops.call({"INFO"}).find("\r\nredis_mode:cluster\r\n") != std::string::npos);
+    const auto info = ops.call({"INFO"});
+    BOOST_CHECK(info.find("\r\nredis_mode:cluster\r\n") != std::string::npos);
+    BOOST_CHECK(info.find("\r\ncluster_enabled:1\r\n") != std::string::npos);
 }
 
 // A compatibility level with a vendor suffix, or not three numbers, would

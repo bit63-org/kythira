@@ -97,6 +97,9 @@ struct redis_command_info {
     std::string_view group;  ///< `COMMAND DOCS` group: string, generic, hash, ...
     std::string_view since;  ///< the Redis release that introduced it
     std::uint8_t task;       ///< the redis-general-data-types task that ships it (0: earlier spec)
+    /// `COMMAND INFO` tips as Redis 7.2 reports them, space-separated
+    /// (`request_policy:multi_shard response_policy:agg_sum`); empty for none.
+    std::string_view tips;
 };
 
 /// A command removed after its id was issued. Its id stays taken, so an old

@@ -951,8 +951,11 @@ watch the gateway, without a client walking the keyspace.
 - `DBSIZE` counts every live key across the cluster exactly, by walking
   the shards; it is not an estimate.
 - `INFO [section ...]` offers `server`, `clients`, `memory`, `stats`,
-  `commandstats`, `errorstats` and `keyspace`, plus `default`, `all` and
-  `everything`. `keyspace` shows the cluster-wide `db0:keys=N,expires=M`
+  `commandstats`, `errorstats`, `cluster` and `keyspace`, plus `default`,
+  `all` and `everything`. `server` carries `arch_bits` and `cluster` carries
+  `cluster_enabled` (1 only in the Cluster compatibility mode), because
+  client libraries and their test suites read both without checking.
+  `keyspace` shows the cluster-wide `db0:keys=N,expires=M`
   and this node's own counts as `local_*` lines. When a shard cannot be
   paged (no leader, or a peer too old to page during a rolling upgrade),
   `db0` falls back to this node's own counts and `kythira_keyspace_scope`
@@ -989,7 +992,7 @@ command`, and `DEL` takes one key, as before.
 | `MSET k v [k v ...]` | Every pair, all or none. Under `KYTHIRA_REDIS_IMMUTABLE_VALUES` a key that already holds the same bytes is left out, and one holding other bytes refuses the whole command |
 | `MGET k [k ...]` | Each key's committed value at the connection's isolation, or a null |
 | `DEL k [k ...]` | Deletes, in one transaction, every key that was present; replies with how many. `DEL` with one key is the plain single-key command |
-| `MULTI` ... `EXEC` | Queues every string, keyspace, hash, set and list command that names its keys (not `SCAN`, `KEYS`, `RANDOMKEY`, server, connection or `KYTHIRA.*` commands), then runs them as one transaction. Each runs at `EXEC` and sees the transaction's own earlier writes. A command's runtime error (`WRONGTYPE`, a value conflict, a bad option) is its element of the reply and writes nothing, as in Redis. If the commit does not commit, `EXEC` answers with that error and nothing applied. A command refused while queuing (one `EXEC` cannot run, the wrong number of arguments, not permitted) makes `EXEC` answer `EXECABORT`, as in Redis |
+| `MULTI` ... `EXEC` | Queues every string, keyspace, hash, set and list command that names its keys (not `SCAN`, `KEYS`, `RANDOMKEY`, server, connection or `KYTHIRA.*` commands), plus `PING` and `ECHO`, then runs them as one transaction. Each runs at `EXEC` and sees the transaction's own earlier writes. A command's runtime error (`WRONGTYPE`, a value conflict, a bad option) is its element of the reply and writes nothing, as in Redis. If the commit does not commit, `EXEC` answers with that error and nothing applied. A command refused while queuing (one `EXEC` cannot run, the wrong number of arguments, not permitted) makes `EXEC` answer `EXECABORT`, as in Redis |
 | `DISCARD` | Drops the queue |
 | `KYTHIRA.ISOLATION [level]` | Shows or sets this connection's isolation |
 | `WATCH k [k ...]`, `UNWATCH` | Snapshot build only (refused on the tier-1 build). The next `EXEC` commits only if no watched key changed since the first `WATCH`; otherwise it answers a null array and applies nothing. `EXEC`, `DISCARD` and `UNWATCH` clear the watch. See below |
@@ -1088,8 +1091,11 @@ What changes with the build:
   watched key validated. Unlike Redis, a key changed between two `WATCH`
   commands also aborts the `EXEC` (they share the first timestamp), and the
   reads queued in the `MULTI` see the data as of the `WATCH`, not as of the
-  `EXEC`. An `EXEC` with no writes therefore never aborts: its reads are
-  one consistent snapshot taken at the `WATCH`.
+  `EXEC`. An `EXEC` with no writes, or none at all, still answers a null
+  array if a watched key changed, as in Redis: each shard checks its
+  watched keys as a prepare would and is released at once, so it costs two
+  log entries per shard watched. Unchanged, its reads are one consistent
+  snapshot taken at the `WATCH`.
 
 ### Isolation levels
 
@@ -1107,6 +1113,28 @@ are on different shards.
 Asking for a level the build does not offer is an error, at startup for
 `KYTHIRA_REDIS_TXN_ISOLATION` and from `KYTHIRA.ISOLATION` for a connection.
 It is never silently downgraded.
+
+## Conformance suites
+
+Three container suites check the gateway against what Redis clients
+expect (`.kiro/specs/redis-general-data-types/` Requirement 23):
+
+- `docker-redis-differential-tests` sends one generated command stream to
+  Redis 7.2, Valkey 8 and a Kythira cluster and compares every reply
+  (`services/redis/tests/differential/README.md`).
+- `docker-redis-client-suites-tests` runs the parts of redis-py's,
+  go-redis's and ioredis's own test suites that cover the shipped commands,
+  unmodified, at pinned releases, against a three-node cluster
+  (`services/redis/docker/clients/`). Each library's selection is a list
+  of its test names (`redis-py.txt`, `go-redis.txt`, `ioredis.txt`), and
+  each test left out is listed there with the reason: a command a later
+  task ships (`TIME`, `CONFIG`, `MONITOR`, scripting, blocking pops, sorted
+  sets, GEO, pub/sub), a database other than 0, or one limit Kythira keeps
+  on purpose: at most half the worker pool derives `AUTH` keys at once, so
+  go-redis's test that opens 100 connections together is refused. redis-py
+  runs in RESP2 and RESP3.
+- `docker-redis-rolling-upgrade-tests` rolls an engine cluster through the
+  format gate (*Format level and the rolling upgrade*).
 
 ## Serializer
 

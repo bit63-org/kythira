@@ -23,6 +23,9 @@
 # - `flags`, `acl` and `keys` (first, last, step) are Redis's COMMAND INFO
 #   values; `path` is the design's column (R W M F A, L local); `task` is the
 #   spec task that ships the command (0: an earlier spec).
+# - `tips` (optional) are the COMMAND INFO tips Redis 7.2 reports for the
+#   command, copied from the reference server: client libraries read them
+#   (go-redis routes by request_policy/response_policy).
 #
 # The format is a strict subset of YAML that the generator parses itself
 # (no PyYAML dependency): `commands:` and `retired:` lists of flat maps,
@@ -73,6 +76,7 @@ commands:
     path: M
     status: shipped
     task: 0
+    tips: [request_policy:multi_shard, response_policy:agg_sum]
   - name: EXISTS
     id: 5
     group: generic
@@ -84,6 +88,7 @@ commands:
     path: R
     status: shipped
     task: 0
+    tips: [request_policy:multi_shard, response_policy:agg_sum]
   - name: STRLEN
     id: 6
     group: string
@@ -117,6 +122,7 @@ commands:
     path: R
     status: shipped
     task: 0
+    tips: [nondeterministic_output]
   - name: PING
     id: 9
     group: connection
@@ -128,6 +134,7 @@ commands:
     path: L
     status: shipped
     task: 0
+    tips: [request_policy:all_shards, response_policy:all_succeeded]
   - name: ECHO
     id: 10
     group: connection
@@ -216,6 +223,7 @@ commands:
     path: L
     status: shipped
     task: 0
+    tips: [nondeterministic_output_order]
   - name: INFO
     id: 18
     group: server
@@ -227,6 +235,7 @@ commands:
     path: L
     status: shipped
     task: 0
+    tips: [nondeterministic_output, request_policy:all_shards, response_policy:special]
   - name: DBSIZE
     id: 19
     group: server
@@ -238,6 +247,7 @@ commands:
     path: F
     status: shipped
     task: 0
+    tips: [request_policy:all_shards, response_policy:agg_sum]
   - name: MGET
     id: 20
     group: string
@@ -249,6 +259,7 @@ commands:
     path: M
     status: shipped
     task: 0
+    tips: [request_policy:multi_shard]
   - name: MSET
     id: 21
     group: string
@@ -260,6 +271,7 @@ commands:
     path: M
     status: shipped
     task: 0
+    tips: [request_policy:multi_shard, response_policy:all_succeeded]
   - name: MULTI
     id: 22
     group: transactions
@@ -513,6 +525,7 @@ commands:
     path: M
     status: shipped
     task: 3
+    tips: [request_policy:multi_shard, response_policy:agg_sum]
   - name: TOUCH
     id: 45
     group: generic
@@ -524,6 +537,7 @@ commands:
     path: R
     status: shipped
     task: 3
+    tips: [request_policy:multi_shard, response_policy:agg_sum]
   - name: OBJECT
     id: 46
     group: generic
@@ -601,6 +615,7 @@ commands:
     path: R
     status: shipped
     task: 4
+    tips: [nondeterministic_output]
   - name: EXPIRETIME
     id: 53
     group: generic
@@ -777,6 +792,7 @@ commands:
     path: R
     status: shipped
     task: 7
+    tips: [nondeterministic_output_order]
   - name: HVALS
     id: 69
     group: hash
@@ -788,6 +804,7 @@ commands:
     path: R
     status: shipped
     task: 7
+    tips: [nondeterministic_output_order]
   - name: HGETALL
     id: 70
     group: hash
@@ -799,6 +816,7 @@ commands:
     path: R
     status: shipped
     task: 7
+    tips: [nondeterministic_output_order]
   - name: HINCRBY
     id: 71
     group: hash
@@ -832,6 +850,7 @@ commands:
     path: R
     status: shipped
     task: 7
+    tips: [nondeterministic_output]
   - name: SADD
     id: 74
     group: set
@@ -887,6 +906,7 @@ commands:
     path: R
     status: shipped
     task: 8
+    tips: [nondeterministic_output_order]
   - name: SCARD
     id: 79
     group: set
@@ -909,6 +929,7 @@ commands:
     path: W
     status: shipped
     task: 8
+    tips: [nondeterministic_output]
   - name: SRANDMEMBER
     id: 81
     group: set
@@ -920,6 +941,7 @@ commands:
     path: R
     status: shipped
     task: 8
+    tips: [nondeterministic_output]
   - name: SMOVE
     id: 82
     group: set
@@ -942,6 +964,7 @@ commands:
     path: M
     status: shipped
     task: 8
+    tips: [nondeterministic_output_order]
   - name: SUNION
     id: 84
     group: set
@@ -953,6 +976,7 @@ commands:
     path: M
     status: shipped
     task: 8
+    tips: [nondeterministic_output_order]
   - name: SDIFF
     id: 85
     group: set
@@ -964,6 +988,7 @@ commands:
     path: M
     status: shipped
     task: 8
+    tips: [nondeterministic_output_order]
   - name: SINTERCARD
     id: 86
     group: set
@@ -1206,6 +1231,7 @@ commands:
     path: F
     status: shipped
     task: 12
+    tips: [nondeterministic_output, request_policy:special, response_policy:special]
   - name: HSCAN
     id: 108
     group: hash
@@ -1217,6 +1243,7 @@ commands:
     path: R
     status: shipped
     task: 12
+    tips: [nondeterministic_output]
   - name: SSCAN
     id: 109
     group: set
@@ -1228,6 +1255,7 @@ commands:
     path: R
     status: shipped
     task: 12
+    tips: [nondeterministic_output]
   - name: KEYS
     id: 110
     group: generic
@@ -1239,6 +1267,7 @@ commands:
     path: F
     status: shipped
     task: 12
+    tips: [request_policy:all_shards, nondeterministic_output_order]
   - name: RANDOMKEY
     id: 111
     group: generic
@@ -1250,6 +1279,7 @@ commands:
     path: F
     status: shipped
     task: 12
+    tips: [request_policy:all_shards, response_policy:special, nondeterministic_output]
   - name: KYTHIRA.DELPREFIX
     id: 112
     group: kythira
@@ -1283,6 +1313,7 @@ commands:
     path: A
     status: shipped
     task: 13
+    tips: [request_policy:all_shards, response_policy:all_succeeded]
   - name: FLUSHALL
     id: 115
     group: server
@@ -1294,6 +1325,7 @@ commands:
     path: A
     status: shipped
     task: 13
+    tips: [request_policy:all_shards, response_policy:all_succeeded]
   - name: MEMORY
     id: 116
     group: server

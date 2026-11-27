@@ -606,6 +606,10 @@ protected:
         /// the connection at this time, and a command after it is refused.
         std::optional<std::chrono::system_clock::time_point> _expires;
         std::string _client_name;
+        /// `CLIENT ID`: unique per connection on this node and never
+        /// reused while it runs, like Redis's; 0 only for sessions that
+        /// have no connection (internal replays).
+        std::uint64_t _client_id{0};
         std::string _lib_name;
         std::string _lib_version;
         bool _closing = false;
@@ -1367,6 +1371,9 @@ private:
     std::optional<boost::asio::thread_pool> _workers;
     std::uint16_t _port = 0;
     std::uint16_t _tls_port = 0;
+
+    /// The last `CLIENT ID` handed out.
+    std::atomic<std::uint64_t> _next_client_id{0};
 
     std::mutex _connections_mutex;
     std::unordered_map<connection*, std::weak_ptr<connection>> _connections;

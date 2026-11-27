@@ -558,6 +558,13 @@ jobs:
           path: build/redis-differential-out/
           if-no-files-found: ignore
 
+      # The client-library suites (redis-general-data-types task 14):
+      # redis-py's, go-redis's and ioredis's own tests, the ones that cover
+      # shipped commands, against the same image as the two steps above.
+      - name: docker-redis-client-suites-tests
+        if: success() || failure()
+        run: cmake --build build --target docker-redis-client-suites-tests -j"$(nproc)"
+
       # Rolling upgrade (redis-gateway-module task 7): build the gateway
       # from the last commit before Redis moved into services/redis/ and
       # mix it with this tree's build in one cluster. The old tree is

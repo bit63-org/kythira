@@ -45,6 +45,9 @@ PATHS = {"R": "read", "W": "write", "M": "multi_key", "F": "fan_out",
 STATUSES = ["shipped", "planned"]
 COMMAND_KEYS = ["name", "id", "group", "since", "arity", "flags", "acl", "keys",
                 "path", "status", "task"]
+# Optional: Redis's COMMAND INFO tips, copied from the reference server.
+OPTIONAL_KEYS = ["tips"]
+TIP_RE = re.compile(r"^[a-z_]+(:[a-z_]+)?$")
 NAME_RE = re.compile(r"^[A-Z][A-Z0-9.]*$")
 VERSION_RE = re.compile(r"^\d+\.\d+\.\d+$")
 
@@ -119,9 +122,9 @@ def validate(sections):
     ids = {}
     for e in sections["commands"]:
         where = f"command {e.get('name', '?')}"
-        if sorted(e) != sorted(COMMAND_KEYS):
+        if sorted(k for k in e if k not in OPTIONAL_KEYS) != sorted(COMMAND_KEYS):
             missing = set(COMMAND_KEYS) - set(e)
-            extra = set(e) - set(COMMAND_KEYS)
+            extra = set(e) - set(COMMAND_KEYS) - set(OPTIONAL_KEYS)
             raise RegistryError(f"{where}: missing {sorted(missing)}, unknown {sorted(extra)}")
         name = e["name"]
         if not isinstance(name, str) or not NAME_RE.match(name):
@@ -155,12 +158,16 @@ def validate(sections):
             raise RegistryError(f"{where}: since must be major.minor.patch")
         if not re.fullmatch(r"[a-z]+", e["group"]):
             raise RegistryError(f"{where}: group must be lower-case letters")
+        tips = e.get("tips", [])
+        if not isinstance(tips, list) or any(not TIP_RE.match(t) for t in tips):
+            raise RegistryError(f"{where}: tips must be a list of lower-case tips")
         commands.append({
             "name": name, "id": cid, "group": e["group"], "since": e["since"],
             "arity": to_int(e["arity"], where, -32768, 32767),
             "flags": e["flags"], "acl": e["acl"], "keys": (first, last, step),
             "path": PATHS[e["path"]], "status": e["status"],
             "task": to_int(e["task"], where, 0, 255),
+            "tips": tips,
         })
     retired = []
     for e in sections["retired"]:
@@ -256,7 +263,8 @@ def render(commands, retired):
             f"{mask(c['flags'], 'redis_command_flag')}, "
             f"{mask(c['acl'], 'redis_acl_category')}, {first}, {last}, {step}, "
             f"redis_command_path::{c['path']}, redis_command_status::{c['status']}, "
-            f"\"{c['group']}\", \"{c['since']}\", {c['task']}}},\n")
+            f"\"{c['group']}\", \"{c['since']}\", {c['task']}, "
+            f"\"{' '.join(c['tips'])}\"}},\n")
     out.append("}};\n\n")
     out.append("/// Ids of removed commands, still taken.\n")
     out.append(f"inline constexpr std::array<redis_retired_command, {len(retired)}> "
