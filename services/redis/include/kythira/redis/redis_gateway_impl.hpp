@@ -1252,13 +1252,17 @@ auto redis_gateway<Host, Logger, Metrics>::handle_hello(session& s, const resp_c
 template<typename Host, typename Logger, typename Metrics>
 auto redis_gateway<Host, Logger, Metrics>::handle_client(session& s, const resp_command& cmd)
     -> std::string {
-    if (auto e = authorize(s, "CLIENT", {})) {
-        return *e;
-    }
     if (cmd._argv.size() < 2) {
+        if (auto e = authorize(s, "CLIENT", {})) {
+            return *e;
+        }
         return s._writer.error("ERR wrong number of arguments for 'client' command");
     }
     auto sub = resp_to_upper(cmd._argv[1]);
+    // The subcommand's categories: CLIENT LIST and KILL are @admin.
+    if (auto e = authorize(s, "CLIENT|" + sub, {})) {
+        return *e;
+    }
     if (sub == "SETINFO") {
         if (cmd._argv.size() != 4) {
             return s._writer.error("ERR wrong number of arguments for 'client|setinfo' command");

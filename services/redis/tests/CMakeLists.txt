@@ -212,8 +212,12 @@ target_include_directories(redis_differential_replay_test PRIVATE
 target_compile_definitions(redis_differential_replay_test PRIVATE
     KYTHIRA_REDIS_DIFF_RECS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/differential/recs")
 target_link_libraries(redis_differential_replay_test PRIVATE OpenSSL::SSL OpenSSL::Crypto)
+# Five cases, each on its own cluster: the Redis/Valkey recordings
+# co-located, through a front end without data and through three layers
+# apart, the AWS recordings in recs/aws/ and the ElastiCache access
+# strings (Requirement 25).
 set_tests_properties(redis_differential_replay_test PROPERTIES
-    LABELS "multi-raft;redis;txn" TIMEOUT 600)
+    LABELS "multi-raft;redis;txn" TIMEOUT 900)
 
 # The gateway's in-process cluster tests compile in the `heavy_tu` pool
 # (top-level CMakeLists.txt), as cache_http_front_end_test above does.
@@ -301,6 +305,17 @@ target_include_directories(redis_differential_unit_test PRIVATE
 target_compile_definitions(redis_differential_unit_test PRIVATE
     KYTHIRA_REDIS_DIFF_RECS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/differential/recs")
 set_tests_properties(redis_differential_unit_test PROPERTIES LABELS "unit;redis" TIMEOUT 120)
+
+# The recorder the AWS interop bundle runs inside the VPC (Requirement 25.1):
+# the generator's hash-tagged streams against one endpoint, plaintext or TLS,
+# written as recs/aws/ recordings. A tool, not a test.
+add_executable(redis_differential_record differential/redis_differential_record.cpp)
+target_include_directories(redis_differential_record PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/differential")
+target_link_libraries(redis_differential_record PRIVATE
+    kythira_test_support OpenSSL::SSL OpenSSL::Crypto)
+set_target_properties(redis_differential_record PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests")
 
 # redis-general-data-types task 25: the Lua script sandbox, and the golden
 # that holds amd64 and arm64 to the same results (ci.yml runs both).

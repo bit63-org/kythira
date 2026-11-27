@@ -12,7 +12,9 @@
 /// (`run --rm clients`), which runs each library's selected tests
 /// (services/redis/docker/clients/{redis-py,go-redis,ioredis}.txt) and
 /// exits non-zero if any fails. The client output is the test's message,
-/// so a failure shows which library test broke.
+/// so a failure shows which library test broke, and each suite's JUnit
+/// report is written to $KYTHIRA_CLIENTS_OUT (default
+/// /tmp/kythira-redis-clients-out).
 ///
 /// Run by docker-redis-client-suites-tests, which builds both images. kv1
 /// publishes RESP on a loopback port picked with tests/test_ports.hpp, for
@@ -38,6 +40,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
+#include <filesystem>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -207,6 +210,11 @@ BOOST_AUTO_TEST_CASE(client_library_suites_pass, *boost::unit_test::timeout(3600
                                                                              << c.logs());
     BOOST_REQUIRE_EQUAL(c.call({"KYTHIRA.FORMAT", "UPGRADE", "3"}), "+OK\r\n");
 
+    // The suites' JUnit reports land here (compose.yml mounts it at /out).
+    const auto out =
+        std::filesystem::absolute(env_or("KYTHIRA_CLIENTS_OUT", "/tmp/kythira-redis-clients-out"));
+    std::filesystem::create_directories(out);
+    ::setenv("KYTHIRA_CLIENTS_OUT", out.c_str(), 1);
     const auto run =
         os::real_exec(compose_cmd({"--profile", "clients", "run", "--rm", "-T", "clients"}));
     BOOST_TEST_MESSAGE(run.out);

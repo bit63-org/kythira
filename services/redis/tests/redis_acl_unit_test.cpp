@@ -317,11 +317,13 @@ BOOST_AUTO_TEST_CASE(later_command_rules_win, *boost::unit_test::timeout(30)) {
     BOOST_CHECK(redis_acl::authorize(v, "SET", {"k"}) == acl_decision::deny_command);
     BOOST_CHECK(redis_acl::authorize(v, "INFO", {}) == acl_decision::deny_command);
 
-    // allcommands never reaches a command this build does not ship, and a
-    // rule naming one is refused at parse time.
-    const auto w = only_user("admin * allcommands");
+    // allcommands never reaches a command this build does not ship. A rule
+    // naming one that Redis knows is accepted and matches nothing (a line
+    // written for another server parses, Requirement 25.3); a name no
+    // server knows is refused at parse time.
+    const auto w = only_user("admin * allcommands +shutdown");
     BOOST_CHECK(redis_acl::authorize(w, "SHUTDOWN", {}) == acl_decision::deny_command);
-    BOOST_CHECK_THROW(redis_acl::parse("user w disabled admin * allcommands +shutdown\n"),
+    BOOST_CHECK_THROW(redis_acl::parse("user w disabled admin * allcommands +shutdwon\n"),
                       redis_acl_parse_error);
     // Categories with no command yet are accepted and match nothing.
     const auto x = only_user("read_only * -@pubsub -@sortedset");
@@ -342,8 +344,11 @@ BOOST_AUTO_TEST_CASE(read_and_write_scopes, *boost::unit_test::timeout(30)) {
     BOOST_CHECK(redis_acl::authorize(u, "SET", {"inbox:a"},
                                      redis_key_access::read | redis_key_access::write) ==
                 acl_decision::deny_key);
-    // Metadata reads accept either scope.
-    BOOST_CHECK(redis_acl::authorize(u, "TTL", {"inbox:a"}) == acl_decision::allow);
+    // Metadata reads accept either scope. The TTL family is a read, as in
+    // Redis (key spec `RO ACCESS`).
+    BOOST_CHECK(redis_acl::authorize(u, "TTL", {"inbox:a"}) == acl_decision::deny_key);
+    BOOST_CHECK(redis_acl::authorize(u, "TTL", {"shared:a"}) == acl_decision::allow);
+    BOOST_CHECK(redis_acl::authorize(u, "TYPE", {"inbox:a"}) == acl_decision::allow);
     BOOST_CHECK(redis_acl::authorize(u, "EXISTS", {"shared:a"}) == acl_decision::allow);
     BOOST_CHECK(redis_acl::authorize(u, "EXISTS", {"other:a"}) == acl_decision::deny_key);
     BOOST_CHECK(redis_acl::authorize(u, "MGET", {"shared:a", "own:b"}) == acl_decision::allow);
@@ -375,4 +380,73 @@ BOOST_AUTO_TEST_CASE(new_syntax_refuses_what_it_cannot_honour, *boost::unit_test
                               redis_acl_parse_error);
         }
     }
+}
+
+// Requirement 25.3: an ElastiCache access string after the `none` role.
+// recs/acl/access-strings.json and the replay test compare whole strings with
+// Redis and Valkey; these pin the parsing itself.
+BOOST_AUTO_TEST_CASE(access_strings_after_the_none_role, *boost::unit_test::timeout(30)) {
+    const auto u = only_user("none on ~app:* &* +@string -@dangerous");
+    BOOST_CHECK(redis_acl::authorize(u, "GET", {"app:1"}) == acl_decision::allow);
+    BOOST_CHECK(redis_acl::authorize(u, "GET", {"other"}) == acl_decision::deny_key);
+    BOOST_CHECK(redis_acl::authorize(u, "HGET", {"app:1"}) == acl_decision::deny_command);
+    BOOST_CHECK(redis_acl::authorize(u, "PING", {}) == acl_decision::deny_command);
+
+    // `off` and `reset` disable; `resetkeys` drops the scopes before it.
+    auto users = redis_acl::parse("user a disabled none off ~* +@all\n");
+    BOOST_CHECK(!users.at(0)._enabled);
+    const auto record = redis_acl::hash_secret("pw", 1000);
+    users = redis_acl::parse("user a " + record + " none on ~* +@all reset on ~b:* +get\n");
+    BOOST_CHECK(users.at(0)._enabled);
+    const auto r = redis_identity_of(users.at(0));
+    BOOST_CHECK(redis_acl::authorize(r, "GET", {"b:1"}) == acl_decision::allow);
+    BOOST_CHECK(redis_acl::authorize(r, "GET", {"a:1"}) == acl_decision::deny_key);
+    BOOST_CHECK(redis_acl::authorize(r, "SET", {"b:1"}) == acl_decision::deny_command);
+    users = redis_acl::parse("user a " + record + " none on ~* +@all reset\n");
+    BOOST_CHECK(!users.at(0)._enabled);
+    // `on` never enables a user whose secret is `disabled`.
+    BOOST_CHECK(!redis_acl::parse("user a disabled none on ~*\n").at(0)._enabled);
+    const auto k = only_user("none on ~d:* resetkeys ~f:* +@all");
+    BOOST_CHECK(redis_acl::authorize(k, "GET", {"d:1"}) == acl_decision::deny_key);
+    BOOST_CHECK(redis_acl::authorize(k, "GET", {"f:1"}) == acl_decision::allow);
+
+    // Commands this build does not ship are valid and match nothing.
+    const auto g = only_user("none on ~* -@all +@read +@geo -setbit -geoadd +zadd");
+    BOOST_CHECK(redis_acl::authorize(g, "GET", {"k"}) == acl_decision::allow);
+
+    // Neither a bare word nor a password word means anything here.
+    for (const auto* bad :
+         {"none on app:", "none on >secret ~*", "none on nopass ~*", "none on ~* +nosuch"}) {
+        BOOST_TEST_CONTEXT(bad) {
+            BOOST_CHECK_THROW((void)redis_acl::parse(std::string("user u disabled ") + bad + "\n"),
+                              redis_acl_parse_error);
+        }
+    }
+    // A `none` user is read-only to the cache's HTTP front end, which knows
+    // roles and not rules.
+    BOOST_CHECK(u._role == redis_role::read_only);
+}
+
+// Redis matches a subcommand by its own categories, and a key needs one
+// scope that grants all it needs; positions differ for COPY and the moves.
+BOOST_AUTO_TEST_CASE(subcommand_categories_and_key_positions, *boost::unit_test::timeout(30)) {
+    const auto reader = only_user("none on ~* +@read");
+    BOOST_CHECK(redis_acl::command_allowed(reader, "OBJECT|ENCODING"));
+    BOOST_CHECK(redis_acl::command_allowed(reader, "MEMORY|USAGE"));
+    BOOST_CHECK(!redis_acl::command_allowed(reader, "OBJECT|HELP"));
+    const auto conn = only_user("none on ~* +@connection -@dangerous");
+    BOOST_CHECK(redis_acl::command_allowed(conn, "CLIENT|ID"));
+    BOOST_CHECK(!redis_acl::command_allowed(conn, "CLIENT|LIST"));
+    BOOST_CHECK(!redis_acl::command_allowed(only_user("read_write *"), "CLIENT|KILL"));
+    BOOST_CHECK(redis_acl::command_allowed(only_user("none on ~* +client"), "CLIENT|LIST"));
+
+    const auto split = only_user("none on %R~* %W~a: +@all");
+    BOOST_CHECK(redis_acl::authorize(split, "INCR", {"a:1"}) == acl_decision::deny_key);
+    BOOST_CHECK(redis_acl::authorize(split, "COPY", {"d:1", "a:1"}) == acl_decision::allow);
+    BOOST_CHECK(redis_acl::authorize(split, "COPY", {"a:1", "d:1"}) == acl_decision::deny_key);
+    BOOST_CHECK(redis_acl::authorize(split, "SINTERSTORE", {"a:1", "d:1", "e:1"}) ==
+                acl_decision::allow);
+    const auto both = only_user("none on ~a: %W~b: +@all");
+    BOOST_CHECK(redis_acl::authorize(both, "LMOVE", {"a:1", "b:1"}) == acl_decision::allow);
+    BOOST_CHECK(redis_acl::authorize(both, "LMOVE", {"b:1", "a:1"}) == acl_decision::deny_key);
 }

@@ -12,6 +12,10 @@ reply is compared.
 | `redis_differential_replay_test.cpp` | `recs/` replayed against an in-process three-node gateway cluster (snapshot isolation, shards cut at "e"), in CTest: the quick check for a command PR |
 | `redis_differential_test.cpp` | the container run (`docker-redis-differential-tests`): the daemon, live reference servers, Docker and rootless Podman |
 | `recs/` | what Redis 7.2 and Valkey 8 answered to the default streams (seeds 1-3, 600 commands) |
+| `recs/aws/` | what ElastiCache Serverless (Valkey, Redis OSS) and MemoryDB answered to the same streams with hash-tagged keys (Requirement 25.1), from the AWS interop bundle; empty until its first run |
+| `recs/acl/access-strings.json` | what Redis 7.2 and Valkey 8's `ACL DRYRUN` say of each ElastiCache access string and probe in `redis_acl_probes.hpp` (Requirement 25.3) |
+| `redis_acl_probes.hpp` | the access strings, the probes (an argument vector per command) and that recording's format |
+| `redis_differential_record.cpp` | the recorder the AWS bundle runs in the VPC: one endpoint, plaintext or TLS, password or IAM token (`services/redis/aws-interop/`) |
 | `../../docker/differential/` | compose file, shared gateway settings (`kythira.env`), ACL |
 
 ## What counts as a match
@@ -70,6 +74,22 @@ one key in twelve comes from another family, so `WRONGTYPE` is compared too.
 Both the container run and the replay raise the format gate
 (`KYTHIRA.FORMAT UPGRADE 3`) before streaming.
 
+## AWS recordings and access strings
+
+ElastiCache Serverless and MemoryDB are always clustered and refuse a
+multi-key command across slots, so their streams use the tag `{s<seed>}`:
+the same commands, every key in one slot. The replay compares each AWS
+recording alone, with two allowances: the difference table's rules, and,
+where Redis 7.2 and Valkey 8 themselves disagree (the nested `MULTI`
+error), the other engine's answer taken from the local recordings of the
+same seed. Anything else is `DIFFERS`.
+
+The access strings are checked by logging in to the in-process cluster as
+a user per string (`user asN <secret> none <access string>`) and sending
+every probe, so the gateway's own key extraction is what is compared with
+`ACL DRYRUN`. Adding a string or a probe makes the recording stale (the
+case fails until it is regenerated as below).
+
 ## Regenerating recs/
 
 The reference servers alone, no Kythira build needed:
@@ -79,4 +99,8 @@ KYTHIRA_DIFF_KYTHIRA_SERVICES= KYTHIRA_DIFF_OUT=/tmp/diff \
   build/tests/docker_chaos/docker_redis_differential_test
 cp /tmp/diff/recs/redis-seed*.json /tmp/diff/recs/valkey-seed*.json \
   services/redis/tests/differential/recs/
+cp /tmp/diff/recs/acl/access-strings.json services/redis/tests/differential/recs/acl/
 ```
+
+`recs/aws/` comes only from the AWS interop bundle
+(`services/redis/aws-interop/README.md`), which needs Clark's go per run.

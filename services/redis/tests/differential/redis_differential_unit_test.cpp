@@ -288,7 +288,7 @@ BOOST_AUTO_TEST_CASE(committed_recordings_match_the_generator) {
         BOOST_TEST(rec.generator_version == diff::k_generator_version, f.path());
         diff::generator_options opt;
         opt.length = rec.length;
-        opt.tag = "s" + std::to_string(rec.seed);
+        opt.tag = rec.key_tag();
         const auto stream = diff::generate(rec.seed, opt);
         BOOST_REQUIRE_EQUAL(stream.size(), rec.entries.size());
         for (std::size_t i = 0; i < stream.size(); ++i) {
@@ -313,6 +313,64 @@ BOOST_AUTO_TEST_CASE(committed_recordings_match_the_generator) {
         BOOST_TEST_MESSAGE("seed " << seed << ": Redis " << r.version << " and Valkey " << v.version
                                    << " disagree on " << differ << " replies");
     }
+}
+
+// recs/aws/ holds what ElastiCache (Valkey and Redis OSS) and MemoryDB
+// answered (Requirement 25.1), recorded by the dispatch-only real-cloud
+// bundle with redis_differential_record. Each must still be its seed's
+// stream under its hash tag, and name the engine, version and date. The
+// directory is empty until the first recording run.
+BOOST_AUTO_TEST_CASE(committed_aws_recordings_match_the_generator) {
+    const fs::path dir = fs::path(KYTHIRA_REDIS_DIFF_RECS_DIR) / "aws";
+    if (!fs::exists(dir)) {
+        BOOST_TEST_MESSAGE("no AWS recordings yet");
+        return;
+    }
+    for (const auto& f : fs::directory_iterator(dir)) {
+        if (f.path().extension() != ".json") {
+            continue;
+        }
+        std::ifstream in(f.path());
+        std::stringstream text;
+        text << in.rdbuf();
+        const auto rec = diff::recording_from_json(boost::json::parse(text.str()));
+        BOOST_TEST((rec.server == "elasticache-valkey" || rec.server == "elasticache-redis" ||
+                    rec.server == "memorydb"),
+                   f.path());
+        BOOST_TEST(!rec.version.empty(), f.path());
+        BOOST_TEST(rec.date.size() == 10U, f.path());
+        BOOST_TEST(rec.tag == "{s" + std::to_string(rec.seed) + "}", f.path());
+        diff::generator_options opt;
+        opt.length = rec.length;
+        opt.tag = rec.key_tag();
+        const auto stream = diff::generate(rec.seed, opt);
+        BOOST_REQUIRE_EQUAL(stream.size(), rec.entries.size());
+        for (std::size_t i = 0; i < stream.size(); ++i) {
+            BOOST_TEST((stream[i].argv == rec.entries[i].argv), f.path() << " entry " << i);
+            BOOST_CHECK_NO_THROW(diff::parse_one(rec.entries[i].resp2));
+            if (!rec.entries[i].resp3.empty()) {
+                BOOST_CHECK_NO_THROW(diff::parse_one(rec.entries[i].resp3));
+            }
+        }
+    }
+}
+
+// A recording's tag survives a round trip, and one without a tag keeps its
+// original bytes (the committed Redis and Valkey recordings have none).
+BOOST_AUTO_TEST_CASE(recording_tag_round_trips) {
+    diff::recording r;
+    r.server = "memorydb";
+    r.version = "7.1";
+    r.date = "2026-11-19";
+    r.seed = 2;
+    r.length = 1;
+    r.entries.push_back({{"GET", "a:{s2}"}, "get", "$-1\r\n", "_\r\n"});
+    BOOST_TEST(r.key_tag() == "s2");
+    BOOST_TEST(diff::serialize(r).find("\"tag\"") == std::string::npos);
+    r.tag = "{s2}";
+    const auto back = diff::recording_from_json(boost::json::parse(diff::serialize(r)));
+    BOOST_TEST(back.tag == "{s2}");
+    BOOST_TEST(back.key_tag() == "{s2}");
 }
 
 BOOST_AUTO_TEST_SUITE_END()

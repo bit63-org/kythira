@@ -12,6 +12,9 @@
 #   KYTHIRA_REDIS_PORT      gateway port (default 6379)
 #   KYTHIRA_REDIS_USER      ACL user (default ops)
 #   KYTHIRA_REDIS_PASSWORD  its secret (default ops-secret)
+#   KYTHIRA_REDIS_TLS       1: connect with TLS, checking the server against
+#                           the system CA store (ElastiCache and MemoryDB,
+#                           for the AWS interop bundle)
 #   KYTHIRA_CLIENT_SUITES   which to run (default "redis-py go-redis ioredis")
 #   KYTHIRA_CLIENT_OUT      directory for each suite's report (default /out,
 #                           when it exists)
@@ -27,6 +30,13 @@ host=${KYTHIRA_REDIS_HOST:-kv1}
 port=${KYTHIRA_REDIS_PORT:-6379}
 user=${KYTHIRA_REDIS_USER:-ops}
 password=${KYTHIRA_REDIS_PASSWORD:-ops-secret}
+tls=${KYTHIRA_REDIS_TLS:-0}
+scheme=redis
+json_tls=false
+if [ "$tls" = 1 ]; then
+    scheme=rediss
+    json_tls=true
+fi
 suites=${KYTHIRA_CLIENT_SUITES:-redis-py go-redis ioredis}
 out=${KYTHIRA_CLIENT_OUT:-/out}
 [ -d "$out" ] || out=$(mktemp -d)
@@ -48,7 +58,7 @@ run_redis_py() {
         # shellcheck disable=SC2086
         /opt/redis-py-venv/bin/python -m pytest -p no:cacheprovider -q \
             --timeout 120 --protocol="$protocol" \
-            --redis-url="redis://$user:$password@$host:$port/0" \
+            --redis-url="$scheme://$user:$password@$host:$port/0" \
             --junitxml="$out/redis-py-resp$protocol.xml" \
             $ids || status=1
     done
@@ -59,8 +69,8 @@ run_go_redis() {
     echo "== go-redis"
     cd /opt/go-redis || return 1
     endpoints=$(mktemp)
-    printf '{"kythira": {"username": "%s", "password": "%s", "tls": false, "endpoints": ["redis://%s:%s"]}}\n' \
-        "$user" "$password" "$host" "$port" > "$endpoints"
+    printf '{"kythira": {"username": "%s", "password": "%s", "tls": %s, "endpoints": ["%s://%s:%s"]}}\n' \
+        "$user" "$password" "$json_tls" "$scheme" "$host" "$port" > "$endpoints"
     # One alternation of the selected spec texts, each escaped and anchored
     # at its end (Ginkgo matches the focus against the full spec text).
     focus=$(selected "$lists/go-redis.txt" | python3 -c '
@@ -84,7 +94,7 @@ run_ioredis() {
     # shellcheck disable=SC2086
     KYTHIRA_IOREDIS_TESTS="$lists/ioredis.txt" \
     KYTHIRA_REDIS_HOST="$host" KYTHIRA_REDIS_PORT="$port" \
-    KYTHIRA_REDIS_USER="$user" KYTHIRA_REDIS_PASSWORD="$password" \
+    KYTHIRA_REDIS_USER="$user" KYTHIRA_REDIS_PASSWORD="$password" KYTHIRA_REDIS_TLS="$tls" \
     TS_NODE_TRANSPILE_ONLY=true NODE_ENV=test \
         npx mocha --no-experimental-strip-types --reporter spec \
         test/helpers/global.ts test/helpers/kythira-setup.ts $files

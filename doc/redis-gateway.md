@@ -192,8 +192,12 @@ user <name> <secret-record|nopass|disabled> <role> [rule or scope ...] [cert=<su
   connection commands, `COMMAND`, `MULTI`/`EXEC`), `read_write` is
   `+@all -@admin -@dangerous` (adds `SET`, `DEL` and every write) and
   `admin` is `+@all` (adds `INFO` and `KYTHIRA.FORMAT`). `ro` and `rw` are
-  accepted abbreviations. A command's categories are the ones `COMMAND
-  INFO` reports.
+  accepted abbreviations. `none` starts from no commands, as a Redis or
+  ElastiCache user does, so an access string can follow it verbatim (see
+  *ElastiCache access strings* below). A command's categories are the ones
+  `COMMAND INFO` reports; a subcommand is matched by its own, as in Redis
+  (`OBJECT ENCODING` is `@read`, `CLIENT LIST` and `CLIENT KILL` are
+  `@admin @dangerous`).
 - Rules after the role edit that set, left to right, the later rule
   winning as in Redis: `+@<category>` / `-@<category>` (`@string`, `@hash`,
   `@set`, `@list`, `@keyspace`, `@read`, `@write`, `@admin`,
@@ -201,14 +205,23 @@ user <name> <secret-record|nopass|disabled> <role> [rule or scope ...] [cert=<su
   categories with no command in this build yet, like `@sortedset`, are
   accepted and match nothing), `+<command>` / `-<command>`, and
   `allcommands` / `nocommands`. A rule never reaches a command the build
-  does not ship. Subcommand rules (`+client|list`) are refused.
+  does not ship; one naming a command Redis 7.2 or Valkey 8 knows that this
+  build does not ship (`-setbit`) is accepted and matches nothing, and a
+  name neither knows rejects the file. Subcommand rules (`+client|list`)
+  are refused for a command this build ships.
 - Key scopes are prefixes. A bare word, or `~prefix`, lets the user read and
   write keys under it; `*`, `~*` and `allkeys` mean every key.
   `%R~prefix` grants reads only and `%W~prefix` writes only (`%RW~` is
-  `~`). A command that only looks at a key's metadata (`EXISTS`, `TYPE`,
-  the TTL family, `STRLEN`, `TOUCH`, `OBJECT`) accepts either scope; one
-  that both writes and returns or uses the old value (`INCR`, `GETDEL`,
-  `GETEX`, `GETSET`, `SET ... GET`) needs both. A trailing `*` is
+  `~`). What a command needs of each key follows Redis's key specs. One
+  that only looks at a key's metadata (`EXISTS`, `TYPE`, `STRLEN`,
+  `TOUCH`, `OBJECT`, `MEMORY USAGE`) accepts either scope; the TTL family
+  reads. One that both writes and returns or uses the old value (`INCR`,
+  `GETDEL`, `GETEX`, `GETSET`, `SET ... GET`) needs a scope granting both,
+  as in Redis: `%R~*` with `%W~app:` does not let `INCR app:n` through.
+  Sources and destinations differ: `COPY` and the `*STORE` set commands
+  read their sources and only write the destination, and `RENAME`,
+  `SMOVE`, `LMOVE` and `RPOPLPUSH` read and write the source but only
+  write the destination. A trailing `*` is
   optional (`~app:*` is `~app:`); any other glob character rejects the
   file. A user with no scope can run `PING` and nothing that names a key:
   scope is granted, never assumed.
@@ -246,6 +259,28 @@ beginning with `+`, `-`, `~` or `%`, or spelled `allkeys`, `allcommands`,
 `nocommands` or `mutable~...`, is now syntax: write such a prefix as
 `~<prefix>`. `services/redis/tests/golden/redis/acl_permissions.txt` pins
 what the original lines grant.
+
+**ElastiCache access strings** (redis-general-data-types Requirement
+25.3). After the `none` role, a line reads an ElastiCache or Redis access
+string as ElastiCache does:
+
+```
+user app pbkdf2-sha256$600000$...$...  none on ~app:* &* +@string -@dangerous
+```
+
+`on` and `off` enable and disable the user (`on` never enables one whose
+secret is `disabled`); `&<pattern>`, `allchannels` and `resetchannels` are
+accepted and grant nothing until pub/sub ships; `resetkeys` drops the key
+scopes before it and `reset` starts the user over (disabled, no commands,
+no keys). A bare word is an error rather than a key prefix, and so is a
+password word (`>secret`, `nopass`): the secret is the line's third word.
+Key patterns are prefixes here as everywhere (`~app:*`), so a pattern
+with a glob in the middle (`~user:*:profile`) rejects the file. To the
+cache's HTTP front end, which knows roles and not rules, a `none` user is
+`read_only`. The replay test logs in with 22 such strings (ElastiCache's
+own examples and one per kind of word) and sends a probe for every
+command: the gateway grants exactly what Redis 7.2 and Valkey 8's
+`ACL DRYRUN` grant (`services/redis/tests/differential/recs/acl/`).
 
 Example, the shape of a build farm:
 
@@ -1135,6 +1170,16 @@ expect (`.kiro/specs/redis-general-data-types/` Requirement 23):
   runs in RESP2 and RESP3.
 - `docker-redis-rolling-upgrade-tests` rolls an engine cluster through the
   format gate (*Format level and the rolling upgrade*).
+
+AWS's managed Redis (Requirement 25) is covered without an AWS account on
+every run: `redis_differential_replay_test` replays what ElastiCache
+Serverless (Valkey and Redis OSS) and MemoryDB answered to the
+differential streams (`recs/aws/`) and checks the ElastiCache access
+strings above. Those recordings come from a dispatch-only workflow,
+`redis-aws-interop.yml`, which also runs the three client suites against
+AWS and compares them with Kythira's, checks an ElastiCache IAM auth token,
+reports the cost and deletes what it made; every run needs Clark's go
+(`services/redis/aws-interop/README.md`).
 
 ## Serializer
 

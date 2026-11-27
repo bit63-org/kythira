@@ -1,0 +1,29 @@
+# Copyright (c) 2026 Clark Rawlins
+# SPDX-License-Identifier: Apache-2.0
+
+# The differential recorder (services/redis/tests/differential/
+# redis_differential_record.cpp) on its own, for the AWS interop bundle's
+# runner inside the VPC (.kiro/specs/redis-general-data-types/
+# Requirement 25). It needs only the generator header, Boost.JSON and
+# OpenSSL, so it builds here without the rest of the tree.
+#
+#   docker build -f services/redis/aws-interop/Dockerfile.recorder \
+#       -t kythira-redis-recorder:interop .
+
+ARG REGISTRY=docker.io/
+
+FROM ${REGISTRY}library/ubuntu:24.04@sha256:73b999393d07f2bf65a40373778a44dc9a6d54ad7718d29247d8ff9413c4d6a8 AS build
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends g++ libboost-dev libboost-json-dev libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+COPY services/redis/tests/differential/redis_differential.hpp \
+     services/redis/tests/differential/redis_differential_record.cpp /src/
+RUN g++ -std=c++23 -O2 -I/src /src/redis_differential_record.cpp \
+        -o /redis_differential_record -lboost_json -lssl -lcrypto -pthread
+
+FROM ${REGISTRY}library/ubuntu:24.04@sha256:73b999393d07f2bf65a40373778a44dc9a6d54ad7718d29247d8ff9413c4d6a8
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libboost-json1.83.0 libssl3t64 ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=build /redis_differential_record /usr/local/bin/redis_differential_record
+ENTRYPOINT ["/usr/local/bin/redis_differential_record"]

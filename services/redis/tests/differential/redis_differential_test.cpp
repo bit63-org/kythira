@@ -5,6 +5,7 @@
 #include <boost/test/unit_test.hpp>
 
 #include "os_faults.hpp"
+#include "redis_acl_probes.hpp"
 #include "redis_differential.hpp"
 #include "test_ports.hpp"
 
@@ -42,6 +43,10 @@
 //
 //   $KYTHIRA_DIFF_OUT/difference-table.md   every row where any two disagree
 //   $KYTHIRA_DIFF_OUT/recs/<server>-seed<N>.json   what each server answered
+//   $KYTHIRA_DIFF_OUT/recs/acl/access-strings.json what each reference's
+//       ACL DRYRUN says of every access string and probe in
+//       redis_acl_probes.hpp (Requirement 25.3; the replay test checks the
+//       gateway against it)
 //
 // and fails if a Kythira reply differs from both references with no rule to
 // cover it.
@@ -466,6 +471,27 @@ BOOST_AUTO_TEST_CASE(differential_against_reference_servers) {
                 << diff::serialize(rec);
         }
     }
+
+    // ElastiCache access strings: what Redis and Valkey grant.
+    diff::acl_recording acl;
+    acl.date = today();
+    acl.probes = diff::acl_probes();
+    for (const auto* server : {"redis", "valkey"}) {
+        acl.versions[server] = versions.at(server);
+        auto admin = open_session(s.find(server), 2);
+        const auto decisions = diff::record_acl_decisions(
+            [&](const std::vector<std::string>& argv) { return admin->call(argv); });
+        if (acl.decisions.empty()) {
+            for (const auto& [access, d] : decisions) {
+                acl.decisions.push_back({access, {}});
+            }
+        }
+        for (std::size_t i = 0; i < decisions.size(); ++i) {
+            acl.decisions[i].second[server] = decisions[i].second;
+        }
+    }
+    fs::create_directories(out_dir / "recs" / "acl");
+    std::ofstream(out_dir / "recs" / "acl" / "access-strings.json") << diff::serialize(acl);
 
     std::ostringstream summary;
     summary << "# Redis differential run\n\n"

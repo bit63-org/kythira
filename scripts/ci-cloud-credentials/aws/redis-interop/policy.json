@@ -1,0 +1,159 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "RedisInteropElastiCache",
+      "Effect": "Allow",
+      "Action": [
+        "elasticache:CreateServerlessCache",
+        "elasticache:DeleteServerlessCache",
+        "elasticache:DescribeServerlessCaches",
+        "elasticache:CreateUser",
+        "elasticache:DeleteUser",
+        "elasticache:DescribeUsers",
+        "elasticache:CreateUserGroup",
+        "elasticache:DeleteUserGroup",
+        "elasticache:DescribeUserGroups",
+        "elasticache:AddTagsToResource",
+        "elasticache:Connect"
+      ],
+      "Resource": [
+        "arn:aws:elasticache:*:{{ACCOUNT_ID}}:serverlesscache:kyt-ri-*",
+        "arn:aws:elasticache:*:{{ACCOUNT_ID}}:user:kyt-ri-*",
+        "arn:aws:elasticache:*:{{ACCOUNT_ID}}:usergroup:kyt-ri-*"
+      ]
+    },
+    {
+      "Sid": "RedisInteropElastiCacheDescribeAll",
+      "Effect": "Allow",
+      "Action": [
+        "elasticache:DescribeUsers",
+        "elasticache:DescribeUserGroups",
+        "elasticache:DescribeServerlessCaches"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "RedisInteropMemoryDB",
+      "Effect": "Allow",
+      "Action": [
+        "memorydb:CreateCluster",
+        "memorydb:DeleteCluster",
+        "memorydb:DescribeClusters",
+        "memorydb:CreateUser",
+        "memorydb:DeleteUser",
+        "memorydb:DescribeUsers",
+        "memorydb:CreateACL",
+        "memorydb:DeleteACL",
+        "memorydb:DescribeACLs",
+        "memorydb:CreateSubnetGroup",
+        "memorydb:DeleteSubnetGroup",
+        "memorydb:DescribeSubnetGroups",
+        "memorydb:TagResource"
+      ],
+      "Resource": [
+        "arn:aws:memorydb:*:{{ACCOUNT_ID}}:cluster/kyt-ri-*",
+        "arn:aws:memorydb:*:{{ACCOUNT_ID}}:user/kyt-ri-*",
+        "arn:aws:memorydb:*:{{ACCOUNT_ID}}:acl/kyt-ri-*",
+        "arn:aws:memorydb:*:{{ACCOUNT_ID}}:subnetgroup/kyt-ri-*",
+        "arn:aws:memorydb:*:{{ACCOUNT_ID}}:parametergroup/*"
+      ]
+    },
+    {
+      "Sid": "RedisInteropServiceLinkedRoles",
+      "Effect": "Allow",
+      "Action": "iam:CreateServiceLinkedRole",
+      "Resource": [
+        "arn:aws:iam::{{ACCOUNT_ID}}:role/aws-service-role/elasticache.amazonaws.com/*",
+        "arn:aws:iam::{{ACCOUNT_ID}}:role/aws-service-role/memorydb.amazonaws.com/*"
+      ],
+      "Condition": {
+        "StringLike": {
+          "iam:AWSServiceName": ["elasticache.amazonaws.com", "memorydb.amazonaws.com"]
+        }
+      }
+    },
+    {
+      "Sid": "RedisInteropNetworkForServices",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:CreateNetworkInterface",
+        "ec2:DeleteNetworkInterface",
+        "ec2:DescribeNetworkInterfaces",
+        "ec2:CreateVpcEndpoint",
+        "ec2:DeleteVpcEndpoints",
+        "ec2:DescribeVpcEndpoints",
+        "ec2:ModifyVpcEndpoint"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "RedisInteropRunner",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:RunInstances",
+        "ec2:CreateSecurityGroup",
+        "ec2:AuthorizeSecurityGroupIngress",
+        "ec2:DescribeVpcs",
+        "ec2:DescribeSubnets",
+        "ec2:DescribeSecurityGroups",
+        "ec2:DescribeInstances",
+        "ec2:DescribeInstanceTypeOfferings",
+        "ec2:DescribeImages"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "RedisInteropTagOnCreate",
+      "Effect": "Allow",
+      "Action": "ec2:CreateTags",
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "ec2:CreateAction": ["RunInstances", "CreateSecurityGroup"]
+        }
+      }
+    },
+    {
+      "Sid": "RedisInteropOwnedOnly",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:TerminateInstances",
+        "ec2:GetConsoleOutput",
+        "ec2:DeleteSecurityGroup"
+      ],
+      "Resource": [
+        "arn:aws:ec2:*:{{ACCOUNT_ID}}:instance/*",
+        "arn:aws:ec2:*:{{ACCOUNT_ID}}:security-group/*"
+      ],
+      "Condition": {
+        "Null": {
+          "aws:ResourceTag/kythira:redis-interop": "false"
+        }
+      }
+    },
+    {
+      "Sid": "RedisInteropAmazonLinuxAmi",
+      "Effect": "Allow",
+      "Action": "ssm:GetParameter",
+      "Resource": "arn:aws:ssm:*::parameter/aws/service/ami-amazon-linux-latest/*"
+    },
+    {
+      "Sid": "RedisInteropBucket",
+      "Effect": "Allow",
+      "Action": [
+        "s3:CreateBucket",
+        "s3:DeleteBucket",
+        "s3:PutBucketTagging",
+        "s3:ListBucket",
+        "s3:PutObject",
+        "s3:GetObject",
+        "s3:DeleteObject"
+      ],
+      "Resource": [
+        "arn:aws:s3:::kyt-ri-*",
+        "arn:aws:s3:::kyt-ri-*/*"
+      ]
+    }
+  ]
+}

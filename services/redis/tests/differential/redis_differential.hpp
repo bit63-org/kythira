@@ -1409,13 +1409,25 @@ struct recording_entry {
 };
 
 struct recording {
-    std::string server;   // "redis", "valkey", "kythira"
+    /// "redis", "valkey", "kythira", or for the AWS recordings in recs/aws/
+    /// (Requirement 25.1) "elasticache-valkey", "elasticache-redis",
+    /// "memorydb".
+    std::string server;
     std::string version;  // as the server reports it
     std::string date;     // YYYY-MM-DD
     std::uint64_t seed = 0;
     std::size_t length = 0;
     int generator_version = k_generator_version;
+    /// The generator's key tag when it is not `s<seed>`. The AWS streams
+    /// use `{s<seed>}`, a hash tag, so every key of a stream is in one
+    /// cluster slot and a multi-key command is not refused as CROSSSLOT
+    /// by ElastiCache Serverless or MemoryDB, which are always clustered.
+    std::string tag;
     std::vector<recording_entry> entries;
+
+    [[nodiscard]] auto key_tag() const -> std::string {
+        return tag.empty() ? "s" + std::to_string(seed) : tag;
+    }
 };
 
 inline auto to_json(const recording& r) -> boost::json::object {
@@ -1432,7 +1444,7 @@ inline auto to_json(const recording& r) -> boost::json::object {
             {"resp3", e.resp3},
         });
     }
-    return boost::json::object{
+    boost::json::object o{
         {"format", 1},
         {"server", r.server},
         {"version", r.version},
@@ -1442,6 +1454,10 @@ inline auto to_json(const recording& r) -> boost::json::object {
         {"generator_version", r.generator_version},
         {"entries", std::move(entries)},
     };
+    if (!r.tag.empty()) {
+        o["tag"] = r.tag;
+    }
+    return o;
 }
 
 inline auto recording_from_json(const boost::json::value& v) -> recording {
@@ -1456,6 +1472,9 @@ inline auto recording_from_json(const boost::json::value& v) -> recording {
     r.seed = o.at("seed").to_number<std::uint64_t>();
     r.length = o.at("length").to_number<std::size_t>();
     r.generator_version = o.at("generator_version").to_number<int>();
+    if (const auto* tag = o.if_contains("tag")) {
+        r.tag = std::string(tag->as_string());
+    }
     for (const auto& ev : o.at("entries").as_array()) {
         const auto& eo = ev.as_object();
         recording_entry e;
@@ -1476,8 +1495,10 @@ inline auto serialize(const recording& r) -> std::string {
     auto o = to_json(r);
     std::string out = "{\n";
     for (const auto* key :
-         {"format", "server", "version", "date", "seed", "length", "generator_version"}) {
-        out += "  \"" + std::string(key) + "\": " + boost::json::serialize(o.at(key)) + ",\n";
+         {"format", "server", "version", "date", "seed", "length", "generator_version", "tag"}) {
+        if (o.contains(key)) {
+            out += "  \"" + std::string(key) + "\": " + boost::json::serialize(o.at(key)) + ",\n";
+        }
     }
     out += "  \"entries\": [\n";
     const auto& entries = o.at("entries").as_array();

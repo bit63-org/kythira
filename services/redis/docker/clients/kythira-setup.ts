@@ -15,6 +15,11 @@ DEFAULT_REDIS_OPTIONS.host = env.KYTHIRA_REDIS_HOST || "localhost";
 DEFAULT_REDIS_OPTIONS.port = Number(env.KYTHIRA_REDIS_PORT || 6379);
 DEFAULT_REDIS_OPTIONS.username = env.KYTHIRA_REDIS_USER;
 DEFAULT_REDIS_OPTIONS.password = env.KYTHIRA_REDIS_PASSWORD;
+// TLS with the system CA store, for ElastiCache and MemoryDB (the AWS
+// interop bundle, Requirement 25.2).
+if (env.KYTHIRA_REDIS_TLS === "1") {
+  DEFAULT_REDIS_OPTIONS.tls = { servername: DEFAULT_REDIS_OPTIONS.host };
+}
 
 const list = env.KYTHIRA_IOREDIS_TESTS;
 const selected = list

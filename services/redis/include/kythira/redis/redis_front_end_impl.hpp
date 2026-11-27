@@ -1297,7 +1297,7 @@ auto redis_front_end<Host, Logger, Metrics>::execute_command(session& s, std::st
         if (auto e = arity(2, 3)) {
             return *e;
         }
-        if (auto e = authorize(s, upper, {})) {
+        if (auto e = authorize(s, "SLOWLOG|" + resp_to_upper(cmd._argv[1]), {})) {
             return *e;
         }
         return handle_slowlog(s, cmd);
@@ -1638,7 +1638,7 @@ template<typename Host, typename Logger, typename Metrics>
 auto redis_front_end<Host, Logger, Metrics>::handle_del(session& s, const resp_command& cmd)
     -> std::string {
     const auto& key = cmd._argv[1];
-    if (auto e = authorize(s, "DEL", {key})) {
+    if (auto e = authorize(s, resp_to_upper(cmd._argv[0]), {key})) {  // DEL or UNLINK
         return *e;
     }
     std::string error;
@@ -2579,6 +2579,11 @@ auto redis_front_end<Host, Logger, Metrics>::execute_txn_command(session& s, std
         return s._writer.simple_string("OK");
     }
     if (upper == "DISCARD") {
+        // Authorized before the state check, as in Redis: a user without
+        // @transaction gets NOPERM, not "without MULTI".
+        if (auto e = authorize(s, upper, {})) {
+            return *e;
+        }
         if (!s._in_multi) {
             return s._writer.error("ERR DISCARD without MULTI");
         }
@@ -2590,6 +2595,9 @@ auto redis_front_end<Host, Logger, Metrics>::execute_txn_command(session& s, std
         return s._writer.simple_string("OK");
     }
     if (upper == "EXEC") {
+        if (auto e = authorize(s, upper, {})) {
+            return *e;
+        }
         if (!s._in_multi) {
             return s._writer.error("ERR EXEC without MULTI");
         }
@@ -4704,6 +4712,8 @@ auto redis_front_end<Host, Logger, Metrics>::handle_multi_key_write(session& s,
     for (const auto pos : redis_exec_key_positions(id, args)) {
         key_views.emplace_back(a[pos + 1]);
     }
+    // Per position for COPY and RENAME (redis_command_key_access_at): the
+    // destination is only written.
     if (auto e = authorize(s, upper, key_views)) {
         return *e;
     }
@@ -4803,7 +4813,7 @@ auto redis_front_end<Host, Logger, Metrics>::handle_key_read(session& s, std::st
     for (std::size_t i = first; i < cmd._argv.size(); ++i) {
         keys.emplace_back(cmd._argv[i]);
     }
-    if (auto e = authorize(s, upper, keys)) {
+    if (auto e = authorize(s, upper == "OBJECT" ? "OBJECT|ENCODING" : upper, keys)) {
         return *e;
     }
     std::int64_t touched = 0;
@@ -6418,7 +6428,7 @@ auto redis_front_end<Host, Logger, Metrics>::handle_memory(session& s, const res
         return s._writer.error("ERR syntax error");
     }
     const auto& key = a[2];
-    if (auto e = authorize(s, "MEMORY", {key})) {
+    if (auto e = authorize(s, "MEMORY|USAGE", {key})) {
         return *e;
     }
     auto r = read_local(s, key);

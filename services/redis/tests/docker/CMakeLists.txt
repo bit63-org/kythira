@@ -51,7 +51,7 @@ target_include_directories(docker_engine_chaos_test PRIVATE "${KYTHIRA_REDIS_INC
 add_docker_chaos_scenario_test(docker_redis_differential_test
     "${CMAKE_CURRENT_SOURCE_DIR}/../differential/redis_differential_test.cpp")
 target_include_directories(docker_redis_differential_test PRIVATE
-    "${CMAKE_CURRENT_SOURCE_DIR}/../differential")
+    "${KYTHIRA_REDIS_INCLUDE_DIR}" "${CMAKE_CURRENT_SOURCE_DIR}/../differential")
 target_link_libraries(docker_redis_differential_test PRIVATE kythira_test_support)
 # The format-level rolling upgrade (.kiro/specs/redis-general-data-types/
 # task 14): engine-storage gateways from before the format gate and from
@@ -308,6 +308,7 @@ if(_RUNTIME_EXE)
                 ${_RT_ENV}
                 KYTHIRA_DOCKER_INTEGRATION_TESTS=1
                 KYTHIRA_CLIENTS_COMPOSE_FILE=${_REDIS_CLIENTS_COMPOSE_FILE}
+                KYTHIRA_CLIENTS_OUT=${CMAKE_BINARY_DIR}/redis-clients-out
                 $<TARGET_FILE:docker_redis_client_suites_test>
                 --log_level=message
         DEPENDS docker-txn-chaos-image docker-redis-clients-image

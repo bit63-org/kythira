@@ -32,6 +32,7 @@
 #include <kythira/redis/redis_kv_mvcc_state_machine.hpp>
 #include <raft/txn_state_machine.hpp>
 
+#include "redis_acl_probes.hpp"
 #include "redis_differential.hpp"
 
 #include <boost/json.hpp>
@@ -53,6 +54,7 @@
 #include <chrono>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <thread>
 #include <vector>
@@ -233,6 +235,7 @@ public:
     [[nodiscard]] auto host(node_id_t id) -> host_type& { return *_hosts.at(id - 1); }
     [[nodiscard]] auto gateway(node_id_t id) -> gateway_type& { return *_gateways.at(id - 1); }
     [[nodiscard]] auto port(node_id_t id) -> std::uint16_t { return _gateways.at(id - 1)->port(); }
+    auto reload_acl(const std::string& text) -> void { (void)_acl.reload(text); }
 
     [[nodiscard]] auto leader_of(group_id_type group) -> node_id_t {
         for (node_id_t id = 1; id <= k_node_count; ++id) {
@@ -391,6 +394,124 @@ auto load_recordings() -> std::map<std::uint64_t, std::map<std::string, diff::re
     return out;
 }
 
+struct replay_result {
+    std::vector<diff::difference_row> rows;
+    std::size_t compared = 0;
+    std::size_t differs = 0;
+};
+
+/// Where Redis 7.2 and Valkey 8 themselves disagree, either answer is
+/// Redis's (README, "What counts as a match"). An AWS recording comes from
+/// one engine, so for those commands the other engine's answer is taken
+/// from the committed local recordings of the same seed: the hash-tagged
+/// stream is the same stream with other key names, so the entries line up,
+/// and key names in the borrowed reply are renamed to the tagged ones.
+struct engine_split {
+    const diff::recording* redis = nullptr;
+    const diff::recording* valkey = nullptr;
+    std::map<std::string, std::string> rename;  // local key -> tagged key
+
+    [[nodiscard]] auto alternate(int protocol, std::size_t i, const diff::reply& recorded) const
+        -> std::optional<diff::reply> {
+        if (redis == nullptr || valkey == nullptr || i >= redis->entries.size()) {
+            return std::nullopt;
+        }
+        const auto& r = protocol == 2 ? redis->entries[i].resp2 : redis->entries[i].resp3;
+        const auto& v = protocol == 2 ? valkey->entries[i].resp2 : valkey->entries[i].resp3;
+        if (r == v) {
+            return std::nullopt;
+        }
+        auto rr = renamed(diff::parse_one(r));
+        auto vr = renamed(diff::parse_one(v));
+        if (rr == recorded) {
+            return vr;
+        }
+        if (vr == recorded) {
+            return rr;
+        }
+        return std::nullopt;
+    }
+
+    [[nodiscard]] auto renamed(diff::reply r) const -> diff::reply {
+        if (const auto it = rename.find(r.text); it != rename.end()) {
+            r.text = it->second;
+        }
+        for (auto& item : r.items) {
+            item = renamed(std::move(item));
+        }
+        return r;
+    }
+};
+
+/// Replays `first` (and, in lockstep, `second` when it is another server's
+/// recording of the same stream) against the gateway `port_for(seed,
+/// protocol)` names in each
+/// protocol it was recorded in, and classifies every Kythira reply against
+/// the recorded ones. A protocol with no recorded replies is skipped (a
+/// server that refused `HELLO 3`).
+using port_for_fn = std::function<std::uint16_t(std::uint64_t, int)>;
+
+auto replay(const port_for_fn& port_for, const diff::recording& first,
+            const diff::recording* second, replay_result& out, const engine_split* split = nullptr)
+    -> void {
+    if (second != nullptr) {
+        BOOST_REQUIRE_EQUAL(first.entries.size(), second->entries.size());
+    }
+    for (const int protocol : {2, 3}) {
+        auto raw = [&](const diff::recording& r, std::size_t i) -> const std::string& {
+            return protocol == 2 ? r.entries[i].resp2 : r.entries[i].resp3;
+        };
+        if (first.entries.empty() || raw(first, 0).empty()) {
+            continue;
+        }
+        resp_client client(port_for(first.seed, protocol));
+        const auto hello = diff::parse_one(
+            client.call_raw({"HELLO", std::to_string(protocol), "AUTH", "ops", "ops-secret"}));
+        BOOST_REQUIRE(hello.kind != diff::reply_kind::error);
+        diff::generator_options opt;
+        opt.tag = first.key_tag();
+        for (const auto& k : diff::stream_keys(opt)) {
+            const std::vector<std::string> del{"DEL", k};
+            for (int i = 0; i < 20 && transient(diff::parse_one(client.call_raw(del))); ++i) {
+                std::this_thread::sleep_for(std::chrono::milliseconds{100});
+            }
+        }
+        bool in_multi = false;
+        for (std::size_t i = 0; i < first.entries.size(); ++i) {
+            const auto& e = first.entries[i];
+            const auto rr = diff::parse_one(raw(first, i));
+            std::optional<diff::reply> vr;
+            if (second != nullptr) {
+                vr = diff::parse_one(raw(*second, i));
+            } else if (split != nullptr) {
+                vr = split->alternate(protocol, i, rr);
+            }
+            auto kraw = client.call_raw(e.argv);
+            for (int attempt = 0; attempt < 20 && !in_multi && transient(diff::parse_one(kraw));
+                 ++attempt) {
+                std::this_thread::sleep_for(std::chrono::milliseconds{100});
+                kraw = client.call_raw(e.argv);
+            }
+            const auto name = diff::detail::upper(e.argv.front());
+            if (name == "MULTI" && rr.kind == diff::reply_kind::simple) {
+                in_multi = true;
+            } else if (name == "EXEC" || name == "DISCARD") {
+                in_multi = false;
+            }
+            const auto kr = diff::parse_one(kraw);
+            ++out.compared;
+            const auto v = diff::classify(diff::command{e.argv, e.shape}, rr, vr, kr);
+            if (v.result == diff::outcome::same) {
+                continue;
+            }
+            const bool bad = v.result == diff::outcome::differs;
+            out.differs += bad ? 1 : 0;
+            out.rows.push_back({first.seed, protocol, i, e.argv, rr, vr, kr,
+                                bad ? std::string("DIFFERS") : v.rule});
+        }
+    }
+}
+
 }  // namespace
 
 namespace {
@@ -413,67 +534,167 @@ void raise_format_gate(std::uint16_t port) {
 
 /// Every recorded stream, in RESP2 and RESP3, against the gateway on the
 /// port `port_for(seed, protocol)` names; every reply classified.
-void replay(const std::function<std::uint16_t(std::uint64_t, int)>& port_for) {
+void replay_all(const port_for_fn& port_for) {
     const auto recordings = load_recordings();
     BOOST_REQUIRE(!recordings.empty());
 
-    std::vector<diff::difference_row> rows;
-    std::size_t compared = 0;
-    std::size_t differs = 0;
+    replay_result result;
     for (const auto& [seed, servers] : recordings) {
-        const auto& redis = servers.at("redis");
-        const auto& valkey = servers.at("valkey");
-        BOOST_REQUIRE_EQUAL(redis.entries.size(), valkey.entries.size());
-        for (const int protocol : {2, 3}) {
-            resp_client client(port_for(seed, protocol));
-            const auto hello = diff::parse_one(
-                client.call_raw({"HELLO", std::to_string(protocol), "AUTH", "ops", "ops-secret"}));
-            BOOST_REQUIRE(hello.kind != diff::reply_kind::error);
-            diff::generator_options opt;
-            opt.tag = "s" + std::to_string(seed);
-            for (const auto& k : diff::stream_keys(opt)) {
-                const std::vector<std::string> del{"DEL", k};
-                for (int i = 0; i < 20 && transient(diff::parse_one(client.call_raw(del))); ++i) {
-                    std::this_thread::sleep_for(std::chrono::milliseconds{100});
-                }
-            }
-            bool in_multi = false;
-            for (std::size_t i = 0; i < redis.entries.size(); ++i) {
-                const auto& e = redis.entries[i];
-                const auto& rraw = protocol == 2 ? e.resp2 : e.resp3;
-                const auto& vraw =
-                    protocol == 2 ? valkey.entries[i].resp2 : valkey.entries[i].resp3;
-                const auto rr = diff::parse_one(rraw);
-                const auto vr = diff::parse_one(vraw);
-                auto kraw = client.call_raw(e.argv);
-                for (int attempt = 0; attempt < 20 && !in_multi && transient(diff::parse_one(kraw));
-                     ++attempt) {
-                    std::this_thread::sleep_for(std::chrono::milliseconds{100});
-                    kraw = client.call_raw(e.argv);
-                }
-                const auto name = diff::detail::upper(e.argv.front());
-                if (name == "MULTI" && rr.kind == diff::reply_kind::simple) {
-                    in_multi = true;
-                } else if (name == "EXEC" || name == "DISCARD") {
-                    in_multi = false;
-                }
-                const auto kr = diff::parse_one(kraw);
-                ++compared;
-                const auto v = diff::classify(diff::command{e.argv, e.shape}, rr, vr, kr);
-                if (v.result == diff::outcome::same) {
-                    continue;
-                }
-                const bool bad = v.result == diff::outcome::differs;
-                differs += bad ? 1 : 0;
-                rows.push_back(
-                    {seed, protocol, i, e.argv, rr, vr, kr, bad ? std::string("DIFFERS") : v.rule});
+        replay(port_for, servers.at("redis"), &servers.at("valkey"), result);
+    }
+    const auto table = diff::render_difference_table(result.rows);
+    BOOST_TEST_MESSAGE(result.compared << " replies compared, " << result.differs << " differ\n"
+                                       << table);
+    BOOST_TEST(result.differs == 0U, "Kythira differs from both references " << result.differs
+                                                                             << " times:\n"
+                                                                             << table);
+}
+
+// Requirement 25.1: what ElastiCache (Valkey and Redis OSS engines) and
+// MemoryDB answered to the generator's hash-tagged streams (recs/aws/,
+// recorded by the dispatch-only real-cloud bundle), replayed against the
+// co-located cluster, each recording compared with the difference table as
+// the only exceptions (and, where Redis and Valkey disagree, the other
+// engine's answer: engine_split). Until the first recording run there is
+// nothing to replay, and the case says so.
+BOOST_AUTO_TEST_CASE(aws_recordings_replay_against_the_gateway, *boost::unit_test::timeout(900)) {
+    const auto dir = std::filesystem::path(KYTHIRA_REDIS_DIFF_RECS_DIR) / "aws";
+    std::vector<diff::recording> recordings;
+    if (std::filesystem::exists(dir)) {
+        for (const auto& f : std::filesystem::directory_iterator(dir)) {
+            if (f.path().extension() == ".json") {
+                std::ifstream in(f.path());
+                std::stringstream text;
+                text << in.rdbuf();
+                recordings.push_back(diff::recording_from_json(boost::json::parse(text.str())));
             }
         }
     }
-    const auto table = diff::render_difference_table(rows);
-    BOOST_TEST_MESSAGE(compared << " replies compared, " << differs << " differ\n" << table);
-    BOOST_TEST(differs == 0U, "Kythira differs from both references " << differs << " times:\n"
-                                                                      << table);
+    if (recordings.empty()) {
+        BOOST_TEST_MESSAGE("no AWS recordings in " << dir.string() << " yet");
+        return;
+    }
+
+    const auto local = load_recordings();
+    cluster c;
+    BOOST_REQUIRE(c.await_all_leaders(std::chrono::seconds{20}));
+    raise_format_gate(c.port(1));
+    std::string report;
+    std::size_t differs = 0;
+    for (const auto& rec : recordings) {
+        engine_split split;
+        if (const auto it = local.find(rec.seed);
+            it != local.end() && it->second.contains("redis") && it->second.contains("valkey") &&
+            it->second.at("redis").length == rec.length) {
+            split.redis = &it->second.at("redis");
+            split.valkey = &it->second.at("valkey");
+            diff::generator_options from;
+            diff::generator_options to;
+            from.tag = split.redis->key_tag();
+            to.tag = rec.key_tag();
+            const auto a = diff::stream_keys(from);
+            const auto b = diff::stream_keys(to);
+            for (std::size_t k = 0; k < a.size(); ++k) {
+                split.rename[a[k]] = b[k];
+            }
+        }
+        replay_result result;
+        replay(
+            [&c](std::uint64_t seed, int protocol) {
+                return c.port(static_cast<node_id_t>(1 + ((seed + protocol) % k_node_count)));
+            },
+            rec, nullptr, result, &split);
+        differs += result.differs;
+        report += "## " + rec.server + " " + rec.version + " (" + rec.date + "), seed " +
+                  std::to_string(rec.seed) + ": " + std::to_string(result.compared) +
+                  " compared, " + std::to_string(result.differs) + " differ\n\n" +
+                  diff::render_difference_table(result.rows) + "\n";
+    }
+    BOOST_TEST_MESSAGE(report);
+    BOOST_TEST(differs == 0U, "Kythira differs from AWS " << differs << " times:\n" << report);
+}
+
+// Requirement 25.3: each ElastiCache access string in redis_acl_probes.hpp,
+// written after the `none` role, grants on the gateway what Redis 7.2 or
+// Valkey 8 grants (recs/acl/access-strings.json, recorded with ACL DRYRUN by
+// the container run). Every probe is sent for real as the user, so the
+// gateway's own key extraction and per-key access are what is compared.
+BOOST_AUTO_TEST_CASE(elasticache_access_strings_grant_what_redis_grants,
+                     *boost::unit_test::timeout(600)) {
+    std::ifstream in(std::filesystem::path(KYTHIRA_REDIS_DIFF_RECS_DIR) / "acl" /
+                     "access-strings.json");
+    BOOST_REQUIRE(in.good());
+    std::stringstream text;
+    text << in.rdbuf();
+    const auto rec = diff::acl_recording_from_json(boost::json::parse(text.str()));
+    // A stale recording (probes or access strings edited since) fails here:
+    // regenerate it with the container run (README).
+    BOOST_REQUIRE(rec.probes == diff::acl_probes());
+    BOOST_REQUIRE_EQUAL(rec.decisions.size(), diff::access_strings().size());
+
+    cluster c;
+    BOOST_REQUIRE(c.await_all_leaders(std::chrono::seconds{20}));
+    raise_format_gate(c.port(1));
+    auto acl = acl_text();
+    for (std::size_t i = 0; i < rec.decisions.size(); ++i) {
+        BOOST_REQUIRE_EQUAL(rec.decisions[i].first, diff::access_strings()[i]);
+        acl += "user as" + std::to_string(i) + " " +
+               redis_acl::hash_secret("as-secret", k_kdf_iters) + " none " +
+               rec.decisions[i].first + "\n";
+    }
+    c.reload_acl(acl);
+
+    std::string mismatches;
+    std::size_t compared = 0;
+    for (std::size_t i = 0; i < rec.decisions.size(); ++i) {
+        const auto& [access, by_server] = rec.decisions[i];
+        const auto& redis = by_server.at("redis");
+        const auto& valkey = by_server.at("valkey");
+        BOOST_REQUIRE_EQUAL(redis.size(), rec.probes.size());
+        const auto user = "as" + std::to_string(i);
+        auto login = [&] {
+            auto cl = std::make_unique<resp_client>(c.port(1 + (i % k_node_count)));
+            const auto r = diff::parse_one(cl->call_raw({"AUTH", user, "as-secret"}));
+            BOOST_REQUIRE_MESSAGE(r.kind != diff::reply_kind::error, access << ": " << r.text);
+            return cl;
+        };
+        auto client = login();
+        for (std::size_t j = 0; j < rec.probes.size(); ++j) {
+            const auto& probe = rec.probes[j];
+            auto kr = diff::parse_one(client->call_raw(probe));
+            for (int attempt = 0; attempt < 20 && transient(kr); ++attempt) {
+                std::this_thread::sleep_for(std::chrono::milliseconds{100});
+                kr = diff::parse_one(client->call_raw(probe));
+            }
+            const char got = diff::gateway_decision(kr);
+            const auto name = diff::detail::upper(probe.front());
+            // A fresh connection after QUIT (closed) or RESET (back to the
+            // default user), and after a MULTI the user may not DISCARD.
+            const bool stuck_in_multi =
+                name == "MULTI" && got == 'a' &&
+                diff::gateway_decision(diff::parse_one(client->call_raw({"DISCARD"}))) != 'a';
+            if (name == "QUIT" || name == "RESET" || stuck_in_multi) {
+                client = login();
+            }
+            if (redis[j] == 'e') {
+                continue;
+            }
+            ++compared;
+            if (got != redis[j] && got != valkey[j]) {
+                std::string argv;
+                for (const auto& a : probe) {
+                    argv += (argv.empty() ? "" : " ") + a;
+                }
+                mismatches += "| `" + access + "` | `" + argv + "` | " + redis[j] + " | " +
+                              valkey[j] + " | " + got + " " + diff::display(kr) + " |\n";
+            }
+        }
+    }
+    BOOST_TEST_MESSAGE(compared << " access decisions compared");
+    BOOST_TEST(mismatches.empty(),
+               "the gateway's ACL differs from Redis and Valkey:\n"
+               "| access string | probe | Redis | Valkey | Kythira |\n|---|---|---|---|---|\n"
+                   << mismatches);
 }
 
 }  // namespace
@@ -482,7 +703,7 @@ BOOST_AUTO_TEST_CASE(recorded_streams_replay_against_the_gateway, *boost::unit_t
     cluster c;
     BOOST_REQUIRE(c.await_all_leaders(std::chrono::seconds{20}));
     raise_format_gate(c.port(1));
-    replay([&c](std::uint64_t seed, int protocol) {
+    replay_all([&c](std::uint64_t seed, int protocol) {
         return c.port(static_cast<node_id_t>(1 + ((seed + protocol) % k_node_count)));
     });
 }
@@ -496,7 +717,7 @@ BOOST_AUTO_TEST_CASE(recorded_streams_replay_through_a_front_end_without_data,
     BOOST_REQUIRE(c.await_all_leaders(std::chrono::seconds{20}));
     raise_format_gate(c.port(1));
     auto& fe = c.add_front_end();
-    replay([&fe](std::uint64_t, int) { return fe.port(); });
+    replay_all([&fe](std::uint64_t, int) { return fe.port(); });
 }
 
 // Three layers apart (task 17): gateways over front ends without data over
@@ -510,6 +731,6 @@ BOOST_AUTO_TEST_CASE(recorded_streams_replay_through_three_layers_apart,
     auto& fe1 = c.add_front_end();
     auto& fe2 = c.add_front_end();
     auto& gw = c.add_gateway({fe1.port(), fe2.port()});
-    replay([&gw](std::uint64_t, int) { return gw.port(); });
+    replay_all([&gw](std::uint64_t, int) { return gw.port(); });
     BOOST_CHECK_EQUAL(gw.stats()._front_end_lost.load(), 0u);
 }

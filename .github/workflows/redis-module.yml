@@ -562,8 +562,19 @@ jobs:
       # redis-py's, go-redis's and ioredis's own tests, the ones that cover
       # shipped commands, against the same image as the two steps above.
       - name: docker-redis-client-suites-tests
+        id: client-suites
         if: success() || failure()
         run: cmake --build build --target docker-redis-client-suites-tests -j"$(nproc)"
+
+      # The suites' JUnit reports: the AWS interop bundle compares its
+      # ElastiCache and MemoryDB runs with these (Requirement 25.2).
+      - name: Upload the client suite reports
+        if: always() && steps.client-suites.outcome != 'skipped'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: redis-client-suites-${{ matrix.runtime }}
+          path: build/redis-clients-out/
+          if-no-files-found: ignore
 
       # Rolling upgrade (redis-gateway-module task 7): build the gateway
       # from the last commit before Redis moved into services/redis/ and
