@@ -161,6 +161,13 @@ public:
             }
         }
 
+        // Then the load buckets (multi-raft-load-buckets Requirement 6): a
+        // cut at the bucket boundary that best balances the window's load,
+        // without waiting for a sampling window of its own.
+        if (auto cut = bucket_load_split(self); cut.has_value()) {
+            return *cut;
+        }
+
         // Size and key count need the sizing hooks. Without them this policy
         // simply never proposes a size-based split — which the host reports
         // once at construction rather than leaving an operator to wonder about.
@@ -178,6 +185,58 @@ public:
                 ._split = true, ._at_keys = {}, ._reason = split_reason::key_count};
         }
         return {};
+    }
+
+    /// @brief The bucket branch of the load split, or nothing.
+    ///
+    /// Proposes only when every gate the sampler applies holds as well:
+    /// - buckets are on (non-empty) and the window behind their rates spans a
+    ///   full `_load_split_duration`, so a burst shorter than that never
+    ///   splits (Requirement 6.1);
+    /// - the window's average load is over a load-split threshold;
+    /// - the sampler is not backing this shard off for a single hot key
+    ///   (Requirement 6.4);
+    /// - the best boundary leaves at most `_load_split_one_sided_fraction` on
+    ///   one side (Requirement 6.2). When it does not, the load is inside one
+    ///   bucket; the host narrows the sampler to that bucket instead.
+    ///
+    /// The reason is the load's dominant direction, exactly as the sampler's
+    /// (Requirement 6.3); the host scatters the children for either.
+    [[nodiscard]] auto bucket_load_split(const stats_type& self) const
+        -> std::optional<split_decision<Key>> {
+        if (!_cfg._load_split_enabled || self._buckets.size() < 2 || self._load_split_backoff ||
+            self._buckets_window < _cfg._load_split_duration) {
+            return std::nullopt;
+        }
+        double reads = 0.0;
+        double writes = 0.0;
+        double read_bytes = 0.0;
+        double write_bytes = 0.0;
+        for (const auto& b : self._buckets) {
+            reads += b._read_qps;
+            writes += b._write_qps;
+            read_bytes += b._read_bytes_per_sec;
+            write_bytes += b._write_bytes_per_sec;
+        }
+        const bool hot = reads >= _cfg._load_split_qps_threshold ||
+                         writes >= _cfg._load_split_qps_threshold ||
+                         read_bytes >= _cfg._load_split_bytes_threshold ||
+                         write_bytes >= _cfg._load_split_bytes_threshold;
+        if (!hot) {
+            return std::nullopt;
+        }
+        const auto cut = best_bucket_cut(self._buckets);
+        if (!cut.has_value() || cut->one_sided_fraction() > _cfg._load_split_one_sided_fraction) {
+            return std::nullopt;
+        }
+        const auto& at = self._buckets[cut->_boundary + 1]._start;
+        if (!at.has_value()) {
+            return std::nullopt;  // never: only the first bucket starts unbounded
+        }
+        return split_decision<Key>{
+            ._split = true,
+            ._at_keys = {*at},
+            ._reason = writes >= reads ? split_reason::write_load : split_reason::read_load};
     }
 
     [[nodiscard]] auto evaluate_merge(const stats_type& self, const stats_type& sibling)

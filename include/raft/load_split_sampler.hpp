@@ -139,8 +139,44 @@ public:
             return;
         }
         ++_observations;
-        ++_seen;
+        // A key outside the restriction is still counted against every
+        // candidate below, so the balance of each candidate stays a fact about
+        // ALL the traffic; it just never becomes a candidate itself.
+        if (!_restriction.has_value() || _restriction->contains(key)) {
+            admit(key);
+        }
 
+        // Every observation counts against every candidate boundary. This is
+        // the O(_sample_keys) part, and the reason that knob is bounded.
+        for (auto& c : _candidates) {
+            if (key < c._key) {
+                ++c._left;
+            } else {
+                ++c._right;
+            }
+        }
+    }
+
+    /// @brief Admit only keys inside `range` as candidates; `nullopt` admits
+    ///        every key again.
+    ///
+    /// The load buckets' hand-off (multi-raft-load-buckets Requirement 6.2):
+    /// when no bucket boundary balances a hot shard, the load sits inside one
+    /// bucket, and sampling candidates from that bucket alone finds a cut
+    /// there sooner. Only admission changes. Every key still counts towards
+    /// each candidate's balance, so the one-sided rule and the back-off still
+    /// see the whole shard, and a single hot key still ends in back-off.
+    auto restrict_to(std::optional<shard_range<Key>> range) -> void {
+        _restriction = std::move(range);
+    }
+
+    [[nodiscard]] auto restriction() const -> const std::optional<shard_range<Key>>& {
+        return _restriction;
+    }
+
+private:
+    auto admit(const Key& key) -> void {
+        ++_seen;
         if (_candidates.size() < _cfg._sample_keys) {
             _candidates.push_back(candidate{._key = key});
         } else if (_cfg._sample_keys > 0) {
@@ -159,18 +195,9 @@ public:
                 _candidates[static_cast<std::size_t>(slot - 1)] = candidate{._key = key};
             }
         }
-
-        // Every observation counts against every candidate boundary. This is
-        // the O(_sample_keys) part, and the reason that knob is bounded.
-        for (auto& c : _candidates) {
-            if (key < c._key) {
-                ++c._left;
-            } else {
-                ++c._right;
-            }
-        }
     }
 
+public:
     /// @brief Advance the state machine. Called once per policy tick.
     ///
     /// @param read_qps    Current measured read rate.
@@ -299,8 +326,10 @@ private:
     clock::time_point _backoff_until{};
 
     std::vector<candidate> _candidates;
-    /// Observations this window, for the reservoir's replacement probability.
+    /// Admitted observations this window, for the reservoir's replacement
+    /// probability.
     std::uint64_t _seen{0};
+    std::optional<shard_range<Key>> _restriction;
 
     std::uint64_t _observations{0};
     std::uint64_t _windows_started{0};

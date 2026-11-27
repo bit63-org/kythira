@@ -17,7 +17,9 @@
 
 #include <raft/split_merge_policy.hpp>
 
+#include <chrono>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -287,6 +289,107 @@ BOOST_AUTO_TEST_CASE(a_trailing_remnant_too_small_to_be_worth_a_child_is_discard
     BOOST_CHECK_EQUAL(p.split_key_count_for_size(96 * k_mib + 60 * k_mib), 1u);
     // 96 + 10 MiB: the remainder is not, so it is not.
     BOOST_CHECK_EQUAL(p.split_key_count_for_size(96 * k_mib + 10 * k_mib), 0u);
+}
+
+// ── the load-bucket branch (multi-raft-load-buckets task 7) ──────────────────
+
+namespace {
+
+auto bucket_policy() -> policy_type {
+    threshold_split_merge_policy_config cfg;
+    cfg._load_split_enabled = true;
+    cfg._load_split_qps_threshold = 100.0;
+    cfg._load_split_duration = std::chrono::seconds{10};
+    cfg._load_split_one_sided_fraction = 0.9;
+    return policy_type{cfg};
+}
+
+/// Buckets cut at "b", "c", "d" with the given write qps, over a window of
+/// `window`.
+auto bucketed(std::vector<double> writes,
+              std::chrono::milliseconds window = std::chrono::seconds{30}) -> stats_type {
+    auto s = sized(1);
+    const std::vector<std::optional<key_type>> starts{std::nullopt, "b", "c", "d"};
+    for (std::size_t i = 0; i < writes.size(); ++i) {
+        kythira::bucket_stats<key_type> b;
+        b._start = starts[i];
+        b._end = i + 1 < writes.size() ? starts[i + 1] : std::nullopt;
+        b._write_qps = writes[i];
+        s._buckets.push_back(b);
+    }
+    s._buckets_version = 1;
+    s._buckets_window = window;
+    return s;
+}
+
+}  // namespace
+
+BOOST_AUTO_TEST_CASE(a_hot_bucketed_shard_splits_at_the_balancing_boundary) {
+    // 10 | 200 | 150 | 40: left of "c" is 210, right 190 — the most even cut.
+    auto p = bucket_policy();
+    const auto d = p.evaluate_split(bucketed({10, 200, 150, 40}));
+    BOOST_REQUIRE(d.should_split());
+    BOOST_TEST(d.at_keys() == (std::vector<key_type>{"c"}));
+    BOOST_CHECK(d.reason() == split_reason::write_load);
+}
+
+BOOST_AUTO_TEST_CASE(the_bucket_reason_follows_the_dominant_direction) {
+    auto p = bucket_policy();
+    auto s = bucketed({0, 0, 0, 0});
+    for (auto& b : s._buckets) {
+        b._read_qps = 100.0;
+    }
+    const auto d = p.evaluate_split(s);
+    BOOST_REQUIRE(d.should_split());
+    BOOST_CHECK(d.reason() == split_reason::read_load);
+}
+
+BOOST_AUTO_TEST_CASE(a_bucket_split_waits_for_a_full_window) {
+    // Requirement 6.1: a window shorter than the sampling duration is a burst
+    // the sampler would also have ignored.
+    auto p = bucket_policy();
+    BOOST_TEST(
+        !p.evaluate_split(bucketed({100, 100, 100, 100}, std::chrono::seconds{9})).should_split());
+    BOOST_TEST(
+        p.evaluate_split(bucketed({100, 100, 100, 100}, std::chrono::seconds{10})).should_split());
+}
+
+BOOST_AUTO_TEST_CASE(a_cool_bucketed_shard_does_not_split) {
+    auto p = bucket_policy();
+    BOOST_TEST(!p.evaluate_split(bucketed({20, 20, 20, 20})).should_split());
+}
+
+BOOST_AUTO_TEST_CASE(a_one_sided_bucket_load_does_not_split) {
+    // Requirement 6.2: 95% in one bucket, so every boundary leaves more than
+    // the one-sided fraction on one side. The host narrows the sampler
+    // instead.
+    auto p = bucket_policy();
+    BOOST_TEST(!p.evaluate_split(bucketed({5, 0, 95, 0})).should_split());
+    BOOST_TEST(!p.evaluate_split(bucketed({0, 0, 0, 500})).should_split());
+}
+
+BOOST_AUTO_TEST_CASE(the_sampler_back_off_suppresses_the_bucket_split) {
+    // Requirement 6.4.
+    auto p = bucket_policy();
+    auto s = bucketed({100, 100, 100, 100});
+    s._load_split_backoff = true;
+    BOOST_TEST(!p.evaluate_split(s).should_split());
+}
+
+BOOST_AUTO_TEST_CASE(buckets_are_ignored_while_load_split_is_off) {
+    threshold_split_merge_policy_config cfg;  // _load_split_enabled false
+    policy_type p{cfg};
+    BOOST_TEST(!p.evaluate_split(bucketed({1000, 1000, 1000, 1000})).should_split());
+}
+
+BOOST_AUTO_TEST_CASE(a_sampler_hot_key_keeps_priority_over_the_buckets) {
+    auto p = bucket_policy();
+    auto s = bucketed({10, 200, 150, 40});
+    s._hot_key_samples.push_back(kythira::hot_key_sample<key_type>{
+        ._key = "bb", ._left_accesses = 50, ._right_accesses = 50});
+    const auto d = p.evaluate_split(s);
+    BOOST_REQUIRE(d.should_split());
+    BOOST_TEST(d.at_keys() == (std::vector<key_type>{"bb"}));
 }
 
 BOOST_AUTO_TEST_SUITE_END()

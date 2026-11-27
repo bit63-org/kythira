@@ -1137,16 +1137,46 @@ auto multi_raft<Types, Key, GroupId>::update_buckets(group_state& g,
     const bool due = g._buckets_refreshed_at == std::chrono::steady_clock::time_point{} ||
                      now - g._buckets_refreshed_at >= _cfg.buckets._refresh_interval ||
                      g._bucket_set->bucket_count() == 1;
-    if (!due) {
-        return;
+    if (due) {
+        // No candidates at all keeps the current cut rather than collapsing it
+        // to one bucket: "nothing to suggest right now" is not evidence the
+        // old boundaries stopped being useful.
+        if (auto candidates = bucket_candidates(g, range); !candidates.empty()) {
+            (void)g._bucket_set->refresh(std::move(candidates), now);
+        }
+        g._buckets_refreshed_at = now;
     }
-    // No candidates at all keeps the current cut rather than collapsing it to
-    // one bucket: "nothing to suggest right now" is not evidence the old
-    // boundaries stopped being useful.
-    if (auto candidates = bucket_candidates(g, range); !candidates.empty()) {
-        (void)g._bucket_set->refresh(std::move(candidates), now);
+
+    const auto snapshot = g._bucket_set->snapshot();
+    const bool measured = g._bucket_set->window_covered() > std::chrono::steady_clock::duration{};
+
+    // Requirement 5.3: one series per shard, the busiest bucket's share,
+    // rather than one per bucket, which would multiply cardinality by up to
+    // 256. Nothing until a slot has closed: a share of no evidence is noise.
+    if (measured) {
+        _cfg.metrics.set_metric_name("kythira.multiraft.shard.hottest_bucket_share");
+        _cfg.metrics.add_dimension("group", detail::describe_value(g._group_id));
+        _cfg.metrics.add_value(hottest_bucket_share(snapshot));
+        _cfg.metrics.emit();
     }
-    g._buckets_refreshed_at = now;
+
+    // Requirement 6.2: when no boundary balances the load, it sits inside one
+    // bucket, so the sampler takes its candidates from that bucket alone. The
+    // policy declines the bucket split in exactly this case, on the same
+    // one-sided rule, so the two never disagree about whose turn it is.
+    if (_cfg.load_split._enabled) {
+        std::optional<shard_range<Key>> restriction;
+        if (measured) {
+            const auto cut = best_bucket_cut(snapshot);
+            const auto hot = hottest_bucket(snapshot);
+            if (cut.has_value() && hot.has_value() && snapshot[*hot].qps() > 0.0 &&
+                cut->one_sided_fraction() > _cfg.load_split._one_sided_fraction) {
+                restriction = snapshot[*hot].range();
+            }
+        }
+        std::lock_guard lock(g._sampler_mutex);
+        g._load_sampler.restrict_to(std::move(restriction));
+    }
 }
 
 template<raft_types Types, shard_key Key, raft_group_id GroupId>
@@ -1790,6 +1820,12 @@ auto multi_raft<Types, Key, GroupId>::stats_for(const GroupId& group) const
     if (g->_bucket_set && g->_buckets_led.load(std::memory_order_acquire)) {
         stats._buckets = g->_bucket_set->snapshot();
         stats._buckets_version = g->_bucket_set->version();
+        stats._buckets_window =
+            std::chrono::duration_cast<std::chrono::milliseconds>(g->_bucket_set->window_covered());
+    }
+    if (_cfg.load_split._enabled) {
+        std::lock_guard lock(g->_sampler_mutex);
+        stats._load_split_backoff = g->_load_sampler.state() == load_sampler_state::backoff;
     }
 
     const auto now = now_ns();
@@ -4715,6 +4751,10 @@ auto multi_raft<Types, Key, GroupId>::build_shard_reports() const
 
         r._read_qps = static_cast<double>(g->_reads.load(std::memory_order_relaxed));
         r._write_qps = static_cast<double>(g->_writes.load(std::memory_order_relaxed));
+        if (g->_bucket_set && g->_buckets_led.load(std::memory_order_acquire)) {
+            r._hot_buckets =
+                top_buckets(g->_bucket_set->snapshot(), _cfg.buckets._report_top_buckets);
+        }
 
         // "Down" is the leader's own belief, formed from match indices, and it
         // is the only belief anyone holds: no other replica tracks per-peer
