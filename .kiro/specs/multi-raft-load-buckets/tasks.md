@@ -1,6 +1,6 @@
 # Implementation Plan — Multi-Raft load buckets
 
-## Status: In progress (tasks 1-2 done; Clark's go 2026-11-20)
+## Status: In progress (tasks 1-5 done; Clark's go 2026-11-20)
 
 Follow-up to `.kiro/specs/multi-raft/` Phase 9 and open question 4.
 
@@ -21,21 +21,33 @@ Follow-up to `.kiro/specs/multi-raft/` Phase 9 and open question 4.
     a second request.
   - _Requirements: 2.3, 2.4, 3.2, 3.3, 7.1, 7.2_
 
-- [ ] 3. Count at the routing layer
+- [x] 3. Count at the routing layer
   - In `route_and_run`, behind one branch on `_cfg.buckets._enabled`, beside
     the existing `_reads` / `_writes` and sampler calls; keyless requests stay
     shard-level only.
+  - A read's size reaches its bucket from the read's continuation through
+    `add_bytes`, as it reaches `_read_bytes` today.
   - _Requirements: 1.2, 3.1, 3.4_
 
-- [ ] 4. Boundaries on the policy phase
+- [x] 4. Boundaries on the policy phase
   - `suggest_split_keys` filtered by range and `can_split_at`, reservoir
     quantiles as the fallback, refresh interval, equal-set no-op; snapshot
     into `shard_stats`; drop on loss of leadership.
+  - `group_state` builds its `bucket_set` once and `reset()`s it on gaining
+    leadership or a new range, so the routing path reads it by plain pointer
+    and pays one atomic load (the layout's), not two. While the set is still
+    one bucket the policy phase re-cuts every tick rather than every refresh
+    interval, so a new leader whose reservoir starts empty gets a cut as soon
+    as traffic gives one.
   - _Requirements: 2.1, 2.2, 2.5, 4.1, 4.4_
 
-- [ ] 5. Split and merge
+- [x] 5. Split and merge
   - Children inherit inner boundaries; the merge survivor unions and trims by
     least combined load.
+  - Inherited boundaries count as a fresh cut (the refresh clock starts at
+    the hand-down), so a hot child can be split again at once.
+  - Host cases in `multi_raft_load_buckets_test`; the trimming and merge
+    rules in `load_buckets_unit_test`.
   - _Requirements: 4.2, 4.3_
 
 - [ ] 6. Exposure
