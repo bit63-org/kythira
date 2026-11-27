@@ -23,6 +23,7 @@
 
 #include <boost/json.hpp>
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
@@ -366,6 +367,50 @@ BOOST_AUTO_TEST_CASE(a_merge_continues_both_streams_in_one) {
     // The first stream and both halves are kept as closed streams.
     BOOST_TEST(st.closed.size() == 3U);
     BOOST_TEST(!r.engine.get(kythira::column_family::meta, ddb::change_log_state_key(cut)));
+}
+
+// A stream listed while open and empty, then closed by a second split and
+// dropped by the next trim, still reads as a shard that ended with no
+// records: a reader that took its iterator before the split must not get
+// "Shard does not exist" (the chaos scenario's verify did, for 5 minutes,
+// while the split policy kept cutting groups after the writers stopped).
+BOOST_AUTO_TEST_CASE(an_empty_stream_dropped_after_a_split_reads_as_ended) {
+    replica r("empty-ended");
+    (void)r.put(k_a1);
+    std::vector<std::string> cuts{key_of("a"), key_of("m"), key_of("zzz")};
+    std::ranges::sort(cuts);
+    BOOST_REQUIRE(r.sm.split_at({cuts[2]}).size() == 1U);
+    // Epoch 1 is open and empty: what a reader lists and takes an
+    // iterator into (TRIM_HORIZON and LATEST are both sequence 1).
+    const auto empty = r.sm.change_log()->current.key;
+    BOOST_TEST(r.sm.change_page_of(empty, 1, 100).open);
+    BOOST_REQUIRE(r.sm.split_at({cuts[1]}).size() == 1U);
+    BOOST_TEST(r.sm.change_log()->epoch == 2U);
+
+    ddb::item_command trim;
+    trim.op = ddb::item_command::kind::trim_change_log;
+    trim.written_ms = 1;  // nothing is past retention; only the empty stream goes
+    (void)r.run(trim);
+    const auto& st = *r.sm.change_log();
+    BOOST_TEST(std::ranges::none_of(st.closed, [&](const auto& c) { return c.key == empty; }));
+    BOOST_TEST(r.sm.change_shards().size() == st.closed.size() + 1U);
+
+    const auto page = r.sm.change_page_of(empty, 1, 100);
+    BOOST_TEST(page.known);
+    BOOST_TEST(!page.open);
+    BOOST_TEST(page.records.empty());
+    BOOST_TEST(page.last_seq < page.first_seq);
+
+    // A reader past sequence 1 was in a stream with records, trimmed past
+    // retention: that stays unknown, as does a stream this group never had.
+    BOOST_TEST(!r.sm.change_page_of(empty, 2, 100).known);
+    BOOST_TEST(!r.sm.change_page_of(ddb::change_stream_key(cuts[1], 1), 1, 100).known);
+    const auto start = ddb::table_range(k_table).start;
+    BOOST_TEST(!r.sm.change_page_of(ddb::change_stream_key(start, 9), 1, 100).known);
+    // The first stream, with its record, is still read as before.
+    const auto first = r.sm.change_page_of(ddb::change_stream_key(start, 0), 1, 100);
+    BOOST_TEST(first.known);
+    BOOST_TEST(first.records.size() == 1U);
 }
 
 BOOST_AUTO_TEST_CASE(an_install_fetches_the_active_segment_and_appends_the_same_bytes) {
