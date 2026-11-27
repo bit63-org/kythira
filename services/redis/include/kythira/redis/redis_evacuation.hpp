@@ -602,12 +602,26 @@ private:
         return node_id_traits<node_id_type>::from_text(s);
     }
 
-    /// The most voters any group this node holds a replica of has now.
-    auto held_voter_count() -> std::size_t {
+    /// The most voters any group this node holds a replica of keeps once
+    /// `evacuee` has left it. A group that already holds a target beside
+    /// the evacuee is in the middle of a move (the target is added before
+    /// the evacuee is removed), so the evacuee is not counted there:
+    /// counting it made a START run again mid-move ask for one voter more
+    /// than the group had, and the evacuee could then never be removed.
+    auto held_voter_count(const node_id_type& evacuee, const std::vector<node_id_type>& targets)
+        -> std::size_t {
         std::size_t most = 0;
         for (const auto& g : _host.group_ids()) {
             if (auto* n = _host.group_node(g)) {
-                most = std::max(most, n->current_membership().voters.size());
+                const auto voters = n->current_membership().voters;
+                auto count = voters.size();
+                const auto holds = [&](const node_id_type& id) {
+                    return std::find(voters.begin(), voters.end(), id) != voters.end();
+                };
+                if (holds(evacuee) && std::any_of(targets.begin(), targets.end(), holds)) {
+                    --count;
+                }
+                most = std::max(most, count);
             }
         }
         return most;
@@ -655,19 +669,6 @@ private:
         if (!evacuee) {
             return answer::error("ERR '" + r->_node + "' is not a node id");
         }
-        // The voters each group keeps: REPLICAS, else this node's setting,
-        // else (a node that joined, which founded nothing and so knows no
-        // founding count) the most voters a group it holds has now. Settled
-        // before anything changes, and fanned out, so every node uses one
-        // number.
-        if (r->_replicas == 0) {
-            r->_replicas = _replicas != 0 ? _replicas : held_voter_count();
-        }
-        if (r->_replicas == 0) {
-            return answer::error(
-                "ERR this node holds no group, so it knows no voter count; pass REPLICAS <n>, "
-                "or run START on a node that holds groups");
-        }
         for (const auto& a : r->_addresses) {
             const auto id = parse_id(a._id);
             if (!id) {
@@ -690,17 +691,34 @@ private:
                 }
             }
         }
-        typename evacuator_type::job job;
-        job._evacuee = *evacuee;
+        std::vector<node_id_type> target_ids;
         for (const auto& t : r->_targets) {
             const auto id = parse_id(t);
             if (!id) {
                 return answer::error("ERR '" + t + "' is not a node id");
             }
-            if (*id == _host.node_id() && _hooks._unrelease) {
+            target_ids.push_back(*id);
+        }
+        // The voters each group keeps: REPLICAS, else this node's setting,
+        // else (a node that joined, which founded nothing and so knows no
+        // founding count) the most voters a group it holds keeps once the
+        // evacuee has left. Settled before anything changes, and fanned
+        // out, so every node uses one number.
+        if (r->_replicas == 0) {
+            r->_replicas = _replicas != 0 ? _replicas : held_voter_count(*evacuee, target_ids);
+        }
+        if (r->_replicas == 0) {
+            return answer::error(
+                "ERR this node holds no group, so it knows no voter count; pass REPLICAS <n>, "
+                "or run START on a node that holds groups");
+        }
+        typename evacuator_type::job job;
+        job._evacuee = *evacuee;
+        for (const auto& id : target_ids) {
+            if (id == _host.node_id() && _hooks._unrelease) {
                 _hooks._unrelease();
             }
-            job._targets.push_back(*id);
+            job._targets.push_back(id);
         }
         if (job._targets.empty()) {
             return answer::error("ERR no data node can take the replicas");
