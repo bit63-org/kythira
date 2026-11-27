@@ -1,0 +1,6 @@
+# Workflow and composite-action changes need the maintainer's review before merge.
+# Branch protection on main requires Code Owner review, so a pull request that
+# edits these paths (including an approved fork PR) cannot merge without it.
+/.github/workflows/ @crawlins
+/.github/actions/   @crawlins
+/.github/CODEOWNERS @crawlins
