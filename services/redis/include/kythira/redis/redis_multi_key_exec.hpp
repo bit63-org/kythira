@@ -21,6 +21,9 @@
 /// | `COPY`      | src dst [REPLACE]          | 1 or 0                      |
 /// | `MSETNX`    | key value [key value ...]  | 1 or 0                      |
 ///
+/// `SMOVE` and `SINTERSTORE`/`SUNIONSTORE`/`SDIFFSTORE` plan the same way;
+/// redis_set_exec.hpp applies them.
+///
 /// `RENAME` and `COPY` carry the source's deadline to the destination, as
 /// Redis does. Under the immutable-value rule (Requirement 5.2) `RENAME`
 /// changes both keys (it takes the source away and may replace the
@@ -65,6 +68,23 @@ namespace kythira {
             break;
         case redis_command_id::msetnx:
             for (std::size_t i = 0; i < args.size(); i += 2) {
+                out.push_back(i);
+            }
+            break;
+        case redis_command_id::smove:
+            // src dst max-bytes max-count member
+            for (std::size_t i = 0; i < 2 && i < args.size(); ++i) {
+                out.push_back(i);
+            }
+            break;
+        case redis_command_id::sinterstore:
+        case redis_command_id::sunionstore:
+        case redis_command_id::sdiffstore:
+            // dst max-bytes max-count src [src ...]
+            if (!args.empty()) {
+                out.push_back(0);
+            }
+            for (std::size_t i = 3; i < args.size(); ++i) {
                 out.push_back(i);
             }
             break;

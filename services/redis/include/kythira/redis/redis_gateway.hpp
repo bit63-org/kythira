@@ -77,6 +77,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
+#include <variant>
 #include <vector>
 
 namespace kythira {
@@ -666,11 +667,23 @@ protected:
                           const std::string& mutable_bits) -> std::string;
     /// `DEL`, `UNLINK`, `RENAME`, `RENAMENX`, `COPY`, `MSETNX` with several
     /// keys: syntax checks and normal form (task 6).
-    /// Every shipped hash command (task 7): writes as `exec` records with
-    /// the configured collection limits, reads evaluated on the entry
-    /// handle after the node lock is released (redis_hash_exec.hpp).
-    auto handle_hash(session& s, const redis_command_info& info, const resp_command& cmd)
+    /// Every shipped hash and set command (tasks 7 and 8): writes as `exec`
+    /// records with the configured collection limits, reads evaluated on
+    /// the entry handle after the node lock is released
+    /// (redis_typed_read.hpp).
+    auto handle_collection(session& s, const redis_command_info& info, const resp_command& cmd)
         -> std::string;
+    /// `SPOP`: the members picked here, on the group's leader, and proposed
+    /// as an explicit removal (Requirement 9.5).
+    auto handle_spop(session& s, const resp_command& cmd) -> std::string;
+    /// `SINTER`, `SUNION`, `SDIFF`, `SINTERCARD`: each key read where it
+    /// lives, the algebra done here.
+    auto handle_set_algebra(session& s, redis_command_id id, const resp_command& cmd)
+        -> std::string;
+    /// The members of `key` for `handle_set_algebra`, in byte order, or the
+    /// encoded error that stops the command.
+    auto set_members_of(session& s, const std::string& key)
+        -> std::variant<std::vector<std::string>, std::string>;
     auto handle_multi_key_write(session& s, std::string_view upper, const resp_command& cmd)
         -> std::string;
     /// Whether a plain `SET` or `SETEX` of `key` goes as an `exec` record:

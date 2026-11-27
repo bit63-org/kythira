@@ -108,7 +108,7 @@ is extended as the rest land.
   - Determinism test across two replicas on random streams
   - _Requirements: 9.1-9.6, 10.1, 10.2_
 
-- [ ] 8. Sets
+- [x] 8. Sets
   - Every set command; `SPOP` as leader-picked `remove_members`;
     multi-key set ops through task 6's planner
   - _Requirements: 9.5, 11.1_

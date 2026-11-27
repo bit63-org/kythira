@@ -841,7 +841,7 @@ commands:
     acl: [write, set, fast]
     keys: [1, 1, 1]
     path: W
-    status: planned
+    status: shipped
     task: 8
   - name: SREM
     id: 75
@@ -852,7 +852,7 @@ commands:
     acl: [write, set, fast]
     keys: [1, 1, 1]
     path: W
-    status: planned
+    status: shipped
     task: 8
   - name: SISMEMBER
     id: 76
@@ -863,7 +863,7 @@ commands:
     acl: [read, set, fast]
     keys: [1, 1, 1]
     path: R
-    status: planned
+    status: shipped
     task: 8
   - name: SMISMEMBER
     id: 77
@@ -874,7 +874,7 @@ commands:
     acl: [read, set, fast]
     keys: [1, 1, 1]
     path: R
-    status: planned
+    status: shipped
     task: 8
   - name: SMEMBERS
     id: 78
@@ -885,7 +885,7 @@ commands:
     acl: [read, set, slow]
     keys: [1, 1, 1]
     path: R
-    status: planned
+    status: shipped
     task: 8
   - name: SCARD
     id: 79
@@ -896,7 +896,7 @@ commands:
     acl: [read, set, fast]
     keys: [1, 1, 1]
     path: R
-    status: planned
+    status: shipped
     task: 8
   - name: SPOP
     id: 80
@@ -907,7 +907,7 @@ commands:
     acl: [write, set, fast]
     keys: [1, 1, 1]
     path: W
-    status: planned
+    status: shipped
     task: 8
   - name: SRANDMEMBER
     id: 81
@@ -918,7 +918,7 @@ commands:
     acl: [read, set, slow]
     keys: [1, 1, 1]
     path: R
-    status: planned
+    status: shipped
     task: 8
   - name: SMOVE
     id: 82
@@ -929,7 +929,7 @@ commands:
     acl: [write, set, fast]
     keys: [1, 2, 1]
     path: M
-    status: planned
+    status: shipped
     task: 8
   - name: SINTER
     id: 83
@@ -940,7 +940,7 @@ commands:
     acl: [read, set, slow]
     keys: [1, -1, 1]
     path: M
-    status: planned
+    status: shipped
     task: 8
   - name: SUNION
     id: 84
@@ -951,7 +951,7 @@ commands:
     acl: [read, set, slow]
     keys: [1, -1, 1]
     path: M
-    status: planned
+    status: shipped
     task: 8
   - name: SDIFF
     id: 85
@@ -962,7 +962,7 @@ commands:
     acl: [read, set, slow]
     keys: [1, -1, 1]
     path: M
-    status: planned
+    status: shipped
     task: 8
   - name: SINTERCARD
     id: 86
@@ -973,7 +973,7 @@ commands:
     acl: [read, set, slow]
     keys: [0, 0, 0]
     path: M
-    status: planned
+    status: shipped
     task: 8
   - name: SINTERSTORE
     id: 87
@@ -984,7 +984,7 @@ commands:
     acl: [write, set, slow]
     keys: [1, -1, 1]
     path: M
-    status: planned
+    status: shipped
     task: 8
   - name: SUNIONSTORE
     id: 88
@@ -995,7 +995,7 @@ commands:
     acl: [write, set, slow]
     keys: [1, -1, 1]
     path: M
-    status: planned
+    status: shipped
     task: 8
   - name: SDIFFSTORE
     id: 89
@@ -1006,7 +1006,7 @@ commands:
     acl: [write, set, slow]
     keys: [1, -1, 1]
     path: M
-    status: planned
+    status: shipped
     task: 8
   - name: LPUSH
     id: 90

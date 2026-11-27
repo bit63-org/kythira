@@ -84,6 +84,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <string>
 #include <thread>
 #include <utility>
@@ -2616,6 +2617,65 @@ BOOST_AUTO_TEST_CASE(hash_commands, *boost::unit_test::timeout(120)) {
     BOOST_CHECK_EQUAL(call({"HRANDFIELD", "a/h", "1", "WITHVALUES"}),
                       "*1\r\n*2\r\n$1\r\nf\r\n$1\r\nv\r\n");
     BOOST_CHECK(call({"HSCAN", "a/h", "0"}).starts_with("-ERR unknown command"));
+}
+
+// Task 8: sets end to end from a follower: SPOP picked by the serving
+// side and removed in apply(), multi-key writes in one group, the algebra
+// across groups read key by key.
+BOOST_AUTO_TEST_CASE(set_commands, *boost::unit_test::timeout(120)) {
+    if constexpr (gateway_type::k_node_format_level < k_redis_typed_values_level) {
+        return;
+    }
+    auto c = typed_cluster();
+    resp_client r(c->port(c->a_follower_of(k_sccache_group)));
+    BOOST_REQUIRE_EQUAL(r.auth("ops", "ops-secret"), "+OK\r\n");
+    const auto call = [&](const std::vector<std::string>& argv) { return r.call(argv); };
+    const std::string crossslot = "-CROSSSLOT Keys in request don't hash to the same slot\r\n";
+
+    BOOST_CHECK_EQUAL(call({"SADD", "sccache/x", "b", "a", "c"}), ":3\r\n");
+    BOOST_CHECK_EQUAL(call({"SADD", "sccache/y", "c", "d"}), ":2\r\n");
+    BOOST_CHECK_EQUAL(call({"SMEMBERS", "sccache/x"}), "*3\r\n$1\r\na\r\n$1\r\nb\r\n$1\r\nc\r\n");
+    BOOST_CHECK_EQUAL(call({"SCARD", "sccache/x"}), ":3\r\n");
+    BOOST_CHECK_EQUAL(call({"SISMEMBER", "sccache/x", "a"}), ":1\r\n");
+    BOOST_CHECK_EQUAL(call({"SMISMEMBER", "sccache/x", "a", "z"}), "*2\r\n:1\r\n:0\r\n");
+    BOOST_CHECK_EQUAL(call({"SINTER", "sccache/x", "sccache/y"}), "*1\r\n$1\r\nc\r\n");
+    BOOST_CHECK_EQUAL(call({"SINTERCARD", "2", "sccache/x", "sccache/y", "LIMIT", "5"}), ":1\r\n");
+    BOOST_CHECK_EQUAL(call({"SDIFF", "sccache/x", "sccache/y"}), "*2\r\n$1\r\na\r\n$1\r\nb\r\n");
+    BOOST_CHECK_EQUAL(call({"SUNIONSTORE", "sccache/u", "sccache/x", "sccache/y"}), ":4\r\n");
+    BOOST_CHECK_EQUAL(call({"SMOVE", "sccache/u", "sccache/v", "d"}), ":1\r\n");
+    BOOST_CHECK_EQUAL(call({"SMEMBERS", "sccache/v"}), "*1\r\n$1\r\nd\r\n");
+    BOOST_CHECK_EQUAL(call({"TYPE", "sccache/v"}), "+set\r\n");
+    BOOST_CHECK_EQUAL(call({"OBJECT", "ENCODING", "sccache/v"}), bulk("hashtable"));
+
+    // SPOP: every pop is a member that was there, and they run out.
+    std::set<std::string> popped;
+    for (int i = 0; i < 3; ++i) {
+        const auto reply = call({"SPOP", "sccache/x"});
+        BOOST_REQUIRE(reply.starts_with("$1\r\n"));
+        popped.insert(reply.substr(4, 1));
+    }
+    BOOST_CHECK((popped == std::set<std::string>{"a", "b", "c"}));
+    BOOST_CHECK_EQUAL(call({"SPOP", "sccache/x"}), "$-1\r\n");
+    BOOST_CHECK_EQUAL(call({"SPOP", "sccache/y", "5"}).substr(0, 4), "*2\r\n");
+    BOOST_CHECK_EQUAL(call({"EXISTS", "sccache/y"}), ":0\r\n");
+    BOOST_CHECK_EQUAL(call({"SPOP", "sccache/y", "-1"}),
+                      "-ERR value is out of range, must be positive\r\n");
+
+    // Type errors and groups.
+    BOOST_CHECK_EQUAL(call({"SET", "sccache/s", "v"}), "+OK\r\n");
+    BOOST_CHECK_EQUAL(call({"SADD", "sccache/s", "m"}),
+                      "-WRONGTYPE Operation against a key holding the wrong kind of value\r\n");
+    BOOST_CHECK_EQUAL(call({"SINTER", "sccache/u", "sccache/s"}),
+                      "-WRONGTYPE Operation against a key holding the wrong kind of value\r\n");
+    BOOST_CHECK_EQUAL(call({"SADD", "a/z", "c", "q"}), ":2\r\n");
+    BOOST_CHECK_EQUAL(call({"SINTER", "a/z", "sccache/u"}), "*1\r\n$1\r\nc\r\n");
+    BOOST_CHECK_EQUAL(call({"SMOVE", "a/z", "sccache/u", "q"}), crossslot);
+    BOOST_CHECK_EQUAL(call({"SUNIONSTORE", "a/w", "a/z", "sccache/u"}), crossslot);
+
+    BOOST_CHECK(call({"HELLO", "3"}).starts_with("%"));
+    BOOST_CHECK_EQUAL(call({"SMEMBERS", "a/z"}), "~2\r\n$1\r\nc\r\n$1\r\nq\r\n");
+    BOOST_CHECK_EQUAL(call({"SMEMBERS", "sccache/v"}), "~1\r\n$1\r\nd\r\n");
+    BOOST_CHECK_EQUAL(call({"SDIFF", "a/z", "sccache/u"}), "~1\r\n$1\r\nq\r\n");
 }
 
 // Requirement 5.4: the rule is decided in apply(), so writers racing to

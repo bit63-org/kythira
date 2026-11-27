@@ -90,12 +90,40 @@ template<typename Entry>
     }
 }
 
-/// A hash: field → value, chunked, in byte order of the field. Immutable
-/// once published; the mutators return a new hash sharing untouched chunks.
-class redis_hash {
+namespace redis_value_detail {
+
+/// How a collection reads its element type: the sort key and the bytes it
+/// counts.
+template<typename Entry> struct element_traits;
+
+template<> struct element_traits<std::pair<std::string, std::string>> {
+    [[nodiscard]] static auto key(const std::pair<std::string, std::string>& e) noexcept
+        -> std::string_view {
+        return e.first;
+    }
+    [[nodiscard]] static auto bytes(const std::pair<std::string, std::string>& e) noexcept
+        -> std::size_t {
+        return e.first.size() + e.second.size();
+    }
+};
+
+template<> struct element_traits<std::string> {
+    [[nodiscard]] static auto key(const std::string& e) noexcept -> std::string_view { return e; }
+    [[nodiscard]] static auto bytes(const std::string& e) noexcept -> std::size_t {
+        return e.size();
+    }
+};
+
+}  // namespace redis_value_detail
+
+/// Elements in byte order of their key, chunked: the shared core of hashes
+/// and sets. Immutable once published; the mutators return a new
+/// collection sharing untouched chunks.
+template<typename Entry> class redis_sorted_chunks {
 public:
-    using entry = std::pair<std::string, std::string>;
+    using entry = Entry;
     using chunk = std::vector<entry>;
+    using traits = redis_value_detail::element_traits<Entry>;
 
     [[nodiscard]] auto size() const noexcept -> std::size_t { return _count; }
     [[nodiscard]] auto bytes() const noexcept -> std::size_t { return _bytes; }
@@ -104,105 +132,108 @@ public:
         return _chunks;
     }
 
-    /// The value of `field`, or nullptr.
-    [[nodiscard]] auto find(std::string_view field) const -> const std::string* {
-        const auto c = chunk_for(field);
+    /// The element whose key is `key`, or nullptr.
+    [[nodiscard]] auto find_entry(std::string_view key) const -> const entry* {
+        const auto c = chunk_for(key);
         if (c >= _chunks.size()) {
             return nullptr;
         }
         const auto& ch = *_chunks[c];
-        const auto it = std::ranges::lower_bound(ch, field, {}, &entry::first);
-        return it != ch.end() && it->first == field ? &it->second : nullptr;
+        const auto it = std::ranges::lower_bound(ch, key, {}, &traits::key);
+        return it != ch.end() && traits::key(*it) == key ? &*it : nullptr;
     }
 
-    /// Calls `f(field, value)` for every entry in byte order of the field.
-    template<typename F> auto for_each(F&& f) const -> void {
+    /// The `n`th element in order (`n < size()`).
+    [[nodiscard]] auto at(std::size_t n) const -> const entry& {
         for (const auto& c : _chunks) {
-            for (const auto& [field, value] : *c) {
-                f(field, value);
+            if (n < c->size()) {
+                return (*c)[n];
+            }
+            n -= c->size();
+        }
+        return _chunks.back()->back();
+    }
+
+    /// Calls `f(element)` for every element in order.
+    template<typename F> auto for_each_entry(F&& f) const -> void {
+        for (const auto& c : _chunks) {
+            for (const auto& e : *c) {
+                f(e);
             }
         }
     }
 
-    /// This hash with `field` set to `value`; `added` says whether the field
-    /// is new.
-    [[nodiscard]] auto with(std::string field, std::string value, bool& added) const -> redis_hash {
-        redis_hash out = *this;
+protected:
+    /// Inserts `e`, or replaces the element with its key; `added` says which.
+    auto put(entry e, bool& added) -> void {
         // Every published chunk is non-empty, so `chunk_for` can read its
-        // first field; an empty hash starts its first chunk here.
-        const auto c = out._chunks.empty() ? 0 : out.chunk_for(field);
-        if (out._chunks.empty()) {
-            out._chunks.push_back(std::make_shared<const chunk>());
+        // first key; an empty collection starts its first chunk here.
+        const auto c = _chunks.empty() ? 0 : chunk_for(traits::key(e));
+        if (_chunks.empty()) {
+            _chunks.push_back(std::make_shared<const chunk>());
         }
-        auto ch = std::make_shared<chunk>(*out._chunks[c]);
-        auto it = std::ranges::lower_bound(*ch, field, {}, &entry::first);
-        if (it != ch->end() && it->first == field) {
+        auto ch = std::make_shared<chunk>(*_chunks[c]);
+        auto it = std::ranges::lower_bound(*ch, traits::key(e), {}, &traits::key);
+        if (it != ch->end() && traits::key(*it) == traits::key(e)) {
             added = false;
-            out._bytes -= it->second.size();
-            out._bytes += value.size();
-            it->second = std::move(value);
+            _bytes -= traits::bytes(*it);
+            _bytes += traits::bytes(e);
+            *it = std::move(e);
         } else {
             added = true;
-            ++out._count;
-            out._bytes += field.size() + value.size() + k_redis_element_overhead;
-            ch->insert(it, entry{std::move(field), std::move(value)});
+            ++_count;
+            _bytes += traits::bytes(e) + k_redis_element_overhead;
+            ch->insert(it, std::move(e));
         }
-        out.replace_chunk(c, std::move(ch));
-        return out;
+        replace_chunk(c, std::move(ch));
     }
 
-    /// This hash without `field`; `removed` says whether it was there.
-    [[nodiscard]] auto without(std::string_view field, bool& removed) const -> redis_hash {
+    /// Removes the element with `key`; `removed` says whether it was there.
+    auto remove(std::string_view key, bool& removed) -> void {
         removed = false;
-        const auto c = chunk_for(field);
+        const auto c = chunk_for(key);
         if (c >= _chunks.size()) {
-            return *this;
+            return;
         }
         const auto& old = *_chunks[c];
-        const auto pos = std::ranges::lower_bound(old, field, {}, &entry::first);
-        if (pos == old.end() || pos->first != field) {
-            return *this;
+        const auto pos = std::ranges::lower_bound(old, key, {}, &traits::key);
+        if (pos == old.end() || traits::key(*pos) != key) {
+            return;
         }
         removed = true;
-        redis_hash out = *this;
         auto ch = std::make_shared<chunk>(old);
         auto it = ch->begin() + (pos - old.begin());
-        --out._count;
-        out._bytes -= it->first.size() + it->second.size() + k_redis_element_overhead;
+        --_count;
+        _bytes -= traits::bytes(*it) + k_redis_element_overhead;
         ch->erase(it);
-        out.replace_chunk(c, std::move(ch));
-        return out;
+        replace_chunk(c, std::move(ch));
     }
 
-    /// Builds a hash from entries in strictly increasing field order (a
-    /// snapshot's), chunk by chunk.
-    [[nodiscard]] static auto from_sorted(std::vector<entry> entries) -> redis_hash {
-        redis_hash out;
+    /// Fills an empty collection from elements in strictly increasing key
+    /// order (a snapshot's), chunk by chunk.
+    auto fill_sorted(std::vector<entry> entries) -> void {
         for (std::size_t i = 0; i < entries.size(); i += k_redis_chunk_entries) {
             const auto end = std::min(entries.size(), i + k_redis_chunk_entries);
             auto ch = std::make_shared<chunk>();
             for (std::size_t j = i; j < end; ++j) {
-                out._bytes +=
-                    entries[j].first.size() + entries[j].second.size() + k_redis_element_overhead;
+                _bytes += traits::bytes(entries[j]) + k_redis_element_overhead;
                 ch->push_back(std::move(entries[j]));
             }
-            out._count += ch->size();
-            out._chunks.push_back(std::move(ch));
+            _count += ch->size();
+            _chunks.push_back(std::move(ch));
         }
-        return out;
     }
 
 private:
-    /// The chunk that holds or would hold `field`: the last whose first
-    /// field is at or below it (the first chunk for anything below all).
-    [[nodiscard]] auto chunk_for(std::string_view field) const -> std::size_t {
+    /// The chunk that holds or would hold `key`: the last whose first key is
+    /// at or below it (the first chunk for anything below all).
+    [[nodiscard]] auto chunk_for(std::string_view key) const -> std::size_t {
         if (_chunks.empty()) {
             return 0;
         }
-        const auto it =
-            std::ranges::upper_bound(_chunks, field, {}, [](const std::shared_ptr<const chunk>& c) {
-                return std::string_view(c->front().first);
-            });
+        const auto it = std::ranges::upper_bound(
+            _chunks, key, {},
+            [](const std::shared_ptr<const chunk>& c) { return traits::key(c->front()); });
         return it == _chunks.begin() ? 0 : static_cast<std::size_t>(it - _chunks.begin()) - 1;
     }
 
@@ -228,6 +259,79 @@ private:
     std::vector<std::shared_ptr<const chunk>> _chunks;
     std::size_t _count = 0;
     std::size_t _bytes = 0;
+};
+
+/// A hash: field → value, in byte order of the field.
+class redis_hash : public redis_sorted_chunks<std::pair<std::string, std::string>> {
+public:
+    /// The value of `field`, or nullptr.
+    [[nodiscard]] auto find(std::string_view field) const -> const std::string* {
+        const auto* e = find_entry(field);
+        return e != nullptr ? &e->second : nullptr;
+    }
+
+    /// Calls `f(field, value)` for every entry in byte order of the field.
+    template<typename F> auto for_each(F&& f) const -> void {
+        for_each_entry([&](const entry& e) { f(e.first, e.second); });
+    }
+
+    /// This hash with `field` set to `value`; `added` says whether the field
+    /// is new.
+    [[nodiscard]] auto with(std::string field, std::string value, bool& added) const -> redis_hash {
+        redis_hash out = *this;
+        out.put(entry{std::move(field), std::move(value)}, added);
+        return out;
+    }
+
+    /// This hash without `field`; `removed` says whether it was there.
+    [[nodiscard]] auto without(std::string_view field, bool& removed) const -> redis_hash {
+        redis_hash out = *this;
+        out.remove(field, removed);
+        return removed ? out : *this;
+    }
+
+    /// Builds a hash from entries in strictly increasing field order.
+    [[nodiscard]] static auto from_sorted(std::vector<entry> entries) -> redis_hash {
+        redis_hash out;
+        out.fill_sorted(std::move(entries));
+        return out;
+    }
+};
+
+/// A set of members, in byte order (Requirement 9.3).
+class redis_set : public redis_sorted_chunks<std::string> {
+public:
+    [[nodiscard]] auto contains(std::string_view member) const -> bool {
+        return find_entry(member) != nullptr;
+    }
+
+    /// Calls `f(member)` for every member in byte order.
+    template<typename F> auto for_each(F&& f) const -> void { for_each_entry(f); }
+
+    /// This set with `member`; `added` says whether it is new.
+    [[nodiscard]] auto with(std::string member, bool& added) const -> redis_set {
+        if (contains(member)) {
+            added = false;
+            return *this;
+        }
+        redis_set out = *this;
+        out.put(std::move(member), added);
+        return out;
+    }
+
+    /// This set without `member`; `removed` says whether it was there.
+    [[nodiscard]] auto without(std::string_view member, bool& removed) const -> redis_set {
+        redis_set out = *this;
+        out.remove(member, removed);
+        return removed ? out : *this;
+    }
+
+    /// Builds a set from members in strictly increasing order.
+    [[nodiscard]] static auto from_sorted(std::vector<std::string> members) -> redis_set {
+        redis_set out;
+        out.fill_sorted(std::move(members));
+        return out;
+    }
 };
 
 }  // namespace kythira
