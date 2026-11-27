@@ -352,6 +352,23 @@ public:
         }
     }
 
+    /// Keys in `[from, to)` (`to` empty: no bound) in key order, each with its newest value, for
+    /// the SCAN family (task 12): `f(key, expire_at_ms, type)` returns whether to go on. Expired
+    /// keys are visited too; the caller skips them.
+    template<typename F>
+    auto scan_keys(std::string_view from, const std::optional<std::string>& to, F&& f) const
+        -> void {
+        for (auto it = _store.lower_bound(from); it != _store.end(); ++it) {
+            if (to && it->first >= *to) {
+                return;
+            }
+            const auto& e = it->second.front()._entry;
+            if (e && !f(it->first, e->_expire_at_ms, redis_entry_type(*e))) {
+                return;
+            }
+        }
+    }
+
     /// The reply to a read of `key`'s newest value at the serving node's
     /// time `now_ms`, as `redis_kv_state_machine::evaluate_read`.
     [[nodiscard]] auto evaluate_read(redis_command_id id, const key_type& key,

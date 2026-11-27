@@ -828,6 +828,39 @@ public:
         return out;
     }
 
+    /// Keys in `[from, to)` (`to` empty: no bound) in key order, for the
+    /// SCAN family (task 12): `f(key, expire_at_ms, type)` returns whether
+    /// to go on. Only the string and header rows are read, so a page over
+    /// large collections costs one row per key. Expired keys are visited
+    /// too; the caller skips them.
+    template<typename F>
+    auto scan_keys(std::string_view from, const std::optional<std::string>& to, F&& f) const
+        -> void {
+        require_open();
+        const bool esc = _meta.level >= k_redis_typed_values_level;
+        const auto engine_key = [esc](std::string_view k) {
+            return esc ? persistent_kv_detail::escape_key(k) : std::string(k);
+        };
+        key_range r{std::max(_range.start, engine_key(from)), _range.end};
+        if (to) {
+            const auto end = engine_key(*to);
+            if (!r.end || end < *r.end) {
+                r.end = end;
+            }
+        }
+        if (r.end && *r.end <= r.start) {
+            return;
+        }
+        for_each_user_row(
+            r, esc, [&](const persistent_kv_detail::parsed_row& row, std::string_view stored) {
+                const auto type =
+                    row.kind == persistent_kv_detail::row_kind::string
+                        ? redis_value_type::string
+                        : persistent_kv_detail::collection_header::decode(stored).type;
+                return f(row.key, row_expiry(row, stored), type);
+            });
+    }
+
     /// Every key in order with its entry. A collection is built from its
     /// rows in the same scan, since they follow its header.
     template<typename F> auto for_each_key(F&& f) const -> void {

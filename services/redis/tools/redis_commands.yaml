@@ -1204,7 +1204,7 @@ commands:
     acl: [keyspace, read, slow]
     keys: [0, 0, 0]
     path: F
-    status: planned
+    status: shipped
     task: 12
   - name: HSCAN
     id: 108
@@ -1215,7 +1215,7 @@ commands:
     acl: [read, hash, slow]
     keys: [1, 1, 1]
     path: R
-    status: planned
+    status: shipped
     task: 12
   - name: SSCAN
     id: 109
@@ -1226,7 +1226,7 @@ commands:
     acl: [read, set, slow]
     keys: [1, 1, 1]
     path: R
-    status: planned
+    status: shipped
     task: 12
   - name: KEYS
     id: 110
@@ -1237,7 +1237,7 @@ commands:
     acl: [keyspace, read, slow, dangerous]
     keys: [0, 0, 0]
     path: F
-    status: planned
+    status: shipped
     task: 12
   - name: RANDOMKEY
     id: 111
@@ -1248,7 +1248,7 @@ commands:
     acl: [keyspace, read, slow]
     keys: [0, 0, 0]
     path: F
-    status: planned
+    status: shipped
     task: 12
   - name: KYTHIRA.DELPREFIX
     id: 112

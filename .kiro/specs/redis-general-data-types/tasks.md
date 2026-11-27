@@ -132,7 +132,7 @@ is extended as the rest land.
     and write-skew tests extended with hashes
   - _Requirements: 13.4-13.6_
 
-- [ ] 12. SCAN family
+- [x] 12. SCAN family
   - Cursor table on the front end, cursor encoding, idle expiry, forward
     to issuer, `invalid cursor`; per-group pages on the data side with
     pattern, type and prefix filtering; literal-prefix narrowing
