@@ -166,6 +166,18 @@ if(KYTHIRA_SQS_MODULE_AVAILABLE)
         WORKING_DIRECTORY "${CMAKE_BINARY_DIR}/tests"
         LABELS "integration;sqs;sqs-module" TIMEOUT 600)
 
+    # Both TUs above compile in the `heavy_tu` pool (top-level
+    # CMakeLists.txt), as the module and sqs_node do. Each instantiates
+    # whole in-process SQS nodes (sqs_module.hpp over multi_raft and the
+    # Beast Raft transport), the shape that measured 10-12 GiB of compiler
+    # RSS apiece for the Redis gateway's cluster tests. Unpooled, they
+    # compiled beside the pooled module TUs, and the 16 GiB hosted runner
+    # of the stdexec full suite was lost an hour into Build on both of
+    # this work's CI runs (PRs #904 and #993), with the compiler cache
+    # cold for every SQS header.
+    set_target_properties(sqs_module_test sqs_migration_test PROPERTIES
+        JOB_POOL_COMPILE heavy_tu)
+
     # Task 11: the whole path again, in containers under Docker and rootless
     # Podman, with a node of every layer killed on the way (docker/; its
     # targets are docker-sqs-node-image and docker-sqs-node-tests).
