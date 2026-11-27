@@ -353,6 +353,45 @@ Subnet, route-table and association IDs come from the catalog's
 counters like every other ID and are rendered with antikythera's
 `proto::ec2_id`, whose 64-bit values the frames carry.
 
+### Internet gateways, public addresses and NAT
+
+Antikythera's `vpc-internet-gateways` puts the work in two places: a
+stateless edge fleet that does the 1:1 public/private translation, and
+the host network role, which routes to gateways and runs NAT gateways
+as source NAT in 1,024-port blocks. The controller's job is to keep both
+fed in the right order.
+
+- **Regional edge group.** A region-wide raft group (`edge`) holds the
+  public pools and their allocators, every gateway, address association
+  and NAT port block, and the edge-table sequence. Each committed change
+  bumps the sequence and appends a delta to every edge server's outbox
+  (which, unlike `MapUpdate`, keeps every delta in order, not only the
+  newest). An edge server that joins or reports a gap gets a snapshot in
+  parts at the current sequence; every 100,000 changes the group sends
+  one to all, so helm's replay buffer stays bounded.
+- **Waiting for the edge.** `edge_applied` reports record each edge
+  server's applied sequence in the group. Workflow steps that must not
+  run ahead of the edge (an association reported done, a NAT gateway
+  becoming `available`, a block handed to a server) wait for the lowest
+  applied sequence among edge servers in service to pass theirs. An edge
+  server out of service for longer than a timeout is taken out of that
+  minimum and must resync by snapshot before it returns.
+- **NIC moves.** The workflow that moves a NIC commits its new owner VTEP
+  to the edge entries in the same multi-raft transaction as the
+  `MapUpdate`, so the edge and the hosts switch together.
+- **Port blocks.** A NAT gateway's addresses give 63 blocks each. A grant
+  commits the block to the edge group first, waits for the edge, then
+  commits the server's next `VpcConfig` version 3 with the block. A
+  revocation runs the other way, and waits for a `nat_usage` reading
+  that no longer lists the block before removing it from the edge.
+- **VPC frames.** Gateways and routes to them live in the VPC's network
+  group with the rest of `VpcConfig`; NAT blocks are per server, so the
+  frame built for each server lists only that server's blocks.
+- **Metering.** `edge_usage` and `nat_usage` readings feed the metering
+  worker of "Metering and the multicast setting" as new series; public
+  address hours and NAT gateway hours come from the edge group's
+  committed history.
+
 ### Metering and the multicast setting
 
 Tags with the reserved `kythira:multicast:` prefix (`mode`,
