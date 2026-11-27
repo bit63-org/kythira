@@ -68,6 +68,16 @@ template<typename SM> auto kv_of(SM& sm) -> auto& {
         return sm;
     }
 }
+
+/// The bytes a stored value holds: a typed entry's value or collection, or
+/// a disk-backed manifest's length.
+template<typename Entry> auto entry_bytes(const Entry& e) -> std::uint64_t {
+    if constexpr (requires { redis_entry_bytes(e); }) {
+        return redis_entry_bytes(e);
+    } else {
+        return e._total_len;
+    }
+}
 }  // namespace redis_gateway_detail
 
 /// Why the data layer could not serve a key here. `ok` is served.
@@ -320,74 +330,99 @@ public:
               std::size_t skip, bool any_replica, std::uint64_t now_ms, Keep&& keep)
         -> page_outcome {
         page_outcome out;
-        auto* node = replica_for(from, out._status, out._leader);
-        if (node == nullptr) {
-            return out;
-        }
-        if (!any_replica && !node->is_leader()) {
-            out._leader = node->known_leader();
-            out._status = redis_data_status::no_leader;
-            return out;
-        }
-        const auto group = _host.resolve(from);
-        if (!group) {
-            out._status = redis_data_status::unrouted;
-            return out;
-        }
-        auto served =
-            _host.with_group_state_machine(group->group_id(), [&](auto& sm, const auto& d) -> bool {
-                if (!d._range.contains(from)) {
-                    return false;  // a split or merge moved it: route again
-                }
-                auto& kv = redis_gateway_detail::kv_of(sm);
-                auto& p = out._page;
-                p._range_end = d._range._end;
-                p._approximate_keys = kv.approximate_key_count();
-                std::optional<std::string> bound = to;
-                if (d._range._end && (!bound || *d._range._end < *bound)) {
-                    bound = d._range._end;
-                }
-                std::size_t examined = 0;
-                std::size_t skipped = 0;
-                std::size_t hidden = 0;
-                p._exhausted = true;
-                kv.scan_keys(
-                    from, bound,
-                    [&](const std::string& key, std::uint64_t expire, redis_value_type type) {
-                        if (expire != 0 && expire <= now_ms) {
-                            return true;
-                        }
-                        if (skipped < skip) {
-                            ++skipped;
-                            return true;
-                        }
-                        if (examined == count) {
-                            p._exhausted = false;
-                            return false;
-                        }
-                        const redis_scan_verdict verdict = keep(key, type);
-                        if (verdict == redis_scan_verdict::hidden) {
-                            if (hidden == k_redis_scan_hidden_per_page) {
-                                p._exhausted = false;
-                                return false;
-                            }
-                            ++hidden;
-                            p._last = key;
-                            return true;
-                        }
-                        ++examined;
-                        ++p._examined;
-                        p._last = key;
-                        if (verdict == redis_scan_verdict::kept) {
-                            p._keys.push_back(key);
-                        }
-                        return true;
-                    });
-                return true;
-            });
-        if (!served || !*served) {
-            out._status = redis_data_status::unrouted;
-        }
+        walk_group(from, to, any_replica, out._status, out._leader,
+                   [&](auto& kv, const std::optional<std::string>& bound,
+                       const std::optional<std::string>& range_end) {
+                       auto& p = out._page;
+                       p._range_end = range_end;
+                       p._approximate_keys = kv.approximate_key_count();
+                       p._expiring_keys = kv.expiring_key_count();
+                       std::size_t examined = 0;
+                       std::size_t skipped = 0;
+                       std::size_t hidden = 0;
+                       p._exhausted = true;
+                       kv.scan_keys(from, bound,
+                                    [&](const std::string& key, std::uint64_t expire,
+                                        redis_value_type type) {
+                                        if (expire != 0 && expire <= now_ms) {
+                                            return true;
+                                        }
+                                        if (skipped < skip) {
+                                            ++skipped;
+                                            return true;
+                                        }
+                                        if (examined == count) {
+                                            p._exhausted = false;
+                                            return false;
+                                        }
+                                        const redis_scan_verdict verdict = keep(key, type);
+                                        if (verdict == redis_scan_verdict::hidden) {
+                                            if (hidden == k_redis_scan_hidden_per_page) {
+                                                p._exhausted = false;
+                                                return false;
+                                            }
+                                            ++hidden;
+                                            p._last = key;
+                                            return true;
+                                        }
+                                        ++examined;
+                                        ++p._examined;
+                                        p._last = key;
+                                        if (verdict == redis_scan_verdict::kept) {
+                                            p._keys.push_back(key);
+                                        }
+                                        return true;
+                                    });
+                   });
+        return out;
+    }
+
+    struct usage_outcome {
+        redis_data_status _status{redis_data_status::ok};
+        redis_usage_page _page;
+        std::optional<node_id_type> _leader;
+    };
+
+    /// One page of `KYTHIRA.USAGE` over the group owning `from` (task 13,
+    /// Requirement 8.4): up to `count` live keys of `[from, to)` the user
+    /// may read, added to their buckets (`redis_usage_bucket`), without a
+    /// log entry and at the read's consistency. At most `max_buckets`
+    /// buckets; keys of any further bucket count as "other".
+    template<typename Keep>
+    auto usage(const std::string& from, const std::optional<std::string>& to, std::size_t count,
+               bool any_replica, std::uint64_t now_ms, std::size_t depth, std::string_view delim,
+               std::size_t max_buckets, Keep&& keep) -> usage_outcome {
+        usage_outcome out;
+        walk_group(from, to, any_replica, out._status, out._leader,
+                   [&](auto& kv, const std::optional<std::string>& bound,
+                       const std::optional<std::string>& range_end) {
+                       auto& p = out._page;
+                       p._range_end = range_end;
+                       p._exhausted = true;
+                       std::size_t examined = 0;
+                       kv.scan_keys(
+                           from, bound,
+                           [&](const std::string& key, std::uint64_t expire, redis_value_type) {
+                               if (expire != 0 && expire <= now_ms) {
+                                   return true;
+                               }
+                               if (examined == count) {
+                                   p._exhausted = false;
+                                   return false;
+                               }
+                               ++examined;
+                               p._last = key;
+                               if (!keep(key)) {
+                                   return true;
+                               }
+                               const auto entry = kv.lookup(key);
+                               const std::uint64_t bytes =
+                                   key.size() +
+                                   (entry ? redis_gateway_detail::entry_bytes(*entry) : 0);
+                               p.add(redis_usage_bucket(key, depth, delim), 1, bytes, max_buckets);
+                               return true;
+                           });
+                   });
         return out;
     }
 
@@ -421,6 +456,44 @@ private:
             return _host.node_id();
         }
         return node.known_leader();
+    }
+
+    /// Runs `f(kv, bound, range_end)` on the store of the group owning
+    /// `from` under its lock: `bound` is `to` cut at the group's range end.
+    /// The replica must be here (a leader unless `any_replica`); otherwise
+    /// `status` and `leader` say where to go.
+    template<typename F>
+    auto walk_group(const std::string& from, const std::optional<std::string>& to, bool any_replica,
+                    redis_data_status& status, std::optional<node_id_type>& leader, F&& f) -> void {
+        auto* node = replica_for(from, status, leader);
+        if (node == nullptr) {
+            return;
+        }
+        if (!any_replica && !node->is_leader()) {
+            leader = node->known_leader();
+            status = redis_data_status::no_leader;
+            return;
+        }
+        const auto group = _host.resolve(from);
+        if (!group) {
+            status = redis_data_status::unrouted;
+            return;
+        }
+        auto served =
+            _host.with_group_state_machine(group->group_id(), [&](auto& sm, const auto& d) -> bool {
+                if (!d._range.contains(from)) {
+                    return false;  // a split or merge moved it: route again
+                }
+                std::optional<std::string> bound = to;
+                if (d._range._end && (!bound || *d._range._end < *bound)) {
+                    bound = d._range._end;
+                }
+                f(redis_gateway_detail::kv_of(sm), bound, d._range._end);
+                return true;
+            });
+        if (!served || !*served) {
+            status = redis_data_status::unrouted;
+        }
     }
 
     /// Another node that can say who leads `r`'s group: its leader hint,
@@ -562,6 +635,38 @@ public:
                 _remote->group_of(keys.front()).value_or(group_id_type{}));
         }
         return local_type::propose_txn(keys, envelope, timeout);
+    }
+
+    // ── scans (tasks 12-13) ────────────────────────────────────────────────
+
+    /// As the local ones; a range that starts in a group with no replica
+    /// here names the data node leading it, so the caller sends it
+    /// `KYTHIRA.DATA PAGE` or `USAGE` instead of walking a store it lacks.
+    template<typename Keep>
+    auto page(const std::string& from, const std::optional<std::string>& to, std::size_t count,
+              std::size_t skip, bool any_replica, std::uint64_t now_ms, Keep&& keep) ->
+        typename local_type::page_outcome {
+        if (remote_for(from)) {
+            typename local_type::page_outcome out;
+            out._leader = _remote->leader_of(from);
+            out._status = redis_data_status::no_leader;
+            return out;
+        }
+        return local_type::page(from, to, count, skip, any_replica, now_ms,
+                                std::forward<Keep>(keep));
+    }
+    template<typename Keep>
+    auto usage(const std::string& from, const std::optional<std::string>& to, std::size_t count,
+               bool any_replica, std::uint64_t now_ms, std::size_t depth, std::string_view delim,
+               std::size_t max_buckets, Keep&& keep) -> typename local_type::usage_outcome {
+        if (remote_for(from)) {
+            typename local_type::usage_outcome out;
+            out._leader = _remote->leader_of(from);
+            out._status = redis_data_status::no_leader;
+            return out;
+        }
+        return local_type::usage(from, to, count, any_replica, now_ms, depth, delim, max_buckets,
+                                 std::forward<Keep>(keep));
     }
 
     // ── reads ──────────────────────────────────────────────────────────────

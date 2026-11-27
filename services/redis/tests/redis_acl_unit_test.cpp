@@ -138,7 +138,7 @@ BOOST_AUTO_TEST_CASE(authorize_by_role_and_prefix, *boost::unit_test::timeout(30
     BOOST_CHECK(redis_acl::authorize(nokeys, "GET", {""}) == acl_decision::deny_key);
 
     // Commands outside the closure are command denials.
-    BOOST_CHECK(redis_acl::authorize(ops, "FLUSHALL", {}) == acl_decision::deny_command);
+    BOOST_CHECK(redis_acl::authorize(ops, "SHUTDOWN", {}) == acl_decision::deny_command);
 }
 
 BOOST_AUTO_TEST_CASE(parse_rejects_malformed_lines, *boost::unit_test::timeout(30)) {
@@ -317,9 +317,12 @@ BOOST_AUTO_TEST_CASE(later_command_rules_win, *boost::unit_test::timeout(30)) {
     BOOST_CHECK(redis_acl::authorize(v, "SET", {"k"}) == acl_decision::deny_command);
     BOOST_CHECK(redis_acl::authorize(v, "INFO", {}) == acl_decision::deny_command);
 
-    // A rule never reaches a command this build does not ship.
-    const auto w = only_user("admin * allcommands +flushall");
-    BOOST_CHECK(redis_acl::authorize(w, "FLUSHALL", {}) == acl_decision::deny_command);
+    // allcommands never reaches a command this build does not ship, and a
+    // rule naming one is refused at parse time.
+    const auto w = only_user("admin * allcommands");
+    BOOST_CHECK(redis_acl::authorize(w, "SHUTDOWN", {}) == acl_decision::deny_command);
+    BOOST_CHECK_THROW(redis_acl::parse("user w disabled admin * allcommands +shutdown\n"),
+                      redis_acl_parse_error);
     // Categories with no command yet are accepted and match nothing.
     const auto x = only_user("read_only * -@pubsub -@sortedset");
     BOOST_CHECK(redis_acl::authorize(x, "GET", {"k"}) == acl_decision::allow);

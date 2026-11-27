@@ -58,6 +58,7 @@
 #include <boost/asio/ssl.hpp>
 
 #include <atomic>
+#include <array>
 #include <cctype>
 #include <chrono>
 #include <condition_variable>
@@ -152,6 +153,17 @@ struct redis_gateway_config {
     std::size_t _max_cursors = 100000;
     /// `KEYS` refuses past this many keys (Requirement 7.7).
     std::size_t _keys_limit = 10000;
+    /// `SLOWLOG` (task 13, Requirement 22.3): commands slower than this many
+    /// microseconds are recorded (negative: none, 0: all), up to
+    /// `_slowlog_max_len` of them.
+    std::int64_t _slowlog_slower_than_us = 10000;
+    std::size_t _slowlog_max_len = 128;
+    /// `FLUSHDB` and `FLUSHALL` refuse unless this is on (task 13,
+    /// Requirement 8.3): a typed accident on a shared cache is an outage.
+    bool _allow_flush = false;
+    /// Keys one range-delete entry removes at most (Requirement 8.2); a
+    /// larger range takes several entries, proposed in order.
+    std::uint32_t _range_delete_keys = 1000;
     std::size_t _max_clients = 1024;
     std::chrono::milliseconds _idle_timeout{300000};
     std::chrono::milliseconds _command_timeout{5000};
@@ -713,6 +725,39 @@ protected:
     /// that did; `-ERR invalid cursor` when it cannot be reached.
     auto forward_cursor(session& s, std::uint64_t cursor, const resp_command& cmd) -> std::string;
 
+    // ---- admin tools (redis-general-data-types task 13) -------------------
+
+    /// `KYTHIRA.DELPREFIX prefix`, `FLUSHDB` and `FLUSHALL`: range deletes
+    /// per group (Requirement 8.1-8.3).
+    auto handle_delprefix(session& s, const resp_command& cmd) -> std::string;
+    auto handle_flush(session& s, std::string_view upper, const resp_command& cmd) -> std::string;
+    /// `KYTHIRA.RANGEDEL lo has_hi hi`: one range-delete entry proposed on
+    /// this node, which leads the group owning `lo` (internal only).
+    auto handle_internal_rangedel(session& s, const resp_command& cmd) -> std::string;
+    struct range_delete_result {
+        std::uint64_t _count = 0;
+        std::optional<std::string> _last;
+    };
+    /// One range-delete entry for the group owning `lo`, bounded by `hi`
+    /// and `_range_delete_keys`; `error` holds the reply when it failed.
+    auto range_delete_page(session& s, const std::string& lo, const std::optional<std::string>& hi,
+                           std::string& error) -> std::optional<range_delete_result>;
+    /// Every key in `[lo, hi)`, group by group; adds what it removed to
+    /// `deleted` even when it fails part way.
+    auto range_delete(session& s, const std::string& lo, const std::optional<std::string>& hi,
+                      std::uint64_t& deleted, std::string& error) -> bool;
+    /// `KYTHIRA.USAGE [prefix] [DEPTH d] [DELIM c]` and its internal page
+    /// (`KYTHIRA.DATA USAGE`), and `MEMORY USAGE key` (Requirement 8.4-8.5).
+    auto handle_usage(session& s, const resp_command& cmd) -> std::string;
+    auto handle_internal_usage(session& s, const resp_command& cmd) -> std::string;
+    auto handle_memory(session& s, const resp_command& cmd) -> std::string;
+    auto fetch_usage(session& s, const std::string& from, const std::optional<std::string>& to,
+                     std::size_t depth, const std::string& delim, std::string& error)
+        -> std::optional<redis_usage_page>;
+    /// Live keys one usage page reads, and the buckets one reply holds.
+    static constexpr std::size_t k_usage_page_keys = 10000;
+    static constexpr std::size_t k_usage_max_buckets = 1000;
+
     // ---- tier 1 strings (redis-general-data-types task 3) ------------------
 
     /// Proposes an `exec` record for `key` (design Component 2) on its
@@ -785,7 +830,19 @@ protected:
     auto handle_ttl(session& s, const resp_command& cmd) -> std::string;
     auto handle_set(session& s, const resp_command& cmd, bool with_expiry) -> std::string;
     auto handle_del(session& s, const resp_command& cmd) -> std::string;
-    auto handle_info(session& s) -> std::string;
+    /// `INFO [section ...]`: the default sections, `all`/`everything`, or
+    /// named ones, `keyspace`, `commandstats` and `errorstats` among them
+    /// (task 13, Requirement 22.2).
+    auto handle_info(session& s, const resp_command& cmd) -> std::string;
+    /// `SLOWLOG GET [n] | LEN | RESET | HELP` (Requirement 22.3).
+    auto handle_slowlog(session& s, const resp_command& cmd) -> std::string;
+    /// Counts one finished command for `INFO commandstats` and `errorstats`
+    /// and, past the threshold, records it in the slow log.
+    auto record_command(const session& s, std::string_view upper, const resp_command& cmd,
+                        const std::string& reply, std::chrono::steady_clock::duration elapsed)
+        -> void;
+    [[nodiscard]] auto commandstats_text() const -> std::string;
+    [[nodiscard]] auto errorstats_text() const -> std::string;
     /// `HELLO`'s `mode` and `INFO`'s `redis_mode`: `cluster` only in the
     /// Cluster protocol compatibility mode (redis-general-data-types
     /// Requirement 1.6).
@@ -1047,6 +1104,31 @@ protected:
     std::atomic<bool> _running{false};
     std::chrono::steady_clock::time_point _started_at{};
 
+    /// `INFO commandstats` per registry command, by its place in
+    /// `k_redis_commands`: lock-free, since every command passes here.
+    struct command_tally {
+        std::atomic<std::uint64_t> _calls{0};
+        std::atomic<std::uint64_t> _usec{0};
+        std::atomic<std::uint64_t> _rejected{0};
+        std::atomic<std::uint64_t> _failed{0};
+    };
+    std::array<command_tally, k_redis_commands.size()> _command_tallies{};
+    /// `INFO errorstats`: replies per error code (the error's first word).
+    mutable std::mutex _errorstats_mutex;
+    std::map<std::string, std::uint64_t, std::less<>> _errorstats;
+    /// The slow log, newest first.
+    struct slowlog_entry {
+        std::uint64_t _id = 0;
+        std::int64_t _unix_seconds = 0;
+        std::uint64_t _usec = 0;
+        std::vector<std::string> _args;
+        std::string _client;
+        std::string _name;
+    };
+    mutable std::mutex _slowlog_mutex;
+    std::deque<slowlog_entry> _slowlog;
+    std::uint64_t _slowlog_next_id = 0;
+
     /// Leader-local advisory LRU per shard: never replicated, rebuilt lazily
     /// after a leadership change from whatever the shard holds.
     struct lru_state {
@@ -1172,6 +1254,7 @@ private:
     using front_end::build_forward_ssl_context;
     using front_end::emit;
     using front_end::emit_duration;
+    using front_end::record_command;
     using front_end::server_mode;
     using front_end::txn_allocate_timestamps;
     using front_end::txn_send;

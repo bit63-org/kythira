@@ -125,6 +125,10 @@ The Redis front end:
 | `KYTHIRA_REDIS_CURSOR_IDLE_MS` | `600000` | A `SCAN`, `HSCAN` or `SSCAN` cursor unused this long is forgotten; using it then answers `-ERR invalid cursor` |
 | `KYTHIRA_REDIS_MAX_CURSORS` | `100000` | Cursors one node holds at once; past it the least recently used is forgotten |
 | `KYTHIRA_REDIS_KEYS_LIMIT` | `10000` | Most keys `KEYS` returns; past it `KEYS` answers an error rather than a truncated list |
+| `KYTHIRA_REDIS_ALLOW_FLUSH` | `false` | Let admins run `FLUSHDB` and `FLUSHALL`. Off, both answer an error and the refusal is audited |
+| `KYTHIRA_REDIS_RANGE_DELETE_KEYS` | `1000` | Most keys one log entry of `KYTHIRA.DELPREFIX` or a flush deletes (1 to 1000000); a larger range takes several entries |
+| `KYTHIRA_REDIS_SLOWLOG_SLOWER_THAN_US` | `10000` | Commands slower than this many microseconds go to `SLOWLOG`; negative disables it, `0` logs everything |
+| `KYTHIRA_REDIS_SLOWLOG_MAX_LEN` | `128` | Entries `SLOWLOG` keeps; the oldest is dropped past it |
 | `KYTHIRA_REDIS_MAX_SHARD_BYTES` | `1073741824` | Per-shard budget; over it the leader evicts least-recently-used keys (the LRU is the leader's own view and starts over on a leadership change) |
 | `KYTHIRA_REDIS_SWEEP_BATCH` | `1024` | Expired keys removed per sweep command |
 | `KYTHIRA_REDIS_IMMUTABLE_VALUES` | `true` | A `SET` to an existing key with different bytes is refused. sccache keys are content hashes, so a conflicting write is a corrupted client, not an update |
@@ -908,6 +912,58 @@ the disk-backed cache, where every key is a string). `SCAN` takes `MATCH`,
 - Expired keys are never returned. Iteration reads at the connection's
   consistency (`KYTHIRA_REDIS_READ_CONSISTENCY`), each page from one shard
   at the time it is read, not as one snapshot.
+
+## Admin tools and introspection
+
+Operators get commands to delete by prefix, see where the space goes, and
+watch the gateway, without a client walking the keyspace.
+
+- `KYTHIRA.DELPREFIX prefix` deletes every key starting with `prefix` and
+  replies with how many it deleted. It is admin only (`dangerous`). Each
+  shard deletes its part through its log in entries of at most
+  `KYTHIRA_REDIS_RANGE_DELETE_KEYS` keys, so one call never makes one huge
+  entry. Each entry is atomic within its shard; the call as a whole is
+  not atomic across shards or entries, and a key written under the prefix
+  while it runs may survive. A key held by a running transaction makes the
+  entry refuse it; the gateway resolves the lock and retries, as for any
+  write. Expired keys not yet swept count as deleted. An empty prefix is
+  refused: that is `FLUSHALL`.
+- `FLUSHDB` and `FLUSHALL` (with `ASYNC` or `SYNC`, both handled the same
+  way) delete every key the same way, but only when
+  `KYTHIRA_REDIS_ALLOW_FLUSH` is on; off, they answer
+  `-ERR FLUSHDB is disabled on this cluster (KYTHIRA_REDIS_ALLOW_FLUSH)`.
+  Every call, deletes and refusals alike, writes an audit line with the
+  prefix and the count.
+- `KYTHIRA.USAGE [prefix] [DEPTH n] [DELIM d]` (admin only) groups keys by
+  their first `n` delimiter-ended segments (default depth 1, delimiter
+  `:`) and replies with one `[bucket, keys, bytes]` row per group, largest
+  first. A key with fewer segments is its own bucket. Past 1000 buckets
+  the rest are summed into one last row whose bucket is nil. Bytes are
+  counted as `MEMORY USAGE` counts them. The walk reads each shard at the
+  connection's consistency.
+- `MEMORY USAGE key [SAMPLES n]` replies with the key's bytes plus its
+  value's bytes plus 16 (the same per-element overhead collections are
+  limited by), or nil for a missing key. `SAMPLES` is accepted and
+  ignored; the count is exact. Other `MEMORY` subcommands are not offered.
+- `DBSIZE` counts every live key across the cluster exactly, by walking
+  the shards; it is not an estimate.
+- `INFO [section ...]` offers `server`, `clients`, `memory`, `stats`,
+  `commandstats`, `errorstats` and `keyspace`, plus `default`, `all` and
+  `everything`. `keyspace` shows the cluster-wide `db0:keys=N,expires=M`
+  and this node's own counts as `local_*` lines. When a shard cannot be
+  paged (no leader, or a peer too old to page during a rolling upgrade),
+  `db0` falls back to this node's own counts and `kythira_keyspace_scope`
+  says `local` instead of `cluster`; INFO itself never fails for it.
+  `commandstats` counts
+  calls, time, rejected calls (not authenticated, not permitted, wrong
+  arity, unknown, `EXECABORT`) and failed calls per command on this node.
+  `errorstats` counts replies by error code, at most 128 codes.
+- `SLOWLOG GET [n]`, `LEN`, `RESET` and `HELP` (admin only) show this
+  node's commands slower than `KYTHIRA_REDIS_SLOWLOG_SLOWER_THAN_US`.
+  An entry keeps the command name and its keys; every other argument is
+  replaced with `(redacted)`, so values and secrets never reach the log.
+  At most 32 arguments of 128 bytes each are kept. `AUTH`, `HELLO` and
+  `SLOWLOG` itself are never logged.
 
 ## Transactions
 

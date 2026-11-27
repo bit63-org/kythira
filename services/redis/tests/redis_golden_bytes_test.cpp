@@ -519,7 +519,8 @@ BOOST_AUTO_TEST_CASE(original_acl_lines_keep_their_permissions, *boost::unit_tes
         "user off1 disabled read_write sccache/",
     };
     // The original closure (redis-compatible-kv, multi-raft-transactions
-    // and the gateway module), plus one command it never had.
+    // and the gateway module), plus FLUSHALL, which it never had: since
+    // redis-general-data-types task 13 admins (and only admins) may run it.
     const std::vector<std::string_view> commands{
         "GET",   "EXISTS",      "STRLEN", "GETRANGE",       "TTL",
         "PING",  "ECHO",        "SELECT", "CLIENT",         "COMMAND",

@@ -1001,8 +1001,8 @@ BOOST_AUTO_TEST_CASE(sccache_handshake_pipeline_and_round_trip, *boost::unit_tes
     BOOST_CHECK_EQUAL(client.call({"SELECT", "1"}), "-ERR DB index is out of range\r\n");
     BOOST_CHECK_EQUAL(client.call({"ECHO", "hi"}), bulk("hi"));
     BOOST_CHECK_EQUAL(client.call({"GET"}), "-ERR wrong number of arguments for 'get' command\r\n");
-    auto unknown = client.call({"FLUSHALL"});
-    BOOST_CHECK(unknown.rfind("-ERR unknown command 'FLUSHALL'", 0) == 0);
+    auto unknown = client.call({"KYTHIRA.NOSUCH"});
+    BOOST_CHECK(unknown.rfind("-ERR unknown command 'KYTHIRA.NOSUCH'", 0) == 0);
     // ...and the connection is still usable afterwards (Requirement 1.8).
     BOOST_CHECK_EQUAL(client.call({"PING"}), "+PONG\r\n");
     BOOST_CHECK_EQUAL(client.call({"QUIT"}), "+OK\r\n");
@@ -3112,9 +3112,220 @@ BOOST_AUTO_TEST_CASE(a_walk_survives_splits_merges_and_leader_moves,
         BOOST_CHECK_GT(splits, 0);
         BOOST_CHECK_GT(merges + moves, 0);
         if (child) {
-            BOOST_CHECK(c->merge(*child, parent));
+            // A child split off by the last call may not have elected a
+            // leader yet, or may still be in its post-split cooldown:
+            // retry the clean-up merge for a while.
+            bool merged = false;
+            const auto give_up = std::chrono::steady_clock::now() + std::chrono::seconds{15};
+            while (!(merged = c->merge(*child, parent)) &&
+                   std::chrono::steady_clock::now() < give_up) {
+                std::this_thread::sleep_for(std::chrono::milliseconds{200});
+            }
+            BOOST_CHECK(merged);
         }
     }
+}
+
+// Task 13 (Requirement 8.1-8.3, 8.5): prefix delete group by group in
+// bounded entries, the flush guard, and an exact DBSIZE.
+BOOST_AUTO_TEST_CASE(prefix_delete_flush_and_dbsize, *boost::unit_test::timeout(240)) {
+    if constexpr (gateway_type::k_node_format_level < k_redis_typed_values_level) {
+        return;
+    }
+    redis_gateway_config cfg;
+    cfg._range_delete_keys = 7;
+    auto c = typed_cluster(cfg);
+    resp_client ops(c->port(c->a_follower_of(k_sccache_group)));
+    BOOST_REQUIRE_EQUAL(ops.auth("ops", "ops-secret"), "+OK\r\n");
+    resp_client farm(c->port(1));
+    BOOST_REQUIRE_EQUAL(farm.auth("farm", "farm-secret"), "+OK\r\n");
+
+    for (const auto& k : numbered("a/x/", 20)) {
+        BOOST_REQUIRE_EQUAL(ops.call({"SET", k, "v"}), "+OK\r\n");
+    }
+    for (const auto& k : numbered("a/y/", 5)) {
+        BOOST_REQUIRE_EQUAL(ops.call({"SET", k, "v"}), "+OK\r\n");
+    }
+    for (const auto& k : numbered("sccache/x/", 15)) {
+        BOOST_REQUIRE_EQUAL(ops.call({"SET", k, "v"}), "+OK\r\n");
+    }
+    BOOST_REQUIRE_EQUAL(ops.call({"HSET", "sccache/x/h", "f", "v"}), ":1\r\n");
+    BOOST_REQUIRE_EQUAL(ops.call({"SET", "sccache/y", "v"}), "+OK\r\n");
+    // Every group counted once, from any node.
+    BOOST_CHECK_EQUAL(ops.call({"DBSIZE"}), ":42\r\n");
+    BOOST_CHECK_EQUAL(farm.call({"DBSIZE"}), ":42\r\n");
+
+    // 20 keys in entries of 7; the neighbouring prefix stays.
+    BOOST_CHECK_EQUAL(ops.call({"KYTHIRA.DELPREFIX", "a/x/"}), ":20\r\n");
+    BOOST_CHECK_EQUAL(ops.call({"EXISTS", "a/x/00", "a/x/19"}), ":0\r\n");
+    BOOST_CHECK_EQUAL(ops.call({"EXISTS", "a/y/00", "a/y/04"}), ":2\r\n");
+    BOOST_CHECK_EQUAL(ops.call({"KYTHIRA.DELPREFIX", "a/x/"}), ":0\r\n");
+    // A prefix whose range two groups share: both are walked.
+    const auto child = c->split(k_sccache_group, "sccache/x/07");
+    BOOST_REQUIRE(child.has_value());
+    BOOST_CHECK_EQUAL(ops.call({"DBSIZE"}), ":22\r\n");
+    BOOST_CHECK_EQUAL(ops.call({"KYTHIRA.DELPREFIX", "sccache/x/"}), ":16\r\n");
+    BOOST_CHECK_EQUAL(ops.call({"GET", "sccache/y"}), bulk("v"));
+    BOOST_CHECK_EQUAL(ops.call({"DBSIZE"}), ":6\r\n");
+
+    // Admin only, never an empty prefix, and the internal hop is internal.
+    BOOST_CHECK(farm.call({"KYTHIRA.DELPREFIX", "sccache/"}).starts_with("-NOPERM"));
+    BOOST_CHECK_EQUAL(ops.call({"KYTHIRA.DELPREFIX", ""}),
+                      "-ERR KYTHIRA.DELPREFIX needs a non-empty prefix; use FLUSHALL\r\n");
+    BOOST_CHECK(ops.call({"KYTHIRA.RANGEDEL", "a", "0", ""}).starts_with("-NOPERM"));
+    // Flushing is off unless the cluster turns it on.
+    BOOST_CHECK_EQUAL(ops.call({"FLUSHALL"}),
+                      "-ERR FLUSHALL is disabled on this cluster (KYTHIRA_REDIS_ALLOW_FLUSH)\r\n");
+    BOOST_CHECK_EQUAL(ops.call({"FLUSHDB", "ASYNC"}),
+                      "-ERR FLUSHDB is disabled on this cluster (KYTHIRA_REDIS_ALLOW_FLUSH)\r\n");
+    BOOST_CHECK(farm.call({"FLUSHDB"}).starts_with("-NOPERM"));
+    BOOST_CHECK_EQUAL(ops.call({"DBSIZE"}), ":6\r\n");
+}
+
+BOOST_AUTO_TEST_CASE(flush_when_the_cluster_allows_it, *boost::unit_test::timeout(180)) {
+    if constexpr (gateway_type::k_node_format_level < k_redis_typed_values_level) {
+        return;
+    }
+    redis_gateway_config cfg;
+    cfg._allow_flush = true;
+    cfg._range_delete_keys = 5;
+    auto c = typed_cluster(cfg);
+    resp_client ops(c->port(1));
+    BOOST_REQUIRE_EQUAL(ops.auth("ops", "ops-secret"), "+OK\r\n");
+    for (const auto& k : numbered("a/", 12)) {
+        BOOST_REQUIRE_EQUAL(ops.call({"SET", k, "v"}), "+OK\r\n");
+    }
+    for (const auto& k : numbered("sccache/", 12)) {
+        BOOST_REQUIRE_EQUAL(ops.call({"RPUSH", k, "v"}), ":1\r\n");
+    }
+    BOOST_CHECK_EQUAL(ops.call({"DBSIZE"}), ":24\r\n");
+    BOOST_CHECK_EQUAL(ops.call({"FLUSHDB", "NOW"}), "-ERR syntax error\r\n");
+    BOOST_CHECK_EQUAL(ops.call({"FLUSHALL", "SYNC"}), "+OK\r\n");
+    BOOST_CHECK_EQUAL(ops.call({"DBSIZE"}), ":0\r\n");
+    BOOST_CHECK_EQUAL(ops.call({"SET", "a/again", "v"}), "+OK\r\n");
+    BOOST_CHECK_EQUAL(ops.call({"FLUSHDB"}), "+OK\r\n");
+    BOOST_CHECK_EQUAL(ops.call({"DBSIZE"}), ":0\r\n");
+}
+
+// Task 13 (Requirement 8.4-8.5): usage per bucket over both groups, and
+// MEMORY USAGE.
+BOOST_AUTO_TEST_CASE(usage_and_memory_usage, *boost::unit_test::timeout(180)) {
+    if constexpr (gateway_type::k_node_format_level < k_redis_typed_values_level) {
+        return;
+    }
+    auto c = typed_cluster();
+    resp_client ops(c->port(c->a_follower_of(k_sccache_group)));
+    BOOST_REQUIRE_EQUAL(ops.auth("ops", "ops-secret"), "+OK\r\n");
+    resp_client farm(c->port(1));
+    BOOST_REQUIRE_EQUAL(farm.auth("farm", "farm-secret"), "+OK\r\n");
+    for (const auto& k : numbered("a/x/", 20)) {  // 6-byte keys, 1-byte values
+        BOOST_REQUIRE_EQUAL(ops.call({"SET", k, "v"}), "+OK\r\n");
+    }
+    for (const auto& k : numbered("a/y/", 3)) {
+        BOOST_REQUIRE_EQUAL(ops.call({"SET", k, "vv"}), "+OK\r\n");
+    }
+    for (const auto& k : numbered("sccache/", 2)) {
+        BOOST_REQUIRE_EQUAL(ops.call({"SET", k, "v"}), "+OK\r\n");
+    }
+    const auto row = [](const std::string& bucket, int keys, int bytes) {
+        return "*3\r\n" + bulk(bucket) + ":" + std::to_string(keys) +
+               "\r\n:" + std::to_string(bytes) + "\r\n";
+    };
+    // Depth 1 at "/": one bucket per top-level prefix, largest first.
+    BOOST_CHECK_EQUAL(ops.call({"KYTHIRA.USAGE", "DELIM", "/"}),
+                      "*2\r\n" + row("a/", 23, 20 * 7 + 3 * 8) + row("sccache/", 2, 2 * 11));
+    // A prefix and a deeper cut.
+    BOOST_CHECK_EQUAL(ops.call({"KYTHIRA.USAGE", "a/", "DEPTH", "2", "DELIM", "/"}),
+                      "*2\r\n" + row("a/x/", 20, 140) + row("a/y/", 3, 24));
+    BOOST_CHECK_EQUAL(ops.call({"KYTHIRA.USAGE", "zzz"}), "*0\r\n");
+    BOOST_CHECK_EQUAL(ops.call({"KYTHIRA.USAGE", "a/", "DEPTH", "x"}),
+                      "-ERR value is not an integer or out of range\r\n");
+    BOOST_CHECK_EQUAL(ops.call({"KYTHIRA.USAGE", "a/", "WIDTH", "1"}), "-ERR syntax error\r\n");
+    BOOST_CHECK(farm.call({"KYTHIRA.USAGE"}).starts_with("-NOPERM"));
+
+    BOOST_CHECK_EQUAL(ops.call({"MEMORY", "USAGE", "a/x/00"}), ":23\r\n");
+    BOOST_CHECK_EQUAL(ops.call({"MEMORY", "USAGE", "a/x/00", "SAMPLES", "5"}), ":23\r\n");
+    BOOST_CHECK_EQUAL(ops.call({"MEMORY", "USAGE", "a/none"}), "$-1\r\n");
+    BOOST_CHECK(ops.call({"MEMORY", "DOCTOR"}).starts_with("-ERR unknown subcommand"));
+    BOOST_CHECK_EQUAL(ops.call({"MEMORY", "USAGE", "a/x/00", "SAMPLES"}),
+                      "-ERR unknown subcommand or wrong number of arguments for 'USAGE'. Try "
+                      "MEMORY HELP.\r\n");
+    BOOST_CHECK_EQUAL(farm.call({"MEMORY", "USAGE", "sccache/00"}), ":27\r\n");
+    BOOST_CHECK(farm.call({"MEMORY", "USAGE", "a/x/00"}).starts_with("-NOPERM"));
+}
+
+// Task 13 (Requirement 22.2-22.3): INFO's keyspace, commandstats and
+// errorstats sections in Redis's format, and the slow log with values
+// never shown.
+BOOST_AUTO_TEST_CASE(info_sections_and_slowlog, *boost::unit_test::timeout(180)) {
+    if constexpr (gateway_type::k_node_format_level < k_redis_typed_values_level) {
+        return;
+    }
+    redis_gateway_config cfg;
+    cfg._slowlog_slower_than_us = 0;  // every command
+    cfg._slowlog_max_len = 5;
+    auto c = typed_cluster(cfg);
+    resp_client ops(c->port(2));
+    BOOST_REQUIRE_EQUAL(ops.auth("ops", "ops-secret"), "+OK\r\n");
+    resp_client farm(c->port(2));
+    BOOST_REQUIRE_EQUAL(farm.auth("farm", "farm-secret"), "+OK\r\n");
+    BOOST_REQUIRE_EQUAL(ops.call({"SET", "a/k", "v"}), "+OK\r\n");
+    BOOST_REQUIRE_EQUAL(ops.call({"EXPIRE", "a/k", "1000"}), ":1\r\n");
+    BOOST_REQUIRE_EQUAL(ops.call({"SET", "sccache/k", "v"}), "+OK\r\n");
+    BOOST_REQUIRE_EQUAL(ops.call({"GET", "a/k"}), bulk("v"));
+    BOOST_REQUIRE(ops.call({"GET"}).starts_with("-ERR wrong number"));
+    BOOST_REQUIRE(ops.call({"HSET", "a/k", "f", "v"}).starts_with("-WRONGTYPE"));
+    BOOST_REQUIRE(farm.call({"GET", "a/k"}).starts_with("-NOPERM"));
+
+    const auto info = [&](std::vector<std::string> argv) {
+        argv.insert(argv.begin(), "INFO");
+        const auto reply = ops.call(argv);
+        BOOST_REQUIRE(reply.starts_with("$"));
+        return reply.substr(reply.find("\r\n") + 2);
+    };
+    const auto stats = info({"commandstats"});
+    BOOST_CHECK(stats.starts_with("# Commandstats\r\n"));
+    BOOST_CHECK(stats.find("cmdstat_get:calls=1,usec=") != std::string::npos);
+    BOOST_CHECK(stats.find(",rejected_calls=2,failed_calls=0\r\n") != std::string::npos);
+    BOOST_CHECK(stats.find("cmdstat_set:calls=2,") != std::string::npos);
+    BOOST_CHECK(stats.find("cmdstat_hset:calls=1,") != std::string::npos);
+    BOOST_CHECK(stats.find("rejected_calls=0,failed_calls=1\r\n") != std::string::npos);
+    const auto errors = info({"errorstats"});
+    BOOST_CHECK(errors.starts_with("# Errorstats\r\n"));
+    BOOST_CHECK(errors.find("errorstat_ERR:count=1\r\n") != std::string::npos);
+    BOOST_CHECK(errors.find("errorstat_NOPERM:count=1\r\n") != std::string::npos);
+    BOOST_CHECK(errors.find("errorstat_WRONGTYPE:count=1\r\n") != std::string::npos);
+    // Keyspace counts the whole cluster, each group once.
+    const auto keyspace = info({"keyspace"});
+    BOOST_CHECK(keyspace.starts_with("# Keyspace\r\ndb0:keys=2,expires=1,avg_ttl=0\r\n"));
+    BOOST_CHECK(keyspace.find("kythira_keyspace_scope:cluster\r\n") != std::string::npos);
+    const auto by_default = info({});
+    BOOST_CHECK(by_default.starts_with("# Server\r\n"));
+    BOOST_CHECK(by_default.find("# Errorstats") != std::string::npos);
+    BOOST_CHECK(by_default.find("db0:keys=2,") != std::string::npos);
+    BOOST_CHECK(by_default.find("# Commandstats") == std::string::npos);
+    BOOST_CHECK(info({"all"}).find("# Commandstats") != std::string::npos);
+    const auto two = info({"server", "clients"});
+    BOOST_CHECK(two.find("# Clients") != std::string::npos);
+    BOOST_CHECK(two.find("# Stats") == std::string::npos);
+
+    // The slow log keeps the newest five; a value never appears in it.
+    BOOST_REQUIRE_EQUAL(ops.call({"SET", "a/secret", "hunter2-value"}), "+OK\r\n");
+    BOOST_CHECK_EQUAL(ops.call({"SLOWLOG", "LEN"}), ":5\r\n");
+    const auto newest = ops.call({"SLOWLOG", "GET", "1"});
+    BOOST_CHECK(newest.starts_with("*1\r\n*6\r\n:"));
+    BOOST_CHECK(newest.find("*3\r\n$3\r\nSET\r\n$8\r\na/secret\r\n$10\r\n(redacted)\r\n") !=
+                std::string::npos);
+    BOOST_CHECK(newest.find("hunter2") == std::string::npos);
+    BOOST_CHECK(ops.call({"SLOWLOG", "GET"}).starts_with("*5\r\n"));
+    BOOST_CHECK(ops.call({"SLOWLOG", "GET", "-1"}).starts_with("*5\r\n"));
+    BOOST_CHECK_EQUAL(ops.call({"SLOWLOG", "GET", "-2"}),
+                      "-ERR count should be greater than or equal to -1\r\n");
+    BOOST_CHECK(ops.call({"SLOWLOG", "HELP"}).starts_with("*9\r\n"));
+    BOOST_CHECK(ops.call({"SLOWLOG", "NOPE"}).starts_with("-ERR unknown subcommand"));
+    BOOST_CHECK(farm.call({"SLOWLOG", "LEN"}).starts_with("-NOPERM"));
+    BOOST_CHECK_EQUAL(ops.call({"SLOWLOG", "RESET"}), "+OK\r\n");
+    BOOST_CHECK_EQUAL(ops.call({"SLOWLOG", "LEN"}), ":0\r\n");
 }
 
 // Requirement 5.4: the rule is decided in apply(), so writers racing to
@@ -3825,7 +4036,8 @@ BOOST_AUTO_TEST_CASE(front_end_without_data_serves_commands_from_the_data_nodes,
     BOOST_CHECK_EQUAL(local.call({"GET", "sccache/fe/shared"}), "$3\r\none\r\n");
     BOOST_CHECK_EQUAL(local.call({"SET", "sccache/fe/back", "two"}), "+OK\r\n");
     BOOST_CHECK_EQUAL(remote.call({"GET", "sccache/fe/back"}), "$3\r\ntwo\r\n");
-    BOOST_CHECK_EQUAL(remote.call({"DBSIZE"}), ":0\r\n");
+    // DBSIZE counts the whole keyspace (task 13), read from the data nodes.
+    BOOST_CHECK_EQUAL(remote.call({"DBSIZE"}), local.call({"DBSIZE"}));
 
     resp_client ops(fe.port());
     BOOST_REQUIRE_EQUAL(ops.auth("ops", "ops-secret"), "+OK\r\n");

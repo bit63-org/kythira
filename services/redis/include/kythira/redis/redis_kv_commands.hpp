@@ -841,9 +841,33 @@ inline auto read_lp_strings(reader& in, const char* what) -> std::vector<std::st
 }
 
 /// Satisfies `kythira::partitioner<std::string>` for `multi_raft_config::partitioner`.
+/// The range a `range_delete` record covers, `[lo, hi)` with an absent `hi`
+/// the end of the keyspace; nothing for any other record.
+[[nodiscard]] inline auto redis_range_delete_bounds(const std::vector<std::byte>& command)
+    -> std::optional<std::pair<std::string, std::optional<std::string>>> {
+    if (!is_redis_kv_v3_record(command) || command.size() < 2 ||
+        static_cast<redis_kv_opcode>(command[1]) != redis_kv_opcode::range_delete) {
+        return std::nullopt;
+    }
+    auto record = decode_redis_kv_v3_command(command);
+    auto& c = std::get<redis_kv_range_delete_command>(record);
+    std::optional<std::string> hi;
+    if (!c._hi.empty()) {
+        hi = std::move(c._hi);
+    }
+    return std::pair{std::move(c._lo), std::move(hi)};
+}
+
 struct redis_kv_partitioner {
     [[nodiscard]] auto key_of(const std::vector<std::byte>& command) const -> std::string {
         return redis_kv_command_key(command);
+    }
+    /// A command that writes a whole key range (task 13's range deletes):
+    /// the transaction wrapper refuses it while a transaction holds a key
+    /// in the range, as it refuses a plain write to a held key.
+    [[nodiscard]] auto range_of(const std::vector<std::byte>& command) const
+        -> std::optional<std::pair<std::string, std::optional<std::string>>> {
+        return redis_range_delete_bounds(command);
     }
 };
 

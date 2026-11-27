@@ -141,7 +141,7 @@ is extended as the rest land.
     every stable key exactly once; filtered keys never leak
   - _Requirements: 7.1-7.8_
 
-- [ ] 13. Admin tools and introspection
+- [x] 13. Admin tools and introspection
   - `KYTHIRA.DELPREFIX` (bounded range deletes, lock resolution),
     `FLUSHDB`/`FLUSHALL` behind `KYTHIRA_REDIS_ALLOW_FLUSH`,
     `KYTHIRA.USAGE`, `MEMORY USAGE`, exact `DBSIZE`, `INFO keyspace`,

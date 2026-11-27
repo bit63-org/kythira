@@ -54,6 +54,7 @@
 #include <kythira/redis/redis_format_level.hpp>
 #include <kythira/redis/redis_kv_commands.hpp>
 #include <kythira/redis/redis_exec_appliers.hpp>
+#include <kythira/redis/redis_range_delete.hpp>
 #include <kythira/redis/redis_kv_state_machine.hpp>
 #include <kythira/redis/redis_reply.hpp>
 #include <kythira/redis/redis_typed_read.hpp>
@@ -529,6 +530,13 @@ private:
         }
         if (const auto* exec = std::get_if<redis_kv_exec_command>(&record)) {
             return apply_exec(*exec, ts);
+        }
+        if (const auto* range = std::get_if<redis_kv_range_delete_command>(&record)) {
+            // A tombstone at `ts` for each key: a snapshot below it still
+            // reads the keys.
+            return apply_redis_range_delete(
+                *range, [this](const auto& lo, const auto& hi, auto&& f) { scan_keys(lo, hi, f); },
+                [this, ts](const key_type& key) { return delete_at(key, ts); });
         }
         return redis_v3_apply_result(redis_v3_apply_status::unchanged);
     }
