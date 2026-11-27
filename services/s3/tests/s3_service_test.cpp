@@ -15,9 +15,12 @@
 #include <kythira/s3/s3_tiers.hpp>
 
 #include <raft/key_object_store.hpp>
+#include <raft/record_segment_store.hpp>
 #include <raft/static_key_authorizer.hpp>
 
 #include <array>
+#include <atomic>
+#include <filesystem>
 #include <fstream>
 #include <chrono>
 #include <map>
@@ -30,6 +33,8 @@
 #include <string>
 #include <utility>
 #include <vector>
+
+#include <unistd.h>
 
 namespace {
 
@@ -135,12 +140,15 @@ struct fixture {
     std::array<memory_copy, 3> nodes;
     std::vector<s3::chunk_copy> copies;
     std::vector<std::string> replicas{"n0", "n1", "n2"};
+    /// Where the index keeps change records (task 14); none in most tests.
+    kythira::segment_store* changes = nullptr;
     s3::local_metadata meta;
     std::unique_ptr<s3::data_path> data;
     authorizer auth;
     std::unique_ptr<s3::s3_service<s3::local_metadata, authorizer>> svc;
 
-    explicit fixture(s3::service_options o = {}) {
+    explicit fixture(s3::service_options o = {}, kythira::segment_store* change_log = nullptr)
+        : changes(change_log), meta(s3::index_options{}, change_log) {
         for (std::size_t i = 0; i < nodes.size(); ++i) {
             copies.emplace_back("n" + std::to_string(i), nodes.at(i));
         }
@@ -1951,4 +1959,446 @@ BOOST_AUTO_TEST_CASE(a_copy_can_change_only_the_storage_class) {
     BOOST_TEST(
         f.send("PUT", "/bkt/k", {{"x-amz-copy-source", "/bkt/k"}, {"x-amz-storage-class", "COLD"}})
             .code() == "InvalidStorageClass");
+}
+
+// ---- task 14: event notifications ---------------------------------------------
+
+namespace {
+
+auto notification_doc(const std::string& arn) -> std::string {
+    return R"(<NotificationConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/">)"
+           "<QueueConfiguration><Id>new-photos</Id><Queue>" +
+           arn +
+           "</Queue><Event>s3:ObjectCreated:*</Event><Filter><S3Key><FilterRule><Name>prefix</Name>"
+           "<Value>img/</Value></FilterRule></S3Key></Filter></QueueConfiguration>"
+           "</NotificationConfiguration>";
+}
+
+const std::string k_queue_arn = "arn:aws:sqs:us-east-1:111122223333:photo-events";
+
+}  // namespace
+
+BOOST_AUTO_TEST_CASE(notification_configurations_are_checked_against_their_destinations) {
+    std::vector<s3::notification_delivery> sent;
+    bool refuse = false;
+    s3::service_options o;
+    o.notifications = [&](const s3::notification_delivery& d) -> s3::delivery_outcome {
+        sent.push_back(d);
+        if (refuse) {
+            return {false, true, "AccessDenied"};
+        }
+        return {true, false, {}};
+    };
+    fixture f(std::move(o));
+    BOOST_REQUIRE(f.make_bucket("bkt").status == 200U);
+    auto got = f.send("GET", "/bkt?notification");
+    BOOST_TEST(got.status == 200U);
+    BOOST_TEST(contains(got.body, "<NotificationConfiguration"));
+    BOOST_TEST(!contains(got.body, "QueueConfiguration"));
+
+    BOOST_TEST(f.send("PUT", "/bkt?notification", {}, notification_doc(k_queue_arn)).status ==
+               200U);
+    BOOST_TEST_REQUIRE(sent.size() == 1U);  // the test event
+    BOOST_TEST(sent[0].arn == k_queue_arn);
+    BOOST_TEST(contains(sent[0].body, "\"Event\":\"s3:TestEvent\""));
+    BOOST_TEST(contains(sent[0].body, "\"Bucket\":\"bkt\""));
+    got = f.send("GET", "/bkt?notification");
+    BOOST_TEST(contains(got.body, "<Id>new-photos</Id>"));
+    BOOST_TEST(contains(got.body, "<Name>Prefix</Name><Value>img/</Value>"));
+    BOOST_TEST(f.meta.bucket("bkt")->config.contains("notification"));
+
+    // Writes to the bucket are now logged for the worker.
+    BOOST_TEST(f.send("PUT", "/bkt/img/a.jpg", {}, "abc").status == 200U);
+    BOOST_TEST(f.meta.state_machine().change_log().value().last_seq == 1U);
+
+    // A destination that refuses the test event fails the request.
+    refuse = true;
+    const auto other = notification_doc("arn:aws:sqs:us-east-1:111122223333:other");
+    auto bad = f.send("PUT", "/bkt?notification", {}, other);
+    BOOST_TEST(bad.status == 400U);
+    BOOST_TEST(bad.code() == "InvalidArgument");
+    BOOST_TEST(contains(bad.body, "Unable to validate the following destination configurations"));
+    BOOST_TEST(contains(f.send("GET", "/bkt?notification").body, "photo-events"));
+    // Unless the caller skips the check.
+    BOOST_TEST(
+        f.send("PUT", "/bkt?notification", {{"x-amz-skip-destination-validation", "true"}}, other)
+            .status == 200U);
+    BOOST_TEST(contains(f.send("GET", "/bkt?notification").body, ":other<"));
+
+    // An empty configuration removes it, and writes stop being logged.
+    BOOST_TEST(f.send("PUT", "/bkt?notification", {},
+                      "<NotificationConfiguration "
+                      "xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"/>")
+                   .status == 200U);
+    BOOST_TEST(!f.meta.bucket("bkt")->config.contains("notification"));
+    BOOST_TEST(f.send("PUT", "/bkt/img/b.jpg", {}, "abc").status == 200U);
+    BOOST_TEST(f.meta.state_machine().change_log().value().last_seq == 1U);
+
+    // Only the bucket owner (or a policy grant) may change it.
+    BOOST_TEST(
+        f.send("PUT", "/bkt?notification", {}, notification_doc(k_queue_arn), "AKIDOTHER").status ==
+        403U);
+    BOOST_TEST(f.send("PUT", "/bkt?notification", {}, "<Nope/>").code() == "MalformedXML");
+}
+
+// ---- task 14: replication -----------------------------------------------------
+
+namespace {
+
+auto replication_doc(const std::string& rules) -> std::string {
+    return R"(<ReplicationConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/">)"
+           "<Role>arn:aws:iam::111122223333:role/replicator</Role>" +
+           rules + "</ReplicationConfiguration>";
+}
+
+auto replication_rule(const std::string& id, const std::string& prefix, const std::string& dest,
+                      int priority = 1, bool markers = true) -> std::string {
+    return "<Rule><ID>" + id + "</ID><Priority>" + std::to_string(priority) +
+           "</Priority><Status>Enabled</Status><Filter><Prefix>" + prefix +
+           "</Prefix></Filter><Destination><Bucket>arn:aws:s3:::" + dest +
+           "</Bucket></Destination><DeleteMarkerReplication><Status>" +
+           (markers ? "Enabled" : "Disabled") + "</Status></DeleteMarkerReplication></Rule>";
+}
+
+/// `doc` as PutBucketReplication sends it (it needs Content-MD5).
+auto put_replication(fixture& f, const std::string& bucket, const std::string& doc,
+                     std::string_view key = "AKIDOWNER") -> reply {
+    return f.send("PUT", "/" + bucket + "?replication", {{"Content-MD5", md5_b64(doc)}}, doc, key);
+}
+
+const std::string k_versioning_on =
+    "<VersioningConfiguration><Status>Enabled</Status></VersioningConfiguration>";
+
+struct scratch_dir {
+    std::filesystem::path path;
+    scratch_dir() {
+        static std::atomic<int> n{0};
+        path = std::filesystem::temp_directory_path() /
+               ("s3_service_repl_" + std::to_string(::getpid()) + "_" + std::to_string(n++));
+        std::filesystem::remove_all(path);
+        std::filesystem::create_directories(path);
+    }
+    ~scratch_dir() {
+        std::error_code ec;
+        std::filesystem::remove_all(path, ec);
+    }
+    scratch_dir(const scratch_dir&) = delete;
+    auto operator=(const scratch_dir&) -> scratch_dir& = delete;
+    scratch_dir(scratch_dir&&) = delete;
+    auto operator=(scratch_dir&&) -> scratch_dir& = delete;
+};
+
+/// A source cluster with a change log, and a destination cluster the
+/// replicator reaches through the S3 API, signed as the owner.
+struct replication_pair {
+    scratch_dir dir;
+    std::unique_ptr<kythira::record_segment_store> store;
+    std::unique_ptr<fixture> source;
+    fixture dest;
+    std::vector<s3::replication_request> sent;
+    /// When set, answers instead of the destination.
+    std::optional<s3::replication_answer> canned;
+
+    replication_pair() {
+        store = std::make_unique<kythira::record_segment_store>(
+            kythira::record_segment_store_options{._data_dir = dir.path});
+        source = std::make_unique<fixture>(s3::service_options{}, store.get());
+        BOOST_REQUIRE(source->make_bucket("src").status == 200U);
+        BOOST_REQUIRE(source->send("PUT", "/src?versioning", {}, k_versioning_on).status == 200U);
+        BOOST_REQUIRE(dest.make_bucket("dst").status == 200U);
+        BOOST_REQUIRE(dest.send("PUT", "/dst?versioning", {}, k_versioning_on).status == 200U);
+    }
+
+    auto call() -> s3::replication_call {
+        return [this](s3::replication_request& q) -> s3::replication_answer {
+            std::string body;
+            if (q.body) {
+                for (bool more = true; more;) {
+                    auto r = q.body(body);
+                    BOOST_REQUIRE(r.has_value());
+                    more = *r;
+                }
+            }
+            auto copy = q;
+            copy.body = {};
+            sent.push_back(copy);
+            if (canned) {
+                return *canned;
+            }
+            s3::header_list headers;
+            for (const auto& [k, v] : q.headers) {
+                if (k != "Content-Length") {
+                    headers.emplace_back(k, v);
+                }
+            }
+            auto r = dest.send(q.method, "/" + q.bucket + "/" + q.key, headers, body);
+            return {static_cast<int>(r.status), r.body};
+        };
+    }
+
+    auto worker(s3::replication_options o = {}) {
+        return s3::replication_worker<s3::local_metadata>(source->meta, *source->data, nullptr,
+                                                          call(), std::move(o));
+    }
+};
+
+}  // namespace
+
+BOOST_AUTO_TEST_CASE(replication_configurations_follow_s3s_rules) {
+    fixture f;
+    BOOST_REQUIRE(f.make_bucket("src").status == 200U);
+    BOOST_REQUIRE(f.make_bucket("plain").status == 200U);
+    BOOST_TEST(f.send("GET", "/src?replication").code() == "ReplicationConfigurationNotFoundError");
+    const auto doc = replication_doc(replication_rule("r1", "docs/", "elsewhere"));
+    // The source must keep versions.
+    BOOST_TEST(put_replication(f, "src", doc).code() == "InvalidRequest");
+    BOOST_REQUIRE(f.send("PUT", "/src?versioning", {}, k_versioning_on).status == 200U);
+    BOOST_TEST(f.send("PUT", "/src?replication", {}, doc).code() == "InvalidRequest");  // no MD5
+    BOOST_TEST(
+        put_replication(f, "src", replication_doc(replication_rule("r", "", "src"))).code() ==
+        "InvalidRequest");
+    // A destination here must keep versions too.
+    BOOST_TEST(
+        put_replication(f, "src", replication_doc(replication_rule("r", "", "plain"))).code() ==
+        "InvalidRequest");
+    BOOST_TEST(put_replication(f, "src", doc).status == 200U);
+    const auto got = f.send("GET", "/src?replication");
+    BOOST_TEST(got.status == 200U);
+    BOOST_TEST(contains(got.body, "<Role>arn:aws:iam::111122223333:role/replicator</Role>"));
+    BOOST_TEST(contains(got.body, "<Bucket>arn:aws:s3:::elsewhere</Bucket>"));
+    BOOST_TEST(contains(got.body, "<DeleteMarkerReplication><Status>Enabled</Status>"));
+
+    // Versioning stays on while replication is configured.
+    BOOST_TEST(f.send("PUT", "/src?versioning", {},
+                      "<VersioningConfiguration><Status>Suspended</Status>"
+                      "</VersioningConfiguration>")
+                   .code() == "InvalidBucketState");
+    BOOST_TEST(f.send("DELETE", "/src?replication").status == 204U);
+    BOOST_TEST(f.send("GET", "/src?replication").code() == "ReplicationConfigurationNotFoundError");
+    BOOST_TEST(put_replication(f, "src", doc, "AKIDOTHER").status == 403U);
+}
+
+BOOST_AUTO_TEST_CASE(replication_rules_parse_both_schemas_and_refuse_bad_ones) {
+    const auto parsed = [](const std::string& rules) {
+        return s3::parse_replication_configuration(replication_doc(rules));
+    };
+    const auto code = [&](const std::string& rules) {
+        auto c = parsed(rules);
+        return c ? std::string{} : c.error().code;
+    };
+    auto v2 = parsed(
+        "<Rule><ID>tagged</ID><Priority>2</Priority><Status>Enabled</Status><Filter><And>"
+        "<Prefix>a/</Prefix><Tag><Key>k</Key><Value>v</Value></Tag></And></Filter>"
+        "<SourceSelectionCriteria><SseKmsEncryptedObjects><Status>Enabled</Status>"
+        "</SseKmsEncryptedObjects></SourceSelectionCriteria><Destination><Bucket>arn:aws:s3:::d"
+        "</Bucket><StorageClass>STANDARD_IA</StorageClass><EncryptionConfiguration>"
+        "<ReplicaKmsKeyID>arn:aws:kms:us-east-1:1:key/k</ReplicaKmsKeyID>"
+        "</EncryptionConfiguration></Destination><DeleteMarkerReplication><Status>Disabled"
+        "</Status></DeleteMarkerReplication></Rule>" +
+        replication_rule("plain", "a/", "d", 1));
+    BOOST_TEST_REQUIRE(v2.has_value());
+    BOOST_TEST(v2->rules.size() == 2U);
+    BOOST_TEST(v2->rules[0].sse_kms);
+    BOOST_TEST(v2->rules[0].storage_class == "STANDARD_IA");
+    auto again = s3::parse_replication_configuration(s3::replication_xml(*v2));
+    BOOST_TEST_REQUIRE(again.has_value());
+    BOOST_TEST((*again == *v2));
+    // The higher priority decides for a destination; KMS objects only go
+    // where the rule allows.
+    const std::vector<std::pair<std::string, std::string>> tags{{"k", "v"}};
+    auto rules = s3::replication_rules_for(*v2, "a/x", tags, false);
+    BOOST_TEST_REQUIRE(rules.size() == 1U);
+    BOOST_TEST(rules[0]->id == "tagged");
+    rules = s3::replication_rules_for(*v2, "a/x", {}, false);
+    BOOST_TEST_REQUIRE(rules.size() == 1U);
+    BOOST_TEST(rules[0]->id == "plain");
+    BOOST_TEST(s3::replication_rules_for(*v2, "a/x", {}, true).empty());
+    BOOST_TEST(s3::replication_rules_for(*v2, "b/x", tags, false).empty());
+
+    auto v1 = parsed(
+        "<Rule><ID>old</ID><Status>Enabled</Status><Prefix>logs/</Prefix>"
+        "<Destination><Bucket>arn:aws:s3:::d</Bucket></Destination></Rule>");
+    BOOST_TEST_REQUIRE(v1.has_value());
+    BOOST_TEST(v1->rules[0].filter.legacy_prefix);
+    BOOST_TEST(contains(s3::replication_xml(*v1), "<Prefix>logs/</Prefix>"));
+
+    BOOST_TEST(code("") == "MalformedXML");
+    BOOST_TEST(code(replication_rule("a", "x/", "d", 1) + replication_rule("a", "y/", "d", 2)) ==
+               "InvalidArgument");  // duplicate id
+    BOOST_TEST(code(replication_rule("a", "x/", "d", 1) + replication_rule("b", "y/", "d", 1)) ==
+               "InvalidRequest");  // duplicate priority
+    BOOST_TEST(code("<Rule><ID>a</ID><Priority>1</Priority><Status>Enabled</Status><Filter/>"
+                    "<Destination><Bucket>arn:aws:s3:::d</Bucket></Destination></Rule>") ==
+               "InvalidRequest");  // the Filter form needs DeleteMarkerReplication
+    BOOST_TEST(code("<Rule><ID>a</ID><Status>Enabled</Status><Prefix>x</Prefix><Destination>"
+                    "<Bucket>arn:aws:s3:::d</Bucket></Destination></Rule><Rule><ID>b</ID>"
+                    "<Status>Enabled</Status><Prefix>xy</Prefix><Destination><Bucket>"
+                    "arn:aws:s3:::d</Bucket></Destination></Rule>") ==
+               "InvalidRequest");  // overlapping prefixes
+    BOOST_TEST(code("<Rule><ID>a</ID><Status>Enabled</Status><Prefix>x</Prefix><Destination>"
+                    "<Bucket>bucket-d</Bucket></Destination></Rule>") == "InvalidArgument");
+    BOOST_TEST(code("<Rule><ID>a</ID><Priority>1</Priority><Status>Enabled</Status><Filter/>"
+                    "<ExistingObjectReplication><Status>Enabled</Status>"
+                    "</ExistingObjectReplication><Destination><Bucket>arn:aws:s3:::d</Bucket>"
+                    "</Destination><DeleteMarkerReplication><Status>Disabled</Status>"
+                    "</DeleteMarkerReplication></Rule>") == "NotImplemented");
+}
+
+BOOST_AUTO_TEST_CASE(new_versions_replicate_to_another_kythira_cluster_in_order) {
+    replication_pair p;
+    auto& src = *p.source;
+    BOOST_REQUIRE(
+        put_replication(src, "src", replication_doc(replication_rule("docs", "docs/", "dst")))
+            .status == 200U);
+    const std::string body = "replicate me " + std::string(200, 'r');
+    BOOST_REQUIRE(src.send("PUT", "/src/docs/a.txt",
+                           {{"Content-Type", "text/plain"},
+                            {"x-amz-meta-color", "blue"},
+                            {"x-amz-tagging", "team=core"},
+                            {"Cache-Control", "max-age=60"}},
+                           body)
+                      .status == 200U);
+    BOOST_TEST(src.send("HEAD", "/src/docs/a.txt").header("x-amz-replication-status") == "PENDING");
+    BOOST_REQUIRE(src.send("PUT", "/src/other/b.txt", {}, "stays").status == 200U);
+    BOOST_TEST(src.send("HEAD", "/src/other/b.txt").header("x-amz-replication-status").empty());
+    BOOST_REQUIRE(src.send("PUT", "/src/docs/a.txt", {}, "second version").status == 200U);
+
+    auto w = p.worker();
+    auto r = w.run();
+    BOOST_TEST(r.replicated == 2U);
+    BOOST_TEST(r.records == 3U);
+    BOOST_TEST(!r.blocked);
+    BOOST_TEST_REQUIRE(p.sent.size() == 2U);  // the two docs/ versions, in order
+    BOOST_TEST(p.sent[0].length == body.size());
+
+    // The destination holds both versions, the newest current, as replicas.
+    auto got = p.dest.send("GET", "/dst/docs/a.txt");
+    BOOST_TEST(got.status == 200U);
+    BOOST_TEST(got.body == "second version");
+    BOOST_TEST(got.header("x-amz-replication-status") == "REPLICA");
+    auto versions = p.dest.send("GET", "/dst?versions");
+    BOOST_TEST(contains(versions.body, "<IsLatest>false</IsLatest>"));
+    auto first =
+        p.dest.send("GET", "/dst/docs/a.txt?versionId=" +
+                               versions.body.substr(versions.body.rfind("<VersionId>") + 11,
+                                                    versions.body.rfind("</VersionId>") -
+                                                        versions.body.rfind("<VersionId>") - 11));
+    BOOST_TEST(first.body == body);
+    BOOST_TEST(first.header("Content-Type") == "text/plain");
+    BOOST_TEST(first.header("x-amz-meta-color") == "blue");
+    BOOST_TEST(first.header("Cache-Control") == "max-age=60");
+    BOOST_TEST(first.header("x-amz-tagging-count") == "1");
+    BOOST_TEST(p.dest.send("GET", "/dst/other/b.txt").status == 404U);
+
+    // The source says so.
+    BOOST_TEST(src.send("HEAD", "/src/docs/a.txt").header("x-amz-replication-status") ==
+               "COMPLETED");
+
+    // A client's delete marker follows; a replica is never replicated on.
+    BOOST_REQUIRE(src.send("DELETE", "/src/docs/a.txt").status == 204U);
+    r = w.run();
+    BOOST_TEST(r.delete_markers == 1U);
+    BOOST_TEST(p.dest.send("GET", "/dst/docs/a.txt").status == 404U);
+    BOOST_TEST(p.sent.back().method == "DELETE");
+    BOOST_TEST(w.run().records == 0U);
+}
+
+BOOST_AUTO_TEST_CASE(only_principals_allowed_to_replicate_may_write_replicas) {
+    fixture f;
+    BOOST_REQUIRE(f.make_bucket("dst").status == 200U);
+    BOOST_TEST(f.send("PUT", "/dst/k", {{"x-amz-replication-status", "REPLICA"}}, "x", "AKIDREADER")
+                   .status == 403U);
+    BOOST_TEST(f.send("PUT", "/dst/k", {{"x-amz-replication-status", "REPLICA"}}, "x").status ==
+               200U);
+    BOOST_TEST(f.send("HEAD", "/dst/k").header("x-amz-replication-status") == "REPLICA");
+    // Without the header, no status.
+    BOOST_TEST(f.send("PUT", "/dst/j", {}, "x").status == 200U);
+    BOOST_TEST(f.send("HEAD", "/dst/j").header("x-amz-replication-status").empty());
+}
+
+BOOST_AUTO_TEST_CASE(a_destination_that_is_down_holds_back_replication_until_it_answers) {
+    replication_pair p;
+    auto& src = *p.source;
+    BOOST_REQUIRE(
+        put_replication(src, "src", replication_doc(replication_rule("all", "", "dst"))).status ==
+        200U);
+    BOOST_REQUIRE(src.send("PUT", "/src/k1", {}, "one").status == 200U);
+    BOOST_REQUIRE(src.send("PUT", "/src/k2", {}, "two").status == 200U);
+    p.canned = s3::replication_answer{503, "<Error><Code>SlowDown</Code></Error>"};
+    auto w = p.worker({.max_attempts = 3});
+    auto r = w.run();
+    BOOST_TEST(r.blocked);
+    BOOST_TEST(r.records == 0U);
+    BOOST_TEST(p.sent.size() == 1U);  // k2 waits behind k1
+    BOOST_TEST(src.send("HEAD", "/src/k1").header("x-amz-replication-status") == "PENDING");
+
+    p.canned.reset();
+    r = w.run();
+    BOOST_TEST(!r.blocked);
+    BOOST_TEST(r.replicated == 2U);
+    BOOST_TEST(p.dest.send("GET", "/dst/k1").body == "one");
+    BOOST_TEST(p.dest.send("GET", "/dst/k2").body == "two");
+
+    // A refusal fails the version for good; so does running out of attempts.
+    BOOST_REQUIRE(src.send("PUT", "/src/k3", {}, "three").status == 200U);
+    p.canned = s3::replication_answer{403, "<Error><Code>AccessDenied</Code></Error>"};
+    r = w.run();
+    BOOST_TEST(r.failed == 1U);
+    BOOST_TEST(src.send("HEAD", "/src/k3").header("x-amz-replication-status") == "FAILED");
+    BOOST_REQUIRE(src.send("PUT", "/src/k4", {}, "four").status == 200U);
+    p.canned = s3::replication_answer{500, "<Error><Code>InternalError</Code></Error>"};
+    BOOST_TEST(w.run().blocked);
+    BOOST_TEST(w.run().blocked);
+    r = w.run();
+    BOOST_TEST(r.failed == 1U);
+    BOOST_TEST(src.send("HEAD", "/src/k4").header("x-amz-replication-status") == "FAILED");
+    BOOST_TEST(src.meta.change_cursor(s3::replication_consumer) ==
+               src.meta.state_machine().change_log()->last_seq);
+}
+
+BOOST_AUTO_TEST_CASE(copies_uploads_and_customer_keys_get_their_own_replication_status) {
+    replication_pair p;
+    auto& src = *p.source;
+    BOOST_REQUIRE(
+        put_replication(src, "src", replication_doc(replication_rule("docs", "docs/", "dst")))
+            .status == 200U);
+    BOOST_REQUIRE(src.send("PUT", "/src/other/a", {}, "bytes").status == 200U);
+    // A copy into the replicated prefix replicates; one out of it does not
+    // inherit the source's status.
+    BOOST_REQUIRE(
+        src.send("PUT", "/src/docs/copied", {{"x-amz-copy-source", "/src/other/a"}}).status ==
+        200U);
+    BOOST_TEST(src.send("HEAD", "/src/docs/copied").header("x-amz-replication-status") ==
+               "PENDING");
+    BOOST_REQUIRE(
+        src.send("PUT", "/src/other/back", {{"x-amz-copy-source", "/src/docs/copied"}}).status ==
+        200U);
+    BOOST_TEST(src.send("HEAD", "/src/other/back").header("x-amz-replication-status").empty());
+
+    // A multipart upload is decided when it starts.
+    const auto created = src.send("POST", "/src/docs/mp?uploads");
+    BOOST_REQUIRE(created.status == 200U);
+    const auto a = created.body.find("<UploadId>") + 10;
+    const auto upload_id = created.body.substr(a, created.body.find("</UploadId>") - a);
+    const auto part = src.send("PUT", "/src/docs/mp?partNumber=1&uploadId=" + upload_id, {}, "p");
+    BOOST_REQUIRE(part.status == 200U);
+    const auto done_doc = "<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>" +
+                          part.header("ETag") + "</ETag></Part></CompleteMultipartUpload>";
+    BOOST_REQUIRE(src.send("POST", "/src/docs/mp?uploadId=" + upload_id, {}, done_doc).status ==
+                  200U);
+    BOOST_TEST(src.send("HEAD", "/src/docs/mp").header("x-amz-replication-status") == "PENDING");
+
+    // The replicator cannot read an object only its writer has the key to.
+    const std::string key(32, 'K');
+    BOOST_REQUIRE(src.send("PUT", "/src/docs/secret", customer_headers(key), "s").status == 200U);
+    BOOST_TEST(src.send("HEAD", "/src/docs/secret", customer_headers(key))
+                   .header("x-amz-replication-status")
+                   .empty());
+
+    auto w = p.worker();
+    const auto r = w.run();
+    BOOST_TEST(r.replicated == 2U);
+    BOOST_TEST(p.dest.send("GET", "/dst/docs/copied").body == "bytes");
+    BOOST_TEST(p.dest.send("GET", "/dst/docs/mp").body == "p");
+    BOOST_TEST(p.dest.send("GET", "/dst/docs/secret").status == 404U);
 }

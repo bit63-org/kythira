@@ -148,8 +148,7 @@ template<metadata_access M>
 
 template<metadata_access M>
 [[nodiscard]] auto restore_object(handler_context<M>& ctx, const s3_request& req,
-                                  const authenticated& /*auth*/, bucket_state& b)
-    -> handler_result {
+                                  const authenticated& auth, bucket_state& b) -> handler_result {
     using lifecycle_detail::argument_error;
     auto body = bucket_detail::document(ctx, req);
     if (!body) {
@@ -208,7 +207,9 @@ template<metadata_access M>
         // and then makes the copy readable (`s3_tiers.hpp`).
         index_command c;
         c.op = index_command::kind::set_object_state;
+        c.event = change_event::object_restore_post;
         c.now_ms = now;
+        c.owner = auth.who ? auth.who->account : std::string{};
         c.target = ref_of(b.desc);
         c.key = req.resource.key;
         c.version_id = v.version_id();
@@ -226,9 +227,13 @@ template<metadata_access M>
         return out;
     }
 
+    // The bytes are already here: the restore starts and completes in one
+    // entry, which records both events.
     index_command c;
     c.op = index_command::kind::set_object_state;
+    c.event = change_event::object_restore_completed;
     c.now_ms = now;
+    c.owner = auth.who ? auth.who->account : std::string{};
     c.target = ref_of(b.desc);
     c.key = req.resource.key;
     c.version_id = v.version_id();
@@ -512,6 +517,9 @@ private:
                                       const object_version& v, std::uint64_t now) -> index_command {
         index_command c;
         c.op = op;
+        if (op == index_command::kind::delete_object) {
+            c.event = change_event::lifecycle_expiration_delete;
+        }
         c.now_ms = now;
         c.target = ref;
         c.key = v.key;
@@ -528,6 +536,7 @@ private:
     void transition(const bucket_ref& ref, const object_version& v, const std::string& to,
                     std::uint64_t now, lifecycle_report& r) {
         auto c = command(index_command::kind::set_object_state, ref, v, now);
+        c.event = change_event::lifecycle_transition;
         c.new_storage_class = to;
         count(_meta.propose(c), r, r.transitioned);
     }
@@ -535,6 +544,7 @@ private:
     void end_restore(const bucket_ref& ref, const object_version& v, std::uint64_t now,
                      lifecycle_report& r) {
         auto c = command(index_command::kind::set_object_state, ref, v, now);
+        c.event = change_event::object_restore_delete;
         // A tiered version also gives back its chunks on the blob stores.
         c.override_metadata = {std::string(restore_metadata), std::string(restore_until_metadata),
                                std::string(restored_metadata)};

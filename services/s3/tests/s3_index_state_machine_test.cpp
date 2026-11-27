@@ -9,11 +9,16 @@
 ///        reference counts with their grace period; then randomized runs
 ///        that check replicas agree, a snapshot restores to the same state,
 ///        and every reference count equals a recount of the manifests.
+///        Last, the change log (task 14, Requirements 12.2 and 12.3): which
+///        writes record which event, cursors and trimming, a torn tail on
+///        reopening, snapshots, and replicas writing identical segments.
 
 #define BOOST_TEST_MODULE s3_index_state_machine_test
 #include <boost/test/unit_test.hpp>
 
 #include <kythira/s3/s3_index_state_machine.hpp>
+
+#include <raft/record_segment_store.hpp>
 
 #include <atomic>
 #include <cstdint>
@@ -1434,4 +1439,339 @@ BOOST_AUTO_TEST_CASE(tiered_versions_hold_no_local_references_until_restored) {
     BOOST_REQUIRE(r.apply(drop).ok());
     BOOST_TEST(r.sm.tier_garbage_list(10).empty());
     check_refcounts(r.sm);
+}
+
+// ---- change log (task 14) ---------------------------------------------------
+
+namespace {
+
+/// A replica whose change log keeps records in its own segment store.
+struct logged_replica : replica {
+    std::unique_ptr<kythira::record_segment_store> store;
+
+    explicit logged_replica(const fs::path& dir, std::uint64_t segment_bytes = 1 << 20)
+        : store(
+              std::make_unique<kythira::record_segment_store>(kythira::record_segment_store_options{
+                  ._data_dir = dir, ._max_segment_bytes = segment_bytes})) {
+        sm.set_change_log(store.get());
+        sm.open(engine, everything);
+    }
+
+    auto logged(const std::string& name) -> bucket_ref {
+        auto r = ref(name);
+        r.log_changes = true;
+        return r;
+    }
+
+    auto put_logged(const std::string& bucket, const std::string& key, object_content content)
+        -> index_result {
+        index_command c;
+        c.op = kind::put_object;
+        c.target = logged(bucket);
+        c.key = key;
+        c.owner = "acct";
+        c.content = std::move(content);
+        return apply(c);
+    }
+
+    auto events() const -> std::vector<std::string> {
+        std::vector<std::string> out;
+        for (const auto& c : sm.read_changes(0, 1000)) {
+            out.emplace_back(event_name(c.record.event));
+        }
+        return out;
+    }
+
+    auto advance(std::string_view consumer, std::uint64_t seq) -> index_result {
+        index_command c;
+        c.op = kind::advance_change_log;
+        c.config_name = std::string(consumer);
+        c.change_seq = seq;
+        return apply(c);
+    }
+};
+
+}  // namespace
+
+BOOST_AUTO_TEST_CASE(change_records_and_log_state_round_trip) {
+    change_record r{
+        change_event::lifecycle_transition, 7, "a/b", "v1", 99, "etag", "acct", "GLACIER", 1234};
+    BOOST_TEST((codec::decode_change(codec::encode_change(r)) == r));
+    BOOST_CHECK_THROW(codec::decode_change("\x01\x63"), index_format_error);
+
+    change_log_state st;
+    st.stream = change_stream_key("s3/", 0);
+    st.first_seq = 3;
+    st.last_seq = 9;
+    st.last_ms = 77;
+    kythira::record_segment_descriptor d;
+    d._stream = st.stream;
+    d._first_seq = 3;
+    d._last_seq = 5;
+    d._records = 3;
+    d._bytes = 100;
+    d._sealed = true;
+    st.sealed.push_back(d);
+    st.cursors = {{"notifications", 5}, {"replication", 4}};
+    BOOST_TEST((codec::decode_change_log_state(codec::encode_change_log_state(st)) == st));
+    BOOST_TEST(st.consumed() == 4U);
+    BOOST_TEST(change_stream_key("s3/", 2) == "s3/73332f/2");
+
+    index_command c;
+    c.op = kind::advance_change_log;
+    c.config_name = "replication";
+    c.change_seq = 12;
+    c.event = change_event::object_created_post;
+    c.target = {4, versioning_state::enabled, false, true};
+    BOOST_TEST((codec::decode_command(codec::encode(c)) == c));
+    index_result res;
+    res.object_size = 4096;
+    BOOST_TEST((codec::decode_result(codec::encode(res)) == res));
+}
+
+BOOST_AUTO_TEST_CASE(only_logged_buckets_record_and_each_write_names_its_event) {
+    temp_dir dir;
+    logged_replica r(dir.path);
+    BOOST_REQUIRE(r.create("b").ok());
+    BOOST_REQUIRE(r.config("b", "versioning", "Enabled").ok());
+
+    // A bucket without notifications or replication logs nothing.
+    BOOST_REQUIRE(r.put("b", "quiet", content_of({1})).ok());
+    BOOST_TEST(!r.sm.change_log().has_value());
+
+    const auto put = r.put_logged("b", "k", content_of({1, 2}, "e1"));
+    BOOST_REQUIRE(put.ok());
+    BOOST_TEST(put.object_size == 200U);
+
+    index_command post;
+    post.op = kind::put_object;
+    post.event = change_event::object_created_post;
+    post.target = r.logged("b");
+    post.key = "posted";
+    post.content = content_of({3});
+    BOOST_REQUIRE(r.apply(post).ok());
+
+    index_command copy;
+    copy.op = kind::copy_object;
+    copy.source = r.logged("b");
+    copy.source_key = "k";
+    copy.target = r.logged("b");
+    copy.key = "copied";
+    BOOST_REQUIRE(r.apply(copy).ok());
+
+    index_command up;
+    up.op = kind::create_upload;
+    up.target = r.logged("b");
+    up.key = "mp";
+    const auto created = r.apply(up);
+    BOOST_REQUIRE(created.ok());
+    index_command part;
+    part.op = kind::upload_part;
+    part.target = r.logged("b");
+    part.key = "mp";
+    part.upload_id = created.upload_id;
+    part.part = part_record{1, "p1", 0, content_of({4}).manifest, {}};
+    BOOST_REQUIRE(r.apply(part).ok());
+    index_command done;
+    done.op = kind::complete_upload;
+    done.target = r.logged("b");
+    done.key = "mp";
+    done.upload_id = created.upload_id;
+    done.parts = {{1, "p1"}};
+    BOOST_REQUIRE(r.apply(done).ok());
+
+    index_command tag;
+    tag.op = kind::set_object_metadata;
+    tag.target = r.logged("b");
+    tag.key = "k";
+    tag.config_name = "x-amz-tagging";
+    tag.document = "a=1";
+    BOOST_REQUIRE(r.apply(tag).ok());
+    tag.document.reset();
+    BOOST_REQUIRE(r.apply(tag).ok());
+    tag.config_name = "x-kythira-acl";
+    tag.document = "<AccessControlPolicy/>";
+    BOOST_REQUIRE(r.apply(tag).ok());
+
+    // State changes record only what the entry names.
+    index_command state;
+    state.op = kind::set_object_state;
+    state.target = r.logged("b");
+    state.key = "k";
+    state.override_metadata = {"x-amz-replication-status"};
+    state.content.system_metadata["x-amz-replication-status"] = "COMPLETED";
+    BOOST_REQUIRE(r.apply(state).ok());
+    state.override_metadata.clear();
+    state.event = change_event::lifecycle_transition;
+    state.new_storage_class = "GLACIER";
+    BOOST_REQUIRE(r.apply(state).ok());
+    state.new_storage_class.clear();
+    state.event = change_event::object_restore_completed;
+    state.owner = "acct";  // a requester's restore of bytes already here
+    BOOST_REQUIRE(r.apply(state).ok());
+
+    index_command del;
+    del.op = kind::delete_object;
+    del.target = r.logged("b");
+    del.key = "copied";
+    BOOST_REQUIRE(r.apply(del).ok());  // a marker
+    del.event = change_event::lifecycle_expiration_delete;
+    del.key = "posted";
+    BOOST_REQUIRE(r.apply(del).ok());  // lifecycle's marker
+    del.event = change_event::none;
+    del.version_id = put.version_id;
+    del.key = "k";
+    BOOST_REQUIRE(r.apply(del).ok());  // one version
+
+    // A failed entry records nothing.
+    del.version_id.reset();
+    del.key = "nope";
+    del.expect_stamp = 1;
+    BOOST_TEST(!r.apply(del).ok());
+
+    const std::vector<std::string> want{"ObjectCreated:Put",
+                                        "ObjectCreated:Post",
+                                        "ObjectCreated:Copy",
+                                        "ObjectCreated:CompleteMultipartUpload",
+                                        "ObjectTagging:Put",
+                                        "ObjectTagging:Delete",
+                                        "ObjectAcl:Put",
+                                        "LifecycleTransition",
+                                        "ObjectRestore:Post",
+                                        "ObjectRestore:Completed",
+                                        "ObjectRemoved:DeleteMarkerCreated",
+                                        "LifecycleExpiration:DeleteMarkerCreated",
+                                        "ObjectRemoved:Delete"};
+    BOOST_TEST(r.events() == want, boost::test_tools::per_element());
+
+    const auto changes = r.sm.read_changes(0, 100);
+    BOOST_TEST(changes.front().seq == 1U);
+    BOOST_TEST(changes.front().record.key == "k");
+    BOOST_TEST(changes.front().record.version_id == put.version_id);
+    BOOST_TEST(changes.front().record.size == 200U);
+    BOOST_TEST(changes.front().record.etag == "e1");
+    BOOST_TEST(changes.front().record.requester == "acct");
+    BOOST_TEST(changes[7].record.storage_class == "GLACIER");
+    BOOST_TEST(r.sm.read_changes(11, 100).size() == 2U);
+    BOOST_TEST(r.sm.read_changes(13, 100).empty());
+    for (std::size_t i = 1; i < changes.size(); ++i) {
+        BOOST_TEST(changes[i].record.written_ms >= changes[i - 1].record.written_ms);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(cursors_advance_and_trim_only_what_every_consumer_passed) {
+    temp_dir dir;
+    logged_replica r(dir.path, 256);  // a few records per segment
+    BOOST_REQUIRE(r.create("b").ok());
+    BOOST_TEST(r.advance("notifications", 5).ok());  // nothing logged yet
+    for (int i = 0; i < 40; ++i) {
+        BOOST_REQUIRE(r.put_logged("b", "k" + std::to_string(i), content_of({i})).ok());
+    }
+    const auto st = r.sm.change_log().value();
+    BOOST_TEST(st.last_seq == 40U);
+    BOOST_TEST_REQUIRE(st.sealed.size() >= 3U);
+    BOOST_TEST(r.store->local_segments(st.stream).size() == st.sealed.size() + 1);
+
+    BOOST_TEST(r.advance("bogus", 3).error == "InvalidRequest");  // unknown consumer
+    BOOST_TEST(r.advance("notifications", 39).ok());
+    BOOST_TEST(r.sm.change_cursor("notifications") == 39U);
+    BOOST_TEST(r.sm.change_log()->first_seq == 1U);   // replication has not moved
+    BOOST_TEST(r.advance("notifications", 10).ok());  // never back
+    BOOST_TEST(r.sm.change_cursor("notifications") == 39U);
+    BOOST_TEST(r.advance("replication", 1000).ok());  // capped at the last record
+    BOOST_TEST(r.sm.change_cursor("replication") == 40U);
+
+    const auto after = r.sm.change_log().value();
+    BOOST_TEST(after.sealed.empty());  // every sealed segment ends at or below 39
+    BOOST_TEST(after.first_seq == st.sealed.back()._last_seq + 1);
+    BOOST_TEST(r.store->local_segments(st.stream).size() == 1U);  // the active one
+    const auto rest = r.sm.read_changes(0, 100);
+    BOOST_TEST_REQUIRE(!rest.empty());
+    BOOST_TEST(rest.front().seq == after.first_seq);
+    BOOST_TEST(rest.back().seq == 40U);
+}
+
+BOOST_AUTO_TEST_CASE(reopening_drops_a_tail_the_engine_never_recorded) {
+    temp_dir dir;
+    logged_replica r(dir.path / "a");
+    BOOST_REQUIRE(r.create("b").ok());
+    BOOST_REQUIRE(r.put_logged("b", "k", content_of({1})).ok());
+    const auto stream = r.sm.change_log()->stream;
+    // A record that reached the store but whose entry the engine lost.
+    const std::string stray = codec::encode_change({change_event::object_created_put, 1, "x"});
+    r.store->append(stream,
+                    kythira::segment_record_view{
+                        2, 0,
+                        std::span<const std::byte>(reinterpret_cast<const std::byte*>(stray.data()),
+                                                   stray.size())});
+    BOOST_TEST(r.store->last_seq(stream).value() == 2U);
+    r.sm.open(r.engine, everything);
+    BOOST_TEST(r.store->last_seq(stream).value() == 1U);
+    BOOST_TEST(r.sm.read_changes(0, 10).size() == 1U);
+    // The replayed entry writes it again, the same way.
+    BOOST_REQUIRE(r.put_logged("b", "k2", content_of({2})).ok());
+    BOOST_TEST(r.sm.read_changes(0, 10).back().record.key == "k2");
+}
+
+BOOST_AUTO_TEST_CASE(replicas_write_identical_change_segments_and_snapshots_carry_the_log) {
+    temp_dir dir;
+    logged_replica leader(dir.path / "leader", 512);
+    logged_replica peer(dir.path / "peer", 512);
+    const auto both = [&](index_command c) {
+        c.now_ms = ++leader.now;
+        const auto a = leader.apply(c);
+        const auto b = peer.apply(c);
+        BOOST_TEST_REQUIRE((a == b));
+        return a;
+    };
+    index_command create;
+    create.op = kind::create_bucket;
+    create.bucket = "b";
+    create.owner = "acct";
+    both(create);
+    const auto ref = leader.logged("b");
+    for (int i = 0; i < 25; ++i) {
+        index_command c;
+        c.op = kind::put_object;
+        c.target = ref;
+        c.key = "k" + std::to_string(i % 7);
+        c.content = content_of({i});
+        both(c);
+    }
+    const auto st = leader.sm.change_log().value();
+    BOOST_TEST((peer.sm.change_log().value() == st));
+    const auto mine = leader.store->local_segments(st.stream);
+    const auto theirs = peer.store->local_segments(st.stream);
+    BOOST_TEST_REQUIRE(mine.size() == theirs.size());
+    for (std::size_t i = 0; i < mine.size(); ++i) {
+        BOOST_TEST((mine[i] == theirs[i]));  // same records, same bytes, same digest
+    }
+
+    // A follower installing a snapshot fetches the active segment it names.
+    const auto cp = dir.path / "cp";
+    const auto manifest = leader.sm.checkpoint(cp);
+    logged_replica follower(dir.path / "follower", 512);
+    std::vector<kythira::record_segment_descriptor> fetched;
+    follower.sm.set_change_log(
+        follower.store.get(), [&](const kythira::record_segment_descriptor& d) {
+            fetched.push_back(d);
+            const auto bytes = leader.store->read_segment_bytes(d._stream, d._first_seq, d._bytes);
+            BOOST_REQUIRE(bytes.has_value());
+            follower.store->install_segment(d, *bytes);
+        });
+    follower.sm.ingest(cp, manifest, leader.index);
+    follower.index = leader.index;
+    BOOST_TEST(fetched.size() == 1U);
+    BOOST_TEST((follower.sm.change_log().value() == st));
+    BOOST_TEST((follower.sm.dump() == leader.sm.dump()));
+    // It appends where the leader does.
+    index_command next;
+    next.op = kind::put_object;
+    next.target = ref;
+    next.key = "after";
+    next.content = content_of({99});
+    next.now_ms = ++leader.now;
+    BOOST_TEST_REQUIRE((leader.apply(next) == follower.apply(next)));
+    BOOST_TEST(follower.sm.read_changes(st.last_seq, 10).size() == 1U);
+    BOOST_TEST(follower.sm.read_changes(st.last_seq, 10).front().record.key == "after");
 }

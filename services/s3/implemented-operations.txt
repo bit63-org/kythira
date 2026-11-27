@@ -16,6 +16,7 @@ DeleteBucketEncryption
 DeleteBucketLifecycle
 DeleteBucketOwnershipControls
 DeleteBucketPolicy
+DeleteBucketReplication
 DeleteBucketTagging
 DeleteObject
 DeleteObjectTagging
@@ -27,9 +28,12 @@ GetBucketLifecycle
 GetBucketLifecycleConfiguration
 GetBucketLocation
 GetBucketLogging
+GetBucketNotification
+GetBucketNotificationConfiguration
 GetBucketOwnershipControls
 GetBucketPolicy
 GetBucketPolicyStatus
+GetBucketReplication
 GetBucketRequestPayment
 GetBucketTagging
 GetBucketVersioning
@@ -54,8 +58,11 @@ PutBucketEncryption
 PutBucketLifecycle
 PutBucketLifecycleConfiguration
 PutBucketLogging
+PutBucketNotification
+PutBucketNotificationConfiguration
 PutBucketOwnershipControls
 PutBucketPolicy
+PutBucketReplication
 PutBucketTagging
 PutBucketVersioning
 PutObject
