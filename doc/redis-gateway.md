@@ -14,7 +14,10 @@ STRLEN GETRANGE PING AUTH HELLO SELECT CLIENT SETINFO QUIT RESET` — plus the
 diagnostics an operator reaches for (`COMMAND`, `INFO`, `DBSIZE`, `TTL`,
 `ECHO`). Everything else is refused with Redis's own `unknown command` error.
 A build with the transaction adapter adds the multi-key commands of
-*Transactions* below, off unless asked for.
+*Transactions* below, off unless asked for. The string commands of
+*Strings* below (`.kiro/specs/redis-general-data-types/`) answer once the
+cluster has passed the format gate (*Format level and the rolling
+upgrade*).
 The design, its requirements and its acceptance tests are in
 `.kiro/specs/redis-compatible-kv/`.
 
@@ -191,8 +194,10 @@ user <name> <secret-record|nopass|disabled> <role> [prefix ...] [cert=<subject>]
   rejected otherwise) and `AUTH` as that user always fails. `disabled` in
   this position keeps the line but lets nobody authenticate as the user.
 - `<role>` is `read_only` (`GET`, `EXISTS`, `STRLEN`, `GETRANGE`, `TTL`,
-  `DBSIZE`, `COMMAND` and the connection commands), `read_write` (adds `SET`,
-  `SETEX`, `DEL`) or `admin` (adds `INFO`). `ro` and `rw` are accepted
+  `TYPE`, `TOUCH`, `OBJECT`, `DBSIZE`, `COMMAND` and the connection
+  commands), `read_write` (adds `SET`, `SETEX`, `DEL`, `UNLINK` and the
+  string writes of *Strings*) or `admin` (adds `INFO` and
+  `KYTHIRA.FORMAT`). `ro` and `rw` are accepted
   abbreviations.
 - Each `prefix` is a key prefix the user may touch; `*` means every key. A
   user with no prefix can run `PING` and nothing that names a key: scope is
@@ -641,6 +646,32 @@ nothing: file mode catches a follower up by fetching chunks, at
 and `docker-engine-chaos-tests` SIGKILLs and restarts them under load
 (the history must be linearizable) and kills a follower in the middle of a
 snapshot transfer (it must still catch up), under Docker and rootless Podman.
+
+## Strings
+
+After the format gate the gateway also answers the tier 1 string commands
+of `.kiro/specs/redis-general-data-types/`, with Redis 7.2's replies in
+RESP2 and RESP3:
+
+| Command | Notes |
+|---|---|
+| `INCR` `DECR` `INCRBY` `DECRBY` | 64-bit, Redis's overflow and not-an-integer errors |
+| `INCRBYFLOAT` | IEEE binary128 on every architecture, printed as Redis prints `long double` (D1: matches arm64 Redis exactly; amd64 Redis's 80-bit arithmetic can differ in the 17th decimal) |
+| `SET key value [NX\|XX] [GET] [EX\|PX\|EXAT\|PXAT n\|KEEPTTL]` | a plain `SET key value` still writes the old record, so sccache's log is unchanged |
+| `SETNX` `PSETEX` `GETSET` `GETDEL` `GETEX` `APPEND` `SETRANGE` | |
+| `TYPE` `TOUCH` `OBJECT ENCODING` `UNLINK key` | `OBJECT ENCODING` names the encoding Redis would choose (D16) |
+
+A write that depends on the current value is decided where the log is
+applied, at the entry's command time (the leader's clock, never earlier
+than the group's last), so every replica gives the same answer and an
+expiring key cannot satisfy two `SET NX` at once. `APPEND` and `SETRANGE`
+refuse a result longer than `KYTHIRA_REDIS_MAX_VALUE_BYTES`. With
+immutable values on (the default), a command that would change the bytes
+of a live value answers `-ERR value conflict for an existing key`; creating
+a key, rewriting the same bytes, deleting and changing a deadline are
+allowed. `COMMAND`, `COMMAND INFO` and `COMMAND DOCS` describe exactly the
+commands the node accepts, from the command registry
+(`services/redis/tools/redis_commands.yaml`).
 
 ## Transactions
 

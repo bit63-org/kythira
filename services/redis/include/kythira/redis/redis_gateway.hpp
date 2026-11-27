@@ -29,10 +29,13 @@
 #include <kythira/redis/redis_format_level.hpp>
 #include <kythira/redis/redis_forward_link.hpp>
 #include <kythira/redis/redis_kv_commands.hpp>
+#include <kythira/redis/redis_command_ids.hpp>
 #include <kythira/redis/redis_data_access.hpp>
 #include <kythira/redis/redis_data_wire.hpp>
 #include <kythira/redis/redis_gateway_value_access.hpp>
 #include <kythira/redis/redis_kv_state_machine.hpp>
+#include <kythira/redis/redis_reply.hpp>
+#include <kythira/redis/redis_string_exec.hpp>
 #include <kythira/redis/redis_server_identity.hpp>
 #include <kythira/redis/redis_layer_membership.hpp>
 #include <kythira/redis/redis_layer_roles.hpp>
@@ -629,6 +632,23 @@ protected:
     auto handle_exists(session& s, const resp_command& cmd) -> std::string;
     auto handle_strlen(session& s, const resp_command& cmd) -> std::string;
     auto handle_getrange(session& s, const resp_command& cmd) -> std::string;
+
+    // ---- tier 1 strings (redis-general-data-types task 3) ------------------
+
+    /// Proposes an `exec` record for `key` (design Component 2) on its
+    /// group's leader, forwarding `cmd` when the leader is elsewhere, and
+    /// renders the reply `apply()` decided. `args` are the record's
+    /// arguments in normal form (redis_string_exec.hpp).
+    auto propose_exec(session& s, const resp_command& cmd, const std::string& key,
+                      redis_command_id id, std::vector<std::string> args, bool may_grow)
+        -> std::string;
+    /// SET with options, SETNX, PSETEX, GETSET, the INCR family, GETDEL,
+    /// GETEX, APPEND and SETRANGE: syntax checks and normal form.
+    auto handle_string_write(session& s, std::string_view upper, const resp_command& cmd)
+        -> std::string;
+    /// TYPE, TOUCH and OBJECT ENCODING.
+    auto handle_key_read(session& s, std::string_view upper, const resp_command& cmd)
+        -> std::string;
     auto handle_ttl(session& s, const resp_command& cmd) -> std::string;
     auto handle_set(session& s, const resp_command& cmd, bool with_expiry) -> std::string;
     auto handle_del(session& s, const resp_command& cmd) -> std::string;
@@ -780,8 +800,10 @@ protected:
         std::optional<node_id_type> _forward_to;
     };
     auto read_local(session& s, const std::string& key) -> read_result;
+    /// `result`, when given, receives the entry's apply result.
     auto submit(session& s, const std::string& key, const std::vector<std::byte>& command,
-                std::string& error_reply, std::optional<node_id_type>& forward_to) -> bool;
+                std::string& error_reply, std::optional<node_id_type>& forward_to,
+                std::vector<std::byte>* result = nullptr) -> bool;
     auto forward(session& s, const resp_command& cmd, const node_id_type& to)
         -> std::optional<std::string>;
     /// The forward link itself, with none of `forward()`'s one-hop and

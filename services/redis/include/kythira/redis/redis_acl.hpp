@@ -149,7 +149,8 @@ enum class acl_decision : std::uint8_t {
         upper_name == "AUTH" || upper_name == "HELLO" || upper_name == "DBSIZE" ||
         upper_name == "MGET" || upper_name == "MULTI" || upper_name == "EXEC" ||
         upper_name == "DISCARD" || upper_name == "KYTHIRA.ISOLATION" || upper_name == "WATCH" ||
-        upper_name == "UNWATCH") {
+        upper_name == "UNWATCH" || upper_name == "TYPE" || upper_name == "TOUCH" ||
+        upper_name == "OBJECT") {
         return redis_role::read_only;
     }
     // MULTI/EXEC/DISCARD need nothing themselves: every queued command is
@@ -157,7 +158,11 @@ enum class acl_decision : std::uint8_t {
     // transaction coordinator's internal hop (multi-raft-transactions
     // task 9); the gateway also refuses it from any non-internal session.
     if (upper_name == "SET" || upper_name == "SETEX" || upper_name == "DEL" ||
-        upper_name == "MSET" || upper_name == "KYTHIRA.TXN") {
+        upper_name == "MSET" || upper_name == "KYTHIRA.TXN" || upper_name == "SETNX" ||
+        upper_name == "PSETEX" || upper_name == "GETSET" || upper_name == "GETDEL" ||
+        upper_name == "GETEX" || upper_name == "APPEND" || upper_name == "SETRANGE" ||
+        upper_name == "INCR" || upper_name == "DECR" || upper_name == "INCRBY" ||
+        upper_name == "DECRBY" || upper_name == "UNLINK" || upper_name == "INCRBYFLOAT") {
         return redis_role::read_write;
     }
     if (upper_name == "INFO" || upper_name == "KYTHIRA.FORMAT") {

@@ -28,6 +28,8 @@
 
 #include <kythira/redis/redis_format_level.hpp>
 #include <kythira/redis/redis_kv_commands.hpp>
+#include <kythira/redis/redis_string_exec.hpp>
+#include <kythira/redis/redis_string_read.hpp>
 #include <raft/shard_types.hpp>
 #include <raft/splittable_state_machine.hpp>
 #include <raft/types.hpp>
@@ -39,6 +41,7 @@
 #include <cstring>
 #include <map>
 #include <memory>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -80,7 +83,10 @@ public:
             if (auto status = apply_redis_v3_common(*this, record)) {
                 return redis_v3_apply_result(*status);
             }
-            // Typed records after the gate: applied from task 3 onwards.
+            if (const auto* exec = std::get_if<redis_kv_exec_command>(&record)) {
+                return apply_exec(*exec);
+            }
+            // range_delete and remove_members: tasks 6 and 8.
             return redis_v3_apply_result(redis_v3_apply_status::unchanged);
         }
         auto decoded = decode_redis_kv_command(command);
@@ -117,6 +123,21 @@ public:
             _expiring += entry->_expire_at_ms != 0 ? 1 : 0;
         }
         _last_applied_index = index;
+    }
+
+    /// The reply to a read of `key` at the serving node's time `now_ms`
+    /// (redis_string_read.hpp), for the data layer's `read_op`; call it
+    /// under the group's lock. `args` are the arguments after the key.
+    [[nodiscard]] auto evaluate_read(redis_command_id id, const key_type& key,
+                                     std::span<const std::string> args, std::uint64_t now_ms) const
+        -> redis_reply {
+        auto it = _store.find(key);
+        const redis_kv_value_entry* entry = it == _store.end() ? nullptr : it->second.get();
+        if (auto reply = evaluate_redis_string_read(entry, id, args, now_ms)) {
+            return *reply;
+        }
+        return redis_reply::error("ERR command id " + std::to_string(static_cast<int>(id)) +
+                                  " is not a read of this store");
     }
 
     [[nodiscard]] auto last_applied_index() const noexcept -> LogIndex {
@@ -395,6 +416,32 @@ private:
             changed = erase(k) || changed;
         }
         return changed;
+    }
+
+    /// An `exec` record at its command time; the reply, encoded, is the
+    /// apply result the front end renders (design Component 2).
+    auto apply_exec(const redis_kv_exec_command& c) -> std::vector<std::byte> {
+        const auto t = advance_command_time(c._now_ms);
+        struct store_ops {
+            redis_kv_state_machine& _sm;
+            [[nodiscard]] auto find(const key_type& key) const -> entry_handle {
+                auto it = _sm._store.find(key);
+                return it == _sm._store.end() ? nullptr : it->second;
+            }
+            auto put(const key_type& key, std::vector<std::byte> value, std::uint64_t expire_at_ms)
+                -> void {
+                auto entry = std::make_shared<redis_kv_value_entry>();
+                entry->_value = std::move(value);
+                entry->_expire_at_ms = expire_at_ms;
+                _sm.insert_or_replace(key, std::move(entry));
+            }
+            auto erase(const key_type& key) -> bool { return _sm.erase(key); }
+        } ops{*this};
+        auto reply = apply_redis_string_exec(ops, c, t);
+        if (!reply) {
+            throw redis_unknown_command_id(c._command_id);
+        }
+        return encode_redis_reply(*reply);
     }
 
     auto insert_or_replace(const key_type& key, entry_handle entry) -> void {
