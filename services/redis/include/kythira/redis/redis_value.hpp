@@ -154,6 +154,25 @@ public:
         return _chunks.back()->back();
     }
 
+    /// Calls `f(element)` for each element whose key is above `after` (every
+    /// element when `after` is empty and `from_start`), in order, while it
+    /// returns true; for HSCAN and SSCAN pages (task 12). Starts at the
+    /// chunk that would hold `after`, so a page costs a chunk, not the
+    /// elements before it.
+    template<typename F>
+    auto visit_after(std::string_view after, bool from_start, F&& f) const -> void {
+        for (auto c = from_start ? 0 : chunk_for(after); c < _chunks.size(); ++c) {
+            const auto& ch = *_chunks[c];
+            auto it =
+                from_start ? ch.begin() : std::ranges::upper_bound(ch, after, {}, &traits::key);
+            for (; it != ch.end(); ++it) {
+                if (!f(*it)) {
+                    return;
+                }
+            }
+        }
+    }
+
     /// Calls `f(element)` for every element in order.
     template<typename F> auto for_each_entry(F&& f) const -> void {
         for (const auto& c : _chunks) {

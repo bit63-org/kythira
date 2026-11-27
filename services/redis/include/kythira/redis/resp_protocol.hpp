@@ -44,9 +44,12 @@ struct resp_parser_limits {
     /// compiler output, so 32 MiB is generous; the value-size limit the
     /// gateway enforces on SET is separate and smaller.
     std::size_t _max_bulk_len = 32u * 1024u * 1024u;
-    /// Largest multibulk element count. The widest command in the closure is
-    /// `HELLO 3 AUTH user pass SETNAME name` (7 elements).
-    std::size_t _max_multibulk_elements = 64;
+    /// Largest multibulk element count once authenticated. Typed commands
+    /// take many arguments (`MSET`, `HSET`, `SADD`, `RPUSH` with thousands
+    /// of elements), and a forwarded command carries a few more than the
+    /// client sent, so the limit is Redis's own order of magnitude; memory
+    /// is bounded by `_max_buffered_bytes`, not by this count.
+    std::size_t _max_multibulk_elements = 1024u * 1024u;
     /// Bytes of the command being assembled plus bytes held unparsed across
     /// `consume()` calls before the connection is declared abusive.
     std::size_t _max_buffered_bytes = 64u * 1024u * 1024u;
@@ -162,7 +165,8 @@ public:
                 _in_multibulk = true;
                 _remaining = static_cast<std::size_t>(count);
                 _pending = resp_command{};
-                _pending._argv.reserve(_remaining);
+                // A header alone must not allocate for a million arguments.
+                _pending._argv.reserve(std::min<std::size_t>(_remaining, 1024));
                 _bulk_len.reset();
                 continue;
             }

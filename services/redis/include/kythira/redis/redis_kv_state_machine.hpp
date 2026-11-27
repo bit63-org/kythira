@@ -438,6 +438,22 @@ public:
         }
     }
 
+    /// Keys in `[from, to)` (`to` empty: no bound) in key order, for the
+    /// SCAN family (task 12): `f(key, expire_at_ms, type)` returns whether
+    /// to go on. Expired keys are visited too; the caller skips them.
+    template<typename F>
+    auto scan_keys(std::string_view from, const std::optional<std::string>& to, F&& f) const
+        -> void {
+        for (auto it = _store.lower_bound(from); it != _store.end(); ++it) {
+            if (to && it->first >= *to) {
+                return;
+            }
+            if (!f(it->first, it->second->_expire_at_ms, redis_entry_type(*it->second))) {
+                return;
+            }
+        }
+    }
+
     // ---- codec, public so tests can check the split/absorb law -------------
 
     using store_type = std::map<key_type, entry_handle, std::less<>>;

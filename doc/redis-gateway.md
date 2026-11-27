@@ -122,6 +122,9 @@ The Redis front end:
 | `KYTHIRA_REDIS_MAX_CLIENTS` | `1024` | Connection cap; beyond it new connections are refused |
 | `KYTHIRA_REDIS_IDLE_TIMEOUT_MS` | `300000` | Idle connections are closed after this |
 | `KYTHIRA_REDIS_COMMAND_TIMEOUT_MS` | `5000` | A command that cannot be committed in this time answers with an error |
+| `KYTHIRA_REDIS_CURSOR_IDLE_MS` | `600000` | A `SCAN`, `HSCAN` or `SSCAN` cursor unused this long is forgotten; using it then answers `-ERR invalid cursor` |
+| `KYTHIRA_REDIS_MAX_CURSORS` | `100000` | Cursors one node holds at once; past it the least recently used is forgotten |
+| `KYTHIRA_REDIS_KEYS_LIMIT` | `10000` | Most keys `KEYS` returns; past it `KEYS` answers an error rather than a truncated list |
 | `KYTHIRA_REDIS_MAX_SHARD_BYTES` | `1073741824` | Per-shard budget; over it the leader evicts least-recently-used keys (the LRU is the leader's own view and starts over on a leadership change) |
 | `KYTHIRA_REDIS_SWEEP_BATCH` | `1024` | Expired keys removed per sweep command |
 | `KYTHIRA_REDIS_IMMUTABLE_VALUES` | `true` | A `SET` to an existing key with different bytes is refused. sccache keys are content hashes, so a conflicting write is a corrupted client, not an update |
@@ -266,7 +269,9 @@ keeps the other workers free for authenticated traffic.
 
 Until a connection authenticates it is held to Redis's limits for
 unauthenticated clients: at most 10 arguments of at most 16 KiB each, parsed
-one command at a time. A client that pipelines `AUTH` and a large `SET` in one
+one command at a time. Once authenticated, a command may have up to 1,048,576
+arguments of up to 32 MiB each, within 64 MiB buffered per connection. A
+client that pipelines `AUTH` and a large `SET` in one
 write is fine; the `SET` is parsed after `AUTH` has run. A client that stops
 reading its replies stops having its commands executed once
 `_max_output_buffer_bytes` (32 MiB; 64 KiB before `AUTH`) of replies are
@@ -778,7 +783,7 @@ format level 3. The disk-backed cache (`file`) stays string-only: there,
 every command of `.kiro/specs/redis-general-data-types/` other than a plain
 `SET`, `GET` or `DEL` answers `-ERR this command needs
 KYTHIRA_CACHE_PERSISTENCE=memory or engine`, and its formats never change.
-`HSCAN` arrives with `SCAN`.
+`HSCAN` is described with `SCAN` below.
 
 - A key holds one type. A hash command on a string, or a string command
   (`GET`, `INCR`, `APPEND`, ...) on a hash, answers `-WRONGTYPE Operation
@@ -824,7 +829,8 @@ never copies it under the lock.
 `SRANDMEMBER`, `SMOVE`, `SINTER`, `SUNION`, `SDIFF`, `SINTERCARD`,
 `SINTERSTORE`, `SUNIONSTORE` and `SDIFFSTORE` behave as in Redis 7, on the
 same stores and format level as hashes, with the same type errors, limits,
-deadlines, chunking and immutable-value rule. `SSCAN` arrives with `SCAN`.
+deadlines, chunking and immutable-value rule. `SSCAN` is described with
+`SCAN` below.
 
 - Members come back in byte order on every replica; Redis promises no
   order. `OBJECT ENCODING` reports `intset` (every member an integer, at
@@ -862,6 +868,46 @@ immutable-value rule. The blocking forms (`BLPOP`, `BRPOP`, `BLMOVE`,
   shard make one log entry; keys in several shards run as one transaction
   where transactions are on, and answer `-CROSSSLOT` elsewhere.
 - `OBJECT ENCODING` reports `quicklist`, as Redis 7.0 does for every list.
+
+## Iterating the keyspace
+
+`SCAN`, `HSCAN`, `SSCAN`, `KEYS` and `RANDOMKEY` behave as in Redis 7 with
+the in-memory and engine stores (`SCAN`, `KEYS` and `RANDOMKEY` also with
+the disk-backed cache, where every key is a string). `SCAN` takes `MATCH`,
+`COUNT` and `TYPE`; `HSCAN` and `SSCAN` take `MATCH` and `COUNT`.
+
+- A cursor is a 64-bit number naming the node that issued it and a walk
+  that node holds. The walk's position is a key, not a hash slot, so it
+  survives splits, merges and leader changes: a full iteration returns
+  every key that existed for its whole duration exactly once, and never a
+  key twice. That is stronger than Redis, which may repeat a key.
+- A cursor works on any node of the cluster: the node that receives it
+  sends the call to the node that issued it, one hop. A cursor is good
+  only for the user who started the walk.
+- A cursor that has finished, or that its node has forgotten (idle past
+  `KYTHIRA_REDIS_CURSOR_IDLE_MS`, past `KYTHIRA_REDIS_MAX_CURSORS`, or
+  because the node restarted), answers `-ERR invalid cursor`. Start again
+  from `0`. Redis would carry on silently from wherever the number points.
+- Keys come back in byte order. `MATCH` with a literal prefix (`a/b*`)
+  reads only the keys starting with that prefix; any other pattern reads
+  every key and filters. `COUNT` is how many live keys a call examines, so
+  a call may return fewer keys than `COUNT`, or none, before the end.
+  `TYPE` with an unknown type name returns nothing, as Redis 7.2 does.
+- A user sees only the keys their ACL scopes let them read. A `MATCH`
+  outside all of them returns cursor `0` and no keys at once.
+- `HSCAN` and `SSCAN` return a hash or set small enough for Redis's
+  compact encodings whole, with cursor `0`, as Redis does. A larger one is
+  walked in field or member order.
+- `KEYS` is in the `dangerous` category, so only admins may run it. It
+  returns every matching key the user may read, or, past
+  `KYTHIRA_REDIS_KEYS_LIMIT` keys, `-ERR KEYS would return more than N
+  keys` rather than a partial answer.
+- `RANDOMKEY` picks a shard with probability proportional to its key
+  count, then a key at a random position in it; the walk to that position
+  reads up to the shard's keys.
+- Expired keys are never returned. Iteration reads at the connection's
+  consistency (`KYTHIRA_REDIS_READ_CONSISTENCY`), each page from one shard
+  at the time it is read, not as one snapshot.
 
 ## Transactions
 

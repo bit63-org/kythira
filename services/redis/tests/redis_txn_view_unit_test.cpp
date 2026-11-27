@@ -34,9 +34,10 @@ constexpr std::uint64_t k_now = 1000;
 
 auto exec_record(redis_command_id id, std::vector<std::string> args, std::uint64_t now = k_now)
     -> redis_kv_exec_command {
-    return make_redis_exec_record(args.empty() ? std::string{} : args[0],
-                                  static_cast<std::uint16_t>(id), std::move(args), now, false,
-                                  false);
+    // The key is copied first: argument evaluation order is unspecified.
+    auto key = args.empty() ? std::string{} : args[0];
+    return make_redis_exec_record(std::move(key), static_cast<std::uint16_t>(id), std::move(args),
+                                  now, false, false);
 }
 
 /// A memory store past the gate, with commands applied in log order.

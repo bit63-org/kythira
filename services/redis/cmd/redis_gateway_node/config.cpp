@@ -510,6 +510,12 @@ auto from_env() -> node_options {
     g._max_collection_elements =
         to_u64("KYTHIRA_REDIS_MAX_COLLECTION_ELEMENTS",
                get_opt("KYTHIRA_REDIS_MAX_COLLECTION_ELEMENTS", "4194304"));
+    g._cursor_idle =
+        to_ms("KYTHIRA_REDIS_CURSOR_IDLE_MS", get_opt("KYTHIRA_REDIS_CURSOR_IDLE_MS", "600000"));
+    g._max_cursors =
+        to_u64("KYTHIRA_REDIS_MAX_CURSORS", get_opt("KYTHIRA_REDIS_MAX_CURSORS", "100000"));
+    g._keys_limit =
+        to_u64("KYTHIRA_REDIS_KEYS_LIMIT", get_opt("KYTHIRA_REDIS_KEYS_LIMIT", "10000"));
     g._max_clients =
         to_u64("KYTHIRA_REDIS_MAX_CLIENTS", get_opt("KYTHIRA_REDIS_MAX_CLIENTS", "1024"));
     g._idle_timeout =

@@ -798,6 +798,33 @@ public:
         return *_front_ends.back();
     }
 
+    /// Split `group` at `at` from its leader; the child's id, or nothing.
+    auto split(group_id_type group, const std::string& at) -> std::optional<group_id_type> {
+        const auto leader = leader_of(group);
+        if (leader == 0 ||
+            !settle(host(leader).split_shard(group, {at}, std::chrono::seconds{5}))) {
+            return std::nullopt;
+        }
+        const auto d = host(leader).resolve(at);
+        if (!d || d->_group_id == group) {
+            return std::nullopt;
+        }
+        return d->_group_id;
+    }
+    /// Merge `source` into `target` from the source's leader.
+    auto merge(group_id_type source, group_id_type target) -> bool {
+        const auto leader = leader_of(source);
+        return leader != 0 &&
+               settle(host(leader).merge_shards(source, target, std::chrono::seconds{5}));
+    }
+    /// Hand `group`'s leadership to another live node.
+    auto move_leader(group_id_type group) -> bool {
+        const auto from = leader_of(group);
+        const auto to = a_follower_of(group);
+        return from != 0 && to != 0 &&
+               settle(host(from).transfer_leadership(group, to, std::chrono::seconds{3}));
+    }
+
     /// Run the gateway's maintenance on the leader of `group` right now.
     auto maintain(group_id_type group) -> std::size_t {
         auto leader = leader_of(group);
@@ -808,6 +835,19 @@ public:
     }
 
 private:
+    template<typename Future> static auto settle(Future&& f) -> bool {
+        if (!f.wait(std::chrono::seconds{8})) {
+            return false;
+        }
+        try {
+            std::ignore = std::forward<Future>(f).get();
+            return true;
+        } catch (const std::exception& e) {
+            BOOST_TEST_MESSAGE("refused: " << e.what());
+            return false;
+        }
+    }
+
     auto make_config(node_id_t id) -> config_type {
         config_type cfg{
             .node_id = id,
@@ -822,6 +862,15 @@ private:
         cfg.hibernation = hibernation_mode::off;
         cfg.executor_stripes = 2;
         cfg.partitioner = kythira::make_partitioner<key_type>(kythira::redis_kv_partitioner{});
+        // Split children take ids from one authority shared by every node.
+        cfg.allocate_group_ids = [this](std::size_t n) {
+            std::lock_guard<std::mutex> lock(_ids_mutex);
+            std::vector<group_id_type> out;
+            for (std::size_t i = 0; i < n; ++i) {
+                out.push_back(_next_group_id++);
+            }
+            return out;
+        };
         with_state_machines(cfg);
         return cfg;
     }
@@ -862,6 +911,8 @@ private:
     std::mutex _routes_mutex;
     std::map<std::pair<node_id_t, node_id_t>, node_id_t> _routes;
     std::map<std::pair<node_id_t, node_id_t>, std::string> _endpoint_overrides;
+    std::mutex _ids_mutex;
+    group_id_type _next_group_id{100};
 };
 
 /// Accepts connections on loopback and never answers: a peer gateway that
@@ -2655,7 +2706,8 @@ BOOST_AUTO_TEST_CASE(hash_commands, *boost::unit_test::timeout(120)) {
     BOOST_CHECK_EQUAL(call({"HGETALL", "a/h"}), "%1\r\n$1\r\nf\r\n$1\r\nv\r\n");
     BOOST_CHECK_EQUAL(call({"HRANDFIELD", "a/h", "1", "WITHVALUES"}),
                       "*1\r\n*2\r\n$1\r\nf\r\n$1\r\nv\r\n");
-    BOOST_CHECK(call({"HSCAN", "a/h", "0"}).starts_with("-ERR unknown command"));
+    // Task 12: a small hash comes back whole.
+    BOOST_CHECK_EQUAL(call({"HSCAN", "a/h", "0"}), "*2\r\n$1\r\n0\r\n*2\r\n$1\r\nf\r\n$1\r\nv\r\n");
 }
 
 // Task 8: sets end to end from a follower: SPOP picked by the serving
@@ -2768,6 +2820,301 @@ BOOST_AUTO_TEST_CASE(list_commands, *boost::unit_test::timeout(120)) {
     BOOST_CHECK(call({"HELLO", "3"}).starts_with("%"));
     BOOST_CHECK_EQUAL(call({"LPOP", "sccache/none", "2"}), "_\r\n");
     BOOST_CHECK_EQUAL(call({"LRANGE", "a/t", "0", "-1"}), "*1\r\n$1\r\ny\r\n");
+}
+
+namespace {
+/// The cursor and elements of a RESP2 SCAN-family reply.
+auto parse_scan(const std::string& reply) -> std::pair<std::string, std::vector<std::string>> {
+    BOOST_REQUIRE_MESSAGE(reply.starts_with("*2\r\n$"), reply);
+    std::size_t at = 0;
+    const auto line = [&] {
+        const auto end = reply.find("\r\n", at);
+        BOOST_REQUIRE(end != std::string::npos);
+        auto out = reply.substr(at, end - at);
+        at = end + 2;
+        return out;
+    };
+    const auto bulk_at = [&] {
+        const auto n = std::stoul(line().substr(1));
+        auto out = reply.substr(at, n);
+        at += n + 2;
+        return out;
+    };
+    (void)line();
+    auto cursor = bulk_at();
+    const auto count = std::stoul(line().substr(1));
+    std::vector<std::string> elements;
+    for (std::size_t i = 0; i < count; ++i) {
+        elements.push_back(bulk_at());
+    }
+    BOOST_REQUIRE_EQUAL(at, reply.size());
+    return {cursor, elements};
+}
+
+/// Every element a walk returns: `head` is `{"SCAN"}` or `{"HSCAN", key}`,
+/// `tail` the options; between calls `between(call_number)` runs.
+auto scan_walk(resp_client& r, const std::vector<std::string>& head,
+               const std::vector<std::string>& tail = {},
+               const std::function<void(int)>& between = {}) -> std::vector<std::string> {
+    std::vector<std::string> out;
+    std::string cursor = "0";
+    for (int call = 0; call < 10000; ++call) {
+        auto argv = head;
+        argv.push_back(cursor);
+        argv.insert(argv.end(), tail.begin(), tail.end());
+        auto [next, elements] = parse_scan(r.call(argv));
+        out.insert(out.end(), elements.begin(), elements.end());
+        if (next == "0") {
+            return out;
+        }
+        cursor = next;
+        if (between) {
+            between(call);
+        }
+    }
+    BOOST_FAIL("the walk never ended");
+    return out;
+}
+
+auto sorted(std::vector<std::string> v) -> std::vector<std::string> {
+    std::sort(v.begin(), v.end());
+    return v;
+}
+
+auto numbered(const std::string& prefix, int n) -> std::vector<std::string> {
+    std::vector<std::string> out;
+    for (int i = 0; i < n; ++i) {
+        out.push_back(prefix + (i < 10 ? "0" : "") + std::to_string(i));
+    }
+    return out;
+}
+}  // namespace
+
+// Task 12 (Requirement 7): SCAN, HSCAN, SSCAN, KEYS and RANDOMKEY over
+// both groups, from a node that leads neither or both.
+BOOST_AUTO_TEST_CASE(scan_family, *boost::unit_test::timeout(180)) {
+    if constexpr (gateway_type::k_node_format_level < k_redis_typed_values_level) {
+        return;
+    }
+    redis_gateway_config cfg;
+    cfg._keys_limit = 50;
+    cfg._cursor_idle = std::chrono::milliseconds{3000};
+    auto c = typed_cluster(cfg);
+    resp_client ops(c->port(1));
+    BOOST_REQUIRE_EQUAL(ops.auth("ops", "ops-secret"), "+OK\r\n");
+    resp_client ops2(c->port(2));
+    BOOST_REQUIRE_EQUAL(ops2.auth("ops", "ops-secret"), "+OK\r\n");
+    resp_client farm(c->port(3));
+    BOOST_REQUIRE_EQUAL(farm.auth("farm", "farm-secret"), "+OK\r\n");
+
+    // A command far wider than the old 64-argument limit is accepted, and
+    // still fits once forwarding to the leader adds its own arguments.
+    {
+        resp_client wide(c->port(c->a_follower_of(k_sccache_group)));
+        BOOST_REQUIRE_EQUAL(wide.auth("ops", "ops-secret"), "+OK\r\n");
+        std::vector<std::string> sadd{"SADD", "sccache/wide"};
+        for (int i = 0; i < 500; ++i) {
+            sadd.push_back(std::to_string(i));
+        }
+        BOOST_CHECK_EQUAL(wide.call(sadd), ":500\r\n");
+        BOOST_CHECK_EQUAL(wide.call({"DEL", "sccache/wide"}), ":1\r\n");
+    }
+
+    // 40 strings in each group, a hash and a set in the upper one.
+    const auto lower = numbered("a/k", 40);
+    const auto upper = numbered("sccache/k", 40);
+    for (const auto& k : lower) {
+        BOOST_REQUIRE_EQUAL(ops.call({"SET", k, "v"}), "+OK\r\n");
+    }
+    for (const auto& k : upper) {
+        BOOST_REQUIRE_EQUAL(ops.call({"SET", k, "v"}), "+OK\r\n");
+    }
+    std::vector<std::string> fields;
+    std::vector<std::string> members;
+    for (int batch = 0; batch < 10; ++batch) {
+        std::vector<std::string> hset{"HSET", "sccache/h"};
+        std::vector<std::string> sadd{"SADD", "sccache/s"};
+        for (int i = batch * 30; i < (batch + 1) * 30; ++i) {
+            if (i < 200) {
+                fields.push_back("f" + std::to_string(i));
+                hset.push_back(fields.back());
+                hset.push_back(std::to_string(i));
+            }
+            members.push_back("m" + std::to_string(i));
+            sadd.push_back(members.back());
+        }
+        if (hset.size() > 2) {
+            const auto added = ops.call(hset);
+            BOOST_REQUIRE_MESSAGE(added.starts_with(":"), added);
+        }
+        BOOST_REQUIRE_EQUAL(ops.call(sadd), ":30\r\n");
+    }
+    BOOST_REQUIRE_EQUAL(ops.call({"HLEN", "sccache/h"}), ":200\r\n");
+    std::vector<std::string> all = lower;
+    all.insert(all.end(), upper.begin(), upper.end());
+    all.push_back("sccache/h");
+    all.push_back("sccache/s");
+    std::sort(all.begin(), all.end());
+
+    // A full walk returns every key exactly once, in any COUNT.
+    for (const auto* count : {"1", "7", "10", "1000"}) {
+        BOOST_CHECK(sorted(scan_walk(ops, {"SCAN"}, {"COUNT", count})) == all);
+    }
+    // MATCH narrows the walk to the prefix's range; TYPE filters by type.
+    BOOST_CHECK(sorted(scan_walk(ops, {"SCAN"}, {"MATCH", "a/k1*"})) ==
+                std::vector<std::string>(lower.begin() + 10, lower.begin() + 20));
+    const auto one = parse_scan(ops.call({"SCAN", "0", "MATCH", "a/k1*", "COUNT", "1000"}));
+    BOOST_CHECK_EQUAL(one.first, "0");
+    BOOST_CHECK_EQUAL(one.second.size(), 10u);
+    BOOST_CHECK(scan_walk(ops, {"SCAN"}, {"MATCH", "*k3?", "COUNT", "5"}).size() == 20u);
+    BOOST_CHECK(scan_walk(ops, {"SCAN"}, {"TYPE", "HASH"}) ==
+                std::vector<std::string>{"sccache/h"});
+    BOOST_CHECK(scan_walk(ops, {"SCAN"}, {"TYPE", "set"}) == std::vector<std::string>{"sccache/s"});
+    BOOST_CHECK_EQUAL(scan_walk(ops, {"SCAN"}, {"TYPE", "string"}).size(), 80u);
+    BOOST_CHECK(scan_walk(ops, {"SCAN"}, {"TYPE", "zset"}).empty());
+    BOOST_CHECK_EQUAL(ops.call({"SCAN", "0", "COUNT", "0"}), "-ERR syntax error\r\n");
+    BOOST_CHECK_EQUAL(ops.call({"SCAN", "0", "COUNT", "x"}),
+                      "-ERR value is not an integer or out of range\r\n");
+    BOOST_CHECK_EQUAL(ops.call({"SCAN", "0", "MATCH"}), "-ERR syntax error\r\n");
+
+    // A user sees only the keys their scopes let them read, and a MATCH
+    // outside every scope ends at once.
+    std::vector<std::string> farm_keys;
+    for (const auto& k : all) {
+        if (k.starts_with("sccache/")) {
+            farm_keys.push_back(k);
+        }
+    }
+    BOOST_CHECK(sorted(scan_walk(farm, {"SCAN"}, {"COUNT", "9"})) == farm_keys);
+    BOOST_CHECK_EQUAL(farm.call({"SCAN", "0", "MATCH", "a/*"}), "*2\r\n$1\r\n0\r\n*0\r\n");
+    // Keys outside the scopes are not counted against COUNT either: the
+    // 40 keys of the lower group cost the first call nothing.
+    BOOST_CHECK_EQUAL(parse_scan(farm.call({"SCAN", "0", "COUNT", "40"})).second.size(), 40u);
+
+    // A cursor is resumed on any node: the issuer serves it.
+    const auto first = parse_scan(ops.call({"SCAN", "0", "COUNT", "5"}));
+    BOOST_REQUIRE_NE(first.first, "0");
+    auto rest = parse_scan(ops2.call({"SCAN", first.first, "COUNT", "1000"}));
+    BOOST_CHECK_EQUAL(rest.first, "0");
+    rest.second.insert(rest.second.end(), first.second.begin(), first.second.end());
+    BOOST_CHECK(sorted(rest.second) == all);
+    // A finished, unknown, malformed or someone else's cursor is invalid.
+    const std::string invalid = "-ERR invalid cursor\r\n";
+    BOOST_CHECK_EQUAL(ops.call({"SCAN", first.first}), invalid);
+    BOOST_CHECK_EQUAL(ops.call({"SCAN", "12345"}), invalid);
+    BOOST_CHECK_EQUAL(ops.call({"SCAN", "x"}), invalid);
+    const auto held = parse_scan(ops.call({"SCAN", "0", "COUNT", "5"})).first;
+    BOOST_CHECK_EQUAL(farm.call({"SCAN", held}), invalid);
+    BOOST_CHECK_EQUAL(ops.call({"KYTHIRA.CURSOR", "ops", "SCAN", held}).substr(0, 7), "-NOPERM");
+
+    // HSCAN and SSCAN walk a large collection in element order; a small
+    // one comes back whole.
+    auto pairs = scan_walk(ops2, {"HSCAN", "sccache/h"}, {"COUNT", "33"});
+    BOOST_REQUIRE_EQUAL(pairs.size(), 400u);
+    std::vector<std::string> got_fields;
+    for (std::size_t i = 0; i < pairs.size(); i += 2) {
+        got_fields.push_back(pairs[i]);
+        BOOST_CHECK_EQUAL(pairs[i], "f" + pairs[i + 1]);
+    }
+    BOOST_CHECK(sorted(got_fields) == sorted(fields));
+    BOOST_CHECK_EQUAL(scan_walk(ops, {"HSCAN", "sccache/h"}, {"MATCH", "f1?"}).size(), 20u);
+    BOOST_CHECK(sorted(scan_walk(farm, {"SSCAN", "sccache/s"}, {"COUNT", "50"})) ==
+                sorted(members));
+    BOOST_CHECK_EQUAL(ops.call({"SADD", "a/small", "x", "y"}), ":2\r\n");
+    BOOST_CHECK_EQUAL(ops.call({"SSCAN", "a/small", "0", "COUNT", "1"}),
+                      "*2\r\n$1\r\n0\r\n*2\r\n$1\r\nx\r\n$1\r\ny\r\n");
+    BOOST_CHECK_EQUAL(ops.call({"SSCAN", "a/none", "0"}), "*2\r\n$1\r\n0\r\n*0\r\n");
+    BOOST_CHECK(ops.call({"HSCAN", "sccache/s", "0"}).starts_with("-WRONGTYPE"));
+    BOOST_CHECK(ops.call({"SSCAN", "a/k00", "0"}).starts_with("-WRONGTYPE"));
+    BOOST_CHECK(ops.call({"SSCAN", "sccache/s", "0", "TYPE", "set"}) == "-ERR syntax error\r\n");
+    const auto member_cursor =
+        parse_scan(ops.call({"SSCAN", "sccache/s", "0", "COUNT", "5"})).first;
+    BOOST_CHECK_EQUAL(ops.call({"SSCAN", "sccache/h", member_cursor}), invalid);
+    BOOST_CHECK_EQUAL(ops.call({"SCAN", member_cursor}), invalid);
+    BOOST_CHECK_EQUAL(ops.call({"DEL", "a/small"}), ":1\r\n");
+
+    // KEYS: admin only, every match, or an error rather than a truncated
+    // list past the limit.
+    const auto keys = ops.call({"KEYS", "a/k0*"});
+    BOOST_CHECK(keys.starts_with("*10\r\n"));
+    BOOST_CHECK(ops.call({"KEYS", "*"}).starts_with("-ERR KEYS would return more than 50 keys"));
+    BOOST_CHECK_EQUAL(ops.call({"KEYS", "nothing*"}), "*0\r\n");
+    BOOST_CHECK(farm.call({"KEYS", "sccache/*"}).starts_with("-NOPERM"));
+
+    // RANDOMKEY returns some key.
+    for (int i = 0; i < 10; ++i) {
+        const auto pick = ops2.call({"RANDOMKEY"});
+        BOOST_REQUIRE(pick.starts_with("$"));
+        const auto key = pick.substr(pick.find("\r\n") + 2, pick.size() - pick.find("\r\n") - 4);
+        BOOST_CHECK(std::binary_search(all.begin(), all.end(), key));
+    }
+
+    // An idle cursor expires.
+    const auto idle = parse_scan(ops.call({"SCAN", "0", "COUNT", "5"})).first;
+    std::this_thread::sleep_for(std::chrono::milliseconds{3500});
+    BOOST_CHECK_EQUAL(ops.call({"SCAN", idle}), invalid);
+}
+
+// Task 12 (Requirement 7.3): the cursor holds a key, not a slot, so a walk
+// that runs while a group splits, merges back and changes leader returns
+// every key that existed throughout exactly once.
+BOOST_AUTO_TEST_CASE(a_walk_survives_splits_merges_and_leader_moves,
+                     *boost::unit_test::timeout(240)) {
+    if constexpr (gateway_type::k_node_format_level < k_redis_typed_values_level) {
+        return;
+    }
+    auto c = typed_cluster();
+    resp_client ops(c->port(2));
+    BOOST_REQUIRE_EQUAL(ops.auth("ops", "ops-secret"), "+OK\r\n");
+    auto all = numbered("a/k", 60);
+    const auto upper = numbered("x/k", 30);
+    all.insert(all.end(), upper.begin(), upper.end());
+    for (const auto& k : all) {
+        BOOST_REQUIRE_EQUAL(ops.call({"SET", k, "v"}), "+OK\r\n");
+    }
+    std::sort(all.begin(), all.end());
+
+    // Round 0 splits the lower group, round 1 the upper one (a group just
+    // merged is in its cooldown).
+    for (int round = 0; round < 2; ++round) {
+        const group_id_type parent = round == 0 ? 1 : 2;
+        std::optional<group_id_type> child;
+        int splits = 0;
+        int merges = 0;
+        int moves = 0;
+        const auto got = scan_walk(ops, {"SCAN"}, {"COUNT", "6"}, [&](int call) {
+            switch (call % 4) {
+                case 0:
+                    if (!child) {
+                        child = c->split(parent, round == 0 ? "a/k30" : "x/k15");
+                        splits += child ? 1 : 0;
+                    }
+                    break;
+                case 1:
+                    moves += c->move_leader(3 - parent) ? 1 : 0;
+                    break;
+                case 2:
+                    if (child) {
+                        moves += c->move_leader(*child) ? 1 : 0;
+                    }
+                    break;
+                default:
+                    if (child && c->merge(*child, parent)) {
+                        ++merges;
+                        child.reset();
+                    }
+                    break;
+            }
+        });
+        BOOST_TEST_MESSAGE("round " << round << ": " << splits << " splits, " << merges
+                                    << " merges, " << moves << " leader moves");
+        BOOST_CHECK(sorted(got) == all);
+        BOOST_CHECK_GT(splits, 0);
+        BOOST_CHECK_GT(merges + moves, 0);
+        if (child) {
+            BOOST_CHECK(c->merge(*child, parent));
+        }
+    }
 }
 
 // Requirement 5.4: the rule is decided in apply(), so writers racing to

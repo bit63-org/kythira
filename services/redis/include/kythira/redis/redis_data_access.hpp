@@ -37,6 +37,7 @@
 #include <kythira/redis/redis_gateway_value_access.hpp>
 #include <kythira/redis/redis_remote_data_access.hpp>
 #include <raft/future_default.hpp>
+#include <kythira/redis/redis_scan.hpp>
 #include <raft/route_cache.hpp>
 #include <raft/shard_exceptions.hpp>
 #include <raft/txn_state_machine.hpp>
@@ -111,6 +112,13 @@ public:
         entry_handle _entry;
         value_context _context{};
         /// Where to send the command instead, when known.
+        std::optional<node_id_type> _leader;
+    };
+
+    /// A page of keys (`KYTHIRA.DATA PAGE`, task 12), or why not.
+    struct page_outcome {
+        redis_data_status _status{redis_data_status::ok};
+        redis_scan_page _page;
         std::optional<node_id_type> _leader;
     };
 
@@ -297,6 +305,92 @@ public:
         }
         return r;
     }
+    /// One page of the group owning `from` (design Component 7): its keys
+    /// in `[from, to)`, cut at the group's own range end, examining at most
+    /// `count` live keys after skipping `skip` of them. `keep(key, type)`
+    /// gives a `redis_scan_verdict` on this node (the user's scopes, then
+    /// pattern and type), so a filtered key is never returned and a hidden
+    /// one is not even counted (Requirement 7.6); at most
+    /// `k_redis_scan_hidden_per_page` hidden keys are passed over per page
+    /// so that a narrowly scoped user's call stays bounded. Expired keys are
+    /// skipped and not examined. Served at the read's consistency: from any replica, or
+    /// only from a leader, without a log entry.
+    template<typename Keep>
+    auto page(const std::string& from, const std::optional<std::string>& to, std::size_t count,
+              std::size_t skip, bool any_replica, std::uint64_t now_ms, Keep&& keep)
+        -> page_outcome {
+        page_outcome out;
+        auto* node = replica_for(from, out._status, out._leader);
+        if (node == nullptr) {
+            return out;
+        }
+        if (!any_replica && !node->is_leader()) {
+            out._leader = node->known_leader();
+            out._status = redis_data_status::no_leader;
+            return out;
+        }
+        const auto group = _host.resolve(from);
+        if (!group) {
+            out._status = redis_data_status::unrouted;
+            return out;
+        }
+        auto served =
+            _host.with_group_state_machine(group->group_id(), [&](auto& sm, const auto& d) -> bool {
+                if (!d._range.contains(from)) {
+                    return false;  // a split or merge moved it: route again
+                }
+                auto& kv = redis_gateway_detail::kv_of(sm);
+                auto& p = out._page;
+                p._range_end = d._range._end;
+                p._approximate_keys = kv.approximate_key_count();
+                std::optional<std::string> bound = to;
+                if (d._range._end && (!bound || *d._range._end < *bound)) {
+                    bound = d._range._end;
+                }
+                std::size_t examined = 0;
+                std::size_t skipped = 0;
+                std::size_t hidden = 0;
+                p._exhausted = true;
+                kv.scan_keys(
+                    from, bound,
+                    [&](const std::string& key, std::uint64_t expire, redis_value_type type) {
+                        if (expire != 0 && expire <= now_ms) {
+                            return true;
+                        }
+                        if (skipped < skip) {
+                            ++skipped;
+                            return true;
+                        }
+                        if (examined == count) {
+                            p._exhausted = false;
+                            return false;
+                        }
+                        const redis_scan_verdict verdict = keep(key, type);
+                        if (verdict == redis_scan_verdict::hidden) {
+                            if (hidden == k_redis_scan_hidden_per_page) {
+                                p._exhausted = false;
+                                return false;
+                            }
+                            ++hidden;
+                            p._last = key;
+                            return true;
+                        }
+                        ++examined;
+                        ++p._examined;
+                        p._last = key;
+                        if (verdict == redis_scan_verdict::kept) {
+                            p._keys.push_back(key);
+                        }
+                        return true;
+                    });
+                return true;
+            });
+        if (!served || !*served) {
+            out._status = redis_data_status::unrouted;
+        }
+        return out;
+    }
+
     /// Waits until every entry committed before the call is applied on
     /// `key`'s group here (a read index round through the host).
     auto read_barrier(const std::string& key, std::chrono::milliseconds timeout) {

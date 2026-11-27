@@ -1218,6 +1218,36 @@ auto redis_front_end<Host, Logger, Metrics>::execute_command(session& s, std::st
         }
         return handle_set(s, cmd, true);
     }
+    if (upper == "SCAN") {
+        if (auto e = arity(2, std::numeric_limits<std::size_t>::max())) {
+            return *e;
+        }
+        return handle_scan(s, cmd);
+    }
+    if (upper == "HSCAN" || upper == "SSCAN") {
+        if (auto e = arity(3, std::numeric_limits<std::size_t>::max())) {
+            return *e;
+        }
+        return handle_member_scan(s, upper, cmd);
+    }
+    if (upper == "KEYS") {
+        if (auto e = arity(2, 2)) {
+            return *e;
+        }
+        return handle_keys(s, cmd);
+    }
+    if (upper == "RANDOMKEY") {
+        if (auto e = arity(1, 1)) {
+            return *e;
+        }
+        return handle_randomkey(s);
+    }
+    if (upper == "KYTHIRA.DATA") {
+        return handle_internal_page(s, cmd);
+    }
+    if (upper == "KYTHIRA.CURSOR") {
+        return handle_internal_cursor(s, cmd);
+    }
     if (const auto* info = find_redis_command(upper);
         info != nullptr &&
         (info->group == "hash" || info->group == "set" || info->group == "list") &&
@@ -5170,6 +5200,608 @@ auto redis_front_end<Host, Logger, Metrics>::handle_list_command(session& s,
         default:
             return std::nullopt;
     }
+}
+
+// ── the SCAN family (redis-general-data-types task 12) ──────────────────────
+
+namespace redis_gateway_detail {
+/// What a SCAN page does with `key` for `identity` (Requirement 7.6).
+inline auto scan_verdict(const redis_identity& identity, const redis_scan_filter& filter,
+                         const std::string& key, redis_value_type type) -> redis_scan_verdict {
+    if (!redis_acl::key_permits(identity, key, redis_key_access::read)) {
+        return redis_scan_verdict::hidden;
+    }
+    return filter.keeps(key, type) ? redis_scan_verdict::kept : redis_scan_verdict::filtered;
+}
+}  // namespace redis_gateway_detail
+
+template<typename Host, typename Logger, typename Metrics>
+auto redis_front_end<Host, Logger, Metrics>::cursor_index_of(const node_id_type& node) const
+    -> std::uint16_t {
+    if constexpr (std::is_integral_v<node_id_type>) {
+        if (node >= 1 && static_cast<std::uint64_t>(node) <= k_redis_cursor_max_index) {
+            return static_cast<std::uint16_t>(node);
+        }
+    }
+    const auto h = std::hash<std::string>{}(redis_gateway_detail::describe_id(node));
+    return static_cast<std::uint16_t>(1 + h % k_redis_cursor_max_index);
+}
+
+template<typename Host, typename Logger, typename Metrics>
+auto redis_front_end<Host, Logger, Metrics>::node_of_cursor_index(std::uint16_t index)
+    -> std::optional<node_id_type> {
+    if (cursor_index_of(_data.self()) == index) {
+        return _data.self();
+    }
+    for (const auto& r : _data.all_routes()) {
+        for (const auto& n : r.voters()) {
+            if (cursor_index_of(n) == index) {
+                return n;
+            }
+        }
+        for (const auto& n : r.learners()) {
+            if (cursor_index_of(n) == index) {
+                return n;
+            }
+        }
+    }
+    return std::nullopt;
+}
+
+template<typename Host, typename Logger, typename Metrics>
+auto redis_front_end<Host, Logger, Metrics>::keep_cursor(scan_cursor c, std::uint64_t id)
+    -> std::uint64_t {
+    std::lock_guard lock(_cursor_mutex);
+    c._touched = std::chrono::steady_clock::now();
+    while (id == 0) {
+        id = _cursor_rng() & k_redis_cursor_id_mask;
+        if (_cursors.contains(id)) {
+            id = 0;
+        }
+    }
+    _cursors.insert_or_assign(id, std::move(c));
+    while (_cursors.size() > std::max<std::size_t>(_config._max_cursors, 1)) {
+        auto oldest = _cursors.begin();
+        for (auto it = _cursors.begin(); it != _cursors.end(); ++it) {
+            if (it->second._touched < oldest->second._touched) {
+                oldest = it;
+            }
+        }
+        _cursors.erase(oldest);
+    }
+    return redis_cursor_make(cursor_index_of(_data.self()), id);
+}
+
+template<typename Host, typename Logger, typename Metrics>
+auto redis_front_end<Host, Logger, Metrics>::find_cursor(std::uint64_t cursor,
+                                                         const std::string& user)
+    -> std::optional<scan_cursor> {
+    std::lock_guard lock(_cursor_mutex);
+    auto it = _cursors.find(redis_cursor_id(cursor));
+    if (it == _cursors.end()) {
+        return std::nullopt;
+    }
+    const auto now = std::chrono::steady_clock::now();
+    if (now - it->second._touched > _config._cursor_idle) {
+        _cursors.erase(it);
+        return std::nullopt;
+    }
+    if (it->second._user != user) {
+        return std::nullopt;
+    }
+    it->second._touched = now;
+    return it->second;
+}
+
+template<typename Host, typename Logger, typename Metrics>
+auto redis_front_end<Host, Logger, Metrics>::drop_cursor(std::uint64_t cursor) -> void {
+    std::lock_guard lock(_cursor_mutex);
+    _cursors.erase(redis_cursor_id(cursor));
+}
+
+template<typename Host, typename Logger, typename Metrics>
+auto redis_front_end<Host, Logger, Metrics>::forward_cursor(session& s, std::uint64_t cursor,
+                                                            const resp_command& cmd)
+    -> std::string {
+    const auto invalid = s._writer.error("ERR invalid cursor");
+    if (s._internal) {
+        return invalid;  // one hop: the issuer never forwards again
+    }
+    const auto node = node_of_cursor_index(redis_cursor_index(cursor));
+    if (!node || *node == _data.self()) {
+        return invalid;
+    }
+    std::vector<std::string> argv{"KYTHIRA.CURSOR", s._identity->_user};
+    argv.insert(argv.end(), cmd._argv.begin(), cmd._argv.end());
+    auto reply = forward_argv(argv, *node, "KYTHIRA.CURSOR");
+    if (!reply) {
+        return invalid;
+    }
+    return *reply;
+}
+
+template<typename Host, typename Logger, typename Metrics>
+auto redis_front_end<Host, Logger, Metrics>::fetch_page(session& s, const std::string& from,
+                                                        const std::optional<std::string>& to,
+                                                        std::size_t count, std::size_t skip,
+                                                        const redis_scan_filter& filter,
+                                                        std::string& error)
+    -> std::optional<redis_scan_page> {
+    const bool any_replica = _config._read_consistency == redis_read_consistency::any_replica;
+    const auto& identity = *s._identity;
+    const auto keep = [&](const std::string& key, redis_value_type type) {
+        return redis_gateway_detail::scan_verdict(identity, filter, key, type);
+    };
+    const auto deadline = std::chrono::steady_clock::now() + _config._command_timeout;
+    std::string last = "no reachable leader for the key's shard";
+    for (;;) {
+        auto outcome = _data.page(from, to, count, skip, any_replica, now_ms(), keep);
+        if (outcome._status == redis_data_status::ok) {
+            return std::move(outcome._page);
+        }
+        if (outcome._leader && *outcome._leader != _data.self()) {
+            auto reply = forward_argv({"KYTHIRA.DATA", "PAGE", from, to ? "1" : "0",
+                                       to.value_or(""), std::to_string(count), std::to_string(skip),
+                                       filter._pattern, filter._type, identity._user},
+                                      *outcome._leader, "KYTHIRA.DATA");
+            if (reply) {
+                auto parsed = redis_gateway_detail::parse_peer_reply(*reply);
+                using kind = redis_gateway_detail::peer_reply::kind;
+                if (parsed._kind == kind::bulk) {
+                    try {
+                        return decode_redis_scan_page(parsed._body);
+                    } catch (const std::exception& e) {
+                        error = s._writer.error(std::string("ERR ") + e.what());
+                        return std::nullopt;
+                    }
+                }
+                if (parsed._kind != kind::error ||
+                    parsed._body.find("retry") == std::string::npos) {
+                    error =
+                        s._writer.error("ERR peer gateway refused a SCAN page: " + parsed._body);
+                    return std::nullopt;
+                }
+                last = parsed._body;
+            }
+        }
+        if (!_running.load() || std::chrono::steady_clock::now() >= deadline) {
+            error = s._writer.error("ERR " + last + ", retry");
+            return std::nullopt;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds{10});
+    }
+}
+
+template<typename Host, typename Logger, typename Metrics>
+auto redis_front_end<Host, Logger, Metrics>::handle_internal_page(session& s,
+                                                                  const resp_command& cmd)
+    -> std::string {
+    if (!s._internal) {
+        audit(s, "KYTHIRA.DATA", "internal command from a client");
+        return s._writer.error("NOPERM KYTHIRA.DATA is internal to the gateways");
+    }
+    const auto& a = cmd._argv;
+    if (a.size() != 10 || resp_to_upper(a[1]) != "PAGE" || (a[3] != "0" && a[3] != "1")) {
+        return s._writer.error("ERR syntax error");
+    }
+    const auto count = redis_string_detail::parse_u64(a[5]);
+    const auto skip = redis_string_detail::parse_u64(a[6]);
+    if (!count || !skip) {
+        return s._writer.error("ERR syntax error");
+    }
+    auto identity = _acl.identity_of(a[9]);
+    if (!identity) {
+        return s._writer.error("ERR invalid cursor");
+    }
+    redis_scan_filter filter{a[7], a[8]};
+    const auto keep = [&](const std::string& key, redis_value_type type) {
+        return redis_gateway_detail::scan_verdict(*identity, filter, key, type);
+    };
+    const std::optional<std::string> to = a[3] == "1" ? std::optional(a[4]) : std::nullopt;
+    auto outcome = _data.page(
+        a[2], to, static_cast<std::size_t>(*count), static_cast<std::size_t>(*skip),
+        _config._read_consistency == redis_read_consistency::any_replica, now_ms(), keep);
+    if (outcome._status != redis_data_status::ok) {
+        return s._writer.error("ERR shard has no reachable leader, retry");
+    }
+    return s._writer.bulk(encode_redis_scan_page(outcome._page));
+}
+
+template<typename Host, typename Logger, typename Metrics>
+auto redis_front_end<Host, Logger, Metrics>::handle_internal_cursor(session& s,
+                                                                    const resp_command& cmd)
+    -> std::string {
+    if (!s._internal) {
+        audit(s, "KYTHIRA.CURSOR", "internal command from a client");
+        return s._writer.error("NOPERM KYTHIRA.CURSOR is internal to the gateways");
+    }
+    if (cmd._argv.size() < 4) {
+        return s._writer.error("ERR syntax error");
+    }
+    auto identity = _acl.identity_of(cmd._argv[1]);
+    if (!identity) {
+        return s._writer.error("ERR invalid cursor");
+    }
+    resp_command inner;
+    inner._argv.assign(cmd._argv.begin() + 2, cmd._argv.end());
+    const auto upper = resp_to_upper(inner._argv[0]);
+    if (upper != "SCAN" && upper != "HSCAN" && upper != "SSCAN") {
+        return s._writer.error("ERR syntax error");
+    }
+    // The call runs as the user who holds the cursor: their scopes filter
+    // the keys, and the cursor's owner must be them.
+    auto saved = std::exchange(s._identity, std::move(identity));
+    std::string reply;
+    try {
+        reply = upper == "SCAN" ? handle_scan(s, inner) : handle_member_scan(s, upper, inner);
+    } catch (...) {
+        s._identity = std::move(saved);
+        throw;
+    }
+    s._identity = std::move(saved);
+    return reply;
+}
+
+namespace redis_gateway_detail {
+/// The `[cursor, [elements]]` reply of the SCAN family.
+inline auto scan_reply(const resp_writer& w, std::uint64_t cursor,
+                       const std::vector<std::string>& elements) -> std::string {
+    std::vector<std::string> encoded;
+    encoded.reserve(elements.size());
+    for (const auto& e : elements) {
+        encoded.push_back(w.bulk(e));
+    }
+    return w.array({w.bulk(std::to_string(cursor)), w.array(encoded)});
+}
+
+/// Parses `[MATCH p] [COUNT n] [TYPE t]` from `argv[first]` on; `type_ok`
+/// says whether TYPE is allowed. The error reply, or nothing.
+inline auto parse_scan_options(const resp_writer& w, const std::vector<std::string>& argv,
+                               std::size_t first, bool type_ok, redis_scan_filter& filter,
+                               std::size_t& count) -> std::optional<std::string> {
+    for (std::size_t i = first; i < argv.size(); i += 2) {
+        const auto opt = resp_to_upper(argv[i]);
+        if (i + 1 >= argv.size()) {
+            return w.error("ERR syntax error");
+        }
+        if (opt == "MATCH") {
+            filter._pattern = argv[i + 1];
+        } else if (opt == "COUNT") {
+            const auto n = redis_string_detail::parse_int64(argv[i + 1]);
+            if (!n) {
+                return w.error("ERR value is not an integer or out of range");
+            }
+            if (*n < 1) {
+                return w.error("ERR syntax error");
+            }
+            count = static_cast<std::size_t>(std::min<std::int64_t>(*n, 1000000));
+        } else if (opt == "TYPE" && type_ok) {
+            filter._type = argv[i + 1];
+        } else {
+            return w.error("ERR syntax error");
+        }
+    }
+    return std::nullopt;
+}
+}  // namespace redis_gateway_detail
+
+/// Design Component 7. The cursor's state is the next key to read (and
+/// the end of a MATCH prefix's range); each call reads pages from the
+/// groups owning the keys after it, in key order, until it has examined
+/// `COUNT` live keys or reached the end. Because the position is a key,
+/// a split, merge or leader change between calls moves nothing a later
+/// page would miss or repeat.
+template<typename Host, typename Logger, typename Metrics>
+auto redis_front_end<Host, Logger, Metrics>::handle_scan(session& s, const resp_command& cmd)
+    -> std::string {
+    if (auto e = authorize(s, "SCAN", {})) {
+        return *e;
+    }
+    const auto cursor = redis_string_detail::parse_u64(cmd._argv[1]);
+    if (!cursor) {
+        return s._writer.error("ERR invalid cursor");
+    }
+    redis_scan_filter filter;
+    std::size_t count = 10;
+    if (auto e = redis_gateway_detail::parse_scan_options(s._writer, cmd._argv, 2, true, filter,
+                                                          count)) {
+        return *e;
+    }
+    const auto& identity = *s._identity;
+    scan_cursor state;
+    if (*cursor == 0) {
+        const auto prefix = redis_glob_literal_prefix(filter._pattern);
+        // A MATCH outside every scope the user may read returns nothing
+        // (Requirement 7.6): the same answer as a keyspace without them.
+        const auto compatible = [&](const std::vector<std::string>& scopes) {
+            return std::ranges::any_of(scopes, [&](const std::string& scope) {
+                return prefix.starts_with(scope) || scope.starts_with(prefix);
+            });
+        };
+        if (!compatible(identity._key_prefixes) && !compatible(identity._read_prefixes)) {
+            return redis_gateway_detail::scan_reply(s._writer, 0, {});
+        }
+        state._user = identity._user;
+        state._from = prefix;
+        if (!prefix.empty()) {
+            state._to = redis_prefix_successor(prefix);
+        }
+    } else {
+        if (redis_cursor_index(*cursor) != cursor_index_of(_data.self())) {
+            return forward_cursor(s, *cursor, cmd);
+        }
+        auto found = find_cursor(*cursor, identity._user);
+        if (!found || found->_members) {
+            return s._writer.error("ERR invalid cursor");
+        }
+        state = std::move(*found);
+    }
+    std::vector<std::string> keys;
+    std::size_t budget = count;
+    bool done = false;
+    while (budget > 0) {
+        std::string error;
+        auto page = fetch_page(s, state._from, state._to, budget, 0, filter, error);
+        if (!page) {
+            return error;
+        }
+        keys.insert(keys.end(), std::make_move_iterator(page->_keys.begin()),
+                    std::make_move_iterator(page->_keys.end()));
+        if (page->_last) {
+            state._from = *page->_last + '\0';
+        }
+        if (!page->_exhausted) {
+            break;
+        }
+        budget -= std::min<std::size_t>(budget, page->_examined);
+        if (!page->_range_end || (state._to && *page->_range_end >= *state._to)) {
+            done = true;
+            break;
+        }
+        state._from = std::max(state._from, *page->_range_end);
+    }
+    if (done) {
+        if (*cursor != 0) {
+            drop_cursor(*cursor);
+        }
+        return redis_gateway_detail::scan_reply(s._writer, 0, keys);
+    }
+    const auto next = keep_cursor(std::move(state), *cursor == 0 ? 0 : redis_cursor_id(*cursor));
+    return redis_gateway_detail::scan_reply(s._writer, next, keys);
+}
+
+/// `HSCAN` / `SSCAN`: a collection small enough for Redis's compact
+/// encodings comes back whole with cursor 0, as from Redis; a larger one is
+/// walked in element order, its cursor holding the last element returned.
+template<typename Host, typename Logger, typename Metrics>
+auto redis_front_end<Host, Logger, Metrics>::handle_member_scan(session& s, std::string_view upper,
+                                                                const resp_command& cmd)
+    -> std::string {
+    const auto& key = cmd._argv[1];
+    if (auto e = authorize(s, upper, {key})) {
+        return *e;
+    }
+    const auto cursor = redis_string_detail::parse_u64(cmd._argv[2]);
+    if (!cursor) {
+        return s._writer.error("ERR invalid cursor");
+    }
+    redis_scan_filter filter;
+    std::size_t count = 10;
+    if (auto e = redis_gateway_detail::parse_scan_options(s._writer, cmd._argv, 3, false, filter,
+                                                          count)) {
+        return *e;
+    }
+    if constexpr (k_string_only_store) {
+        return s._writer.error(std::string(k_redis_string_only_store_error));
+    } else {
+        const auto& user = s._identity->_user;
+        scan_cursor state;
+        if (*cursor != 0) {
+            if (redis_cursor_index(*cursor) != cursor_index_of(_data.self())) {
+                return forward_cursor(s, *cursor, cmd);
+            }
+            auto found = find_cursor(*cursor, user);
+            if (!found || !found->_members || found->_key != key) {
+                return s._writer.error("ERR invalid cursor");
+            }
+            state = std::move(*found);
+        } else {
+            state._members = true;
+            state._user = user;
+            state._key = key;
+        }
+        auto r = read_local(s, key);
+        if (!r._error.empty()) {
+            if (*cursor == 0 && r._forward_to && !s._internal) {
+                // The walk's cursor lives where the collection is read.
+                std::vector<std::string> argv{"KYTHIRA.CURSOR", user};
+                argv.insert(argv.end(), cmd._argv.begin(), cmd._argv.end());
+                if (auto reply = forward_argv(argv, *r._forward_to, "KYTHIRA.CURSOR")) {
+                    return *reply;
+                }
+            }
+            return r._error;
+        }
+        if (auto refused = format_refusal(s, key, k_redis_typed_values_level)) {
+            return *refused;
+        }
+        const auto t = now_ms();
+        const bool present =
+            r._entry && (r._entry->_expire_at_ms == 0 || r._entry->_expire_at_ms > t);
+        if (!present) {
+            if (*cursor != 0) {
+                drop_cursor(*cursor);
+            }
+            return redis_gateway_detail::scan_reply(s._writer, 0, {});
+        }
+        const auto want = upper == "HSCAN" ? redis_value_type::hash : redis_value_type::set;
+        if (redis_entry_type(*r._entry) != want) {
+            return s._writer.error(std::string(k_redis_wrongtype));
+        }
+        std::vector<std::string> out;
+        const auto matches = [&](const std::string& element) {
+            return filter._pattern.empty() || redis_glob_match(filter._pattern, element);
+        };
+        bool more = false;
+        std::size_t examined = 0;
+        const auto take = [&](const std::string& element, const std::string* value) {
+            if (examined == count) {
+                more = true;
+                return false;
+            }
+            ++examined;
+            state._from = element;
+            state._started = true;
+            if (matches(element)) {
+                out.push_back(element);
+                if (value != nullptr) {
+                    out.push_back(*value);
+                }
+            }
+            return true;
+        };
+        bool whole = false;
+        if (want == redis_value_type::hash) {
+            const auto& h = *r._entry->_hash;
+            whole = *cursor == 0 && redis_hash_encoding(h) == "listpack";
+            if (whole) {
+                h.for_each([&](const std::string& f, const std::string& v) {
+                    if (matches(f)) {
+                        out.push_back(f);
+                        out.push_back(v);
+                    }
+                });
+            } else {
+                h.visit_after(state._from, !state._started,
+                              [&](const auto& e) { return take(e.first, &e.second); });
+            }
+        } else {
+            const auto& set = *r._entry->_set;
+            bool small = set.size() <= 128;
+            set.for_each([&](const std::string& m) { small = small && m.size() <= 64; });
+            whole = *cursor == 0 && (small || redis_set_encoding(set) == "intset");
+            if (whole) {
+                set.for_each([&](const std::string& m) {
+                    if (matches(m)) {
+                        out.push_back(m);
+                    }
+                });
+            } else {
+                set.visit_after(state._from, !state._started,
+                                [&](const std::string& m) { return take(m, nullptr); });
+            }
+        }
+        if (whole || !more) {
+            if (*cursor != 0) {
+                drop_cursor(*cursor);
+            }
+            return redis_gateway_detail::scan_reply(s._writer, 0, out);
+        }
+        const auto next =
+            keep_cursor(std::move(state), *cursor == 0 ? 0 : redis_cursor_id(*cursor));
+        return redis_gateway_detail::scan_reply(s._writer, next, out);
+    }
+}
+
+/// `KEYS pattern`: admin only (by its ACL role); every matching key the
+/// user may read, or an error past `_keys_limit` rather than a truncated
+/// list (Requirement 7.7).
+template<typename Host, typename Logger, typename Metrics>
+auto redis_front_end<Host, Logger, Metrics>::handle_keys(session& s, const resp_command& cmd)
+    -> std::string {
+    if (auto e = authorize(s, "KEYS", {})) {
+        return *e;
+    }
+    redis_scan_filter filter{cmd._argv[1], {}};
+    const auto prefix = redis_glob_literal_prefix(filter._pattern);
+    std::string from = prefix;
+    const std::optional<std::string> to =
+        prefix.empty() ? std::nullopt : redis_prefix_successor(prefix);
+    std::vector<std::string> keys;
+    for (;;) {
+        std::string error;
+        auto page = fetch_page(s, from, to, 1000, 0, filter, error);
+        if (!page) {
+            return error;
+        }
+        keys.insert(keys.end(), std::make_move_iterator(page->_keys.begin()),
+                    std::make_move_iterator(page->_keys.end()));
+        if (keys.size() > _config._keys_limit) {
+            return s._writer.error("ERR KEYS would return more than " +
+                                   std::to_string(_config._keys_limit) +
+                                   " keys (KYTHIRA_REDIS_KEYS_LIMIT); use SCAN");
+        }
+        if (page->_last) {
+            from = *page->_last + '\0';
+        }
+        if (!page->_exhausted) {
+            continue;
+        }
+        if (!page->_range_end || (to && *page->_range_end >= *to)) {
+            break;
+        }
+        from = std::max(from, *page->_range_end);
+    }
+    std::vector<std::string> encoded;
+    encoded.reserve(keys.size());
+    for (const auto& k : keys) {
+        encoded.push_back(s._writer.bulk(k));
+    }
+    return s._writer.array(encoded);
+}
+
+/// `RANDOMKEY`: a group chosen with probability proportional to its
+/// approximate key count (Requirement 7.8), then a key at a random rank in
+/// it. The rank walk costs up to the group's key count; a user with scopes
+/// gets a key in them, or nil.
+template<typename Host, typename Logger, typename Metrics>
+auto redis_front_end<Host, Logger, Metrics>::handle_randomkey(session& s) -> std::string {
+    if (auto e = authorize(s, "RANDOMKEY", {})) {
+        return *e;
+    }
+    struct candidate {
+        std::string _from;
+        std::uint64_t _keys = 0;
+    };
+    std::vector<candidate> groups;
+    std::uint64_t total = 0;
+    const redis_scan_filter all;
+    for (const auto& r : _data.all_routes()) {
+        candidate c{r.range()._start.value_or(std::string{}), 0};
+        std::string error;
+        auto page = fetch_page(s, c._from, std::nullopt, 0, 0, all, error);
+        if (!page) {
+            return error;
+        }
+        c._keys = page->_approximate_keys;
+        total += c._keys;
+        groups.push_back(std::move(c));
+    }
+    thread_local std::mt19937_64 rng{std::random_device{}()};
+    for (int attempt = 0; attempt < 4 && total > 0; ++attempt) {
+        auto pick = rng() % total;
+        const candidate* chosen = &groups.front();
+        for (const auto& g : groups) {
+            if (pick < g._keys) {
+                chosen = &g;
+                break;
+            }
+            pick -= g._keys;
+        }
+        const auto rank = chosen->_keys == 0 ? 0 : rng() % chosen->_keys;
+        for (const auto skip : {rank, std::uint64_t{0}}) {
+            std::string error;
+            auto page = fetch_page(s, chosen->_from, std::nullopt, 64,
+                                   static_cast<std::size_t>(skip), all, error);
+            if (!page) {
+                return error;
+            }
+            if (!page->_keys.empty()) {
+                return s._writer.bulk(page->_keys.front());
+            }
+        }
+    }
+    return s._writer.null();
 }
 
 }  // namespace kythira

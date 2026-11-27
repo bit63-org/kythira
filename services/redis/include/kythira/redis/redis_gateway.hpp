@@ -36,6 +36,7 @@
 #include <kythira/redis/redis_kv_state_machine.hpp>
 #include <kythira/redis/redis_multi_key_exec.hpp>
 #include <kythira/redis/redis_reply.hpp>
+#include <kythira/redis/redis_scan.hpp>
 #include <kythira/redis/redis_expiry_exec.hpp>
 #include <kythira/redis/redis_string_exec.hpp>
 #include <kythira/redis/redis_string_read.hpp>
@@ -69,6 +70,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <random>
 #include <optional>
 #include <set>
 #include <string>
@@ -143,6 +145,13 @@ struct redis_gateway_config {
     /// replica refuses the same write.
     std::size_t _max_collection_bytes = 64u * 1024u * 1024u;
     std::size_t _max_collection_elements = 4u * 1024u * 1024u;
+    /// SCAN cursors (task 12, Requirement 7.5): how long one may sit idle
+    /// before it answers `-ERR invalid cursor`, and how many one front end
+    /// keeps (the oldest goes first past it).
+    std::chrono::milliseconds _cursor_idle{600000};
+    std::size_t _max_cursors = 100000;
+    /// `KEYS` refuses past this many keys (Requirement 7.7).
+    std::size_t _keys_limit = 10000;
     std::size_t _max_clients = 1024;
     std::chrono::milliseconds _idle_timeout{300000};
     std::chrono::milliseconds _command_timeout{5000};
@@ -674,6 +683,36 @@ protected:
     auto handle_strlen(session& s, const resp_command& cmd) -> std::string;
     auto handle_getrange(session& s, const resp_command& cmd) -> std::string;
 
+    // ---- the SCAN family (redis-general-data-types task 12) ---------------
+
+    /// `SCAN cursor [MATCH p] [COUNT n] [TYPE t]`: one call of a walk over
+    /// the keyspace in key order, group by group (Requirement 7.1-7.6).
+    auto handle_scan(session& s, const resp_command& cmd) -> std::string;
+    /// `HSCAN` / `SSCAN key cursor [MATCH p] [COUNT n]`.
+    auto handle_member_scan(session& s, std::string_view upper, const resp_command& cmd)
+        -> std::string;
+    /// `KEYS pattern` (admin, bounded) and `RANDOMKEY`.
+    auto handle_keys(session& s, const resp_command& cmd) -> std::string;
+    auto handle_randomkey(session& s) -> std::string;
+    /// `KYTHIRA.DATA PAGE from has_to to count skip pattern type user`:
+    /// a page of the group owning `from` on this node (internal only).
+    auto handle_internal_page(session& s, const resp_command& cmd) -> std::string;
+    /// `KYTHIRA.CURSOR user command...`: a SCAN-family call forwarded to
+    /// the front end that issued its cursor (internal only, one hop).
+    auto handle_internal_cursor(session& s, const resp_command& cmd) -> std::string;
+    /// One page of the group owning `from`, here or from a node that holds
+    /// it; `error` holds the reply when none answered.
+    auto fetch_page(session& s, const std::string& from, const std::optional<std::string>& to,
+                    std::size_t count, std::size_t skip, const redis_scan_filter& filter,
+                    std::string& error) -> std::optional<redis_scan_page>;
+    /// The 14-bit index this front end puts in its cursors, and the node a
+    /// cursor's index names (Requirement 7.5).
+    [[nodiscard]] auto cursor_index_of(const node_id_type& node) const -> std::uint16_t;
+    auto node_of_cursor_index(std::uint16_t index) -> std::optional<node_id_type>;
+    /// Sends a call with a cursor this front end did not issue to the one
+    /// that did; `-ERR invalid cursor` when it cannot be reached.
+    auto forward_cursor(session& s, std::uint64_t cursor, const resp_command& cmd) -> std::string;
+
     // ---- tier 1 strings (redis-general-data-types task 3) ------------------
 
     /// Proposes an `exec` record for `key` (design Component 2) on its
@@ -1016,6 +1055,29 @@ protected:
     };
     std::mutex _lru_mutex;
     std::map<group_id_type, lru_state> _lru;
+    /// SCAN-family cursors this front end issued (task 12): a key walk's
+    /// next key and end, or a collection walk's key and last element.
+    struct scan_cursor {
+        bool _members = false;
+        std::string _user;
+        std::string _key;
+        std::string _from;
+        bool _started = false;
+        std::optional<std::string> _to;
+        redis_scan_filter _filter;
+        std::chrono::steady_clock::time_point _touched;
+    };
+    std::mutex _cursor_mutex;
+    std::map<std::uint64_t, scan_cursor> _cursors;
+    std::mt19937_64 _cursor_rng{std::random_device{}()};
+    /// Stores `c` under a fresh id (or `id`) and returns its cursor; drops
+    /// the least recently used past `_max_cursors`.
+    auto keep_cursor(scan_cursor c, std::uint64_t id = 0) -> std::uint64_t;
+    /// The cursor's state, if this front end holds it, has not let it idle
+    /// out, and it belongs to `user`.
+    auto find_cursor(std::uint64_t cursor, const std::string& user) -> std::optional<scan_cursor>;
+    auto drop_cursor(std::uint64_t cursor) -> void;
+
     /// Keys this node served as a follower, per shard, for its leader.
     std::map<group_id_type, std::set<std::string>> _remote_touches;
 
