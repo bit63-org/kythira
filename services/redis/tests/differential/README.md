@@ -11,7 +11,7 @@ reply is compared.
 | `redis_differential_unit_test.cpp` | all of the above without containers, plus a check that `recs/` still matches the generator (in CTest) |
 | `redis_differential_replay_test.cpp` | `recs/` replayed against an in-process three-node gateway cluster (snapshot isolation, shards cut at "e"), in CTest: the quick check for a command PR |
 | `redis_differential_test.cpp` | the container run (`docker-redis-differential-tests`): the daemon, live reference servers, Docker and rootless Podman |
-| `recs/` | what Redis 7.2 and Valkey 8 answered to the default streams (seeds 1-3, 400 commands) |
+| `recs/` | what Redis 7.2 and Valkey 8 answered to the default streams (seeds 1-3, 600 commands) |
 | `../../docker/differential/` | compose file, shared gateway settings (`kythira.env`), ACL |
 
 ## What counts as a match
@@ -20,13 +20,16 @@ A Kythira reply passes when it equals the Redis 7.2 reply **or** the Valkey 8
 reply (the two disagree in places, for example the nested `MULTI` error), or
 when a rule in `rules()` covers it:
 
-- `clock`: a harness tolerance (positive `TTL` within 2 s);
-- `D<n>`: a row of the design's difference table;
+- `clock`: a harness tolerance (positive `TTL` within 2 s, `PTTL` within
+  2000 ms, any positive `EXPIRETIME`/`PEXPIRETIME`, since an absolute expiry
+  depends on when the stream ran);
+- `D<n>`: a row of the design's difference table (D1 float increments in
+  binary128; D2 byte order for collections, `KEYS` and the `SCAN` family,
+  compared as sets with the same cursor);
 - `G<n>`: a known gap. Every gap names the task that closes it, and that task's
   PR deletes the rule. The unit test lists the rule ids, so a new gap is a
-  visible change in review. Today: G1, `STRLEN` refused inside `MULTI`
-  (task 11), and G2, `GETRANGE` not clamping an end index before the start of
-  the string (task 3).
+  visible change in review. There are none today: G1 (`STRLEN` in `MULTI`)
+  closed with task 11 and G2 (`GETRANGE` end clamp) with task 3.
 
 A gap that would abort a `MULTI` block is kept out of the general shapes and
 given a shape of its own that leaves state unchanged (`multi_unsupported`
@@ -51,9 +54,21 @@ Environment knobs are documented at the top of `redis_differential_test.cpp`
 
 ## Adding a command
 
-When a phase 1 task ships a command, add its shape to `shapes()` and bump
-`k_generator_version`, then regenerate `recs/` and update the fingerprint in
-`seed_one_is_stable`. Delete any `G<n>` rule the task closes.
+Generator version 2 covers every shipped command but those listed, with a
+reason, in `excluded_commands()` (identity, whole-server, random and
+Kythira-only commands); the unit test fails when a shipped command is in
+neither place. When a task ships a command, add its shape to `shapes()` (or
+an exclusion) and bump `k_generator_version`, then regenerate `recs/` and
+update the fingerprint in `seed_one_is_stable`. Delete any `G<n>` rule the
+task closes.
+
+Random commands are generated so their answers are deterministic: `SPOP`,
+`SRANDMEMBER` and `HRANDFIELD` take a count past any collection's size, and
+`SCAN`/`HSCAN`/`SSCAN` a `COUNT` past the stream's key space, so every server
+answers in one call with cursor 0. Collection keys are `<letter>:h|s|l:<tag>`;
+one key in twelve comes from another family, so `WRONGTYPE` is compared too.
+Both the container run and the replay raise the format gate
+(`KYTHIRA.FORMAT UPGRADE 3`) before streaming.
 
 ## Regenerating recs/
 

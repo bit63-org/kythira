@@ -837,8 +837,9 @@ deadlines, chunking and immutable-value rule. `SSCAN` is described with
 `SCAN` below.
 
 - Members come back in byte order on every replica; Redis promises no
-  order. `OBJECT ENCODING` reports `intset` (every member an integer, at
-  most 512) or `hashtable`.
+  order. `OBJECT ENCODING` reports what Redis 7.2 would choose: `intset`
+  (every member an integer, at most 512), else `listpack` (at most 128
+  members of at most 64 bytes), else `hashtable`.
 - Random picks never happen in the log. `SRANDMEMBER` picks on the node
   that serves the read. `SPOP` picks on the node that serves the read of
   the set and proposes the removal of exactly those members; each is
@@ -871,7 +872,9 @@ immutable-value rule. The blocking forms (`BLPOP`, `BRPOP`, `BLMOVE`,
 - `LMOVE`, `RPOPLPUSH` and `LMPOP` are multi-key writes: their keys in one
   shard make one log entry; keys in several shards run as one transaction
   where transactions are on, and answer `-CROSSSLOT` elsewhere.
-- `OBJECT ENCODING` reports `quicklist`, as Redis 7.0 does for every list.
+- `OBJECT ENCODING` reports `listpack` while the list would fit Redis 7.2's
+  default 8 KiB listpack, else `quicklist`. Redis converts a quicklist back
+  only once it shrinks to half that, a history Kythira does not keep.
 
 ## Iterating the keyspace
 

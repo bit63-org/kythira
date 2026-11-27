@@ -2736,7 +2736,7 @@ BOOST_AUTO_TEST_CASE(set_commands, *boost::unit_test::timeout(120)) {
     BOOST_CHECK_EQUAL(call({"SMOVE", "sccache/u", "sccache/v", "d"}), ":1\r\n");
     BOOST_CHECK_EQUAL(call({"SMEMBERS", "sccache/v"}), "*1\r\n$1\r\nd\r\n");
     BOOST_CHECK_EQUAL(call({"TYPE", "sccache/v"}), "+set\r\n");
-    BOOST_CHECK_EQUAL(call({"OBJECT", "ENCODING", "sccache/v"}), bulk("hashtable"));
+    BOOST_CHECK_EQUAL(call({"OBJECT", "ENCODING", "sccache/v"}), bulk("listpack"));
 
     // SPOP: every pop is a member that was there, and they run out.
     std::set<std::string> popped;
@@ -2808,7 +2808,7 @@ BOOST_AUTO_TEST_CASE(list_commands, *boost::unit_test::timeout(120)) {
     BOOST_CHECK_EQUAL(call({"LPOP", "sccache/l", "2"}), "*-1\r\n");
     BOOST_CHECK_EQUAL(call({"RPUSH", "sccache/t", "x"}), ":1\r\n");
     BOOST_CHECK_EQUAL(call({"TYPE", "sccache/t"}), "+list\r\n");
-    BOOST_CHECK_EQUAL(call({"OBJECT", "ENCODING", "sccache/t"}), bulk("quicklist"));
+    BOOST_CHECK_EQUAL(call({"OBJECT", "ENCODING", "sccache/t"}), bulk("listpack"));
     BOOST_CHECK_EQUAL(call({"GET", "sccache/t"}),
                       "-WRONGTYPE Operation against a key holding the wrong kind of value\r\n");
     BOOST_CHECK_EQUAL(call({"RPUSH", "a/t", "y"}), ":1\r\n");

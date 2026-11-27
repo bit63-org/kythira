@@ -395,6 +395,22 @@ auto load_recordings() -> std::map<std::uint64_t, std::map<std::string, diff::re
 
 namespace {
 
+/// The typed commands need the format gate raised (Requirement 2).
+void raise_format_gate(std::uint16_t port) {
+    resp_client admin(port);
+    BOOST_REQUIRE(diff::parse_one(admin.call_raw({"AUTH", "ops", "ops-secret"})).kind !=
+                  diff::reply_kind::error);
+    diff::reply up;
+    for (int i = 0; i < 50; ++i) {
+        up = diff::parse_one(admin.call_raw({"KYTHIRA.FORMAT", "UPGRADE", "3"}));
+        if (up.kind != diff::reply_kind::error) {
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds{200});
+    }
+    BOOST_REQUIRE_MESSAGE(up.kind != diff::reply_kind::error, diff::display(up));
+}
+
 /// Every recorded stream, in RESP2 and RESP3, against the gateway on the
 /// port `port_for(seed, protocol)` names; every reply classified.
 void replay(const std::function<std::uint16_t(std::uint64_t, int)>& port_for) {
@@ -413,9 +429,10 @@ void replay(const std::function<std::uint16_t(std::uint64_t, int)>& port_for) {
             const auto hello = diff::parse_one(
                 client.call_raw({"HELLO", std::to_string(protocol), "AUTH", "ops", "ops-secret"}));
             BOOST_REQUIRE(hello.kind != diff::reply_kind::error);
-            for (char k = 'a'; k < 'a' + 8; ++k) {
-                std::vector<std::string> del{"DEL",
-                                             std::string(1, k) + ":s" + std::to_string(seed)};
+            diff::generator_options opt;
+            opt.tag = "s" + std::to_string(seed);
+            for (const auto& k : diff::stream_keys(opt)) {
+                const std::vector<std::string> del{"DEL", k};
                 for (int i = 0; i < 20 && transient(diff::parse_one(client.call_raw(del))); ++i) {
                     std::this_thread::sleep_for(std::chrono::milliseconds{100});
                 }
@@ -464,6 +481,7 @@ void replay(const std::function<std::uint16_t(std::uint64_t, int)>& port_for) {
 BOOST_AUTO_TEST_CASE(recorded_streams_replay_against_the_gateway, *boost::unit_test::timeout(600)) {
     cluster c;
     BOOST_REQUIRE(c.await_all_leaders(std::chrono::seconds{20}));
+    raise_format_gate(c.port(1));
     replay([&c](std::uint64_t seed, int protocol) {
         return c.port(static_cast<node_id_t>(1 + ((seed + protocol) % k_node_count)));
     });
@@ -476,6 +494,7 @@ BOOST_AUTO_TEST_CASE(recorded_streams_replay_through_a_front_end_without_data,
                      *boost::unit_test::timeout(600)) {
     cluster c;
     BOOST_REQUIRE(c.await_all_leaders(std::chrono::seconds{20}));
+    raise_format_gate(c.port(1));
     auto& fe = c.add_front_end();
     replay([&fe](std::uint64_t, int) { return fe.port(); });
 }
@@ -487,6 +506,7 @@ BOOST_AUTO_TEST_CASE(recorded_streams_replay_through_three_layers_apart,
                      *boost::unit_test::timeout(600)) {
     cluster c;
     BOOST_REQUIRE(c.await_all_leaders(std::chrono::seconds{20}));
+    raise_format_gate(c.port(1));
     auto& fe1 = c.add_front_end();
     auto& fe2 = c.add_front_end();
     auto& gw = c.add_gateway({fe1.port(), fe2.port()});

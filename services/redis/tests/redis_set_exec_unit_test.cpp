@@ -91,7 +91,9 @@ BOOST_FIXTURE_TEST_CASE(set_writes_and_reads, fixture) {
     BOOST_CHECK(read(redis_command_id::smismember, "s", {"a", "z"}) ==
                 redis_reply::array({redis_reply::integer(1), redis_reply::integer(0)}));
     BOOST_CHECK(read(redis_command_id::type, "s") == redis_reply::simple("set"));
-    BOOST_CHECK(read(redis_command_id::object, "s", {"ENCODING"}) ==
+    BOOST_CHECK(read(redis_command_id::object, "s", {"ENCODING"}) == redis_reply::bulk("listpack"));
+    BOOST_CHECK(sadd("long", {std::string(65, 'x')}) == redis_reply::integer(1));
+    BOOST_CHECK(read(redis_command_id::object, "long", {"ENCODING"}) ==
                 redis_reply::bulk("hashtable"));
     BOOST_CHECK(sadd("n", {"1", "-2", "30"}) == redis_reply::integer(3));
     BOOST_CHECK(read(redis_command_id::object, "n", {"ENCODING"}) == redis_reply::bulk("intset"));
@@ -112,9 +114,9 @@ BOOST_FIXTURE_TEST_CASE(spop_removes_only_what_is_still_there, fixture) {
     // Picked by a leader that saw an older set: "b" is gone already.
     BOOST_CHECK(exec(redis_command_id::spop, {"s", "0", "b"}) == redis_reply::null());
     BOOST_CHECK(exec(redis_command_id::spop, {"s", "1", "a", "b", "c"}) ==
-                redis_reply::array(bulks({"a", "c"})));
+                redis_reply::set(bulks({"a", "c"})));
     BOOST_CHECK(sm.lookup("s") == nullptr);
-    BOOST_CHECK(exec(redis_command_id::spop, {"s", "1"}) == redis_reply::array({}));
+    BOOST_CHECK(exec(redis_command_id::spop, {"s", "1"}) == redis_reply::set({}));
 }
 
 BOOST_FIXTURE_TEST_CASE(smove_and_the_store_forms, fixture) {
@@ -148,6 +150,8 @@ BOOST_FIXTURE_TEST_CASE(smove_and_the_store_forms, fixture) {
     BOOST_CHECK(smove("x", "y", "b") == redis_reply::integer(1));
     BOOST_CHECK(smove("x", "x", "c") == redis_reply::integer(1));
     BOOST_CHECK(smove("x", "str", "c") == wrongtype);
+    // A missing source answers 0 before either type is checked (smoveCommand).
+    BOOST_CHECK(smove("none", "str", "c") == redis_reply::integer(0));
     BOOST_CHECK(smove("x", "z", "c") == redis_reply::integer(1));
     BOOST_CHECK(sm.lookup("x") == nullptr);
     BOOST_CHECK(read(redis_command_id::smembers, "y") ==

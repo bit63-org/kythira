@@ -4521,10 +4521,11 @@ auto redis_front_end<Host, Logger, Metrics>::handle_string_write(session& s, std
                             true);
     }
     if (upper == "INCRBYFLOAT") {
-        const auto incr = parse_redis_float128(a[2]);
-        if (!incr || !is_finite_redis_float128(*incr)) {
-            return s._writer.error(incr ? "ERR increment would produce NaN or Infinity"
-                                        : "ERR value is not a valid float");
+        // An infinite increment goes to apply(): Redis checks the stored
+        // value first, so a non-numeric value answers "not a valid float"
+        // and a numeric one "would produce NaN or Infinity".
+        if (!parse_redis_float128(a[2])) {
+            return s._writer.error("ERR value is not a valid float");
         }
         return propose_exec(s, cmd, key, redis_command_id::incrbyfloat, {key, a[2]}, true);
     }
@@ -4924,8 +4925,14 @@ auto redis_front_end<Host, Logger, Metrics>::handle_collection(session& s,
         if (id == redis_command_id::hincrby && !redis_string_detail::parse_int64(a[3])) {
             return s._writer.error("ERR value is not an integer or out of range");
         }
-        if (id == redis_command_id::hincrbyfloat && !parse_redis_float128(a[3])) {
-            return s._writer.error("ERR value is not a valid float");
+        if (id == redis_command_id::hincrbyfloat) {
+            const auto incr = parse_redis_float128(a[3]);
+            if (!incr) {
+                return s._writer.error("ERR value is not a valid float");
+            }
+            if (!is_finite_redis_float128(*incr)) {
+                return s._writer.error("ERR value is NaN or Infinity");
+            }
         }
         args.insert(args.end(), a.begin() + 2, a.end());
         return propose_exec(s, cmd, key, id, std::move(args), id != redis_command_id::hdel);
@@ -4933,7 +4940,9 @@ auto redis_front_end<Host, Logger, Metrics>::handle_collection(session& s,
 
     // A read: arguments the data side expects already valid.
     std::vector<std::string> args(a.begin() + 2, a.end());
-    if (id == redis_command_id::lindex || id == redis_command_id::lrange) {
+    // LINDEX checks the key's type before its index (lindexCommand), so its
+    // index is parsed on the data side; LRANGE parses first, as Redis does.
+    if (id == redis_command_id::lrange) {
         for (const auto& v : args) {
             if (!redis_string_detail::parse_int64(v)) {
                 return s._writer.error("ERR value is not an integer or out of range");
@@ -5064,7 +5073,11 @@ auto redis_front_end<Host, Logger, Metrics>::handle_spop(session& s, const resp_
     if (auto refused = format_refusal(s, key, k_redis_typed_values_level)) {
         return *refused;
     }
-    const auto empty_reply = [&] { return count ? s._writer.array({}) : s._writer.null(); };
+    const auto empty_reply = [&] {
+        // With a count, an empty set (RESP3 `~0`), as Redis replies.
+        return count ? render_redis_reply(redis_reply::set({}), s._writer.version())
+                     : s._writer.null();
+    };
     if (count && *count == 0) {
         return empty_reply();
     }
@@ -5104,7 +5117,13 @@ auto redis_front_end<Host, Logger, Metrics>::handle_spop(session& s, const resp_
     if (args.size() == 2) {
         return empty_reply();
     }
-    return propose_exec(s, cmd, key, redis_command_id::spop, std::move(args), false);
+    auto reply = propose_exec(s, cmd, key, redis_command_id::spop, std::move(args), false);
+    // A reply forwarded from the leader comes back as a RESP2 array; a RESP3
+    // client gets the set Redis sends for SPOP with a count.
+    if (count && s._writer.version() >= 3 && reply.starts_with('*')) {
+        reply.front() = '~';
+    }
+    return reply;
 }
 
 template<typename Host, typename Logger, typename Metrics>

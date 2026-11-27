@@ -506,9 +506,14 @@ auto apply_redis_list_exec(Store& store, const redis_kv_exec_command& c, std::ui
         case redis_command_id::llen:
             return redis_reply::integer(static_cast<std::int64_t>(l.size()));
         case redis_command_id::lindex: {
+            // As lindexCommand: the key and its type first, then the index,
+            // so a missing key answers nil whatever the index says.
+            if (list == nullptr) {
+                return redis_reply::null();
+            }
             const auto i = args.empty() ? std::nullopt : parse_int64(args[0]);
             if (!i) {
-                return syntax();
+                return redis_reply::error("ERR value is not an integer or out of range");
             }
             const auto at = normalise_index(*i, l.size());
             return at ? redis_reply::bulk(l.at(*at)) : redis_reply::null();
@@ -574,10 +579,25 @@ auto apply_redis_list_exec(Store& store, const redis_kv_exec_command& c, std::ui
     }
 }
 
-/// `OBJECT ENCODING` of a list: Redis 7.0 reports `quicklist` for every
-/// list.
-[[nodiscard]] inline auto redis_list_encoding(const redis_list&) -> std::string {
-    return "quicklist";
+/// `OBJECT ENCODING` of a list: what Redis 7.2 would choose under its
+/// default `list-max-listpack-size -2`, a listpack while the encoded list
+/// stays within 8 KiB. The size is estimated as a listpack lays elements out
+/// (each element plus its encoding and back-length bytes, about two for the
+/// short elements this applies to). Redis converts back to a listpack only
+/// when a list shrinks to half the limit, a history this does not keep, so
+/// a list that grew past 8 KiB and shrank to between 4 and 8 KiB reads
+/// `listpack` here and `quicklist` in Redis.
+[[nodiscard]] inline auto redis_list_encoding(const redis_list& l) -> std::string {
+    constexpr std::size_t k_listpack_limit = 8192;
+    constexpr std::size_t k_listpack_header = 7;  // total bytes, count, end byte
+    std::size_t estimate = k_listpack_header;
+    bool small = true;
+    l.visit(0, l.empty() ? 0 : l.size() - 1, [&](std::size_t, const std::string& e) {
+        estimate += e.size() + (e.size() < 64 ? 2 : e.size() < 4096 ? 3 : 6);
+        small = estimate <= k_listpack_limit;
+        return small;
+    });
+    return small ? "listpack" : "quicklist";
 }
 
 }  // namespace kythira

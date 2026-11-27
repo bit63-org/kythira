@@ -6,6 +6,8 @@
 
 #include "redis_differential.hpp"
 
+#include <kythira/redis/redis_command_ids.hpp>
+
 #include <boost/json.hpp>
 
 #include <algorithm>
@@ -112,8 +114,8 @@ BOOST_AUTO_TEST_CASE(seed_one_is_stable) {
     diff::generator_options opt;
     opt.tag = "s1";
     const auto stream = diff::generate(1, opt);
-    BOOST_TEST(diff::k_generator_version == 1);
-    BOOST_TEST(diff::fingerprint(stream) == 0x77c62aa7e4256344ULL,
+    BOOST_TEST(diff::k_generator_version == 2);
+    BOOST_TEST(diff::fingerprint(stream) == 0x57d751085589e14cULL,
                std::hex << diff::fingerprint(stream));
 }
 
@@ -123,6 +125,9 @@ BOOST_AUTO_TEST_CASE(keys_stay_in_the_key_space_and_blocks_are_whole) {
     opt.tag = "x";
     const auto stream = diff::generate(42, opt);
     BOOST_TEST(stream.size() >= opt.length);
+    const auto all_keys = diff::stream_keys(opt);
+    const std::set<std::string> keys(all_keys.begin(), all_keys.end());
+    BOOST_TEST(keys.size() == 32U);
     std::set<std::string> shapes;
     int depth = 0;
     for (const auto& c : stream) {
@@ -136,14 +141,40 @@ BOOST_AUTO_TEST_CASE(keys_stay_in_the_key_space_and_blocks_are_whole) {
         }
         for (std::size_t i = 1; i < c.argv.size(); ++i) {
             const auto& a = c.argv[i];
-            if (a.size() == 3 && a[1] == ':' && a[2] == 'x') {
-                BOOST_TEST((a[0] >= 'a' && a[0] < 'a' + 8));
+            if (a.ends_with(":x") && !a.starts_with("*")) {
+                BOOST_TEST(keys.contains(a), a);
             }
         }
     }
     BOOST_TEST(depth == 0);
     // Every shape turns up in a long stream.
     BOOST_TEST(shapes.size() == diff::shapes().size());
+}
+
+// Every shipped command is generated, or excluded with a reason
+// (redis_differential.hpp's excluded_commands()).
+BOOST_AUTO_TEST_CASE(every_shipped_command_is_generated_or_excluded) {
+    diff::generator_options opt;
+    opt.length = 20000;
+    opt.tag = "x";
+    std::set<std::string> generated;
+    for (const auto& c : diff::generate(7, opt)) {
+        generated.insert(diff::detail::upper(c.argv.front()));
+    }
+    for (const auto& info : kythira::k_redis_commands) {
+        if (info.status != kythira::redis_command_status::shipped) {
+            continue;
+        }
+        const std::string name(info.name);
+        const bool excluded = diff::excluded_commands().contains(name);
+        BOOST_TEST((generated.contains(name) || excluded),
+                   name << " is shipped but neither generated nor excluded");
+        BOOST_TEST((!generated.contains(name) || !excluded), name << " is both");
+    }
+    for (const auto& [name, why] : diff::excluded_commands()) {
+        BOOST_TEST(kythira::find_redis_command(name) != nullptr, name << " is not in the registry");
+        BOOST_TEST(!why.empty());
+    }
 }
 
 BOOST_AUTO_TEST_CASE(transactions_off_leaves_out_transaction_shapes) {
@@ -212,7 +243,7 @@ BOOST_AUTO_TEST_CASE(rules_are_named_and_gaps_name_their_task) {
             BOOST_TEST(r.reference.find("task") != std::string::npos, r.id);
         }
     }
-    const std::set<std::string> expected{"clock", "D2", "G1", "G2"};
+    const std::set<std::string> expected{"clock", "D1", "D2"};
     BOOST_TEST((ids == expected));
 }
 
