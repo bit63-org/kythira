@@ -24,6 +24,20 @@
 // Asymmetric keys join in task 8 and grants in task 10; until then an
 // asymmetric key answers UnsupportedOperationException and GrantTokens are
 // accepted and not used.
+//
+// Decrypt's Recipient takes a Kythira extension besides AWS's Nitro form
+// (.kiro/specs/ec2-compatible-api/ Requirement 10.2-10.3): with
+// KeyEncryptionAlgorithm KYTHIRA_HPKE_X25519_SHA256_AES256GCM, an X25519
+// KythiraPublicKey, KythiraAssociatedData and KythiraInfo, the plaintext
+// is sealed with HPKE (kms_hpke.hpp) to that key and returned as
+// CiphertextForRecipient (the 32-byte encapsulation, then the ciphertext
+// and tag), never as Plaintext. The caller, the EC2 controller, never
+// holds the data key; only the attaching helm can open it. It is
+// authorized as Decrypt with the usual condition keys plus
+// kms:KythiraRecipientPublicKeySha256, the lower-case hex SHA-256 of the
+// public key, so a key policy can name the enrolled transport keys it
+// will seal to. AWS's Nitro form still answers
+// UnsupportedOperationException.
 
 #include <kythira/kms/kms_api.hpp>
 #include <kythira/kms/kms_backing.hpp>
@@ -31,6 +45,7 @@
 #include <kythira/kms/kms_ciphertext.hpp>
 #include <kythira/kms/kms_errors.hpp>
 #include <kythira/kms/kms_front_end.hpp>
+#include <kythira/kms/kms_hpke.hpp>
 #include <kythira/kms/kms_public_key.hpp>
 
 #include <raft/aws_json_protocol.hpp>
@@ -39,7 +54,9 @@
 #include <boost/json.hpp>
 
 #include <openssl/crypto.h>
+#include <openssl/evp.h>
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -186,6 +203,28 @@ protected:
     }
 };
 
+/// Decrypt's Kythira recipient: where the plaintext is sealed instead
+/// of returned.
+struct hpke_recipient {
+    hpke::public_key key{};
+    std::vector<std::byte> aad;
+    std::vector<std::byte> info;
+};
+
+/// The value of kms:KythiraRecipientPublicKeySha256 for `key`.
+[[nodiscard]] inline auto recipient_key_sha256(std::span<const std::byte> key) -> std::string {
+    std::array<unsigned char, EVP_MAX_MD_SIZE> digest{};
+    unsigned int len = 0;
+    EVP_Digest(key.data(), key.size(), digest.data(), &len, EVP_sha256(), nullptr);
+    static constexpr std::string_view hex = "0123456789abcdef";
+    std::string out;
+    for (unsigned int i = 0; i < len; ++i) {
+        out.push_back(hex[digest[i] >> 4U]);
+        out.push_back(hex[digest[i] & 0xFU]);
+    }
+    return out;
+}
+
 template<typename Catalog> class crypto_api : protected crypto_common {
 public:
     using result = aws_json::result<boost::json::object>;
@@ -255,18 +294,33 @@ public:
                                    {"EncryptionAlgorithm", alg->name}};
     }
 
+    static constexpr std::string_view k_hpke_recipient = "KYTHIRA_HPKE_X25519_SHA256_AES256GCM";
+    static constexpr std::string_view k_recipient_key_condition =
+        "kms:KythiraRecipientPublicKeySha256";
+
     auto decrypt(call_context& ctx, boost::json::object& in) -> result {
-        if (in.contains("Recipient")) {
-            return unsupported("Recipient (Nitro Enclaves attestation) is not supported");
+        std::optional<hpke_recipient> recipient;
+        condition_keys extra;
+        if (const auto* r = in.if_contains("Recipient")) {
+            auto read = read_recipient(*r);
+            if (!read) {
+                return read.error();
+            }
+            extra.emplace_back(std::string(k_recipient_key_condition),
+                               std::vector<std::string>{recipient_key_sha256(read->key)});
+            recipient = std::move(*read);
         }
         auto c = catalog();
         if (!c) {
             return c.error();
         }
         auto opened = open(ctx, **c, in, "CiphertextBlob", "KeyId", "EncryptionContext",
-                           "EncryptionAlgorithm", "Decrypt");
+                           "EncryptionAlgorithm", "Decrypt", &extra);
         if (!opened) {
             return opened.error();
+        }
+        if (recipient) {
+            return seal_for_recipient(ctx, *opened, *recipient);
         }
         boost::json::object out{{"KeyId", ctx.key_arn(opened->key.account, opened->key.key_id)},
                                 {"Plaintext", opened->plain.base64()},
@@ -387,15 +441,100 @@ private:
         std::optional<std::uint32_t> version;  ///< the backing version, symmetric only
     };
 
+    using condition_keys = std::vector<std::pair<std::string, std::vector<std::string>>>;
+
+    /// A blob member of the Recipient structure (the model has checked
+    /// its base64 and length).
+    [[nodiscard]] static auto recipient_bytes(const boost::json::object& r, std::string_view member)
+        -> std::optional<std::vector<std::byte>> {
+        auto raw = blob(r, member);
+        if (!raw) {
+            return std::nullopt;
+        }
+        std::vector<std::byte> out(raw->size());
+        std::ranges::transform(*raw, out.begin(), [](std::uint8_t b) { return std::byte{b}; });
+        return out;
+    }
+
+    /// The Recipient member: the Kythira HPKE form, or an answer. AWS's
+    /// Nitro form (RSAES_OAEP_SHA_256 or an AttestationDocument) is not
+    /// supported; Kythira members are refused with it, and every Kythira
+    /// member is required with the Kythira algorithm.
+    [[nodiscard]] static auto read_recipient(const boost::json::value& v)
+        -> aws_json::result<hpke_recipient> {
+        if (!v.is_object()) {
+            return validation_error("Recipient must be a structure");
+        }
+        const auto& r = v.get_object();
+        const auto alg = str(r, "KeyEncryptionAlgorithm");
+        if (!alg || *alg != k_hpke_recipient) {
+            if (r.contains("KythiraPublicKey") || r.contains("KythiraAssociatedData") ||
+                r.contains("KythiraInfo")) {
+                return validation_error(
+                    "KythiraPublicKey, KythiraAssociatedData and KythiraInfo require "
+                    "KeyEncryptionAlgorithm " +
+                    std::string(k_hpke_recipient));
+            }
+            return unsupported("Recipient (Nitro Enclaves attestation) is not supported");
+        }
+        if (r.contains("AttestationDocument")) {
+            return validation_error("AttestationDocument is not used with KeyEncryptionAlgorithm " +
+                                    std::string(k_hpke_recipient));
+        }
+        auto key = recipient_bytes(r, "KythiraPublicKey");
+        auto aad = recipient_bytes(r, "KythiraAssociatedData");
+        auto info = recipient_bytes(r, "KythiraInfo");
+        if (!key || !aad || !info) {
+            return validation_error(
+                "KythiraPublicKey, KythiraAssociatedData and KythiraInfo are required with "
+                "KeyEncryptionAlgorithm " +
+                std::string(k_hpke_recipient));
+        }
+        if (key->size() != hpke::public_key_size) {
+            return validation_error("KythiraPublicKey must be a 32-byte X25519 public key");
+        }
+        hpke_recipient out;
+        std::ranges::copy(*key, out.key.begin());
+        out.aad = std::move(*aad);
+        out.info = std::move(*info);
+        return out;
+    }
+
+    /// Decrypt's answer for a Kythira recipient: the plaintext sealed to
+    /// it, and no Plaintext or KeyMaterialId (AWS leaves KeyMaterialId out
+    /// with a Recipient too).
+    [[nodiscard]] static auto seal_for_recipient(const call_context& ctx, const opened_blob& opened,
+                                                 const hpke_recipient& r) -> result {
+        const auto plain = std::as_bytes(opened.plain.bytes());
+        auto sealed = hpke::seal(r.key, r.info, r.aad, plain);
+        if (!sealed) {
+            if (sealed.error() == hpke::error::bad_public_key) {
+                return validation_error("KythiraPublicKey is not a valid X25519 public key");
+            }
+            return internal_error();
+        }
+        std::vector<std::byte> out;
+        out.reserve(sealed->enc.size() + sealed->ciphertext.size());
+        out.insert(out.end(), sealed->enc.begin(), sealed->enc.end());
+        out.insert(out.end(), sealed->ciphertext.begin(), sealed->ciphertext.end());
+        return boost::json::object{{"KeyId", ctx.key_arn(opened.key.account, opened.key.key_id)},
+                                   {"CiphertextForRecipient", aws_json::base64_encode(out)},
+                                   {"EncryptionAlgorithm", opened.algorithm}};
+    }
+
     /// `action` on the key, with the encryption context and algorithm as
     /// condition keys (the algorithm the request names, or
     /// SYMMETRIC_DEFAULT on a symmetric key that names none).
     [[nodiscard]] static auto authorize_use(call_context& ctx, const Catalog& c, const resolved& k,
                                             std::string_view action,
                                             const encryption_context& context,
-                                            std::optional<std::string_view> algorithm)
+                                            std::optional<std::string_view> algorithm,
+                                            const condition_keys* extra = nullptr)
         -> std::optional<aws_json::error> {
         auto r = key_request(ctx, c, k, action);
+        if (extra != nullptr) {
+            r.keys.insert(r.keys.end(), extra->begin(), extra->end());
+        }
         std::vector<std::string> keys;
         for (const auto& [ck, cv] : context) {
             r.keys.emplace_back("kms:EncryptionContext:" + ck, std::vector<std::string>{cv});
@@ -532,7 +671,8 @@ private:
     [[nodiscard]] auto open(call_context& ctx, const Catalog& c, const boost::json::object& in,
                             std::string_view blob_member, std::string_view key_member,
                             std::string_view context_member, std::string_view algorithm_member,
-                            std::string_view action) const -> aws_json::result<opened_blob> {
+                            std::string_view action, const condition_keys* extra = nullptr) const
+        -> aws_json::result<opened_blob> {
         const auto raw = blob(in, blob_member);
         if (!raw) {
             return validation_error(std::string(blob_member) + " is required");
@@ -555,7 +695,7 @@ private:
                 "asymmetric CMKs.");
         }
         if (named && !is_symmetric(named->record.spec)) {
-            return open_rsa(ctx, c, in, *named, *raw, context, requested, action);
+            return open_rsa(ctx, c, in, *named, *raw, context, requested, action, extra);
         }
         const auto b = decode_ciphertext(*raw);
         if (!b) {
@@ -571,7 +711,7 @@ private:
                              "perform this operation.");
         }
         const resolved k = named ? *named : resolved{*key, false, {}};
-        if (auto denied = authorize_use(ctx, c, k, action, context, requested)) {
+        if (auto denied = authorize_use(ctx, c, k, action, context, requested, extra)) {
             return *denied;
         }
         if (!c.version(b->key_id, b->backing_version)) {
@@ -611,9 +751,10 @@ private:
     [[nodiscard]] auto open_rsa(call_context& ctx, const Catalog& c, const boost::json::object& in,
                                 const resolved& k, std::span<const std::uint8_t> raw,
                                 const encryption_context& context,
-                                std::optional<std::string_view> requested,
-                                std::string_view action) const -> aws_json::result<opened_blob> {
-        if (auto denied = authorize_use(ctx, c, k, action, context, requested)) {
+                                std::optional<std::string_view> requested, std::string_view action,
+                                const condition_keys* extra = nullptr) const
+        -> aws_json::result<opened_blob> {
+        if (auto denied = authorize_use(ctx, c, k, action, context, requested, extra)) {
             return *denied;
         }
         auto alg = choose_encryption(ctx, k.record, requested, context);

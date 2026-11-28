@@ -11,8 +11,9 @@ pinned as tools/kms-service-reference.json. The output holds:
 
 - kms_actions(): every action with the ARN formats of the resources it
   acts on (`key`, `alias`) and its condition keys (action keys plus the
-  resources'), for the IAM authorizer's service registry
-  (.kiro/specs/kms-compatible-api/ Requirement 7.4);
+  resources', and the Kythira extension keys listed below), for the IAM
+  authorizer's service registry (.kiro/specs/kms-compatible-api/
+  Requirement 7.4);
 - k_operation_actions: per API operation, every `kms` action AWS checks
   for it, and whether any of them writes. ReEncrypt is the one operation
   with two (ReEncryptFrom on the source key, ReEncryptTo on the
@@ -97,6 +98,16 @@ CRYPTOGRAPHIC = {
 }
 
 
+# Condition keys Kythira adds to AWS's actions. Decrypt's Kythira
+# recipient (KYTHIRA_HPKE_X25519_SHA256_AES256GCM, the EC2 controller's
+# VolumeKey) names the X25519 key it seals to, so a key policy can allow
+# only enrolled helm transport keys (.kiro/specs/ec2-compatible-api/
+# Requirement 10.3).
+KYTHIRA_CONDITION_KEYS = {
+    "Decrypt": ["kms:KythiraRecipientPublicKeySha256"],
+}
+
+
 def q(s):
     return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
@@ -125,6 +136,7 @@ def generate(ref):
             keys += r.get("ConditionKeys", [])
         if not arns:
             arns = ["*"]
+        keys += KYTHIRA_CONDITION_KEYS.get(name, [])
         keys = sorted(set(keys))
         out.append(
             "            {%s, {%s}, {%s}},"
