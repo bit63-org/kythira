@@ -1,0 +1,245 @@
+# Copyright (c) 2026 Clark Rawlins
+# SPDX-License-Identifier: Apache-2.0
+
+# The cold-start dependency graph (.kiro/specs/az-cold-start/ Requirement 1):
+# every component that must run for an AZ to come back from a full power
+# outage, the tier it starts in, and what it needs before it can serve.
+#
+# tools/cold_start_graph/check_cold_start_graph.py checks it on every pull
+# request and renders it into doc/runbooks/az-cold-start.md. The rules:
+#
+#   - no cycles;
+#   - a component never needs one of a higher tier number;
+#   - a tier-0 component may need another tier-0 component only when both
+#     restart from local state (`restart: local`: standing records, LKG
+#     images, sealed keys), so the bootstrap tier needs nothing but power
+#     and each other;
+#   - every directory under services/ declares the components it owns, and
+#     their needs, in services/<m>/cold_start.yaml next to its module
+#     number, and that declaration matches this file.
+#
+# Fields of a component:
+#
+#   tier         0 bootstrap (pinned instances, time, the host's own boot),
+#                1 storage, 2 rest of the control plane, 3 customer workload
+#   restart      local       restarts from state on its own hosts, with no
+#                            controller (standing records, LKG, sealed keys)
+#                controller  started or restarted by the EC2 controller
+#   needs        components that must be serving before this one can serve.
+#                Tiers are a time ordering plus retries, not gates: a
+#                component that starts early backs off and tries again.
+#   module       the services/<m>/ directory that owns it, if any
+#   repo         `antikythera` for components built there
+#   planned      true while the component is not built yet; the check
+#                refuses it once its module declares itself
+#   description  one line for the runbook
+#
+# Needs are direct only; the check follows them transitively.
+
+components:
+  # ---- tier 0: the bootstrap tier and what it stands on -------------------
+
+  helm:
+    tier: 0
+    restart: local
+    repo: antikythera
+    description: >-
+      Server management controller; applies the power-on policy, boots hull
+      from the last-known-good image and keeps the sealed store
+    needs: []
+
+  hull:
+    tier: 0
+    restart: local
+    repo: antikythera
+    description: >-
+      Host agent; starts the pinned instances of the standing set with no
+      controller link
+    needs: [helm]
+
+  time_sources:
+    tier: 0
+    restart: local
+    planned: true
+    description: >-
+      At least two local time sources (GNSS or PTP grandmasters, or trusted
+      RTC NTP servers) in different power domains (Requirement 10.1)
+    needs: []
+
+  khold_storage_bootstrap:
+    tier: 0
+    restart: local
+    planned: true
+    description: >-
+      khold replicas holding the pinned instances' volumes; elect from
+      durable state and honour standing attachments with no controller
+      (Requirement 6)
+    needs: [hull]
+
+  hsm:
+    tier: 0
+    restart: local
+    module: hsm
+    description: >-
+      Virtual HSM in pinned instances; unseals itself from instance secrets
+      (node unseal, Requirement 3.3)
+    needs: [hull, khold_storage_bootstrap]
+
+  kms:
+    tier: 0
+    restart: local
+    module: kms
+    description: Key management; unwraps keys through the HSM
+    needs: [hull, khold_storage_bootstrap, hsm]
+
+  ca:
+    tier: 0
+    restart: local
+    description: >-
+      Certificate authority Raft group (cmd/ca_cluster_node); members use
+      bootstrap identity certificates among themselves (Requirement 9.4)
+    needs: [hull, khold_storage_bootstrap, kms, time_sources]
+
+  iam:
+    tier: 0
+    restart: local
+    module: iam
+    description: Identity and access management
+    needs: [hull, khold_storage_bootstrap, kms, ca]
+
+  ec2_data:
+    tier: 0
+    restart: local
+    module: ec2
+    planned: true
+    description: >-
+      EC2 data layer; servers, instances, standing sets and the recovery-mode
+      state
+    needs: [hull, khold_storage_bootstrap, kms, ca, iam]
+
+  ec2_fleet:
+    tier: 0
+    restart: local
+    module: ec2
+    planned: true
+    description: >-
+      EC2 fleet layer (the controller, with khold's controller library);
+      starts in recovery mode
+    needs: [hull, khold_storage_bootstrap, ca, ec2_data]
+
+  metal_data:
+    tier: 0
+    restart: local
+    module: metal
+    planned: true
+    description: >-
+      Metal registry data layer; tiers, power domains and slots; commits the
+      time floor every 10 minutes (Requirement 10.2)
+    needs: [hull, khold_storage_bootstrap, kms, ca, iam, time_sources]
+
+  # ---- tier 1: storage ---------------------------------------------------
+
+  khold_storage:
+    tier: 1
+    restart: local
+    planned: true
+    description: >-
+      khold storage nodes for every other volume; boot LKG and serve the
+      data they hold, with membership from the fleet layer
+    needs: [helm, kms, ca, ec2_fleet]
+
+  s3_storage:
+    tier: 1
+    restart: local
+    module: s3
+    description: >-
+      S3 storage nodes; boot LKG and serve the objects they hold, including
+      the boot layer's images
+    needs: [helm, kms, ca]
+
+  # ---- tier 2: the rest of the control plane -------------------------------
+
+  s3:
+    tier: 2
+    restart: controller
+    module: s3
+    description: S3 front and metadata layers
+    needs: [hull, khold_storage, ec2_fleet, iam, kms, s3_storage]
+
+  boot_layer:
+    tier: 2
+    restart: controller
+    module: metal
+    planned: true
+    description: >-
+      Metal boot layer; netboot for hosts whose image changed or whose LKG
+      is missing (tier-0 and tier-1 hosts boot LKG and do not need it)
+    needs: [hull, khold_storage, ec2_fleet, metal_data, s3]
+
+  metal_front:
+    tier: 2
+    restart: controller
+    module: metal
+    planned: true
+    description: Metal API front, including DescribeRecovery
+    needs: [hull, ec2_fleet, iam, metal_data]
+
+  ec2_front:
+    tier: 2
+    restart: controller
+    module: ec2
+    planned: true
+    description: EC2 API front
+    needs: [hull, ec2_fleet, iam, ec2_data]
+
+  redis:
+    tier: 2
+    restart: controller
+    module: redis
+    description: Redis-compatible gateway and build cache
+    needs: [hull, khold_storage, ec2_fleet, iam]
+
+  dynamodb:
+    tier: 2
+    restart: controller
+    module: dynamodb
+    description: DynamoDB-compatible tables
+    needs: [hull, khold_storage, ec2_fleet, iam, kms]
+
+  kinesis:
+    tier: 2
+    restart: controller
+    module: kinesis
+    description: Kinesis-compatible streams
+    needs: [hull, khold_storage, ec2_fleet, iam, kms]
+
+  ledger:
+    tier: 2
+    restart: controller
+    module: ledger
+    description: Verifiable ledger
+    needs: [hull, khold_storage, ec2_fleet, iam, kms]
+
+  sqs:
+    tier: 2
+    restart: controller
+    module: sqs
+    description: SQS-compatible queues
+    needs: [hull, khold_storage, ec2_fleet, iam, kms]
+
+  sns:
+    tier: 2
+    restart: controller
+    module: sns
+    description: SNS-compatible notifications
+    needs: [hull, khold_storage, ec2_fleet, iam, kms]
+
+  # ---- tier 3: customer workload -----------------------------------------
+
+  customer_instances:
+    tier: 3
+    restart: controller
+    description: >-
+      Customer instances; restarted in waves once their hosts report
+      (Requirement 8)
+    needs: [hull, khold_storage, ec2_fleet, metal_data, boot_layer]

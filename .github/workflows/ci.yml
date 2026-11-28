@@ -4008,6 +4008,15 @@ jobs:
         run: python3 scripts/tests/test_tidy_shard.py -v
       - name: Every services/ module uses only Kythira's public surface
         run: python3 scripts/check_module_boundaries.py
+      # .kiro/specs/az-cold-start/ Requirements 1 and 14.5: the cold-start
+      # dependency graph has no cycle and no tier inversion, every module
+      # declares its needs in services/<m>/cold_start.yaml and agrees with
+      # the graph, and the runbook shows the checked order. Fixture tests
+      # first, as above. PyYAML is the runner image's system package.
+      - name: Cold-start graph checker passes its tests
+        run: python3 tools/cold_start_graph/test_check_cold_start_graph.py -v
+      - name: Cold-start graph is acyclic, tiered and matches every module
+        run: python3 tools/cold_start_graph/check_cold_start_graph.py --check-rendered
 
   workflow-input-limits:
     runs-on: ubuntu-24.04

@@ -22,6 +22,8 @@ services/<m>/
 ├── CMakeLists.txt          entered only when the module's switch is on
 ├── boundary-allow.txt      core *_impl.hpp includes the module may make, with
 │                           reasons (optional; see "Boundary rules")
+├── cold_start.yaml         the module's number and what each of its components
+│                           needs after a power outage (see "Cold start")
 ├── include/kythira/<m>/    library headers
 ├── cmd/<daemon>/           the daemon: the composition root
 ├── tests/                  unit and in-process integration tests
@@ -124,6 +126,28 @@ from another, the shared piece becomes a core concept (a header under
 `include/raft/` with no module types in it), each module depends on core, and
 the daemon that needs both wires them together, with a `boundary-allow.txt`
 entry for the adapter.
+
+## Cold start
+
+Every module says what it needs to come back after the whole AZ lost power
+(`.kiro/specs/az-cold-start/` Requirement 1.4), in `cold_start.yaml`:
+
+```yaml
+module_number: 7          # include/raft/service_module.hpp's
+components:
+  kms:
+    needs: [hull, khold_storage_bootstrap, hsm]
+```
+
+The components and needs must match `config/cold_start_graph.yaml`, which
+gives each component its tier and restart kind.
+`tools/cold_start_graph/check_cold_start_graph.py` (in `ci.yml`'s
+`kconfig-check` job) refuses a module with no declaration, a number that
+disagrees with `service_module.hpp`, or needs that differ from the graph,
+and refuses a graph with a cycle or a component needing a later tier. A new
+module adds its components to the graph and its declaration in the same
+pull request, then runs the checker with `--render` to update
+`doc/runbooks/az-cold-start.md`.
 
 ## CI
 
