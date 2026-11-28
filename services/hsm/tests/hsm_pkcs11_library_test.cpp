@@ -725,6 +725,47 @@ BOOST_AUTO_TEST_CASE(failover_restores_sessions_logins_and_unstarted_operations)
     std::filesystem::rename(a.cfg.socket_path, c.cfg.socket_path);
 }
 
+// A failover whose login the new node refuses (its token group still
+// electing, so the PIN check's proposal answers CKR_DEVICE_ERROR) must not
+// leave the session open and logged out: it would look logged in, find no
+// private object and say nothing. The session is lost instead, and a new
+// one logs in once the node accepts. Found by hsm_chaos_test's KMS-layers
+// case: a KMS front end on the library answered every Encrypt with
+// KMSInternalException after its HSM node was killed, because its session
+// no longer saw the backing keys.
+BOOST_AUTO_TEST_CASE(a_login_the_new_node_refuses_loses_the_session) {
+    node n;
+    // A second node over the same store: its own logins, like another
+    // member's session layer.
+    hsm::session_layer other(n.store, n.vault, options());
+    socket_server a(n.layer);
+    socket_server b(other);
+    loaded lib({a.cfg.socket_path, b.cfg.socket_path});
+
+    const auto s1 = open_rw();
+    login_user(s1);
+    const auto [pub, priv] = ec_pair(s1, true);
+    BOOST_TEST(verify(s1, pub, "before", sign(s1, priv, "before")) == CKR_OK);
+
+    a.stop();
+    n.store.fail_proposals = true;
+    CK_SESSION_INFO info{};
+    BOOST_TEST(f().C_GetSessionInfo(s1, &info) == CKR_SESSION_HANDLE_INVALID);
+    BOOST_TEST(f().C_CloseSession(s1) == CKR_OK);
+
+    // While the node refuses, a new session's login says so; once it
+    // accepts, the session is logged in and signs with the token's key.
+    const auto s2 = open_rw();
+    std::string pin = k_user_pin;
+    BOOST_TEST(f().C_Login(s2, CKU_USER, reinterpret_cast<CK_UTF8CHAR_PTR>(pin.data()),
+                           pin.size()) == CKR_DEVICE_ERROR);
+    n.store.fail_proposals = false;
+    login_user(s2);
+    BOOST_REQUIRE(f().C_GetSessionInfo(s2, &info) == CKR_OK);
+    BOOST_TEST(info.state == CKS_RW_USER_FUNCTIONS);
+    BOOST_TEST(verify(s2, pub, "after", sign(s2, priv, "after")) == CKR_OK);
+}
+
 // hsm-independent-layers task 4 (Requirement 6.3): the library's only
 // endpoint is an endpoint relay in front of two crypto nodes' TLS
 // listeners. When the crypto node its connection is pinned to goes away,

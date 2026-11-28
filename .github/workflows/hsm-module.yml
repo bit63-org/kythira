@@ -411,8 +411,12 @@ jobs:
   # rekey, and a partitioned leader. Its third layout is the KMS's
   # (.kiro/specs/kms-compatible-api/ task 19, Requirement 14.5): the HSM,
   # the KMS, DynamoDB and Kinesis in kythira_node, encrypted writes under
-  # a kill and a partition, and the plaintext scan. Same configuration and
-  # vcpkg tree as the cluster job.
+  # a kill and a partition, and the plaintext scan. The fourth moves the
+  # KMS between layouts (.kiro/specs/kms-independent-layers/ task 6,
+  # Requirement 11.3): a data node, a lone gateway and a lone front end on
+  # libkythira_pkcs11.so join, a catalog seat moves out and back, with HSM
+  # and KMS nodes killed and cut off. Same configuration and vcpkg tree as
+  # the cluster job.
   container:
     name: HSM chaos in containers (${{ matrix.runtime }})
     runs-on: ubuntu-24.04

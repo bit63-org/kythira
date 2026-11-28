@@ -46,7 +46,7 @@ a task that needs one first builds it to that spec's design.
     `KYTHIRA_KMS_ROLES`
   - _Requirements: 8.1, 8.2_
 
-- [ ] 6. Migration path tests
+- [x] 6. Migration path tests
   - One test per path in both directions under an encrypt/decrypt and
     key-administration workload: gateway role, front-end role with the
     job lease, data role, and the whole co-located to split path and back
@@ -61,8 +61,14 @@ a task that needs one first builds it to that spec's design.
     replica creation; a node still holding a replica refuses to start
     without `data` (`KYTHIRA_KMS_DISCARD_CATALOG` overrides).
     `kms_node_migration_test` runs each path both ways under a workload
-    checking Requirement 10.3 after every step. The docker-chaos scenario
-    is still open.
+    checking Requirement 10.3 after every step. The docker-chaos half is
+    `hsm_chaos_test`'s `kms_layers_move_in_kythira_node` case
+    (`services/hsm/docker/hsm-chaos-compose.yml`, `kms-layers` profile):
+    a data node, a lone gateway and a lone front end on
+    `libkythira_pkcs11.so` join three HSM and KMS members, a member's
+    seat moves and comes back, with the HSM token leader and the lone
+    front end SIGKILLed and the data node cut off on the way, under
+    Docker and rootless Podman.
   - _Requirements: 10.1-10.3, 11.2, 11.3_
 
 - [ ] 7. Interoperability with real AWS

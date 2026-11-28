@@ -1460,7 +1460,24 @@ private:
                 it = _logins.erase(it);
                 continue;
             }
-            (void)_client->login(on_slot->remote, it->second.user, it->second.pin);
+            // The new node may refuse for now (its token group electing a
+            // leader answers CKR_DEVICE_ERROR). A session left open but
+            // logged out would look logged in to the application, see no
+            // private object and never say why, so the slot's sessions are
+            // lost instead: the application's next call on them answers
+            // CKR_SESSION_HANDLE_INVALID, and it opens a session and logs
+            // in again.
+            const auto r = _client->login(on_slot->remote, it->second.user, it->second.pin);
+            if (!r && r.error() != CKR_USER_ALREADY_LOGGED_IN) {
+                for (auto& [h, s] : _sessions) {
+                    if (!s.dead && s.slot == it->first) {
+                        (void)_client->close_session(s.remote);
+                        s.dead = true;
+                    }
+                }
+                it = _logins.erase(it);
+                continue;
+            }
             ++it;
         }
         for (auto& [h, s] : _sessions) {

@@ -101,6 +101,14 @@ Every layout change works in both directions on a running KMS.
   group. Each data node's `/metrics` reports `kythira_kms_catalog_voters`
   and `kythira_kms_catalog_learners` as its replica sees them.
 
+A front end that leaves the HSM's nodes reaches the HSM through
+`libkythira_pkcs11.so` instead (`KYTHIRA_KMS_PKCS11` naming its path and
+`KYTHIRA_PKCS11_CONF` its configuration, with a certificate the token
+binds); it sees the same backing keys as the co-located front ends when
+it acts as the same identity. `services/hsm/tests/docker/hsm_chaos_test`'s
+KMS-layers case moves a container cluster this way and back under node
+kills and a partition.
+
 ### With the virtual HSM in the same process
 
 The simplest layout: each node runs the HSM and the KMS, and the KMS uses

@@ -16,6 +16,17 @@
 #     the test binds to the token), and DynamoDB and Kinesis encrypt
 #     through the co-located KMS. The test's static key file (/pki/keys)
 #     and the token's user PIN (/pki/kms-pin) are in the PKI directory.
+#   * KMS layers (.kiro/specs/kms-independent-layers/ task 6,
+#     Requirement 11.3): kythira_node with KYTHIRA_HSM_CHAOS_SERVICES=
+#     hsm,kms on hsm-1 .. hsm-3, and the `kms-layers` profile's kms-4 (a
+#     catalog data node), kms-5 (a gateway alone) and kms-6 (a front end
+#     alone, reaching the HSM through libkythira_pkcs11.so and
+#     /pki/pkcs11.conf, as an application host would). The test moves the
+#     KMS between layouts by recreating one member at a time with new
+#     roles (KYTHIRA_HSM_CHAOS_KMS_ROLES_N), data nodes
+#     (KYTHIRA_HSM_CHAOS_KMS_URLS) and front ends
+#     (KYTHIRA_HSM_CHAOS_KMS_FRONT_ENDS_N); a recreated container keeps its
+#     /data volume.
 #
 # The test SIGKILLs members, starts them again and cuts them off the
 # network while it generates keys and rekeys the master key. A killed
@@ -62,7 +73,9 @@ x-node: &node
 x-node-env: &node-env
   KYTHIRA_SERVICES: "${KYTHIRA_HSM_CHAOS_SERVICES:-hsm}"
   KYTHIRA_NODE_DATA_DIR: /data
-  KYTHIRA_NODE_PEERS: "1=hsm-1:7100,2=hsm-2:7100,3=hsm-3:7100"
+  # The KMS-layers layout lists kms-4 .. kms-6 too (its catalog's data
+  # node joins the members' Raft listeners).
+  KYTHIRA_NODE_PEERS: "${KYTHIRA_HSM_CHAOS_PEERS:-1=hsm-1:7100,2=hsm-2:7100,3=hsm-3:7100}"
   KYTHIRA_NODE_RAFT_BIND: 0.0.0.0
   KYTHIRA_NODE_RAFT_PORT: "7100"
   KYTHIRA_NODE_TLS_CA: /pki/ca.pem
@@ -88,8 +101,12 @@ x-node-env: &node-env
   # name; DynamoDB on :8000 and Kinesis on :4567, their peers defaulting
   # to hsm-N at the same port. Static keys for all three, one file.
   KYTHIRA_KMS_API_LISTEN: 0.0.0.0:8443
-  KYTHIRA_KMS_API_URLS: "1=https://hsm-1:8443,2=https://hsm-2:8443,3=https://hsm-3:8443"
-  KYTHIRA_KMS_PEER_IDENTITIES: "spiffe://hsm/node-1,spiffe://hsm/node-2,spiffe://hsm/node-3"
+  # The KMS-layers layout sets the catalog's data nodes, its founding
+  # voters and every node's identity as its moves go; see below.
+  KYTHIRA_KMS_API_URLS: "${KYTHIRA_HSM_CHAOS_KMS_URLS:-1=https://hsm-1:8443,2=https://hsm-2:8443,3=https://hsm-3:8443}"
+  KYTHIRA_KMS_PEER_IDENTITIES: "${KYTHIRA_HSM_CHAOS_KMS_IDENTITIES:-spiffe://hsm/node-1,spiffe://hsm/node-2,spiffe://hsm/node-3}"
+  KYTHIRA_KMS_VOTERS: "${KYTHIRA_HSM_CHAOS_KMS_VOTERS:-}"
+  KYTHIRA_KMS_FRONT_END_PROBE_MS: "500"
   KYTHIRA_KMS_AUTH: static
   KYTHIRA_KMS_STATIC_KEYS_FILE: /pki/keys
   KYTHIRA_KMS_PKCS11: hsm
@@ -130,6 +147,8 @@ services:
       KYTHIRA_NODE_ID: "1"
       KYTHIRA_NODE_TLS_CERT: /pki/node-1.pem
       KYTHIRA_NODE_TLS_KEY: /pki/node-1.key
+      KYTHIRA_KMS_ROLES: "${KYTHIRA_HSM_CHAOS_KMS_ROLES_1:-}"
+      KYTHIRA_KMS_FRONT_END_URLS: "${KYTHIRA_HSM_CHAOS_KMS_FRONT_ENDS_1:-}"
     volumes:
       - ${KYTHIRA_HSM_CHAOS_PKI_DIR:?the scenario test sets it}:/pki:ro
       - hsm-1-data:/data
@@ -149,6 +168,8 @@ services:
       KYTHIRA_NODE_ID: "2"
       KYTHIRA_NODE_TLS_CERT: /pki/node-2.pem
       KYTHIRA_NODE_TLS_KEY: /pki/node-2.key
+      KYTHIRA_KMS_ROLES: "${KYTHIRA_HSM_CHAOS_KMS_ROLES_2:-}"
+      KYTHIRA_KMS_FRONT_END_URLS: "${KYTHIRA_HSM_CHAOS_KMS_FRONT_ENDS_2:-}"
     volumes:
       - ${KYTHIRA_HSM_CHAOS_PKI_DIR:?the scenario test sets it}:/pki:ro
       - hsm-2-data:/data
@@ -168,6 +189,8 @@ services:
       KYTHIRA_NODE_ID: "3"
       KYTHIRA_NODE_TLS_CERT: /pki/node-3.pem
       KYTHIRA_NODE_TLS_KEY: /pki/node-3.key
+      KYTHIRA_KMS_ROLES: "${KYTHIRA_HSM_CHAOS_KMS_ROLES_3:-}"
+      KYTHIRA_KMS_FRONT_END_URLS: "${KYTHIRA_HSM_CHAOS_KMS_FRONT_ENDS_3:-}"
     volumes:
       - ${KYTHIRA_HSM_CHAOS_PKI_DIR:?the scenario test sets it}:/pki:ro
       - hsm-3-data:/data
@@ -178,10 +201,77 @@ services:
       - "127.0.0.1:${KYTHIRA_HSM_CHAOS_DDB_3:-19473}:8000"
       - "127.0.0.1:${KYTHIRA_HSM_CHAOS_KINESIS_3:-19483}:4567"
 
+  kms-4:
+    <<: *node
+    profiles: ["kms-layers"]
+    entrypoint: ["/usr/local/bin/kythira_node"]
+    container_name: kythira-kms-layers-4
+    hostname: kms-4
+    environment:
+      <<: *node-env
+      KYTHIRA_SERVICES: kms
+      KYTHIRA_NODE_ID: "4"
+      KYTHIRA_NODE_TLS_CERT: /pki/node-4.pem
+      KYTHIRA_NODE_TLS_KEY: /pki/node-4.key
+      KYTHIRA_KMS_ROLES: data
+      KYTHIRA_KMS_PIN_FILE: ""
+    volumes:
+      - ${KYTHIRA_HSM_CHAOS_PKI_DIR:?the scenario test sets it}:/pki:ro
+      - kms-4-data:/data
+    ports:
+      - "127.0.0.1:${KYTHIRA_HSM_CHAOS_KMS_4:-19464}:8443"
+
+  kms-5:
+    <<: *node
+    profiles: ["kms-layers"]
+    entrypoint: ["/usr/local/bin/kythira_node"]
+    container_name: kythira-kms-layers-5
+    hostname: kms-5
+    environment:
+      <<: *node-env
+      KYTHIRA_SERVICES: kms
+      KYTHIRA_NODE_ID: "5"
+      KYTHIRA_NODE_TLS_CERT: /pki/node-5.pem
+      KYTHIRA_NODE_TLS_KEY: /pki/node-5.key
+      KYTHIRA_KMS_ROLES: gateway
+      KYTHIRA_KMS_FRONT_END_URLS: "${KYTHIRA_HSM_CHAOS_KMS_FRONT_ENDS_5:-}"
+      KYTHIRA_KMS_PIN_FILE: ""
+    volumes:
+      - ${KYTHIRA_HSM_CHAOS_PKI_DIR:?the scenario test sets it}:/pki:ro
+      - kms-5-data:/data
+    ports:
+      - "127.0.0.1:${KYTHIRA_HSM_CHAOS_KMS_5:-19465}:8443"
+
+  kms-6:
+    <<: *node
+    profiles: ["kms-layers"]
+    entrypoint: ["/usr/local/bin/kythira_node"]
+    container_name: kythira-kms-layers-6
+    hostname: kms-6
+    environment:
+      <<: *node-env
+      KYTHIRA_SERVICES: kms
+      KYTHIRA_NODE_ID: "6"
+      KYTHIRA_NODE_TLS_CERT: /pki/node-6.pem
+      KYTHIRA_NODE_TLS_KEY: /pki/node-6.key
+      KYTHIRA_KMS_ROLES: front_end
+      KYTHIRA_KMS_FRONT_END_URLS: "${KYTHIRA_HSM_CHAOS_KMS_FRONT_ENDS_6:-}"
+      KYTHIRA_KMS_PIN_FILE: "/pki/kms-pin"
+      KYTHIRA_KMS_PKCS11: /usr/local/lib/libkythira_pkcs11.so
+      KYTHIRA_PKCS11_CONF: /pki/pkcs11.conf
+    volumes:
+      - ${KYTHIRA_HSM_CHAOS_PKI_DIR:?the scenario test sets it}:/pki:ro
+      - kms-6-data:/data
+    ports:
+      - "127.0.0.1:${KYTHIRA_HSM_CHAOS_KMS_6:-19466}:8443"
+
 volumes:
   hsm-1-data:
   hsm-2-data:
   hsm-3-data:
+  kms-4-data:
+  kms-5-data:
+  kms-6-data:
 
 networks:
   hsm_chaos_net:

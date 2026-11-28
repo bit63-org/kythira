@@ -6,8 +6,9 @@
 # services/hsm/docker/hsm-chaos-compose.yml, stand-alone (hsm_node),
 # co-located (kythira_node with the HSM and Redis modules) and with
 # encrypted services (kythira_node with the HSM, the KMS, DynamoDB and
-# Kinesis; .kiro/specs/kms-compatible-api/ task 19), under kills and
-# partitions, driven by hsm_chaos_test (docker-hsm-chaos-tests).
+# Kinesis; .kiro/specs/kms-compatible-api/ task 19) and moving the KMS
+# between layouts (.kiro/specs/kms-independent-layers/ task 6), under
+# kills and partitions, driven by hsm_chaos_test (docker-hsm-chaos-tests).
 #
 # Like every container scenario it is not registered in CTest: it needs
 # Docker or rootless Podman at run time and is run through its custom
@@ -38,33 +39,33 @@ set(_HSM_CHAOS_COMPOSE_FILE "${KYTHIRA_HSM_SOURCE_DIR}/docker/hsm-chaos-compose.
 
 # The co-located layout runs the HSM beside Redis; without the Redis module
 # in kythira_node only the stand-alone case could run, so the target says so.
+# Redis's directory comes before this one, so its name is already listed.
+#
 # The encrypted-services case needs the KMS, DynamoDB and Kinesis modules
-# too, and is left out (with a message) in a build without one of them.
+# too, and the KMS-layers case the KMS. The KMS's directory comes after
+# this one, so the module list read here never named it, and a filter
+# computed from it left the encrypted-services case out of every run.
+# The test is told kythira_node's modules instead, read at generation
+# time from the property cmd/kythira_node/CMakeLists.txt sets once every
+# module is known, and skips (naming the module) a case whose modules
+# are absent.
 get_property(_hsm_chaos_modules GLOBAL PROPERTY KYTHIRA_NODE_MODULE_NAMES)
-set(_hsm_chaos_filter)
-foreach(_m kms dynamodb kinesis)
-    if(NOT "${_m}" IN_LIST _hsm_chaos_modules)
-        set(_hsm_chaos_filter "--run_test=!encrypted_services_in_kythira_node")
-    endif()
-endforeach()
-if(_hsm_chaos_filter)
-    message(STATUS "docker-hsm-chaos-tests: the encrypted-services case needs the kms, "
-                   "dynamodb and kinesis modules in kythira_node; left out")
-endif()
 
 if(_RUNTIME_EXE AND "redis" IN_LIST _hsm_chaos_modules)
     add_custom_target(docker-hsm-chaos-image
-        DEPENDS hsm_node kythira_node
+        DEPENDS hsm_node kythira_node kythira_pkcs11
         COMMAND ${CMAKE_COMMAND} -E rm -rf "${_HSM_CHAOS_DIST}"
         COMMAND ${CMAKE_COMMAND} -E make_directory "${_HSM_CHAOS_DIST}"
         COMMAND ${CMAKE_COMMAND} -E copy "$<TARGET_FILE:hsm_node>" "${_HSM_CHAOS_DIST}/hsm_node"
         COMMAND ${CMAKE_COMMAND} -E copy "$<TARGET_FILE:kythira_node>"
                 "${_HSM_CHAOS_DIST}/kythira_node"
+        COMMAND ${CMAKE_COMMAND} -E copy "$<TARGET_FILE:kythira_pkcs11>"
+                "${_HSM_CHAOS_DIST}/libkythira_pkcs11.so"
         COMMAND ${_RUNTIME_EXE} build ${_IMAGE_FORMAT_ARGS}
                 --file "${_HSM_CHAOS_DOCKERFILE}"
                 --tag kythira-hsm-chaos:dev
                 "${KYTHIRA_IMAGE_CONTEXT}"
-        COMMENT "Staging hsm_node and kythira_node and building kythira-hsm-chaos:dev"
+        COMMENT "Staging hsm_node, kythira_node and libkythira_pkcs11.so and building kythira-hsm-chaos:dev"
         WORKING_DIRECTORY "${KYTHIRA_IMAGE_CONTEXT}"
     )
     add_custom_target(docker-hsm-chaos-tests
@@ -72,8 +73,9 @@ if(_RUNTIME_EXE AND "redis" IN_LIST _hsm_chaos_modules)
                 ${_RT_ENV}
                 KYTHIRA_HSM_CHAOS_COMPOSE_FILE=${_HSM_CHAOS_COMPOSE_FILE}
                 KYTHIRA_HSM_CHAOS_COLOCATE=redis
+                "KYTHIRA_HSM_CHAOS_MODULES=$<JOIN:$<TARGET_PROPERTY:kythira_node,KYTHIRA_NODE_MODULES>,$<COMMA>>"
                 $<TARGET_FILE:hsm_chaos_test>
-                --log_level=message ${_hsm_chaos_filter}
+                --log_level=message
         DEPENDS docker-hsm-chaos-image hsm_chaos_test
         COMMENT "Running the virtual HSM chaos container scenario (runtime: ${CONTAINER_RUNTIME})"
         WORKING_DIRECTORY "${KYTHIRA_IMAGE_CONTEXT}"
