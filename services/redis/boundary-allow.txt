@@ -18,6 +18,7 @@ tests/multi_raft_txn_snapshot_bank_test.cpp  multi_raft_impl.hpp               s
 tests/multi_raft_txn_snapshot_test.cpp       multi_raft_impl.hpp               stands up in-process hosts
 tests/multi_raft_txn_write_skew_test.cpp     multi_raft_impl.hpp               stands up in-process hosts
 tests/redis_gateway_integration_test.cpp     multi_raft_impl.hpp               stands up in-process hosts
+tests/redis_layer_migration_test.cpp         multi_raft_impl.hpp               stands up in-process hosts
 tests/redis_gateway_snapshot_test.cpp        multi_raft_impl.hpp               stands up in-process hosts
 tests/redis_gateway_txn_test.cpp             multi_raft_impl.hpp               stands up in-process hosts
 tests/differential/redis_differential_replay_test.cpp  multi_raft_impl.hpp  stands up in-process hosts

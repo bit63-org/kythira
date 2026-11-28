@@ -27,8 +27,8 @@ A set without `data` needs `KYTHIRA_REDIS_DATA_NODES` when it has
 `KYTHIRA_REDIS_FRONT_ENDS`. Any node that is not co-located talks to the
 other layers with a layer identity over mutual TLS (below).
 
-The later tasks add layer membership and the split and merge procedures. This
-page gains the runbook with task 19.
+Layer membership and the split and merge runbook are below
+([Splitting and merging layers](#splitting-and-merging-layers)).
 
 ## How the code is layered
 
@@ -156,7 +156,8 @@ listener is the internal listener: another node's connection gets the
 data-layer API, `KYTHIRA.TXN` and the commands co-located nodes forward, and
 any other connection gets `PING` and an error naming the node's roles for
 everything else. A co-located node and a data node can share a cluster, which
-is how a layout moves from one to the other (task 19).
+is how a layout moves from one to the other
+([Splitting and merging layers](#splitting-and-merging-layers)).
 
 ## Gateways apart from front ends
 
@@ -374,6 +375,126 @@ the forwarding certificate, key and CA files are checked at most once a
 second, on a new connection. A change rebuilds the TLS context for new
 connections, and open connections finish on the old one. A half-written pair
 fails to load and is tried again at the next check.
+
+## Splitting and merging layers
+
+A cluster moves between layouts one node at a time, while it serves
+(Requirement 21). Every step below leaves a mixed deployment that serves,
+so a migration can stop after any step, wait, or go back the way it came.
+Clients may see retryable errors (`TRYAGAIN`, a closed connection from a
+draining gateway) during a step. They never see a lost or doubled
+acknowledged write: writes are Raft entries, and a node changes role only
+after nothing it accepted is still in flight.
+
+Before any step, and after each one:
+
+- `KYTHIRA.LAYERS LIST` (with `KYTHIRA_REDIS_MEMBERSHIP`) shows every
+  gateway and front end, serving, with the expected roles.
+- `INFO` on a node shows `kythira_roles:` as intended.
+- A client `SET`/`GET` through each remaining gateway succeeds.
+- `KYTHIRA.EVACUATE STATUS` shows no running job, unless a step below
+  started one.
+
+### Adding or removing `gateway` or `front_end`
+
+These layers hold no data, so changing them is a drain and a restart
+(Requirement 21.2):
+
+1. `KYTHIRA.LAYERS DRAIN <id>` on any member. Gateways stop calling a
+   draining front end; a draining gateway accepts no new connection and
+   closes each client once its command finishes.
+2. Wait for `KYTHIRA.LAYERS LIST` to show the node `drained`. A front end
+   also waits for its open `SCAN` cursors, up to
+   `KYTHIRA_REDIS_CURSOR_DRAIN_MS` (60 s); a cursor still open after that
+   answers `-ERR invalid cursor` on its next page, never a skipped or
+   repeated key.
+3. Restart the node with the new `KYTHIRA_REDIS_ROLES`, plus what the new
+   set needs (`KYTHIRA_REDIS_DATA_NODES` for a front end without data,
+   `KYTHIRA_REDIS_FRONT_ENDS` or the group for a gateway apart, and layer
+   certificates for anything not co-located).
+4. `KYTHIRA.LAYERS SERVE <id>` if it came back still marked draining.
+
+To reverse, do the same with the old role set. Without the membership
+group, step 1 is taking the node out of the load balancer (gateway) or out
+of every gateway's `KYTHIRA_REDIS_FRONT_ENDS` (front end), and step 2 is
+`KYTHIRA_REDIS_DRAIN_TIMEOUT_MS` on shutdown.
+
+### Removing `data` from a node (evacuation)
+
+A node that holds replicas will not start without `data`, unless told to
+discard them (Requirement 21.3). `KYTHIRA.EVACUATE` moves them first:
+
+1. On any data node, as an admin:
+
+   ```
+   KYTHIRA.EVACUATE START <node> [TO <id>...] [REPLICAS <n>]
+   ```
+
+   Without `TO`, every other data node the node knows
+   (`KYTHIRA_REDIS_PEER_GATEWAYS`) is a target. The node fans the job out
+   to each of them; `TRYAGAIN started here, not on ...` means a peer
+   missed it, and running the same `START` again is safe. Each data node
+   then works on the groups it leads: it adds a target as a learner, lets
+   it catch up, promotes it, hands leadership away when the evacuee leads,
+   and removes the evacuee. `REPLICAS` is the voter count to keep
+   (`KYTHIRA_REDIS_REPLICAS`, else the number of founding voters).
+2. Poll `KYTHIRA.EVACUATE STATUS` until its first line is `done 1`. Each
+   node's lines show what it holds, what it leads, the action on each led
+   group and any error. Writes and reads keep working throughout.
+3. On the evacuee, `KYTHIRA.EVACUATE RELEASE`. It refuses while the node
+   still leads a group or any data node has not finished; once it
+   answers `OK`, the node's copies no longer count anywhere.
+4. Restart the evacuee without `data`. It deletes the released replicas,
+   records that it left, and serves its other roles.
+
+To reverse before step 4, run `KYTHIRA.EVACUATE CANCEL` (the groups keep
+whatever voters they have, all valid) and, if replicas already moved, the
+merge below with the evacuee as the target; `START` with the evacuee as a
+target also withdraws its release. After step 4 the node has no data
+left, so reversing it is the merge below.
+
+If a node lost its replicas some other way (a replaced disk, a group
+re-seeded elsewhere), `KYTHIRA_REDIS_DISCARD_REPLICAS=true` lets it start
+without `data` and delete what it holds. The groups still count it until
+an evacuation or a placement operator removes it, so use this only for a
+node the groups no longer need.
+
+### Adding `data` to a node
+
+A data node either founds the groups (a new cluster) or joins existing
+ones (Requirement 21.4):
+
+1. Start the node with `data` in its roles and with
+   `KYTHIRA_REDIS_JOIN=true`. It founds no group. A node that left the
+   data layer by step 4 above joins without the flag, because it recorded
+   that it left; a node with a memory store keeps no record and needs it.
+   Add it to every data node's `KYTHIRA_PEERS` and
+   `KYTHIRA_REDIS_PEER_GATEWAYS`, or pass it in the next step.
+2. On any data node, move replicas onto it by evacuating a node that is
+   leaving: `KYTHIRA.EVACUATE START <leaving node> TO <new node>`.
+   `ADDRESS <id> <raft-url> <host:port>` names a target the settings
+   lack. The new node learns each group from a
+   peer's `KYTHIRA.EVACUATE DESCRIPTOR` answer as soon as the leader adds
+   it as a learner, catches up, and is promoted.
+3. `KYTHIRA.EVACUATE STATUS` until `done 1`, then
+   `KYTHIRA.EVACUATE CANCEL` to end the job.
+
+To reverse, evacuate the node again.
+
+### Whole layouts
+
+Each layout change is a sequence of the steps above, checked between each:
+
+| From | To | Steps |
+|---|---|---|
+| co-located | gateway apart | for each node to become a gateway: drain, restart as `gateway` with `KYTHIRA_REDIS_FRONT_ENDS` |
+| co-located | front ends without data | add data nodes (`KYTHIRA_REDIS_JOIN`), evacuate each co-located node onto them, release, restart it as `gateway,front_end` |
+| co-located | three-way | the two rows above, data first |
+| three-way | co-located | restart each front end with `data` and `KYTHIRA_REDIS_JOIN`, evacuate each data node onto them, release, then retire the data nodes and restart the gateways with every role |
+| gateway + front end apart from data | co-located | add `data` to the front ends (as above), evacuate the data nodes |
+
+The in-process test `redis_layer_migration_test` evacuates a founding data
+node onto a joined one under writes, releases it, and brings it back.
 
 ## Co-located baseline
 

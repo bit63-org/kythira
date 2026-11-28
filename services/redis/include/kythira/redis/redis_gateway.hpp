@@ -24,6 +24,7 @@
 /// Definitions live in redis_gateway_impl.hpp, this tree's convention.
 
 #include <kythira/redis/redis_acl.hpp>
+#include <kythira/redis/redis_admin_answer.hpp>
 #include <kythira/redis/redis_auth_limiter.hpp>
 #include <kythira/redis/redis_call_wire.hpp>
 #include <kythira/redis/redis_forward_link.hpp>
@@ -227,6 +228,19 @@ struct redis_gateway_config {
     /// closes the connections (`KYTHIRA_REDIS_DRAIN_TIMEOUT_MS`;
     /// Requirement 17.4).
     std::chrono::milliseconds _drain_timeout{10000};
+    /// `KYTHIRA.EVACUATE` (task 19): set by a node with `data`, which runs
+    /// the job. A node without it relays the command to its next layer (a
+    /// gateway apart to a front end, a front end without data to a data
+    /// node). `internal` is whether the caller is another node.
+    std::function<redis_admin_answer(const std::vector<std::string>&, bool internal)> _evacuate;
+    /// The `SCAN` cursors this front end issued that are still open. A
+    /// front end the layer membership group drains keeps answering their
+    /// continuations until none is left or `_cursor_drain_bound` has passed
+    /// (`KYTHIRA_REDIS_CURSOR_DRAIN_MS`; Requirement 21.5); a continuation
+    /// that comes later gets `-ERR invalid cursor` from whoever takes it.
+    /// Unset counts none.
+    std::function<std::size_t()> _cursors_open;
+    std::chrono::milliseconds _cursor_drain_bound{60000};
     /// How often the TLS certificate, key and CA files are checked for a
     /// change. A change is picked up for new connections without a restart
     /// (Requirement 19.5); 0 checks on every new connection.
@@ -991,6 +1005,9 @@ private:
     auto handle_members(session& s, const resp_command& cmd) -> std::string;
     /// `KYTHIRA.LAYERS [LIST | DRAIN <id> | SERVE <id>]` from an admin.
     auto handle_layers(session& s, const resp_command& cmd) -> std::string;
+    /// `KYTHIRA.EVACUATE ...` from an admin or another node (task 19): run
+    /// here when this node holds data, else relayed to its next layer.
+    auto handle_evacuate(session& s, const resp_command& cmd) -> std::string;
     /// The addresses of the front ends calls may go to now.
     auto front_end_candidates() -> std::vector<std::string>;
 
