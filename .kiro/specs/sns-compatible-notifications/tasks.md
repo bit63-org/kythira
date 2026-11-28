@@ -127,6 +127,17 @@ first builds it to that design). Each task is one PR unless noted.
     SMTP; raw delivery; dead-letter queues; FIFO ordering per group and
     subscription
   - _Requirements: 6.1, 6.3-6.7_
+  - Part done (November 19, 2026): `sns_delivery_format.hpp` writes the
+    Notification and SubscriptionConfirmation documents, checked byte for
+    byte against every recorded wrapped delivery (signature fields passed
+    in; task 7 computes them), the HTTP headers including raw delivery,
+    the body each protocol takes from `MessageStructure=json`, and the
+    confirm and unsubscribe links. `sns_delivery_policy.hpp` has SNS's
+    four retry phases, the four backoff curves (approximated: SNS does
+    not publish formulas), the fixed policies for SQS/Lambda/Firehose
+    (100,015 retries, about 23 days) and SMTP (50), and the topic and
+    subscription DeliveryPolicy grammar with override rules. Still to do:
+    the leased worker loop, the targets and dead-letter queues.
 
 - [ ] 7. Message signatures
   - v1 and v2, certificate serving, configurable host, rotation

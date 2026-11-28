@@ -34,6 +34,8 @@ Built when `CONFIG_SNS=y` (`services/sns/Kconfig`, off by default).
 | `include/kythira/sns/sns_service.hpp` | the operation handlers over a `topic_store` (one in-process state machine for now): topics, attributes, tags, permissions, data protection policies, subscriptions and publishing | 4 |
 | `include/kythira/sns/sns_message.hpp` | a published message as a publish log record carries it: body, structure, subject, attributes, timestamp and publisher, for delivery to read | 4 |
 | `include/kythira/sns/sns_filter_policy.hpp` | subscription filter policies: attribute and payload scopes, every SNS operator and `$or`, SNS's limits and errors | 5 |
+| `include/kythira/sns/sns_delivery_format.hpp` | delivery documents (Notification, SubscriptionConfirmation) byte for byte as SNS writes them, the HTTP headers, per-protocol bodies, confirm and unsubscribe links | 6 |
+| `include/kythira/sns/sns_delivery_policy.hpp` | retry phases and backoff curves, SNS's fixed policies for managed endpoints and SMTP, and the DeliveryPolicy grammar | 6 |
 | `cmd/sns_node/` | the daemon; a placeholder whose `--self-test` checks the operation table, until the daemon serves the handlers | 1 |
 
 ## Upgrading the model
