@@ -1,0 +1,14 @@
+# Copyright (c) 2026 Clark Rawlins
+# SPDX-License-Identifier: Apache-2.0
+
+# What this module needs before it can serve after a full power outage
+# (.kiro/specs/az-cold-start/ Requirement 1.4). Must match
+# config/cold_start_graph.yaml; tools/cold_start_graph/ checks both on
+# every pull request. module_number is include/raft/service_module.hpp's.
+
+module_number: 8
+components:
+  s3_storage:
+    needs: [helm, kms, ca]
+  s3:
+    needs: [hull, khold_storage, ec2_fleet, iam, kms, s3_storage]
