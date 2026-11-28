@@ -1,0 +1,8 @@
+# Copyright (c) 2026 Clark Rawlins
+# SPDX-License-Identifier: Apache-2.0
+
+# What record_all.sh installs or builds for the clients; only the sources,
+# lock files and data/ are checked in.
+clients/js-sdk-v3/node_modules/
+clients/java-sdk-v2/build/
+clients/java-sdk-v2/.gradle/

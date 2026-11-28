@@ -1,0 +1,1939 @@
+{
+ "client": "boto3-1.43.126",
+ "requests": [
+  {
+   "operation": "DescribeRegions",
+   "method": "POST",
+   "path": "/",
+   "http_version": "HTTP/1.1",
+   "content_type": "application/x-www-form-urlencoded",
+   "content_type_header": "application/x-www-form-urlencoded; charset=utf-8",
+   "headers": [
+    [
+     "Host",
+     "127.0.0.1:<port>"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "Content-Type",
+     "application/x-www-form-urlencoded; charset=utf-8"
+    ],
+    [
+     "User-Agent",
+     "Boto3/1.43.126 md/Botocore#1.43.126 ua/2.1 os/linux#<kernel> md/arch#x86_64 lang/python#3.13.18 md/pyimpl#CPython m/D,N,Z,b,g cfg/retry-mode#legacy Botocore/1.43.126"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/ec2/aws4_request, SignedHeaders=content-type;host;x-amz-date, Signature=<hex>"
+    ],
+    [
+     "amz-sdk-invocation-id",
+     "<uuid>"
+    ],
+    [
+     "amz-sdk-request",
+     "attempt=1"
+    ],
+    [
+     "Content-Length",
+     "64"
+    ]
+   ],
+   "body_sha256": "5ecef2e1f9f2b88d050203c113392e51e0c8faedfdaec4dc31a10b41e370f6b3",
+   "form": [
+    [
+     "Action",
+     "DescribeRegions"
+    ],
+    [
+     "Version",
+     "2016-11-15"
+    ],
+    [
+     "RegionName.1",
+     "us-east-1"
+    ]
+   ],
+   "response_status": 200,
+   "response_code": null
+  },
+  {
+   "operation": "DescribeAvailabilityZones",
+   "method": "POST",
+   "path": "/",
+   "http_version": "HTTP/1.1",
+   "content_type": "application/x-www-form-urlencoded",
+   "content_type_header": "application/x-www-form-urlencoded; charset=utf-8",
+   "headers": [
+    [
+     "Host",
+     "127.0.0.1:<port>"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "Content-Type",
+     "application/x-www-form-urlencoded; charset=utf-8"
+    ],
+    [
+     "User-Agent",
+     "Boto3/1.43.126 md/Botocore#1.43.126 ua/2.1 os/linux#<kernel> md/arch#x86_64 lang/python#3.13.18 md/pyimpl#CPython m/D,N,Z,b,g cfg/retry-mode#legacy Botocore/1.43.126"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/ec2/aws4_request, SignedHeaders=content-type;host;x-amz-date, Signature=<hex>"
+    ],
+    [
+     "amz-sdk-invocation-id",
+     "<uuid>"
+    ],
+    [
+     "amz-sdk-request",
+     "attempt=1"
+    ],
+    [
+     "Content-Length",
+     "98"
+    ]
+   ],
+   "body_sha256": "33668f6328478254add341b587a7e3bc373485f478fd18129ebfa56b88a38994",
+   "form": [
+    [
+     "Action",
+     "DescribeAvailabilityZones"
+    ],
+    [
+     "Version",
+     "2016-11-15"
+    ],
+    [
+     "Filter.1.Name",
+     "state"
+    ],
+    [
+     "Filter.1.Value.1",
+     "available"
+    ]
+   ],
+   "response_status": 200,
+   "response_code": null
+  },
+  {
+   "operation": "CreateVpc",
+   "method": "POST",
+   "path": "/",
+   "http_version": "HTTP/1.1",
+   "content_type": "application/x-www-form-urlencoded",
+   "content_type_header": "application/x-www-form-urlencoded; charset=utf-8",
+   "headers": [
+    [
+     "Host",
+     "127.0.0.1:<port>"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "Content-Type",
+     "application/x-www-form-urlencoded; charset=utf-8"
+    ],
+    [
+     "User-Agent",
+     "Boto3/1.43.126 md/Botocore#1.43.126 ua/2.1 os/linux#<kernel> md/arch#x86_64 lang/python#3.13.18 md/pyimpl#CPython m/D,N,Z,b,g cfg/retry-mode#legacy Botocore/1.43.126"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/ec2/aws4_request, SignedHeaders=content-type;host;x-amz-date, Signature=<hex>"
+    ],
+    [
+     "amz-sdk-invocation-id",
+     "<uuid>"
+    ],
+    [
+     "amz-sdk-request",
+     "attempt=1"
+    ],
+    [
+     "Content-Length",
+     "242"
+    ]
+   ],
+   "body_sha256": "2fee623e093e3a805f496effd198f7ea7fea8e7ff2183595a81c150548180f7a",
+   "form": [
+    [
+     "Action",
+     "CreateVpc"
+    ],
+    [
+     "Version",
+     "2016-11-15"
+    ],
+    [
+     "CidrBlock",
+     "10.0.0.0/16"
+    ],
+    [
+     "TagSpecification.1.ResourceType",
+     "vpc"
+    ],
+    [
+     "TagSpecification.1.Tag.1.Key",
+     "Name"
+    ],
+    [
+     "TagSpecification.1.Tag.1.Value",
+     "evidence"
+    ],
+    [
+     "TagSpecification.1.Tag.2.Key",
+     "team"
+    ],
+    [
+     "TagSpecification.1.Tag.2.Value",
+     "kythira"
+    ]
+   ],
+   "response_status": 200,
+   "response_code": null
+  },
+  {
+   "operation": "CreateSubnet",
+   "method": "POST",
+   "path": "/",
+   "http_version": "HTTP/1.1",
+   "content_type": "application/x-www-form-urlencoded",
+   "content_type_header": "application/x-www-form-urlencoded; charset=utf-8",
+   "headers": [
+    [
+     "Host",
+     "127.0.0.1:<port>"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "Content-Type",
+     "application/x-www-form-urlencoded; charset=utf-8"
+    ],
+    [
+     "User-Agent",
+     "Boto3/1.43.126 md/Botocore#1.43.126 ua/2.1 os/linux#<kernel> md/arch#x86_64 lang/python#3.13.18 md/pyimpl#CPython m/D,N,Z,b,g cfg/retry-mode#legacy Botocore/1.43.126"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/ec2/aws4_request, SignedHeaders=content-type;host;x-amz-date, Signature=<hex>"
+    ],
+    [
+     "amz-sdk-invocation-id",
+     "<uuid>"
+    ],
+    [
+     "amz-sdk-request",
+     "attempt=1"
+    ],
+    [
+     "Content-Length",
+     "118"
+    ]
+   ],
+   "body_sha256": "dc87158e18b1f0ccfd6d9b461b67b8cffd0adb856aa7cb34002d4fc9ea32467c",
+   "form": [
+    [
+     "Action",
+     "CreateSubnet"
+    ],
+    [
+     "Version",
+     "2016-11-15"
+    ],
+    [
+     "VpcId",
+     "vpc-00000000000000001"
+    ],
+    [
+     "CidrBlock",
+     "10.0.1.0/24"
+    ],
+    [
+     "AvailabilityZone",
+     "us-east-1a"
+    ]
+   ],
+   "response_status": 200,
+   "response_code": null
+  },
+  {
+   "operation": "DescribeVpcs",
+   "method": "POST",
+   "path": "/",
+   "http_version": "HTTP/1.1",
+   "content_type": "application/x-www-form-urlencoded",
+   "content_type_header": "application/x-www-form-urlencoded; charset=utf-8",
+   "headers": [
+    [
+     "Host",
+     "127.0.0.1:<port>"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "Content-Type",
+     "application/x-www-form-urlencoded; charset=utf-8"
+    ],
+    [
+     "User-Agent",
+     "Boto3/1.43.126 md/Botocore#1.43.126 ua/2.1 os/linux#<kernel> md/arch#x86_64 lang/python#3.13.18 md/pyimpl#CPython m/D,N,Z,b,g cfg/retry-mode#legacy Botocore/1.43.126"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/ec2/aws4_request, SignedHeaders=content-type;host;x-amz-date, Signature=<hex>"
+    ],
+    [
+     "amz-sdk-invocation-id",
+     "<uuid>"
+    ],
+    [
+     "amz-sdk-request",
+     "attempt=1"
+    ],
+    [
+     "Content-Length",
+     "119"
+    ]
+   ],
+   "body_sha256": "db411aa1db81c7348fb7a678228f88f41a1c9428a881b2b3a8f2a67d7dcf3ae2",
+   "form": [
+    [
+     "Action",
+     "DescribeVpcs"
+    ],
+    [
+     "Version",
+     "2016-11-15"
+    ],
+    [
+     "VpcId.1",
+     "vpc-00000000000000001"
+    ],
+    [
+     "Filter.1.Name",
+     "tag:Name"
+    ],
+    [
+     "Filter.1.Value.1",
+     "evidence"
+    ]
+   ],
+   "response_status": 200,
+   "response_code": null
+  },
+  {
+   "operation": "CreateVolume",
+   "method": "POST",
+   "path": "/",
+   "http_version": "HTTP/1.1",
+   "content_type": "application/x-www-form-urlencoded",
+   "content_type_header": "application/x-www-form-urlencoded; charset=utf-8",
+   "headers": [
+    [
+     "Host",
+     "127.0.0.1:<port>"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "Content-Type",
+     "application/x-www-form-urlencoded; charset=utf-8"
+    ],
+    [
+     "User-Agent",
+     "Boto3/1.43.126 md/Botocore#1.43.126 ua/2.1 os/linux#<kernel> md/arch#x86_64 lang/python#3.13.18 md/pyimpl#CPython m/D,N,Z,b,g cfg/retry-mode#legacy Botocore/1.43.126"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/ec2/aws4_request, SignedHeaders=content-type;host;x-amz-date, Signature=<hex>"
+    ],
+    [
+     "amz-sdk-invocation-id",
+     "<uuid>"
+    ],
+    [
+     "amz-sdk-request",
+     "attempt=1"
+    ],
+    [
+     "Content-Length",
+     "251"
+    ]
+   ],
+   "body_sha256": "bf76eeb17c774a27337ee19b8ff686c5c24ec8dd7019594062162276daca2297",
+   "form": [
+    [
+     "Action",
+     "CreateVolume"
+    ],
+    [
+     "Version",
+     "2016-11-15"
+    ],
+    [
+     "AvailabilityZone",
+     "us-east-1a"
+    ],
+    [
+     "Size",
+     "8"
+    ],
+    [
+     "VolumeType",
+     "gp3"
+    ],
+    [
+     "Encrypted",
+     "true"
+    ],
+    [
+     "ClientToken",
+     "evidence-volume-1"
+    ],
+    [
+     "TagSpecification.1.ResourceType",
+     "volume"
+    ],
+    [
+     "TagSpecification.1.Tag.1.Key",
+     "Name"
+    ],
+    [
+     "TagSpecification.1.Tag.1.Value",
+     "evidence-data"
+    ]
+   ],
+   "response_status": 200,
+   "response_code": null
+  },
+  {
+   "operation": "CreateVolume",
+   "method": "POST",
+   "path": "/",
+   "http_version": "HTTP/1.1",
+   "content_type": "application/x-www-form-urlencoded",
+   "content_type_header": "application/x-www-form-urlencoded; charset=utf-8",
+   "headers": [
+    [
+     "Host",
+     "127.0.0.1:<port>"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "Content-Type",
+     "application/x-www-form-urlencoded; charset=utf-8"
+    ],
+    [
+     "User-Agent",
+     "Boto3/1.43.126 md/Botocore#1.43.126 ua/2.1 os/linux#<kernel> md/arch#x86_64 lang/python#3.13.18 md/pyimpl#CPython m/D,N,Z,b,g cfg/retry-mode#legacy Botocore/1.43.126"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/ec2/aws4_request, SignedHeaders=content-type;host;x-amz-date, Signature=<hex>"
+    ],
+    [
+     "amz-sdk-invocation-id",
+     "<uuid>"
+    ],
+    [
+     "amz-sdk-request",
+     "attempt=1"
+    ],
+    [
+     "Content-Length",
+     "163"
+    ]
+   ],
+   "body_sha256": "<varies>",
+   "form": [
+    [
+     "Action",
+     "CreateVolume"
+    ],
+    [
+     "Version",
+     "2016-11-15"
+    ],
+    [
+     "AvailabilityZone",
+     "us-east-1a"
+    ],
+    [
+     "Size",
+     "16"
+    ],
+    [
+     "VolumeType",
+     "gp3"
+    ],
+    [
+     "Iops",
+     "3000"
+    ],
+    [
+     "Throughput",
+     "125"
+    ],
+    [
+     "ClientToken",
+     "<uuid>"
+    ]
+   ],
+   "response_status": 200,
+   "response_code": null
+  },
+  {
+   "operation": "DescribeVolumes",
+   "method": "POST",
+   "path": "/",
+   "http_version": "HTTP/1.1",
+   "content_type": "application/x-www-form-urlencoded",
+   "content_type_header": "application/x-www-form-urlencoded; charset=utf-8",
+   "headers": [
+    [
+     "Host",
+     "127.0.0.1:<port>"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "Content-Type",
+     "application/x-www-form-urlencoded; charset=utf-8"
+    ],
+    [
+     "User-Agent",
+     "Boto3/1.43.126 md/Botocore#1.43.126 ua/2.1 os/linux#<kernel> md/arch#x86_64 lang/python#3.13.18 md/pyimpl#CPython m/D,N,Z,b,g cfg/retry-mode#legacy Botocore/1.43.126"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/ec2/aws4_request, SignedHeaders=content-type;host;x-amz-date, Signature=<hex>"
+    ],
+    [
+     "amz-sdk-invocation-id",
+     "<uuid>"
+    ],
+    [
+     "amz-sdk-request",
+     "attempt=1"
+    ],
+    [
+     "Content-Length",
+     "114"
+    ]
+   ],
+   "body_sha256": "a78063b1cce9fba163f9ce62589de806fef9ae386c41ecea0631176c42a7adba",
+   "form": [
+    [
+     "Action",
+     "DescribeVolumes"
+    ],
+    [
+     "Version",
+     "2016-11-15"
+    ],
+    [
+     "Filter.1.Name",
+     "availability-zone"
+    ],
+    [
+     "Filter.1.Value.1",
+     "us-east-1a"
+    ],
+    [
+     "MaxResults",
+     "5"
+    ]
+   ],
+   "response_status": 200,
+   "response_code": null
+  },
+  {
+   "operation": "DescribeVolumes",
+   "method": "POST",
+   "path": "/",
+   "http_version": "HTTP/1.1",
+   "content_type": "application/x-www-form-urlencoded",
+   "content_type_header": "application/x-www-form-urlencoded; charset=utf-8",
+   "headers": [
+    [
+     "Host",
+     "127.0.0.1:<port>"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "Content-Type",
+     "application/x-www-form-urlencoded; charset=utf-8"
+    ],
+    [
+     "User-Agent",
+     "Boto3/1.43.126 md/Botocore#1.43.126 ua/2.1 os/linux#<kernel> md/arch#x86_64 lang/python#3.13.18 md/pyimpl#CPython m/D,N,Z,b,g cfg/retry-mode#legacy Botocore/1.43.126"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/ec2/aws4_request, SignedHeaders=content-type;host;x-amz-date, Signature=<hex>"
+    ],
+    [
+     "amz-sdk-invocation-id",
+     "<uuid>"
+    ],
+    [
+     "amz-sdk-request",
+     "attempt=1"
+    ],
+    [
+     "Content-Length",
+     "140"
+    ]
+   ],
+   "body_sha256": "8e53b248721cc9ed1038c2858f9c162e04e2664aeddb22de11fdbefbcc20a86a",
+   "form": [
+    [
+     "Action",
+     "DescribeVolumes"
+    ],
+    [
+     "Version",
+     "2016-11-15"
+    ],
+    [
+     "Filter.1.Name",
+     "availability-zone"
+    ],
+    [
+     "Filter.1.Value.1",
+     "us-east-1a"
+    ],
+    [
+     "MaxResults",
+     "5"
+    ],
+    [
+     "NextToken",
+     "evidence-page-2"
+    ]
+   ],
+   "response_status": 200,
+   "response_code": null
+  },
+  {
+   "operation": "RunInstances",
+   "method": "POST",
+   "path": "/",
+   "http_version": "HTTP/1.1",
+   "content_type": "application/x-www-form-urlencoded",
+   "content_type_header": "application/x-www-form-urlencoded; charset=utf-8",
+   "headers": [
+    [
+     "Host",
+     "127.0.0.1:<port>"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "Content-Type",
+     "application/x-www-form-urlencoded; charset=utf-8"
+    ],
+    [
+     "User-Agent",
+     "Boto3/1.43.126 md/Botocore#1.43.126 ua/2.1 os/linux#<kernel> md/arch#x86_64 lang/python#3.13.18 md/pyimpl#CPython m/D,N,Z,b,g cfg/retry-mode#legacy Botocore/1.43.126"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/ec2/aws4_request, SignedHeaders=content-type;host;x-amz-date, Signature=<hex>"
+    ],
+    [
+     "amz-sdk-invocation-id",
+     "<uuid>"
+    ],
+    [
+     "amz-sdk-request",
+     "attempt=1"
+    ],
+    [
+     "Content-Length",
+     "707"
+    ]
+   ],
+   "body_sha256": "d7cb4499a991c9e8d18a9dd0933413754c516f5b9ce211c96b7928df52c852cc",
+   "form": [
+    [
+     "Action",
+     "RunInstances"
+    ],
+    [
+     "Version",
+     "2016-11-15"
+    ],
+    [
+     "ClientToken",
+     "evidence-run-1"
+    ],
+    [
+     "ImageId",
+     "ami-0000000000000a001"
+    ],
+    [
+     "InstanceType",
+     "t3.micro"
+    ],
+    [
+     "MinCount",
+     "1"
+    ],
+    [
+     "MaxCount",
+     "2"
+    ],
+    [
+     "SubnetId",
+     "subnet-00000000000000003"
+    ],
+    [
+     "UserData",
+     "IyEvYmluL3NoCmVjaG8gaGVsbG8K"
+    ],
+    [
+     "BlockDeviceMapping.1.DeviceName",
+     "/dev/xvda"
+    ],
+    [
+     "BlockDeviceMapping.1.Ebs.VolumeSize",
+     "8"
+    ],
+    [
+     "BlockDeviceMapping.1.Ebs.VolumeType",
+     "gp3"
+    ],
+    [
+     "BlockDeviceMapping.1.Ebs.DeleteOnTermination",
+     "true"
+    ],
+    [
+     "BlockDeviceMapping.2.DeviceName",
+     "/dev/sdb"
+    ],
+    [
+     "BlockDeviceMapping.2.VirtualName",
+     "ephemeral0"
+    ],
+    [
+     "TagSpecification.1.ResourceType",
+     "instance"
+    ],
+    [
+     "TagSpecification.1.Tag.1.Key",
+     "Name"
+    ],
+    [
+     "TagSpecification.1.Tag.1.Value",
+     "evidence"
+    ],
+    [
+     "TagSpecification.2.ResourceType",
+     "volume"
+    ],
+    [
+     "TagSpecification.2.Tag.1.Key",
+     "Name"
+    ],
+    [
+     "TagSpecification.2.Tag.1.Value",
+     "evidence-root"
+    ]
+   ],
+   "response_status": 200,
+   "response_code": null
+  },
+  {
+   "operation": "RunInstances",
+   "method": "POST",
+   "path": "/",
+   "http_version": "HTTP/1.1",
+   "content_type": "application/x-www-form-urlencoded",
+   "content_type_header": "application/x-www-form-urlencoded; charset=utf-8",
+   "headers": [
+    [
+     "Host",
+     "127.0.0.1:<port>"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "Content-Type",
+     "application/x-www-form-urlencoded; charset=utf-8"
+    ],
+    [
+     "User-Agent",
+     "Boto3/1.43.126 md/Botocore#1.43.126 ua/2.1 os/linux#<kernel> md/arch#x86_64 lang/python#3.13.18 md/pyimpl#CPython m/D,N,Z,b,g cfg/retry-mode#legacy Botocore/1.43.126"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/ec2/aws4_request, SignedHeaders=content-type;host;x-amz-date, Signature=<hex>"
+    ],
+    [
+     "amz-sdk-invocation-id",
+     "<uuid>"
+    ],
+    [
+     "amz-sdk-request",
+     "attempt=1"
+    ],
+    [
+     "Content-Length",
+     "741"
+    ]
+   ],
+   "body_sha256": "<varies>",
+   "form": [
+    [
+     "Action",
+     "RunInstances"
+    ],
+    [
+     "Version",
+     "2016-11-15"
+    ],
+    [
+     "DryRun",
+     "true"
+    ],
+    [
+     "ImageId",
+     "ami-0000000000000a001"
+    ],
+    [
+     "InstanceType",
+     "t3.micro"
+    ],
+    [
+     "MinCount",
+     "1"
+    ],
+    [
+     "MaxCount",
+     "2"
+    ],
+    [
+     "SubnetId",
+     "subnet-00000000000000003"
+    ],
+    [
+     "UserData",
+     "IyEvYmluL3NoCmVjaG8gaGVsbG8K"
+    ],
+    [
+     "BlockDeviceMapping.1.DeviceName",
+     "/dev/xvda"
+    ],
+    [
+     "BlockDeviceMapping.1.Ebs.VolumeSize",
+     "8"
+    ],
+    [
+     "BlockDeviceMapping.1.Ebs.VolumeType",
+     "gp3"
+    ],
+    [
+     "BlockDeviceMapping.1.Ebs.DeleteOnTermination",
+     "true"
+    ],
+    [
+     "BlockDeviceMapping.2.DeviceName",
+     "/dev/sdb"
+    ],
+    [
+     "BlockDeviceMapping.2.VirtualName",
+     "ephemeral0"
+    ],
+    [
+     "TagSpecification.1.ResourceType",
+     "instance"
+    ],
+    [
+     "TagSpecification.1.Tag.1.Key",
+     "Name"
+    ],
+    [
+     "TagSpecification.1.Tag.1.Value",
+     "evidence"
+    ],
+    [
+     "TagSpecification.2.ResourceType",
+     "volume"
+    ],
+    [
+     "TagSpecification.2.Tag.1.Key",
+     "Name"
+    ],
+    [
+     "TagSpecification.2.Tag.1.Value",
+     "evidence-root"
+    ],
+    [
+     "ClientToken",
+     "<uuid>"
+    ]
+   ],
+   "response_status": 412,
+   "response_code": "DryRunOperation"
+  },
+  {
+   "operation": "DescribeInstances",
+   "method": "POST",
+   "path": "/",
+   "http_version": "HTTP/1.1",
+   "content_type": "application/x-www-form-urlencoded",
+   "content_type_header": "application/x-www-form-urlencoded; charset=utf-8",
+   "headers": [
+    [
+     "Host",
+     "127.0.0.1:<port>"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "Content-Type",
+     "application/x-www-form-urlencoded; charset=utf-8"
+    ],
+    [
+     "User-Agent",
+     "Boto3/1.43.126 md/Botocore#1.43.126 ua/2.1 os/linux#<kernel> md/arch#x86_64 lang/python#3.13.18 md/pyimpl#CPython m/D,N,Z,b,g cfg/retry-mode#legacy Botocore/1.43.126"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/ec2/aws4_request, SignedHeaders=content-type;host;x-amz-date, Signature=<hex>"
+    ],
+    [
+     "amz-sdk-invocation-id",
+     "<uuid>"
+    ],
+    [
+     "amz-sdk-request",
+     "attempt=1"
+    ],
+    [
+     "Content-Length",
+     "193"
+    ]
+   ],
+   "body_sha256": "5df532493bb41358f9a815874f28257c45a566fd881ff6e028f7c701ea7ead73",
+   "form": [
+    [
+     "Action",
+     "DescribeInstances"
+    ],
+    [
+     "Version",
+     "2016-11-15"
+    ],
+    [
+     "InstanceId.1",
+     "i-00000000000000007"
+    ],
+    [
+     "InstanceId.2",
+     "i-00000000000000008"
+    ],
+    [
+     "Filter.1.Name",
+     "instance-state-name"
+    ],
+    [
+     "Filter.1.Value.1",
+     "pending"
+    ],
+    [
+     "Filter.1.Value.2",
+     "running"
+    ]
+   ],
+   "response_status": 200,
+   "response_code": null
+  },
+  {
+   "operation": "CreateTags",
+   "method": "POST",
+   "path": "/",
+   "http_version": "HTTP/1.1",
+   "content_type": "application/x-www-form-urlencoded",
+   "content_type_header": "application/x-www-form-urlencoded; charset=utf-8",
+   "headers": [
+    [
+     "Host",
+     "127.0.0.1:<port>"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "Content-Type",
+     "application/x-www-form-urlencoded; charset=utf-8"
+    ],
+    [
+     "User-Agent",
+     "Boto3/1.43.126 md/Botocore#1.43.126 ua/2.1 os/linux#<kernel> md/arch#x86_64 lang/python#3.13.18 md/pyimpl#CPython m/D,N,Z,b,g cfg/retry-mode#legacy Botocore/1.43.126"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/ec2/aws4_request, SignedHeaders=content-type;host;x-amz-date, Signature=<hex>"
+    ],
+    [
+     "amz-sdk-invocation-id",
+     "<uuid>"
+    ],
+    [
+     "amz-sdk-request",
+     "attempt=1"
+    ],
+    [
+     "Content-Length",
+     "156"
+    ]
+   ],
+   "body_sha256": "1f74faf1a128d013e0fab4a3d70a3a18b6a83c411808eed1ce576df9e614dbee",
+   "form": [
+    [
+     "Action",
+     "CreateTags"
+    ],
+    [
+     "Version",
+     "2016-11-15"
+    ],
+    [
+     "ResourceId.1",
+     "i-00000000000000007"
+    ],
+    [
+     "ResourceId.2",
+     "vol-00000000000000004"
+    ],
+    [
+     "Tag.1.Key",
+     "stage"
+    ],
+    [
+     "Tag.1.Value",
+     "evidence"
+    ],
+    [
+     "Tag.2.Key",
+     "flag"
+    ]
+   ],
+   "response_status": 200,
+   "response_code": null
+  },
+  {
+   "operation": "DescribeTags",
+   "method": "POST",
+   "path": "/",
+   "http_version": "HTTP/1.1",
+   "content_type": "application/x-www-form-urlencoded",
+   "content_type_header": "application/x-www-form-urlencoded; charset=utf-8",
+   "headers": [
+    [
+     "Host",
+     "127.0.0.1:<port>"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "Content-Type",
+     "application/x-www-form-urlencoded; charset=utf-8"
+    ],
+    [
+     "User-Agent",
+     "Boto3/1.43.126 md/Botocore#1.43.126 ua/2.1 os/linux#<kernel> md/arch#x86_64 lang/python#3.13.18 md/pyimpl#CPython m/D,N,Z,b,g cfg/retry-mode#legacy Botocore/1.43.126"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/ec2/aws4_request, SignedHeaders=content-type;host;x-amz-date, Signature=<hex>"
+    ],
+    [
+     "amz-sdk-invocation-id",
+     "<uuid>"
+    ],
+    [
+     "amz-sdk-request",
+     "attempt=1"
+    ],
+    [
+     "Content-Length",
+     "142"
+    ]
+   ],
+   "body_sha256": "f6902360675b7db554ebad64d1f7696047eb6f5a515f3981150f9927ee106f25",
+   "form": [
+    [
+     "Action",
+     "DescribeTags"
+    ],
+    [
+     "Version",
+     "2016-11-15"
+    ],
+    [
+     "Filter.1.Name",
+     "resource-id"
+    ],
+    [
+     "Filter.1.Value.1",
+     "i-00000000000000007"
+    ],
+    [
+     "Filter.2.Name",
+     "key"
+    ],
+    [
+     "Filter.2.Value.1",
+     "stage"
+    ]
+   ],
+   "response_status": 200,
+   "response_code": null
+  },
+  {
+   "operation": "DeleteTags",
+   "method": "POST",
+   "path": "/",
+   "http_version": "HTTP/1.1",
+   "content_type": "application/x-www-form-urlencoded",
+   "content_type_header": "application/x-www-form-urlencoded; charset=utf-8",
+   "headers": [
+    [
+     "Host",
+     "127.0.0.1:<port>"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "Content-Type",
+     "application/x-www-form-urlencoded; charset=utf-8"
+    ],
+    [
+     "User-Agent",
+     "Boto3/1.43.126 md/Botocore#1.43.126 ua/2.1 os/linux#<kernel> md/arch#x86_64 lang/python#3.13.18 md/pyimpl#CPython m/D,N,Z,b,g cfg/retry-mode#legacy Botocore/1.43.126"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/ec2/aws4_request, SignedHeaders=content-type;host;x-amz-date, Signature=<hex>"
+    ],
+    [
+     "amz-sdk-invocation-id",
+     "<uuid>"
+    ],
+    [
+     "amz-sdk-request",
+     "attempt=1"
+    ],
+    [
+     "Content-Length",
+     "86"
+    ]
+   ],
+   "body_sha256": "00e52d994cb7c926f1a7c4f1ddc09945dd153b1c97945397792875cf7fd14295",
+   "form": [
+    [
+     "Action",
+     "DeleteTags"
+    ],
+    [
+     "Version",
+     "2016-11-15"
+    ],
+    [
+     "ResourceId.1",
+     "vol-00000000000000004"
+    ],
+    [
+     "Tag.1.Key",
+     "flag"
+    ]
+   ],
+   "response_status": 200,
+   "response_code": null
+  },
+  {
+   "operation": "AttachVolume",
+   "method": "POST",
+   "path": "/",
+   "http_version": "HTTP/1.1",
+   "content_type": "application/x-www-form-urlencoded",
+   "content_type_header": "application/x-www-form-urlencoded; charset=utf-8",
+   "headers": [
+    [
+     "Host",
+     "127.0.0.1:<port>"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "Content-Type",
+     "application/x-www-form-urlencoded; charset=utf-8"
+    ],
+    [
+     "User-Agent",
+     "Boto3/1.43.126 md/Botocore#1.43.126 ua/2.1 os/linux#<kernel> md/arch#x86_64 lang/python#3.13.18 md/pyimpl#CPython m/D,N,Z,b,g cfg/retry-mode#legacy Botocore/1.43.126"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/ec2/aws4_request, SignedHeaders=content-type;host;x-amz-date, Signature=<hex>"
+    ],
+    [
+     "amz-sdk-invocation-id",
+     "<uuid>"
+    ],
+    [
+     "amz-sdk-request",
+     "attempt=1"
+    ],
+    [
+     "Content-Length",
+     "120"
+    ]
+   ],
+   "body_sha256": "b5d383b415f8b5fc767e2bf1162b96541077396dcc09f794ea5838191f2db266",
+   "form": [
+    [
+     "Action",
+     "AttachVolume"
+    ],
+    [
+     "Version",
+     "2016-11-15"
+    ],
+    [
+     "VolumeId",
+     "vol-00000000000000004"
+    ],
+    [
+     "InstanceId",
+     "i-00000000000000007"
+    ],
+    [
+     "Device",
+     "/dev/sdf"
+    ]
+   ],
+   "response_status": 200,
+   "response_code": null
+  },
+  {
+   "operation": "DetachVolume",
+   "method": "POST",
+   "path": "/",
+   "http_version": "HTTP/1.1",
+   "content_type": "application/x-www-form-urlencoded",
+   "content_type_header": "application/x-www-form-urlencoded; charset=utf-8",
+   "headers": [
+    [
+     "Host",
+     "127.0.0.1:<port>"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "Content-Type",
+     "application/x-www-form-urlencoded; charset=utf-8"
+    ],
+    [
+     "User-Agent",
+     "Boto3/1.43.126 md/Botocore#1.43.126 ua/2.1 os/linux#<kernel> md/arch#x86_64 lang/python#3.13.18 md/pyimpl#CPython m/D,N,Z,b,g cfg/retry-mode#legacy Botocore/1.43.126"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/ec2/aws4_request, SignedHeaders=content-type;host;x-amz-date, Signature=<hex>"
+    ],
+    [
+     "amz-sdk-invocation-id",
+     "<uuid>"
+    ],
+    [
+     "amz-sdk-request",
+     "attempt=1"
+    ],
+    [
+     "Content-Length",
+     "69"
+    ]
+   ],
+   "body_sha256": "64cc32603355c393cec28351cbb90cfff5ba428c1a2db1fd19534f25198e5367",
+   "form": [
+    [
+     "Action",
+     "DetachVolume"
+    ],
+    [
+     "Version",
+     "2016-11-15"
+    ],
+    [
+     "VolumeId",
+     "vol-00000000000000004"
+    ]
+   ],
+   "response_status": 200,
+   "response_code": null
+  },
+  {
+   "operation": "StopInstances",
+   "method": "POST",
+   "path": "/",
+   "http_version": "HTTP/1.1",
+   "content_type": "application/x-www-form-urlencoded",
+   "content_type_header": "application/x-www-form-urlencoded; charset=utf-8",
+   "headers": [
+    [
+     "Host",
+     "127.0.0.1:<port>"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "Content-Type",
+     "application/x-www-form-urlencoded; charset=utf-8"
+    ],
+    [
+     "User-Agent",
+     "Boto3/1.43.126 md/Botocore#1.43.126 ua/2.1 os/linux#<kernel> md/arch#x86_64 lang/python#3.13.18 md/pyimpl#CPython m/D,N,Z,b,g cfg/retry-mode#legacy Botocore/1.43.126"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/ec2/aws4_request, SignedHeaders=content-type;host;x-amz-date, Signature=<hex>"
+    ],
+    [
+     "amz-sdk-invocation-id",
+     "<uuid>"
+    ],
+    [
+     "amz-sdk-request",
+     "attempt=1"
+    ],
+    [
+     "Content-Length",
+     "72"
+    ]
+   ],
+   "body_sha256": "165517139bb475ad3ff09c5109c8b51ddbde897f8f6cc8515a23259a3a3366f6",
+   "form": [
+    [
+     "Action",
+     "StopInstances"
+    ],
+    [
+     "Version",
+     "2016-11-15"
+    ],
+    [
+     "InstanceId.1",
+     "i-00000000000000007"
+    ]
+   ],
+   "response_status": 200,
+   "response_code": null
+  },
+  {
+   "operation": "StartInstances",
+   "method": "POST",
+   "path": "/",
+   "http_version": "HTTP/1.1",
+   "content_type": "application/x-www-form-urlencoded",
+   "content_type_header": "application/x-www-form-urlencoded; charset=utf-8",
+   "headers": [
+    [
+     "Host",
+     "127.0.0.1:<port>"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "Content-Type",
+     "application/x-www-form-urlencoded; charset=utf-8"
+    ],
+    [
+     "User-Agent",
+     "Boto3/1.43.126 md/Botocore#1.43.126 ua/2.1 os/linux#<kernel> md/arch#x86_64 lang/python#3.13.18 md/pyimpl#CPython m/D,N,Z,b,g cfg/retry-mode#legacy Botocore/1.43.126"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/ec2/aws4_request, SignedHeaders=content-type;host;x-amz-date, Signature=<hex>"
+    ],
+    [
+     "amz-sdk-invocation-id",
+     "<uuid>"
+    ],
+    [
+     "amz-sdk-request",
+     "attempt=1"
+    ],
+    [
+     "Content-Length",
+     "73"
+    ]
+   ],
+   "body_sha256": "cb0b7e219ab154d947a4cae16a67ffb9d7037af2e7b38a426eb0c145a170d6c4",
+   "form": [
+    [
+     "Action",
+     "StartInstances"
+    ],
+    [
+     "Version",
+     "2016-11-15"
+    ],
+    [
+     "InstanceId.1",
+     "i-00000000000000007"
+    ]
+   ],
+   "response_status": 200,
+   "response_code": null
+  },
+  {
+   "operation": "TerminateInstances",
+   "method": "POST",
+   "path": "/",
+   "http_version": "HTTP/1.1",
+   "content_type": "application/x-www-form-urlencoded",
+   "content_type_header": "application/x-www-form-urlencoded; charset=utf-8",
+   "headers": [
+    [
+     "Host",
+     "127.0.0.1:<port>"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "Content-Type",
+     "application/x-www-form-urlencoded; charset=utf-8"
+    ],
+    [
+     "User-Agent",
+     "Boto3/1.43.126 md/Botocore#1.43.126 ua/2.1 os/linux#<kernel> md/arch#x86_64 lang/python#3.13.18 md/pyimpl#CPython m/D,N,Z,b,g cfg/retry-mode#legacy Botocore/1.43.126"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/ec2/aws4_request, SignedHeaders=content-type;host;x-amz-date, Signature=<hex>"
+    ],
+    [
+     "amz-sdk-invocation-id",
+     "<uuid>"
+    ],
+    [
+     "amz-sdk-request",
+     "attempt=1"
+    ],
+    [
+     "Content-Length",
+     "110"
+    ]
+   ],
+   "body_sha256": "00ff07da685075d0a1898201144e5700ebb4c9011c13388bdf5631c64ebc3f28",
+   "form": [
+    [
+     "Action",
+     "TerminateInstances"
+    ],
+    [
+     "Version",
+     "2016-11-15"
+    ],
+    [
+     "InstanceId.1",
+     "i-00000000000000007"
+    ],
+    [
+     "InstanceId.2",
+     "i-00000000000000008"
+    ]
+   ],
+   "response_status": 200,
+   "response_code": null
+  },
+  {
+   "operation": "CreateSecurityGroup",
+   "method": "POST",
+   "path": "/",
+   "http_version": "HTTP/1.1",
+   "content_type": "application/x-www-form-urlencoded",
+   "content_type_header": "application/x-www-form-urlencoded; charset=utf-8",
+   "headers": [
+    [
+     "Host",
+     "127.0.0.1:<port>"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "Content-Type",
+     "application/x-www-form-urlencoded; charset=utf-8"
+    ],
+    [
+     "User-Agent",
+     "Boto3/1.43.126 md/Botocore#1.43.126 ua/2.1 os/linux#<kernel> md/arch#x86_64 lang/python#3.13.18 md/pyimpl#CPython m/D,N,Z,b,g cfg/retry-mode#legacy Botocore/1.43.126"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/ec2/aws4_request, SignedHeaders=content-type;host;x-amz-date, Signature=<hex>"
+    ],
+    [
+     "amz-sdk-invocation-id",
+     "<uuid>"
+    ],
+    [
+     "amz-sdk-request",
+     "attempt=1"
+    ],
+    [
+     "Content-Length",
+     "124"
+    ]
+   ],
+   "body_sha256": "3f3c98cc11a5e4796f5b4007a01956466ba9d9c80ad7d42923a638807d23e056",
+   "form": [
+    [
+     "Action",
+     "CreateSecurityGroup"
+    ],
+    [
+     "Version",
+     "2016-11-15"
+    ],
+    [
+     "GroupName",
+     "evidence"
+    ],
+    [
+     "GroupDescription",
+     "evidence group"
+    ],
+    [
+     "VpcId",
+     "vpc-00000000000000001"
+    ]
+   ],
+   "response_status": 400,
+   "response_code": "UnsupportedOperation"
+  },
+  {
+   "operation": "DeleteVolume",
+   "method": "POST",
+   "path": "/",
+   "http_version": "HTTP/1.1",
+   "content_type": "application/x-www-form-urlencoded",
+   "content_type_header": "application/x-www-form-urlencoded; charset=utf-8",
+   "headers": [
+    [
+     "Host",
+     "127.0.0.1:<port>"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "Content-Type",
+     "application/x-www-form-urlencoded; charset=utf-8"
+    ],
+    [
+     "User-Agent",
+     "Boto3/1.43.126 md/Botocore#1.43.126 ua/2.1 os/linux#<kernel> md/arch#x86_64 lang/python#3.13.18 md/pyimpl#CPython m/D,N,Z,b,g cfg/retry-mode#legacy Botocore/1.43.126"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/ec2/aws4_request, SignedHeaders=content-type;host;x-amz-date, Signature=<hex>"
+    ],
+    [
+     "amz-sdk-invocation-id",
+     "<uuid>"
+    ],
+    [
+     "amz-sdk-request",
+     "attempt=1"
+    ],
+    [
+     "Content-Length",
+     "69"
+    ]
+   ],
+   "body_sha256": "0c1e0ddee628524051cbb4d89e7a8482f0dc5407ac2129a998b6cef387b30c86",
+   "form": [
+    [
+     "Action",
+     "DeleteVolume"
+    ],
+    [
+     "Version",
+     "2016-11-15"
+    ],
+    [
+     "VolumeId",
+     "vol-00000000000000004"
+    ]
+   ],
+   "response_status": 200,
+   "response_code": null
+  },
+  {
+   "operation": "DeleteVolume",
+   "method": "POST",
+   "path": "/",
+   "http_version": "HTTP/1.1",
+   "content_type": "application/x-www-form-urlencoded",
+   "content_type_header": "application/x-www-form-urlencoded; charset=utf-8",
+   "headers": [
+    [
+     "Host",
+     "127.0.0.1:<port>"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "Content-Type",
+     "application/x-www-form-urlencoded; charset=utf-8"
+    ],
+    [
+     "User-Agent",
+     "Boto3/1.43.126 md/Botocore#1.43.126 ua/2.1 os/linux#<kernel> md/arch#x86_64 lang/python#3.13.18 md/pyimpl#CPython m/D,N,Z,b,g cfg/retry-mode#legacy Botocore/1.43.126"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/ec2/aws4_request, SignedHeaders=content-type;host;x-amz-date, Signature=<hex>"
+    ],
+    [
+     "amz-sdk-invocation-id",
+     "<uuid>"
+    ],
+    [
+     "amz-sdk-request",
+     "attempt=1"
+    ],
+    [
+     "Content-Length",
+     "69"
+    ]
+   ],
+   "body_sha256": "c954287f3a3d337dca6dd5d94179520432580d4f58d3674f1c0a9bf818d14358",
+   "form": [
+    [
+     "Action",
+     "DeleteVolume"
+    ],
+    [
+     "Version",
+     "2016-11-15"
+    ],
+    [
+     "VolumeId",
+     "vol-00000000000000005"
+    ]
+   ],
+   "response_status": 200,
+   "response_code": null
+  },
+  {
+   "operation": "DeleteSubnet",
+   "method": "POST",
+   "path": "/",
+   "http_version": "HTTP/1.1",
+   "content_type": "application/x-www-form-urlencoded",
+   "content_type_header": "application/x-www-form-urlencoded; charset=utf-8",
+   "headers": [
+    [
+     "Host",
+     "127.0.0.1:<port>"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "Content-Type",
+     "application/x-www-form-urlencoded; charset=utf-8"
+    ],
+    [
+     "User-Agent",
+     "Boto3/1.43.126 md/Botocore#1.43.126 ua/2.1 os/linux#<kernel> md/arch#x86_64 lang/python#3.13.18 md/pyimpl#CPython m/D,N,Z,b,g cfg/retry-mode#legacy Botocore/1.43.126"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/ec2/aws4_request, SignedHeaders=content-type;host;x-amz-date, Signature=<hex>"
+    ],
+    [
+     "amz-sdk-invocation-id",
+     "<uuid>"
+    ],
+    [
+     "amz-sdk-request",
+     "attempt=1"
+    ],
+    [
+     "Content-Length",
+     "72"
+    ]
+   ],
+   "body_sha256": "c2f4676dd3c817431ab39a1b8c4c4469b9e951d176be794c23a1ea3f2227ac86",
+   "form": [
+    [
+     "Action",
+     "DeleteSubnet"
+    ],
+    [
+     "Version",
+     "2016-11-15"
+    ],
+    [
+     "SubnetId",
+     "subnet-00000000000000003"
+    ]
+   ],
+   "response_status": 200,
+   "response_code": null
+  },
+  {
+   "operation": "DeleteVpc",
+   "method": "POST",
+   "path": "/",
+   "http_version": "HTTP/1.1",
+   "content_type": "application/x-www-form-urlencoded",
+   "content_type_header": "application/x-www-form-urlencoded; charset=utf-8",
+   "headers": [
+    [
+     "Host",
+     "127.0.0.1:<port>"
+    ],
+    [
+     "Accept-Encoding",
+     "identity"
+    ],
+    [
+     "Content-Type",
+     "application/x-www-form-urlencoded; charset=utf-8"
+    ],
+    [
+     "User-Agent",
+     "Boto3/1.43.126 md/Botocore#1.43.126 ua/2.1 os/linux#<kernel> md/arch#x86_64 lang/python#3.13.18 md/pyimpl#CPython m/D,N,Z,b,g cfg/retry-mode#legacy Botocore/1.43.126"
+    ],
+    [
+     "X-Amz-Date",
+     "<amz-date>"
+    ],
+    [
+     "Authorization",
+     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/<yyyymmdd>/us-east-1/ec2/aws4_request, SignedHeaders=content-type;host;x-amz-date, Signature=<hex>"
+    ],
+    [
+     "amz-sdk-invocation-id",
+     "<uuid>"
+    ],
+    [
+     "amz-sdk-request",
+     "attempt=1"
+    ],
+    [
+     "Content-Length",
+     "63"
+    ]
+   ],
+   "body_sha256": "dab7dfe696331b61c8d82241006646da1ebf2500f7e834b9ad9f1ccf34c8cd73",
+   "form": [
+    [
+     "Action",
+     "DeleteVpc"
+    ],
+    [
+     "Version",
+     "2016-11-15"
+    ],
+    [
+     "VpcId",
+     "vpc-00000000000000001"
+    ]
+   ],
+   "response_status": 200,
+   "response_code": null
+  }
+ ],
+ "summary": {
+  "operations": [
+   "DescribeRegions",
+   "DescribeAvailabilityZones",
+   "CreateVpc",
+   "CreateSubnet",
+   "DescribeVpcs",
+   "CreateVolume",
+   "CreateVolume",
+   "DescribeVolumes",
+   "DescribeVolumes",
+   "RunInstances",
+   "RunInstances",
+   "DescribeInstances",
+   "CreateTags",
+   "DescribeTags",
+   "DeleteTags",
+   "AttachVolume",
+   "DetachVolume",
+   "StopInstances",
+   "StartInstances",
+   "TerminateInstances",
+   "CreateSecurityGroup",
+   "DeleteVolume",
+   "DeleteVolume",
+   "DeleteSubnet",
+   "DeleteVpc"
+  ],
+  "content_types": [
+   "application/x-www-form-urlencoded"
+  ],
+  "http_versions": [
+   "HTTP/1.1"
+  ]
+ }
+}
