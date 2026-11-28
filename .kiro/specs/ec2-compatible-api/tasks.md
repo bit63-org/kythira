@@ -70,6 +70,30 @@ is one PR unless noted.
     profiles; static keys; `DryRun`; encoded authorization messages that
     Kythira STS decodes; the `aws` profile, quotas and throttling
   - _Requirements: 2.2, 2.3, 3.2-3.5_
+  - Done (November 27, 2026), bar the daemon: `ec2_front_end.hpp` (SigV4
+    through `aws_request_authorizer`, with static keys or IAM; the codec's
+    errors; `UnsupportedOperation` for an operation with no handler;
+    admission; each operation's `prepare` validating and naming every
+    resource EC2 authorizes it on, checked with `ec2:Region`, resource
+    tags as `aws:ResourceTag/*` and `ec2:ResourceTag/*`, request tags,
+    `ec2:CreateTags` with `ec2:CreateAction` for tagging on create, and
+    `iam:PassRole` with `iam:PassedToService`; an action the plan misses is
+    checked on `*` only when it has no resource types, otherwise the
+    request is InternalError; `DryRun` answers DryRunOperation or
+    UnauthorizedOperation and never runs the operation; the denial carries
+    the authorizer's encoded authorization message). The `ec2` action
+    table, resource ARNs, operation-to-action map and static-key roles are
+    generated from AWS's Service Authorization Reference (`ec2`, v1.5),
+    pinned with a `--check` test. `ec2_throttle.hpp` has EC2's request and
+    resource buckets per account; `ec2_profile.hpp` the `aws` profile and
+    its cluster and account switches (quotas, retentions, throttling). The
+    quotas are enforced by the tasks that create the resources (4, 11-13).
+    Still open: serving the front end from `ec2_node` over HTTPS, which
+    comes with the first handlers (task 4), and with it the end-to-end
+    check that `sts:DecodeAuthorizationMessage` on an IAM cluster opens an
+    EC2 denial's message (the IAM module's tests already show the
+    authorizer's messages round-trip; the front end passes them through
+    unchanged).
 
 - [ ] 4. Catalog, identifiers, idempotency, tags and describes
   - Catalog group: per-kind ID counters with block allocation, EC2 ID
