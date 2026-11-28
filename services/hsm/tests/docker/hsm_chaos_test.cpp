@@ -46,6 +46,9 @@
 // stay in the clear by design (the engine orders by them), so only values
 // carry the searched-for text.
 //
+// A case whose kythira_node modules are missing (KYTHIRA_HSM_CHAOS_MODULES)
+// is skipped, naming the module.
+//
 // Not registered in CTest: it needs Docker or rootless Podman and runs
 // through the docker-hsm-chaos-tests target.
 
@@ -73,6 +76,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <format>
+#include <functional>
 #include <fstream>
 #include <initializer_list>
 #include <iostream>
@@ -119,6 +123,29 @@ auto compose_cmd(std::initializer_list<std::string> args) -> std::vector<std::st
 auto colocated_with() -> std::string {
     const char* env = std::getenv("KYTHIRA_HSM_CHAOS_COLOCATE");
     return env != nullptr && *env != 0 ? std::string(env) : std::string("redis");
+}
+
+/// A Boost.Test precondition: kythira_node has every module in `needed`
+/// (KYTHIRA_HSM_CHAOS_MODULES, the docker-hsm-chaos-tests target's list;
+/// unset runs every case).
+auto has_modules(std::initializer_list<std::string_view> needed)
+    -> std::function<boost::test_tools::assertion_result(boost::unit_test::test_unit_id)> {
+    std::vector<std::string> want(needed.begin(), needed.end());
+    return [want](boost::unit_test::test_unit_id) -> boost::test_tools::assertion_result {
+        const char* env = std::getenv("KYTHIRA_HSM_CHAOS_MODULES");
+        if (env == nullptr) {
+            return true;
+        }
+        const auto list = "," + std::string(env) + ",";
+        for (const auto& m : want) {
+            if (list.find("," + m + ",") == std::string::npos) {
+                boost::test_tools::assertion_result r(false);
+                r.message() << "kythira_node has no " << m << " module (has: " << env << ")";
+                return r;
+            }
+        }
+        return true;
+    };
 }
 
 enum class layout {
@@ -717,7 +744,8 @@ BOOST_AUTO_TEST_CASE(co_located_in_kythira_node) {
     run_scenarios(cl);
 }
 
-BOOST_AUTO_TEST_CASE(encrypted_services_in_kythira_node) {
+BOOST_AUTO_TEST_CASE(encrypted_services_in_kythira_node,
+                     *boost::unit_test::precondition(has_modules({"kms", "dynamodb", "kinesis"}))) {
     container_cluster cl(layout::encrypted_services);
     run_encrypted_writes(cl);
 }

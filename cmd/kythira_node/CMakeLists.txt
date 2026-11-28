@@ -65,6 +65,9 @@ set_tests_properties(kythira_node_unknown_service PROPERTIES
     PASS_REGULAR_EXPRESSION "service 'no-such-service' is not compiled in; compiled in: "
     TIMEOUT 30 LABELS "unit;node")
 get_property(_kythira_node_module_names GLOBAL PROPERTY KYTHIRA_NODE_MODULE_NAMES)
+# The compiled-in modules, for directories entered before every service's
+# (a container scenario reads them through $<TARGET_PROPERTY>).
+set_property(TARGET kythira_node PROPERTY KYTHIRA_NODE_MODULES "${_kythira_node_module_names}")
 foreach(_name IN LISTS _kythira_node_module_names)
     add_test(NAME kythira_node_offers_${_name} COMMAND kythira_node --help)
     set_tests_properties(kythira_node_offers_${_name} PROPERTIES

@@ -38,19 +38,16 @@ set(_HSM_CHAOS_COMPOSE_FILE "${KYTHIRA_HSM_SOURCE_DIR}/docker/hsm-chaos-compose.
 
 # The co-located layout runs the HSM beside Redis; without the Redis module
 # in kythira_node only the stand-alone case could run, so the target says so.
+# Redis's directory comes before this one, so its name is already listed.
+#
 # The encrypted-services case needs the KMS, DynamoDB and Kinesis modules
-# too, and is left out (with a message) in a build without one of them.
+# too. The KMS's directory comes after this one, so the module list read
+# here never named it, and a filter computed from it left the
+# encrypted-services case out of every run. The test is told
+# kythira_node's modules instead, read at generation time from the
+# property cmd/kythira_node/CMakeLists.txt sets once every module is
+# known, and skips (naming the module) a case whose modules are absent.
 get_property(_hsm_chaos_modules GLOBAL PROPERTY KYTHIRA_NODE_MODULE_NAMES)
-set(_hsm_chaos_filter)
-foreach(_m kms dynamodb kinesis)
-    if(NOT "${_m}" IN_LIST _hsm_chaos_modules)
-        set(_hsm_chaos_filter "--run_test=!encrypted_services_in_kythira_node")
-    endif()
-endforeach()
-if(_hsm_chaos_filter)
-    message(STATUS "docker-hsm-chaos-tests: the encrypted-services case needs the kms, "
-                   "dynamodb and kinesis modules in kythira_node; left out")
-endif()
 
 if(_RUNTIME_EXE AND "redis" IN_LIST _hsm_chaos_modules)
     add_custom_target(docker-hsm-chaos-image
@@ -72,8 +69,9 @@ if(_RUNTIME_EXE AND "redis" IN_LIST _hsm_chaos_modules)
                 ${_RT_ENV}
                 KYTHIRA_HSM_CHAOS_COMPOSE_FILE=${_HSM_CHAOS_COMPOSE_FILE}
                 KYTHIRA_HSM_CHAOS_COLOCATE=redis
+                "KYTHIRA_HSM_CHAOS_MODULES=$<JOIN:$<TARGET_PROPERTY:kythira_node,KYTHIRA_NODE_MODULES>,$<COMMA>>"
                 $<TARGET_FILE:hsm_chaos_test>
-                --log_level=message ${_hsm_chaos_filter}
+                --log_level=message
         DEPENDS docker-hsm-chaos-image hsm_chaos_test
         COMMENT "Running the virtual HSM chaos container scenario (runtime: ${CONTAINER_RUNTIME})"
         WORKING_DIRECTORY "${KYTHIRA_IMAGE_CONTEXT}"
