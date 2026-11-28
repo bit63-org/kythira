@@ -65,11 +65,16 @@ struct conversion_summary {
     std::uint64_t term = 0;
 };
 
-/// Converts `data_dir` in place.
+/// Converts `data_dir` in place. The new log is written with
+/// `log_options`, so a node that seals its Raft logs at rest
+/// (`.kiro/specs/raft-log-encryption/`) starts on a sealed log rather than
+/// on plaintext waiting for compaction.
 /// @throws std::runtime_error when there is nothing to convert, it was
 ///         converted already, or a file cannot be read or written; a
 ///         failure before the old files move leaves them untouched.
-inline auto convert_data_dir(const std::filesystem::path& data_dir) -> conversion_summary {
+inline auto convert_data_dir(const std::filesystem::path& data_dir,
+                             const kythira::binary_file_persistence_options& log_options = {})
+    -> conversion_summary {
     using node_id = kythira::host_node_id;
     if (std::filesystem::exists(kythira::iam::iam_raft_dir(data_dir))) {
         throw std::runtime_error(data_dir.string() +
@@ -88,7 +93,7 @@ inline auto convert_data_dir(const std::filesystem::path& data_dir) -> conversio
     {
         kythira::file_persistence_engine<node_id> old(data_dir);
         kythira::binary_file_persistence_engine<node_id> fresh(
-            staging / std::to_string(kythira::iam::k_iam_group_id));
+            staging / std::to_string(kythira::iam::k_iam_group_id), log_options);
 
         const auto snap = old.load_snapshot();
         if (snap) {

@@ -21,11 +21,14 @@
 #include <raft/file_persistence.hpp>
 #include <raft/host_node_id.hpp>
 #include <raft/private_file.hpp>
+#include <raft/raft_log_encryption.hpp>
 
 #include <boost/json.hpp>
 
 #include <cstdint>
 #include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <optional>
 #include <string>
 #include <vector>
@@ -132,6 +135,51 @@ BOOST_AUTO_TEST_CASE(the_whole_raft_state_moves_and_rebuilds_the_same_iam_state)
     BOOST_TEST(fs::exists(d.path / "pre-host" / "snapshot"));
     BOOST_TEST(fs::exists(d.path / "pre-host" / "log"));
     BOOST_CHECK_THROW((void)iam_node::convert_data_dir(d.path), std::runtime_error);
+}
+
+// .kiro/specs/raft-log-encryption/ task 5: a node that seals its Raft
+// logs at rest converts into a sealed log, which reopens only with its key
+// ring and holds no account id in the clear.
+BOOST_AUTO_TEST_CASE(a_sealing_node_converts_into_a_sealed_log) {
+    temp_dir d;
+    write_old_member(d.path);
+    kythira::raft_log_data_key_bytes wrapping{};
+    wrapping.fill(0x5A);
+    kythira::binary_file_persistence_options sealed;
+    sealed._key_ring = kythira::raft_log_key_file_ring::open(
+        d.path / "raft-log-keys", kythira::raft_log_fixed_key_source(wrapping));
+
+    const auto done = iam_node::convert_data_dir(d.path, sealed);
+    BOOST_TEST(done.last_entry == 4U);
+
+    const auto group = iam::iam_raft_dir(d.path) / std::to_string(iam::k_iam_group_id);
+    {
+        new_engine fresh(group, sealed);
+        BOOST_TEST(fresh.sealed_record_count() == 2U);
+        BOOST_TEST(fresh.get_last_log_index() == 4U);
+        iam::iam_state_machine sm(iam::iam_config{});
+        const auto snap = fresh.load_snapshot();
+        BOOST_REQUIRE(snap.has_value());
+        sm.restore_from_snapshot(snap->_state_machine_state, snap->_last_included_index);
+        for (const auto& e : fresh.get_log_entries(3, 4)) {
+            (void)sm.apply(e.command(), e.index());
+        }
+        BOOST_TEST(has_account(sm, "444455556666"));
+    }
+    for (const auto& f : fs::recursive_directory_iterator(iam::iam_raft_dir(d.path))) {
+        if (!f.is_regular_file()) {
+            continue;
+        }
+        std::ifstream in(f.path(), std::ios::binary);
+        const std::string bytes{std::istreambuf_iterator<char>(in),
+                                std::istreambuf_iterator<char>()};
+        for (const auto* account :
+             {"111122223333", "222233334444", "333344445555", "444455556666"}) {
+            BOOST_TEST(bytes.find(account) == std::string::npos,
+                       account << " in the clear in " << f.path());
+        }
+    }
+    BOOST_CHECK_THROW((void)new_engine{group}, std::exception);
 }
 
 BOOST_AUTO_TEST_CASE(a_log_with_a_hole_is_refused_before_anything_moves) {

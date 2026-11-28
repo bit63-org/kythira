@@ -55,6 +55,7 @@
 #include <raft/multi_raft_impl.hpp>
 #include <raft/node_core.hpp>
 #include <raft/node_host.hpp>
+#include <raft/raft_log_kms.hpp>
 #include <raft/service_module.hpp>
 
 #include <openssl/pem.h>
@@ -217,7 +218,10 @@ int main(int argc, char** argv) {
 
     if (cfg.convert_data_dir) {
         try {
-            const auto done = iam_node::convert_data_dir(cfg.data_dir);
+            const auto done = iam_node::convert_data_dir(
+                cfg.data_dir,
+                kythira::raft_log_options_for(
+                    cfg.data_dir, kythira::raft_log_encryption_settings::from_environment()));
             std::cerr << "iam_node: converted " << cfg.data_dir << " (snapshot at "
                       << done.snapshot_index << ", entries " << done.first_entry << "-"
                       << done.last_entry << ", term " << done.term

@@ -138,13 +138,16 @@ struct iam_raft_timing {
 
 /// The multi_raft settings every IAM host uses: one group, never split or
 /// merged, never hibernating (a replica's staleness bound counts on
-/// heartbeats), with each group's files in `iam_raft_dir`.
+/// heartbeats), with each group's files in `iam_raft_dir`, opened with
+/// `log_options` (a key ring when the node seals its Raft logs at rest,
+/// `.kiro/specs/raft-log-encryption/`).
 template<typename Types>
 [[nodiscard]] auto iam_raft_config(const kythira::host_node_id& self,
                                    typename Types::network_client_type client,
                                    typename Types::network_server_type server,
                                    const std::filesystem::path& data_dir, std::string partition,
-                                   const iam_raft_timing& timing, log_level level)
+                                   const iam_raft_timing& timing, log_level level,
+                                   kythira::binary_file_persistence_options log_options = {})
     -> kythira::multi_raft_config<Types, std::string, std::uint64_t> {
     const auto raft_dir = iam_raft_dir(data_dir);
     std::filesystem::create_directories(raft_dir);
@@ -153,8 +156,9 @@ template<typename Types>
         .network_client = std::move(client),
         .network_server = std::move(server),
         .store_factory =
-            [raft_dir](const std::uint64_t& group) {
-                return typename Types::persistence_engine_type{raft_dir / std::to_string(group)};
+            [raft_dir, log_options = std::move(log_options)](const std::uint64_t& group) {
+                return typename Types::persistence_engine_type{raft_dir / std::to_string(group),
+                                                               log_options};
             },
     };
     rc.state_machine_factory = [partition = std::move(partition)](const std::uint64_t&) {

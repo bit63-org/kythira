@@ -796,6 +796,15 @@ add_raft_completion_test(raft_log_kms_test raft_log_kms_test.cpp)
 target_link_libraries(raft_log_kms_test PRIVATE OpenSSL::SSL OpenSSL::Crypto)
 set_tests_properties(raft_log_kms_test PROPERTIES LABELS "unit;persistence" TIMEOUT 120)
 
+# raft-log-encryption task 3: three in-process nodes, plaintext, sealed and
+# decrypt-only, replicating through leader changes and restarts that move
+# nodes between modes (one rewritten in the clear offline); a byte scan of
+# each node's files checks what it wrote in the clear. About 3 seconds.
+add_raft_completion_test(raft_log_encryption_cluster_test raft_log_encryption_cluster_test.cpp)
+target_link_libraries(raft_log_encryption_cluster_test PRIVATE OpenSSL::Crypto)
+set_tests_properties(raft_log_encryption_cluster_test PROPERTIES
+    LABELS "integration;persistence" TIMEOUT 300)
+
 # raft-log-encryption task 7: appends (with their barrier) and reads, plain
 # against sealed, per command size. Prints a table; a few seconds.
 add_raft_completion_test(raft_log_encryption_bench raft_log_encryption_bench.cpp)

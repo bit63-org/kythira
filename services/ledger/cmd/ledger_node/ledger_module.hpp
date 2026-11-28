@@ -40,6 +40,7 @@
 #include <raft/multi_raft_transport_handles.hpp>
 #include <raft/node_core.hpp>
 #include <raft/prometheus_metrics.hpp>
+#include <raft/raft_log_kms.hpp>
 #include <raft/rocksdb_kv_engine.hpp>
 #include <raft/service_module.hpp>
 
@@ -368,14 +369,18 @@ private:
 
     auto make_raft_config(Host& host, const service_node::group_space& space) -> raft_config {
         const auto raft_dir = opt_.data_dir / "raft";
+        // Sealed at rest when KYTHIRA_RAFT_LOG_KMS says so
+        // (.kiro/specs/raft-log-encryption/); one key ring per data dir.
+        const auto log_options = kythira::raft_log_options_for(
+            opt_.data_dir, kythira::raft_log_encryption_settings::from_environment());
         raft_config cfg{
             .node_id = opt_.node_id,
             .network_client = typename types::network_client_type{host.client()},
             .network_server = host.server_for(space),
             .store_factory =
-                [raft_dir](const std::uint64_t& group) {
-                    return
-                        typename types::persistence_engine_type{raft_dir / std::to_string(group)};
+                [raft_dir, log_options](const std::uint64_t& group) {
+                    return typename types::persistence_engine_type{raft_dir / std::to_string(group),
+                                                                   log_options};
                 },
         };
         cfg.state_engine = std::make_shared<engine_type>(opt_.data_dir / "engine");
