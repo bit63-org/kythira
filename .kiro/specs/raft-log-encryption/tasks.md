@@ -15,14 +15,20 @@
   - Engine tests re-run with a key ring, plus the no-plaintext scan
   - _Requirements: 1.1-1.6, 2.1, 2.2, 3.5, 4.1-4.3_
 
-- [ ] 3. Migration both ways and rotation
+- [x] 3. Migration both ways and rotation
   - `rewrite_records()`, crash-safe, with fault points at each step
   - `lowest_live_generation()` and key ring pruning
   - Tests: plaintext to sealed, sealed to plaintext (through
     `decrypt_only`), rotation then rewrite then prune, a crash at each
     rewrite step (done, `raft_log_encryption_unit_test`)
-  - [ ] A three-node cluster with mixed modes through a leader change
-    (with task 5, where a service node is the natural fixture)
+  - [x] A three-node cluster with mixed modes through a leader change
+    (`raft_log_encryption_cluster_test`: plaintext, sealed and
+    decrypt-only nodes through two leader changes that make a new leader
+    ship entries from its own log; then one node rewritten in the clear
+    offline and restarted with no key ring while another turns sealing on;
+    a byte scan of each node's files after every phase. In-process hosts
+    rather than service nodes: the property is the engine's and the wire's,
+    and the service wiring is the same `raft_log_options_for` call each)
   - _Requirements: 4.4-4.6, 5.1, 5.2_
 
 - [x] 4. KMS adapter (needs the shared `kms_key_provider`, PR #837)
