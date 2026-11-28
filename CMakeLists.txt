@@ -944,6 +944,19 @@ else()
     message(STATUS "SNS module disabled (CONFIG_SNS=n, or OpenSSL/Boost not found)")
 endif()
 kythira_kconfig_require(SNS KYTHIRA_BUILD_SNS "OpenSSL and Boost")
+# ec2-compatible-api spec: the services/ec2/ module (an Amazon EC2-compatible
+# compute API, antikythera's controller). Off unless CONFIG_EC2=y, like every
+# new module; needs OpenSSL (SigV4, the link's TLS) and Boost (the Beast front
+# end). Entered with add_subdirectory(services/ec2) below, after tests/.
+kythira_kconfig_gate(EC2)
+set(KYTHIRA_BUILD_EC2 FALSE)
+if(_KYTHIRA_GATE_EC2 AND DEFINED KCONFIG_EC2 AND OpenSSL_FOUND AND Boost_FOUND)
+    set(KYTHIRA_BUILD_EC2 TRUE)
+    message(STATUS "EC2 module enabled (services/ec2/, .kiro/specs/ec2-compatible-api/)")
+else()
+    message(STATUS "EC2 module disabled (CONFIG_EC2=n, or OpenSSL/Boost not found)")
+endif()
+kythira_kconfig_require(EC2 KYTHIRA_BUILD_EC2 "OpenSSL and Boost")
 
 # sqs-compatible-queues spec: the services/sqs/ module (an Amazon
 # SQS-compatible message queue service). Off unless CONFIG_SQS=y, like every
@@ -2417,6 +2430,12 @@ endif()
 # entered likewise.
 if(KYTHIRA_BUILD_SNS)
     add_subdirectory(services/sns)
+endif()
+
+# The EC2 module (services/README.md, .kiro/specs/ec2-compatible-api/),
+# entered likewise.
+if(KYTHIRA_BUILD_EC2)
+    add_subdirectory(services/ec2)
 endif()
 
 # The S3 module (services/README.md, .kiro/specs/s3-compatible-storage/),

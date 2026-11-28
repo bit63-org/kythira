@@ -52,3 +52,8 @@ CONFIG_SNS=y
 # and clang-tidy cover it. Needs only OpenSSL, which every leg has.
 # configs/ci_no_s3_defconfig is this file without it.
 CONFIG_S3=y
+# The EC2 module (services/ec2/, .kiro/specs/ec2-compatible-api/). Off by
+# default like every new module; on here so the build-and-test legs, coverage
+# and clang-tidy cover it. Needs only OpenSSL and Boost, which every leg has.
+# configs/ci_no_ec2_defconfig is this file without it.
+CONFIG_EC2=y
