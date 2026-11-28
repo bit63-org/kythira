@@ -53,8 +53,12 @@ stderr.
   operation initialized with no data sent yet; the failed call is then tried
   once more. An operation that had sent data is lost: its next call answers
   `CKR_DEVICE_ERROR`. A session that made session objects is gone, since
-  they lived on the old node: it answers `CKR_SESSION_HANDLE_INVALID`. With
-  no node answering, calls answer `CKR_DEVICE_ERROR` until one does.
+  they lived on the old node: it answers `CKR_SESSION_HANDLE_INVALID`. So
+  do a slot's sessions when the new node refuses the login (a token group
+  still electing its leader answers `CKR_DEVICE_ERROR`): left open they
+  would be logged out without saying so, so the application opens a
+  session and logs in again instead. With no node answering, calls answer
+  `CKR_DEVICE_ERROR` until one does.
 - **Key usage.** A new key gets no usage flag (`CKA_SIGN`, `CKA_ENCRYPT`,
   ...) its template does not ask for. Most consumers ask; Java's SunPKCS11
   does not, so its configuration names them, as for any HSM with strict
