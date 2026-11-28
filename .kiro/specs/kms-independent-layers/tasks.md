@@ -34,9 +34,16 @@ a task that needs one first builds it to that spec's design.
     layer
   - _Requirements: 6.1-6.3, 7.1, 7.2, 9.1, 9.2_
 
-- [ ] 5. In-process consumers in split layouts
+- [x] 5. In-process consumers in split layouts
   - `kms.client` published only by front-end nodes; DynamoDB and Kinesis
     tests against a co-located and a remote KMS front end
+  - Built as `kythira_node_kms_consumers_test` over the shared process
+    harness `kms_process_cluster.hpp` (kms_node and kythira_node members,
+    roles per member, consumers on a peer set of their own): a front end
+    beside Kinesis and DynamoDB answers them in process, a node with no KMS
+    reaches a remote front end over HTTPS as a trusted service, and a
+    consumer beside a KMS without a front end refuses to start, naming
+    `KYTHIRA_KMS_ROLES`
   - _Requirements: 8.1, 8.2_
 
 - [ ] 6. Migration path tests

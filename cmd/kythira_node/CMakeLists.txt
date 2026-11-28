@@ -145,6 +145,35 @@ if(TARGET kythira_iam_module AND TARGET kythira_kinesis_module  # module-hook
         LABELS "integration;kms;kms-module;kinesis;node" TIMEOUT 600)
 endif()
 
+# Kinesis and DynamoDB on the KMS's layers (.kiro/specs/
+# kms-independent-layers/ task 5, Requirements 8.1 and 8.2): a kythira_node
+# with a KMS front end of its own and one with no KMS beside kms_node data
+# nodes and a remote front end, over SoftHSM2. Registered here because it
+# needs this binary and kms_node.
+if(TARGET kythira_kms_module AND TARGET kythira_kinesis_module  # module-hook
+   AND TARGET kythira_dynamodb_module AND TARGET kms_node  # module-hook
+   AND KYTHIRA_KMS_SOFTHSM2_LIBRARY AND KYTHIRA_KMS_SOFTHSM2_UTIL  # module-hook
+   AND TARGET httplib::httplib)
+    add_raft_completion_test(kythira_node_kms_consumers_test
+        "${PROJECT_SOURCE_DIR}/services/kms/tests/kythira_node_kms_consumers_test.cpp")
+    target_include_directories(kythira_node_kms_consumers_test PRIVATE
+        "${PROJECT_SOURCE_DIR}/services/kms/tests")  # module-hook
+    target_link_libraries(kythira_node_kms_consumers_test PRIVATE
+        kythira_kms httplib::httplib boost_json OpenSSL::SSL OpenSSL::Crypto  # module-hook
+        kythira_test_support)
+    target_compile_definitions(kythira_node_kms_consumers_test PRIVATE
+        KMS_NODE_PATH="$<TARGET_FILE:kms_node>"  # module-hook
+        KYTHIRA_SOFTHSM2_LIBRARY="${KYTHIRA_KMS_SOFTHSM2_LIBRARY}"  # module-hook
+        KYTHIRA_SOFTHSM2_UTIL="${KYTHIRA_KMS_SOFTHSM2_UTIL}"  # module-hook
+        KYTHIRA_NODE_PATH="$<TARGET_FILE:kythira_node>")
+    add_dependencies(kythira_node_kms_consumers_test kythira_node kms_node)  # module-hook
+    set_target_properties(kythira_node_kms_consumers_test PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests")
+    set_tests_properties(kythira_node_kms_consumers_test PROPERTIES
+        WORKING_DIRECTORY "${CMAKE_BINARY_DIR}/tests"
+        LABELS "integration;kms;kms-module;kinesis;dynamodb;node" TIMEOUT 900)
+endif()
+
 # Every compiled-in module on one three-node cluster (.kiro/specs/
 # service-colocation/ task 11, Requirement 10.1): each service's smoke test
 # against the same kythira_node processes. The test reads the module list
