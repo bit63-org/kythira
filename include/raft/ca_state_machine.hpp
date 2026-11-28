@@ -64,6 +64,11 @@ enum class ca_command_type : std::uint8_t {
     // expiry is driven by the log, never by a replica's clock.
     record_oidc_key = 5,
     retire_oidc_key = 6,
+    // The time floor (`.kiro/specs/az-cold-start/` Requirement 10.2): the
+    // leader commits its clock every ten minutes, from a clock that passed
+    // raft::check_issuing_clock(). apply() keeps the highest seen, so a
+    // new leader with a slower clock never moves it back.
+    record_time_floor = 7,
 };
 
 struct ca_ledger_entry {
@@ -549,6 +554,16 @@ requires kythira::node_id_traits<NodeId>::is_textual
     return ca_state_machine_detail::bytes_from_json(obj);
 }
 
+/// Encodes a `record_time_floor` command: the cluster has passed `floor`
+/// (Unix seconds).
+[[nodiscard]] inline auto encode_record_time_floor_command(std::int64_t floor)
+    -> std::vector<std::byte> {
+    boost::json::object obj;
+    obj["type"] = static_cast<int>(ca_command_type::record_time_floor);
+    obj["floor"] = floor;
+    return ca_state_machine_detail::bytes_from_json(obj);
+}
+
 /// Replicated CA state: root material (encrypted key + plaintext cert, the
 /// cert being public by nature) plus the full issuance/revocation ledger.
 /// Satisfies `kythira::state_machine<ca_state_machine, std::uint64_t>` so it
@@ -662,6 +677,10 @@ public:
                 it->retire_after = retire_after;
                 return {};
             }
+            case ca_command_type::record_time_floor: {
+                _time_floor = std::max(_time_floor, obj.at("floor").to_number<std::int64_t>());
+                return {};
+            }
         }
         throw std::invalid_argument("ca_state_machine: unknown command type");
     }
@@ -698,6 +717,10 @@ public:
             }
             obj["oidc_keys"] = std::move(keys);
             obj["oidc_clock"] = _oidc_clock;
+        }
+        // Likewise only once a floor has been committed.
+        if (_time_floor != 0) {
+            obj["time_floor"] = _time_floor;
         }
         return ca_state_machine_detail::bytes_from_json(obj);
     }
@@ -738,6 +761,7 @@ public:
         std::set<std::string> rpc_tls_ready_textual;
         std::vector<kythira::oidc::oidc_key_record> oidc_keys;
         std::int64_t oidc_clock = 0;
+        std::int64_t time_floor = 0;
 
         if (!snapshot.empty()) {
             auto obj = ca_state_machine_detail::json_from_bytes(snapshot).as_object();
@@ -769,6 +793,10 @@ public:
             }
             if (auto* v = obj.if_contains("oidc_clock")) {
                 oidc_clock = v->to_number<std::int64_t>();
+            }
+            // Snapshots from before the time floor have none: 0, no floor.
+            if (auto* v = obj.if_contains("time_floor")) {
+                time_floor = v->to_number<std::int64_t>();
             }
         }
 
@@ -812,6 +840,11 @@ public:
             if (oidc_clock < _oidc_clock) {
                 reject("it moves the OIDC key clock backwards");
             }
+            // A lower floor would let a node whose clock fell back into the
+            // gap issue again, which is exactly what the floor prevents.
+            if (time_floor < _time_floor) {
+                reject("it moves the time floor backwards");
+            }
             for (const auto& current : _oidc_keys) {
                 auto it =
                     std::ranges::find(oidc_keys, current.kid, &kythira::oidc::oidc_key_record::kid);
@@ -841,6 +874,7 @@ public:
         _rpc_tls_ready_textual = std::move(rpc_tls_ready_textual);
         _oidc_keys = std::move(oidc_keys);
         _oidc_clock = oidc_clock;
+        _time_floor = time_floor;
     }
 
     // Not part of the state_machine concept; used by ca_cluster_node's HTTP layer.
@@ -886,6 +920,8 @@ public:
     }
     /// The latest leader-stamped time any OIDC command carried.
     [[nodiscard]] auto oidc_clock() const -> std::int64_t { return _oidc_clock; }
+    /// The highest committed time floor (Unix seconds), or 0 for none.
+    [[nodiscard]] auto time_floor() const -> std::int64_t { return _time_floor; }
 
 private:
     // Moves the OIDC clock forward to `now` (never back: a new leader's clock
@@ -911,6 +947,7 @@ private:
     std::set<std::string> _rpc_tls_ready_textual;
     std::vector<kythira::oidc::oidc_key_record> _oidc_keys;
     std::int64_t _oidc_clock{0};
+    std::int64_t _time_floor{0};
     log_index_t _last_applied_index{0};
 };
 

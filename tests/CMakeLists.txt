@@ -5241,6 +5241,19 @@ set_tests_properties(ca_state_machine_unit_test PROPERTIES
     LABELS "unit;certificate_authority;ca;raft;state_machine"
 )
 
+# az-cold-start Requirement 10: the time floor and issuing-clock checks.
+add_executable(time_floor_unit_test time_floor_unit_test.cpp)
+target_link_libraries(time_floor_unit_test PRIVATE
+    kythira_core_headers
+    Boost::unit_test_framework
+)
+target_compile_features(time_floor_unit_test PRIVATE cxx_std_23)
+add_test(NAME time_floor_unit_test COMMAND time_floor_unit_test)
+set_tests_properties(time_floor_unit_test PROPERTIES
+    TIMEOUT 30
+    LABELS "unit;ca;cold_start"
+)
+
 add_executable(acme_jws_unit_test acme_jws_unit_test.cpp)
 target_link_libraries(acme_jws_unit_test PRIVATE
     Boost::unit_test_framework

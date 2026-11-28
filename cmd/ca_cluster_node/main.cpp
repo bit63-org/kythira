@@ -103,6 +103,7 @@
 #include <raft/prometheus_metrics.hpp>
 #include <raft/raft.hpp>
 #include <raft/tcp_raft_types.hpp>
+#include <raft/time_floor.hpp>
 #include <raft/tcp_rpc.hpp>
 #include <raft/tls_tcp_rpc.hpp>
 
@@ -554,9 +555,18 @@ auto acquire_rpc_peer_certificate(kythira::node<Types>& raft_node,
                                   std::mutex& signer_mu,
                                   std::unique_ptr<raft::testing::certificate_authority>& signer,
                                   const std::string& csr_pem,
-                                  const raft::testing::csr_signing_options& sign_opts)
+                                  const raft::testing::csr_signing_options& sign_opts,
+                                  const raft::time_floor& time_floor)
     -> raft::testing::pem_material {
     if (raft_node.is_leader()) {
+        // az-cold-start Requirement 10.3: never issue from a clock below the
+        // time floor, not even to itself. The next tick retries.
+        if (const auto clock =
+                raft::check_issuing_clock(std::chrono::system_clock::now(), time_floor.value(), {});
+            !clock.ok()) {
+            throw std::runtime_error("acquire_rpc_peer_certificate: refusing to issue: " +
+                                     std::string(raft::to_string(clock.verdict)));
+        }
         raft::testing::pem_material material;
         {
             std::unique_lock signer_lock(signer_mu);
@@ -837,6 +847,19 @@ auto run_ca_cluster_node(ca_cluster_node::ca_cluster_node_config cfg, std::strin
         return label;
     };
 
+    // The time floor (.kiro/specs/az-cold-start/ Requirement 10): the
+    // newest committed floor this node has read. Every issuance checks the
+    // clock against it first (Requirement 10.3), and the leader commits a
+    // new one every ten minutes from a clock that passes the same check
+    // (maybe_commit_time_floor). No time sources are configured yet (the
+    // graph's `time_sources` component is planned), so only the floor
+    // applies; raft::check_issuing_clock takes their samples once they
+    // exist.
+    raft::time_floor known_floor;
+    auto issuing_clock = [&known_floor] {
+        return raft::check_issuing_clock(std::chrono::system_clock::now(), known_floor.value(), {});
+    };
+
     auto ensure_signer = [&] {
         {
             std::lock_guard lock(signer_mu);
@@ -854,6 +877,8 @@ auto run_ca_cluster_node(ca_cluster_node::ca_cluster_node_config cfg, std::strin
         } catch (const std::exception&) {
             return;  // lost leadership mid-read, or no quorum yet — retry next tick
         }
+        // Before any signer exists, so no issuance runs on a stale floor.
+        (void)known_floor.observe(state.time_floor());
         if (!state.has_root_material()) {
             return;
         }
@@ -1265,7 +1290,7 @@ auto run_ca_cluster_node(ca_cluster_node::ca_cluster_node_config cfg, std::strin
             raft::testing::pem_material material;
             try {
                 material = acquire_rpc_peer_certificate(raft_node, cfg, signer_mu, signer,
-                                                        csr.csr_pem, sign_opts);
+                                                        csr.csr_pem, sign_opts, known_floor);
             } catch (const std::exception& ex) {
                 std::cerr << "[warn] ca_cluster_node: failed to acquire RPC peer identity, will "
                              "retry: "
@@ -1358,7 +1383,7 @@ auto run_ca_cluster_node(ca_cluster_node::ca_cluster_node_config cfg, std::strin
                 sign_opts.client_auth = leaf_opts.client_auth;
                 try {
                     new_cert_pem = acquire_rpc_peer_certificate(raft_node, cfg, signer_mu, signer,
-                                                                csr.csr_pem, sign_opts)
+                                                                csr.csr_pem, sign_opts, known_floor)
                                        .certificate_pem;
                 } catch (const std::exception& ex) {
                     std::cerr << "[warn] ca_cluster_node: RPC peer identity renewal failed, will "
@@ -1456,6 +1481,73 @@ auto run_ca_cluster_node(ca_cluster_node::ca_cluster_node_config cfg, std::strin
     // the OIDC publisher's counters today.
     auto metrics_registry = std::make_shared<kythira::prometheus_registry>();
 
+    // Requirement 10.2: the leader commits its clock as the time floor every
+    // ten minutes (and at once on election), only from a clock that passes
+    // the issuing check, and exports the skew (Requirement 10.3).
+    raft::time_floor_schedule floor_schedule;
+    auto maybe_commit_time_floor = [&] {
+        const auto steady_now = std::chrono::steady_clock::now();
+        if (!floor_schedule.due(steady_now)) {
+            return;
+        }
+        raft::testing::ca_state_machine state;
+        try {
+            state = read_ca_state(raft_node, std::chrono::milliseconds(5000));
+        } catch (const std::exception&) {
+            return;  // lost leadership or no quorum; try again next tick
+        }
+        (void)known_floor.observe(state.time_floor());
+        const auto now = std::chrono::system_clock::now();
+        const auto clock = raft::check_issuing_clock(now, known_floor.value(), {});
+        metrics_registry->observe_gauge("kythira_time_floor_seconds", {},
+                                        static_cast<double>(known_floor.value()));
+        metrics_registry->observe_gauge("kythira_clock_below_time_floor_seconds", {},
+                                        static_cast<double>(clock.below_floor_by.count()));
+        // Whatever happens, wait an interval: a clock that is wrong now is
+        // reported once per interval, not every tick.
+        floor_schedule.committed(steady_now);
+        if (!clock.ok()) {
+            std::cerr << "[warn] ca_cluster_node: not committing a time floor and refusing to "
+                         "issue: "
+                      << raft::to_string(clock.verdict) << " (clock " << raft::to_unix_seconds(now)
+                      << " s, floor " << known_floor.value() << " s)\n";
+            return;
+        }
+        const auto next = raft::time_floor_schedule::next_floor(clock, now, known_floor.value());
+        if (!next) {
+            return;
+        }
+        try {
+            raft_node
+                .submit_command(raft::testing::encode_record_time_floor_command(*next),
+                                k_command_timeout)
+                .get();
+            (void)known_floor.observe(*next);
+        } catch (const std::exception& ex) {
+            floor_schedule.reset();  // not committed: try again next tick
+            std::cerr << "[warn] ca_cluster_node: committing the time floor failed, will "
+                         "retry: "
+                      << ex.what() << "\n";
+        }
+    };
+
+    // az-cold-start Requirement 10.3: a leader whose clock is below the
+    // time floor answers 503 with the reason instead of issuing, and
+    // counts the refusal. False when it refused. At this scope, not in the
+    // route setup, because the handlers keep a reference to it.
+    auto clock_allows_issuing = [&](httplib::Response& res) {
+        const auto clock = issuing_clock();
+        if (clock.ok()) {
+            return true;
+        }
+        const std::string reason(raft::to_string(clock.verdict));
+        metrics_registry->observe_counter("kythira_ca_issuance_refused_clock", {{"reason", reason}},
+                                          1);
+        res.status = 503;
+        res.set_content(json_error(reason), "application/json");
+        return false;
+    };
+
     std::jthread maintenance_thread([&](std::stop_token st) {
         bool was_leader = false;
         while (!st.stop_requested() && !g_stop.load()) {
@@ -1477,8 +1569,12 @@ auto run_ca_cluster_node(ca_cluster_node::ca_cluster_node_config cfg, std::strin
                         // through; the next tick re-checks is_leader().
                     }
                 }
+                if (!was_leader) {
+                    floor_schedule.reset();
+                }
                 maybe_bootstrap();
                 ensure_signer();
+                maybe_commit_time_floor();
                 maybe_rotate_oidc();
             } else if (was_leader) {
                 std::lock_guard lock(signer_mu);
@@ -1961,6 +2057,9 @@ auto run_ca_cluster_node(ca_cluster_node::ca_cluster_node_config cfg, std::strin
                     return;
                 }
 
+                if (!clock_allows_issuing(res)) {
+                    return;
+                }
                 std::unique_lock signer_lock(signer_mu);
                 if (signer == nullptr) {
                     res.status = 503;
@@ -2170,6 +2269,9 @@ auto run_ca_cluster_node(ca_cluster_node::ca_cluster_node_config cfg, std::strin
                     options.validity = *validity;
                 }
 
+                if (!clock_allows_issuing(res)) {
+                    return;
+                }
                 std::unique_lock signer_lock(signer_mu);
                 if (signer == nullptr) {
                     res.status = 503;

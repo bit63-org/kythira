@@ -631,3 +631,40 @@ BOOST_AUTO_TEST_CASE(wide_serial_rejects_unknown_versions_and_bad_hex) {
     revoke["serial"] = "not-hex";
     BOOST_CHECK_THROW(sm.apply(bytes_of(revoke), 3), std::invalid_argument);
 }
+
+// ── record_time_floor (.kiro/specs/az-cold-start/ Requirement 10.2) ─────────
+
+BOOST_AUTO_TEST_CASE(time_floor_only_rises_and_survives_snapshots) {
+    ca_state_machine sm;
+    BOOST_TEST(sm.time_floor() == 0);
+    // No floor yet: the snapshot format is unchanged.
+    BOOST_TEST(!boost::json::parse(std::string(reinterpret_cast<const char*>(sm.get_state().data()),
+                                               sm.get_state().size()))
+                    .as_object()
+                    .contains("time_floor"));
+    BOOST_TEST(sm.apply(encode_record_time_floor_command(1'795'000'000), 1).empty());
+    // A new leader with a slower clock never moves it back.
+    BOOST_TEST(sm.apply(encode_record_time_floor_command(1'794'000'000), 2).empty());
+    BOOST_TEST(sm.time_floor() == 1'795'000'000);
+    BOOST_TEST(sm.apply(encode_record_time_floor_command(1'795'000'600), 3).empty());
+    BOOST_TEST(sm.time_floor() == 1'795'000'600);
+
+    ca_state_machine restored;
+    restored.restore_from_snapshot(sm.get_state(), 3);
+    BOOST_TEST(restored.time_floor() == 1'795'000'600);
+}
+
+BOOST_AUTO_TEST_CASE(bootstrapped_rejects_a_lower_time_floor) {
+    auto sm = bootstrapped_with_revoked_serial();
+    sm.apply(encode_record_time_floor_command(1'795'000'000), 5);
+    auto lower = forged_snapshot(sm, [](auto& o) { o["time_floor"] = 1'700'000'000; });
+    BOOST_CHECK_THROW(sm.restore_from_snapshot(lower, 9), std::invalid_argument);
+    auto dropped = forged_snapshot(sm, [](auto& o) { o.erase("time_floor"); });
+    BOOST_CHECK_THROW(sm.restore_from_snapshot(dropped, 9), std::invalid_argument);
+    require_unchanged(sm);
+    BOOST_TEST(sm.time_floor() == 1'795'000'000);
+
+    auto higher = forged_snapshot(sm, [](auto& o) { o["time_floor"] = 1'795'000'600; });
+    sm.restore_from_snapshot(higher, 9);
+    BOOST_TEST(sm.time_floor() == 1'795'000'600);
+}
