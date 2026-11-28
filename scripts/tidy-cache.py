@@ -20,7 +20,14 @@ MODE:
 
 The bucket comes from the variables .github/actions/oci-build-cache
 exports: AWS_ENDPOINT_URL, AWS_REGION, AWS_ACCESS_KEY_ID,
-AWS_SECRET_ACCESS_KEY and SCCACHE_BUCKET. Objects live under clang-tidy/.
+AWS_SECRET_ACCESS_KEY and SCCACHE_BUCKET. When that action picked the
+self-hosted kythira cache instead, it exports KYTHIRA_CACHE_HTTP_URL,
+_USER and _PASSWORD and the driver talks plain HTTP with Basic auth.
+Objects live under clang-tidy/ either way. When both are configured, a
+miss in the kythira cache is looked up again in the bucket (read-only),
+and a bucket hit is copied into the kythira cache when that is writable,
+so a cold self-hosted cache serves the bucket's results at once and fills
+itself from them.
 
 Only clean results are stored: clang-tidy exited 0 and printed no
 `file:line:col: warning|error:` line. Nothing stored is replayed, so every
@@ -44,6 +51,7 @@ start last and run alone at the end.
 from __future__ import annotations
 
 import argparse
+import base64
 import concurrent.futures
 import datetime as dt
 import hashlib
@@ -196,15 +204,21 @@ class S3Backend:
             c.close()
             self._local.conn = None
 
+    def _path(self, key: str) -> str:
+        return f"{self.base}/{self.bucket}/{PREFIX}{key}"
+
+    def _headers(self, method: str, path: str, body: bytes) -> dict[str, str]:
+        return sigv4_headers(method, self.netloc, path, self.region, self.access_key,
+                             self.secret_key, body, session_token=self.session_token)
+
     def request(self, method: str, key: str, body: bytes = b"") -> tuple[int, bytes]:
         """(status, body) for one request, retried on transport errors and 5xx."""
-        path = f"{self.base}/{self.bucket}/{PREFIX}{key}"
+        path = self._path(key)
         last = ""
         for attempt in range(len(self.backoff) + 1):
             if attempt:
                 time.sleep(self.backoff[attempt - 1])
-            headers = sigv4_headers(method, self.netloc, path, self.region, self.access_key,
-                                    self.secret_key, body, session_token=self.session_token)
+            headers = self._headers(method, path, body)
             if method == "PUT":
                 headers["content-type"] = "application/json"
                 headers["content-length"] = str(len(body))
@@ -247,6 +261,92 @@ class S3Backend:
                 pass
         snippet = data[:200].decode(errors="replace")
         raise BackendError(f"PUT {key[:12]}: HTTP {status} {snippet}")
+
+
+class HttpBackend(S3Backend):
+    """HEAD and PUT on <url>/clang-tidy/<key> with HTTP Basic auth.
+
+    The self-hosted kythira cache (redis_gateway_node's HTTP front end,
+    doc/redis-gateway.md) serves the same key space as the bucket, so only
+    the path and the Authorization header differ from S3Backend; the
+    connection reuse, retries and present-on-refused-overwrite handling are
+    inherited unchanged.
+    """
+
+    def __init__(self, url: str, user: str, password: str, writable: bool,
+                 timeout: float = TIMEOUT_S, backoff: tuple[float, ...] = RETRY_BACKOFF_S):
+        super().__init__(url, "", "", "", "", writable, timeout=timeout, backoff=backoff)
+        token = base64.b64encode(f"{user}:{password}".encode()).decode()
+        self._auth = f"Basic {token}"
+
+    @classmethod
+    def from_env(cls, writable: bool) -> "HttpBackend":
+        env = os.environ
+        missing = [v for v in ("KYTHIRA_CACHE_HTTP_URL", "KYTHIRA_CACHE_HTTP_USER",
+                               "KYTHIRA_CACHE_HTTP_PASSWORD") if not env.get(v)]
+        if missing:
+            raise ValueError("missing " + ", ".join(missing))
+        return cls(env["KYTHIRA_CACHE_HTTP_URL"], env["KYTHIRA_CACHE_HTTP_USER"],
+                   env["KYTHIRA_CACHE_HTTP_PASSWORD"], writable)
+
+    def _path(self, key: str) -> str:
+        return f"{self.base}/{PREFIX}{key}"
+
+    def _headers(self, method: str, path: str, body: bytes) -> dict[str, str]:
+        return {"host": self.netloc, "authorization": self._auth}
+
+
+class ChainBackend:
+    """The kythira cache first, the bucket on its misses.
+
+    Lookups that miss `primary` ask `fallback`, which is only ever read.
+    A fallback hit is copied into `primary` when it is writable, so a run
+    with write access (main) moves the bucket's results into the kythira
+    cache as it meets them. Stores go to `primary` alone. Errors from
+    `primary` propagate as usual; a fallback error is a miss, counted in
+    `fallback_errors`, so a broken bucket never costs more than it saves.
+    """
+
+    def __init__(self, primary, fallback):
+        self.primary = primary
+        self.fallback = fallback
+        self.writable = primary.writable
+        self.fallback_hits = 0
+        self.fallback_errors = 0
+        self.backfilled = 0
+        self._lock = threading.Lock()
+
+    def lookup(self, key: str) -> bool:
+        if self.primary.lookup(key):
+            return True
+        try:
+            hit = self.fallback.lookup(key)
+        except BackendError:
+            with self._lock:
+                self.fallback_errors += 1
+            return False
+        if not hit:
+            return False
+        with self._lock:
+            self.fallback_hits += 1
+        if self.primary.writable:
+            body = json.dumps({"v": 1, "backfill": "bucket",
+                               "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())},
+                              sort_keys=True, separators=(",", ":")).encode()
+            try:
+                self.primary.store(key, body)
+                with self._lock:
+                    self.backfilled += 1
+            except BackendError:
+                pass
+        return True
+
+    def store(self, key: str, body: bytes) -> str:
+        return self.primary.store(key, body)
+
+    def close(self) -> None:
+        self.primary.close()
+        self.fallback.close()
 
 
 # ── Analysis ────────────────────────────────────────────────────────────────
@@ -485,9 +585,19 @@ def cmd_run(args) -> int:
         backend = LocalBackend(Path(mode[len("local:"):]))
     elif requested:
         try:
-            backend = S3Backend.from_env(writable=(mode == "readwrite"))
+            # The build-cache action exports KYTHIRA_CACHE_HTTP_URL only when
+            # it picked the self-hosted kythira cache over the bucket.
+            backend_cls = HttpBackend if os.environ.get("KYTHIRA_CACHE_HTTP_URL") else S3Backend
+            backend = backend_cls.from_env(writable=(mode == "readwrite"))
         except ValueError as e:
             print(f"tidy-cache: warning: no bucket ({e}); analysing everything", file=sys.stderr)
+        if isinstance(backend, HttpBackend):
+            # The action also exports the bucket, read-only, as the
+            # fallback for a cold kythira cache (doc/ci_build_cache.md).
+            try:
+                backend = ChainBackend(backend, S3Backend.from_env(writable=False))
+            except ValueError:
+                pass
 
     files, skipped = [], 0
     for f in args.files:
@@ -511,6 +621,13 @@ def cmd_run(args) -> int:
     driver.stats["skipped_no_command"] = skipped
     rc = driver.run(files)
     print(driver.summary())
+    if isinstance(backend, ChainBackend):
+        driver.stats["fallback_hits"] = backend.fallback_hits
+        driver.stats["fallback_errors"] = backend.fallback_errors
+        driver.stats["backfilled"] = backend.backfilled
+        print(f"tidy-cache: bucket fallback: {backend.fallback_hits} hits, "
+              f"{backend.backfilled} copied into the kythira cache, "
+              f"{backend.fallback_errors} errors")
     stats_path = Path(args.stats) if args.stats else build / "tidy-cache-stats.json"
     stats_path.write_text(json.dumps(driver.stats, indent=1, sort_keys=True) + "\n")
     if os.environ.get("GITHUB_STEP_SUMMARY"):

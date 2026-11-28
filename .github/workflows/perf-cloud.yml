@@ -69,7 +69,7 @@ jobs:
     # rather than discovering it as "cannot execute binary file" five
     # minutes into a boot. Requirement 18.12's Graviton row is this input
     # set to arm64 and nothing else.
-    runs-on: ${{ github.event.inputs.architecture == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
+    runs-on: ${{ github.event.inputs.architecture == 'arm64' && 'ubuntu-24.04-arm' || ((github.event.pull_request.head.repo.fork && 'ubuntu-24.04') || vars.KYTHIRA_X64_RUNNER || 'bit63') }}
     environment: real-cloud-tests
     # Bounds the whole job, including a runner that wedges before or after the
     # benchmark's own `timeout`. The second of the three independent ceilings
@@ -112,6 +112,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Self-hosted runner baseline
+        uses: ./.github/actions/self-hosted-baseline
 
       # A single run-scoped tag value is the contract the teardown and the
       # audit both key off. Generated once, here, so that a re-run of the job
@@ -195,6 +197,13 @@ jobs:
           bucket: ${{ vars.OCI_BUILD_CACHE_BUCKET }}
           namespace: ${{ vars.OCI_BUILD_CACHE_NAMESPACE }}
           region: ${{ vars.OCI_CI_REGION }}
+          kythira-cache-url: ${{ vars.KYTHIRA_BUILD_CACHE_URL }}
+          kythira-cache-rw-user: ${{ vars.KYTHIRA_BUILD_CACHE_RW_USER }}
+          kythira-cache-rw-password: ${{ secrets.KYTHIRA_BUILD_CACHE_RW_PASSWORD }}
+          kythira-cache-pr-user: ${{ vars.KYTHIRA_BUILD_CACHE_PR_USER }}
+          kythira-cache-pr-password: ${{ secrets.KYTHIRA_BUILD_CACHE_PR_PASSWORD }}
+          kythira-cache-ro-user: ${{ vars.KYTHIRA_BUILD_CACHE_RO_USER }}
+          kythira-cache-ro-password: ${{ secrets.KYTHIRA_BUILD_CACHE_RO_PASSWORD }}
 
       - name: Cache vcpkg packages
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0

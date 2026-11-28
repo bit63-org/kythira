@@ -124,6 +124,11 @@ struct http_result {
     std::string location;
 };
 
+/// Why the calling thread's last https_call returned nullopt (the
+/// exception's message), for failure messages.
+// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables): per-thread diagnostic only
+inline thread_local std::string https_call_last_error;
+
 /// One HTTPS request to a member, optionally with a client certificate.
 inline auto https_call(std::uint16_t port, const kythira::iam::testing::test_pki_paths& pki,
                        http::verb method, const std::string& target, const std::string& cert = {},
@@ -166,7 +171,8 @@ inline auto https_call(std::uint16_t port, const kythira::iam::testing::test_pki
         auto location = std::string(res[http::field::location]);
         const auto status = res.result_int();
         return http_result{status, std::move(res.body()), std::move(location)};
-    } catch (const std::exception&) {
+    } catch (const std::exception& e) {
+        https_call_last_error = e.what();
         return std::nullopt;
     }
 }

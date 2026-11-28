@@ -68,6 +68,39 @@ inputs:
     description: vars.OCI_CI_REGION
     required: false
     default: ""
+  kythira-cache-url:
+    description: >-
+      vars.KYTHIRA_BUILD_CACHE_URL — base URL(s) of the self-hosted kythira
+      cache's HTTP front end (redis_gateway_node), space- or
+      comma-separated, tried in order, e.g.
+      "http://192.168.12.21:18091 http://192.168.12.21:18092".
+      Used only on self-hosted runners.
+    required: false
+    default: ""
+  kythira-cache-rw-user:
+    description: vars.KYTHIRA_BUILD_CACHE_RW_USER — read_write ACL user for main
+    required: false
+    default: ""
+  kythira-cache-rw-password:
+    description: secrets.KYTHIRA_BUILD_CACHE_RW_PASSWORD (build-cache-write environment)
+    required: false
+    default: ""
+  kythira-cache-pr-user:
+    description: vars.KYTHIRA_BUILD_CACHE_PR_USER — ACL user for same-repository pull requests
+    required: false
+    default: ""
+  kythira-cache-pr-password:
+    description: secrets.KYTHIRA_BUILD_CACHE_PR_PASSWORD
+    required: false
+    default: ""
+  kythira-cache-ro-user:
+    description: vars.KYTHIRA_BUILD_CACHE_RO_USER — read_only ACL user for everything else
+    required: false
+    default: ""
+  kythira-cache-ro-password:
+    description: secrets.KYTHIRA_BUILD_CACHE_RO_PASSWORD
+    required: false
+    default: ""
   sccache-version:
     description: pinned sccache release; the checksums below belong to it
     required: false
@@ -76,13 +109,220 @@ inputs:
 outputs:
   enabled:
     description: "true when a credential was found and the environment was exported"
-    value: ${{ steps.select.outputs.enabled }}
+    value: ${{ steps.kythira.outputs.enabled == 'true' && 'true' || steps.select.outputs.enabled }}
+  backend:
+    description: "kythira, oci, or none: which cache the environment points at"
+    value: ${{ steps.kythira.outputs.enabled == 'true' && 'kythira' || (steps.select.outputs.enabled == 'true' && 'oci' || 'none') }}
 
 runs:
   using: composite
   steps:
+    # The self-hosted kythira cache comes first, and only on a self-hosted
+    # runner. It is a redis_gateway_node cluster on new-reliant, on the same
+    # private network as the bit63 runner pods, and is not reachable
+    # from GitHub-hosted runners -- so a GitHub-hosted job (arm64, fork pull
+    # requests, or every job after vars.KYTHIRA_X64_RUNNER is pointed back at
+    # ubuntu-24.04) skips straight to the OCI bucket below and behaves
+    # exactly as before.
+    #
+    # The writer policy is the OCI one, unchanged: main gets the read_write
+    # user, a same-repository pull request the pr user, everything else the
+    # read_only user. The gateway's ACL role is what enforces it; the
+    # *_RW_MODE variables only stop sccache and vcpkg asking to be told no.
+    #
+    # sccache talks WebDAV and vcpkg its `http` binary source, both against
+    # the gateway's HTTP front end (doc/redis-gateway.md "Clients"). Neither
+    # needs the AWS CLI, which ARC runner images do not carry.
+    #
+    # If the cache does not answer, or answers 401/403 to the probe, this
+    # step falls through to OCI rather than failing: a cache is never a build
+    # dependency (Requirement 3.5).
+    - name: Select the self-hosted kythira cache
+      id: kythira
+      if: runner.environment == 'self-hosted' && inputs.kythira-cache-url != ''
+      shell: bash
+      env:
+        URL: ${{ inputs.kythira-cache-url }}
+        RW_USER: ${{ inputs.kythira-cache-rw-user }}
+        RW_PASSWORD: ${{ inputs.kythira-cache-rw-password }}
+        PR_USER: ${{ inputs.kythira-cache-pr-user }}
+        PR_PASSWORD: ${{ inputs.kythira-cache-pr-password }}
+        RO_USER: ${{ inputs.kythira-cache-ro-user }}
+        RO_PASSWORD: ${{ inputs.kythira-cache-ro-password }}
+        TRIPLET: ${{ inputs.triplet }}
+      run: |
+        set -euo pipefail
+        # URL may list several nodes, separated by spaces or commas. Every
+        # node of the cluster serves every key (writes are forwarded to the
+        # shard leader), so the first one that answers is used for the
+        # whole job; the others are only there for when a node is down.
+        read -r -a urls <<< "${URL//,/ }"
+        url="${urls[0]%/}"
+
+        same_repo=false
+        if [ "${GITHUB_EVENT_NAME}" = "pull_request" ] && [ -r "${GITHUB_EVENT_PATH:-}" ]; then
+          head_repo=$(jq -r '.pull_request.head.repo.full_name // ""' "$GITHUB_EVENT_PATH")
+          [ "$head_repo" = "${GITHUB_REPOSITORY}" ] && same_repo=true
+        fi
+
+        # Same patterns as the OCI step: exact matches on main, `*` last.
+        case "${GITHUB_EVENT_NAME}:${GITHUB_REF_NAME}:${same_repo}" in
+          push:main:*|schedule:main:*|workflow_dispatch:main:*)
+                     user="$RW_USER"; pass="$RW_PASSWORD"; mode="readwrite"; which="read-write" ;;
+          pull_request:*:true)
+                     user="$PR_USER"; pass="$PR_PASSWORD"; mode="readwrite"; which="pr-writer" ;;
+          *)         user="$RO_USER"; pass="$RO_PASSWORD"; mode="read";      which="read-only" ;;
+        esac
+        # A missing writer credential degrades to read-only, never to a
+        # different writer.
+        if [ "$mode" = "readwrite" ] && { [ -z "$user" ] || [ -z "$pass" ]; }; then
+          user="$RO_USER"; pass="$RO_PASSWORD"; mode="read"; which="read-only (no ${which} credential in this job)"
+        fi
+        if [ -z "$user" ] || [ -z "$pass" ]; then
+          echo "::warning::kythira cache at ${url}: no credential for ${GITHUB_EVENT_NAME} on ${GITHUB_REF_NAME}; trying the OCI bucket"
+          echo "enabled=false" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        auth_b64=$(printf '%s:%s' "$user" "$pass" | base64 -w0)
+        # GitHub masks the password but not its base64, and vcpkg's source
+        # string carries the header. Several workflows echo
+        # VCPKG_BINARY_SOURCES, so mask it before anything can print it.
+        echo "::add-mask::${auth_b64}"
+
+        # One authenticated GET of sccache's own check object per node, in
+        # order. 200 or 404 both prove the node is up and the user
+        # authenticates; 401/403 means the ACL or secret is wrong (no point
+        # asking the other nodes, which share the ACL); 000 means
+        # unreachable, so try the next node.
+        picked=""
+        for candidate in "${urls[@]}"; do
+          candidate="${candidate%/}"
+          code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 --retry 1 --retry-connrefused \
+                   -H "Authorization: Basic ${auth_b64}" "${candidate}/sccache/.sccache_check" || true)
+          case "$code" in
+            200|404) picked="$candidate"; break ;;
+            401|403)
+              echo "::warning::kythira cache at ${candidate} refused ${user} (HTTP ${code}); check the ACL and secret"
+              break ;;
+            *) echo "::warning::kythira cache at ${candidate} answered HTTP ${code}; trying the next node" ;;
+          esac
+        done
+        if [ -z "$picked" ]; then
+          echo "::warning::no kythira cache node served ${user}; trying the OCI bucket"
+          echo "enabled=false" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+        url="$picked"
+        echo "build cache: kythira at ${url}, ${which} user ${user}, vcpkg mode=${mode}, prefix vcpkg/${TRIPLET}/"
+
+        {
+          echo "KYTHIRA_BUILD_CACHE_BACKEND=kythira"
+          # Read by scripts/tidy-cache.py's HTTP backend.
+          echo "KYTHIRA_CACHE_HTTP_URL=${url}"
+          echo "KYTHIRA_CACHE_HTTP_USER=${user}"
+          echo "KYTHIRA_CACHE_HTTP_PASSWORD=${pass}"
+          echo "OCI_BUILD_CACHE_MODE=${mode}"
+          # The template is {sha}.zip under vcpkg/<triplet>/, the key the
+          # bucket's x-aws backend uses, so packages seeded from the bucket
+          # are hits; the fourth field is a header vcpkg sends with every
+          # request.
+          echo "VCPKG_BINARY_SOURCES=clear;http,${url}/vcpkg/${TRIPLET}/{sha}.zip,${mode},Authorization: Basic ${auth_b64}"
+          echo "SCCACHE_WEBDAV_ENDPOINT=${url}/sccache"
+          echo "SCCACHE_WEBDAV_USERNAME=${user}"
+          echo "SCCACHE_WEBDAV_PASSWORD=${pass}"
+          if [ "${mode}" = "readwrite" ]; then
+            echo "SCCACHE_WEBDAV_RW_MODE=READ_WRITE"
+          else
+            echo "SCCACHE_WEBDAV_RW_MODE=READ_ONLY"
+          fi
+          echo "VCPKG_KEEP_ENV_VARS=RUSTC_WRAPPER;SCCACHE_WEBDAV_ENDPOINT;SCCACHE_WEBDAV_USERNAME;SCCACHE_WEBDAV_PASSWORD;SCCACHE_WEBDAV_RW_MODE"
+          # Checkout-relative keys, as on the OCI path: this runner checks
+          # out under /home/runner/_work, GitHub-hosted ones under
+          # /home/runner/work, and both must find each other's entries.
+          echo "SCCACHE_BASEDIRS=${GITHUB_WORKSPACE}"
+        } >> "$GITHUB_ENV"
+        echo "enabled=true" >> "$GITHUB_OUTPUT"
+
+    # A second, read-only vcpkg source behind the kythira cache: the OCI
+    # bucket, with the read-only key. The kythira cache starts empty and
+    # only main writes to it, so without this every self-hosted job builds
+    # all ~135 ports from source until main has run, and a port whose
+    # upstream tarball no longer matches the baseline's SHA512 (libunwind
+    # 1.8.3 from GitHub's archive endpoint, first seen on 2026-11-20) fails
+    # the job outright, where a GitHub-hosted job restores the package from
+    # the bucket and never downloads it. vcpkg tries sources in order and
+    # writes only to sources marked readwrite, so the bucket is never
+    # written from here. Skipped, without failing, when the read-only key or
+    # the AWS CLI is missing.
+    #
+    # sccache gets the same fallback through its multi-level chain
+    # (SCCACHE_MULTILEVEL_CHAIN, sccache >= 0.15): the kythira cache first,
+    # then the bucket, read-only. Pull requests only read the kythira
+    # cache, and until main has run there it holds no compiler output, so
+    # every self-hosted pull-request build compiled from scratch: 0 hits in
+    # 466 compiles on #943's g++-13 leg, which ran out its 3-hour timeout
+    # at step 892 of 1910. The bucket is what main's GitHub-hosted jobs
+    # have been filling all along. Read-only levels are never written, and
+    # on main a hit in the bucket is copied back into the kythira cache, so
+    # the bucket matters less with every main run. The write-error policy
+    # is `ignore` because a cache must never fail a compile.
+    - name: Read vcpkg packages and compiler output from the OCI bucket as a fallback
+      if: steps.kythira.outputs.enabled == 'true'
+      shell: bash
+      env:
+        RO_ID: ${{ inputs.ro-access-key-id }}
+        RO_SECRET: ${{ inputs.ro-secret-access-key }}
+        BUCKET: ${{ inputs.bucket }}
+        NAMESPACE: ${{ inputs.namespace }}
+        REGION: ${{ inputs.region }}
+        TRIPLET: ${{ inputs.triplet }}
+      run: |
+        set -euo pipefail
+        for v in RO_ID RO_SECRET BUCKET NAMESPACE REGION TRIPLET; do
+          if [ -z "${!v}" ]; then
+            echo "no OCI fallback for vcpkg: ${v} is empty"
+            exit 0
+          fi
+        done
+        if ! command -v aws >/dev/null 2>&1; then
+          echo "::warning::no AWS CLI on this runner; vcpkg reads the kythira cache only"
+          exit 0
+        fi
+        # Same settings the OCI-only path uses (see the next step for why
+        # each one is there); this source only reads, so the multipart
+        # settings are moot but harmless.
+        aws_config="${RUNNER_TEMP}/oci-build-cache-aws-config"
+        printf '%s\n' '[default]' 's3 =' \
+          '    preferred_transfer_client = classic' \
+          '    multipart_threshold = 5GB' \
+          '    multipart_chunksize = 5GB' > "${aws_config}"
+        endpoint="https://${NAMESPACE}.compat.objectstorage.${REGION}.oraclecloud.com"
+        echo "build cache: vcpkg and sccache fall back to s3://${BUCKET}/ (read-only key)"
+        {
+          echo "AWS_CONFIG_FILE=${aws_config}"
+          echo "AWS_ENDPOINT_URL=${endpoint}"
+          echo "AWS_REGION=${REGION}"
+          echo "AWS_ACCESS_KEY_ID=${RO_ID}"
+          echo "AWS_SECRET_ACCESS_KEY=${RO_SECRET}"
+          echo "AWS_REQUEST_CHECKSUM_CALCULATION=when_required"
+          echo "AWS_RESPONSE_CHECKSUM_VALIDATION=when_required"
+          echo "VCPKG_BINARY_SOURCES=${VCPKG_BINARY_SOURCES};x-aws,s3://${BUCKET}/vcpkg/${TRIPLET}/,read"
+          echo "SCCACHE_MULTILEVEL_CHAIN=webdav,s3"
+          echo "SCCACHE_MULTILEVEL_WRITE_ERROR_POLICY=ignore"
+          echo "SCCACHE_BUCKET=${BUCKET}"
+          echo "SCCACHE_ENDPOINT=${endpoint}"
+          echo "SCCACHE_REGION=${REGION}"
+          echo "SCCACHE_S3_KEY_PREFIX=sccache/"
+          echo "SCCACHE_S3_USE_SSL=true"
+          echo "SCCACHE_S3_RW_MODE=READ_ONLY"
+          # vcpkg scrubs port builds' environment (see the OCI-only step).
+          echo "VCPKG_KEEP_ENV_VARS=${VCPKG_KEEP_ENV_VARS};SCCACHE_MULTILEVEL_CHAIN;SCCACHE_MULTILEVEL_WRITE_ERROR_POLICY;SCCACHE_BUCKET;SCCACHE_ENDPOINT;SCCACHE_REGION;SCCACHE_S3_KEY_PREFIX;SCCACHE_S3_USE_SSL;SCCACHE_S3_RW_MODE;AWS_ENDPOINT_URL;AWS_REGION;AWS_ACCESS_KEY_ID;AWS_SECRET_ACCESS_KEY;AWS_REQUEST_CHECKSUM_CALCULATION;AWS_RESPONSE_CHECKSUM_VALIDATION;AWS_CONFIG_FILE"
+        } >> "$GITHUB_ENV"
+
     - name: Select credential and export the cache environment
       id: select
+      if: steps.kythira.outputs.enabled != 'true'
       shell: bash
       env:
         # Passed through the environment rather than interpolated into the
@@ -180,11 +420,24 @@ runs:
         # than assumed: it is present on ubuntu-24.04 and ubuntu-24.04-arm
         # today, and if a future image drops it every port would rebuild from
         # source with only a per-port warning to say so.
+        #
+        # On a self-hosted runner (bit63) the image is not GitHub's and
+        # may not carry the CLI. There the bucket is only the fallback for
+        # when the kythira cache is unset or down, so a missing CLI turns the
+        # vcpkg binary cache off with a warning instead of failing the job;
+        # sccache talks S3 itself and keeps working.
+        vcpkg_source=on
         if ! command -v aws >/dev/null 2>&1; then
-          echo "::error::the AWS CLI is not on this runner; vcpkg's x-aws backend cannot work"
-          exit 1
+          if [ "${RUNNER_ENVIRONMENT:-}" = "self-hosted" ]; then
+            echo "::warning::the AWS CLI is not on this self-hosted runner; vcpkg binary cache off for this job (sccache still uses the bucket)"
+            vcpkg_source=off
+          else
+            echo "::error::the AWS CLI is not on this runner; vcpkg's x-aws backend cannot work"
+            exit 1
+          fi
+        else
+          aws --version
         fi
-        aws --version
 
         # Every upload is one PutObject, never a multipart upload. OCI asks
         # for OBJECT_CREATE *and* OBJECT_OVERWRITE on CreateMultipartUpload
@@ -219,7 +472,9 @@ runs:
           # byte-identical round-trip with when_required.
           echo "AWS_REQUEST_CHECKSUM_CALCULATION=when_required"
           echo "AWS_RESPONSE_CHECKSUM_VALIDATION=when_required"
-          echo "VCPKG_BINARY_SOURCES=clear;x-aws,s3://${BUCKET}/vcpkg/${TRIPLET}/,${mode}"
+          if [ "$vcpkg_source" = on ]; then
+            echo "VCPKG_BINARY_SOURCES=clear;x-aws,s3://${BUCKET}/vcpkg/${TRIPLET}/,${mode}"
+          fi
           # Stated, not inferred, for other consumers of these credentials
           # (the clang-tidy result cache): readwrite or read.
           echo "OCI_BUILD_CACHE_MODE=${mode}"
@@ -260,7 +515,7 @@ runs:
         echo "enabled=true" >> "$GITHUB_OUTPUT"
 
     - name: Install the pinned sccache
-      if: steps.select.outputs.enabled == 'true'
+      if: steps.kythira.outputs.enabled == 'true' || steps.select.outputs.enabled == 'true'
       shell: bash
       env:
         SCCACHE_VERSION: ${{ inputs.sccache-version }}
@@ -322,7 +577,16 @@ runs:
         # Fatal on purpose — see above.
         echo "${sha}  ${tmp}/${tarball}" | sha256sum -c -
         tar xzf "${tmp}/${tarball}" -C "$tmp"
-        sudo install -m 0755 "${tmp}/sccache-v${SCCACHE_VERSION}-${target}/sccache" /usr/local/bin/sccache
+        # A self-hosted runner image may not carry sudo; install for this
+        # job only in that case.
+        if command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
+          sudo install -m 0755 "${tmp}/sccache-v${SCCACHE_VERSION}-${target}/sccache" /usr/local/bin/sccache
+        else
+          mkdir -p "${RUNNER_TEMP}/sccache-bin"
+          install -m 0755 "${tmp}/sccache-v${SCCACHE_VERSION}-${target}/sccache" "${RUNNER_TEMP}/sccache-bin/sccache"
+          echo "${RUNNER_TEMP}/sccache-bin" >> "$GITHUB_PATH"
+          export PATH="${RUNNER_TEMP}/sccache-bin:${PATH}"
+        fi
         rm -rf "$tmp"
         sccache --version
 
@@ -346,7 +610,7 @@ runs:
     # decision; the second probe hits the cache the first one populated.
     - name: Probe sccache before the vcpkg install can use it
       id: probe
-      if: steps.select.outputs.enabled == 'true'
+      if: steps.kythira.outputs.enabled == 'true' || steps.select.outputs.enabled == 'true'
       shell: bash
       run: scripts/oci-build-cache/start-sccache.sh
 

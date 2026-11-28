@@ -127,7 +127,7 @@ permissions:
 jobs:
   measure:
     name: Measure ${{ github.event.inputs.label || 'coap' }} @ ${{ github.event.inputs.compiler || 'clang++-18' }}/${{ github.event.inputs.arch || 'x64' }}
-    runs-on: ${{ github.event.inputs.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
+    runs-on: ${{ github.event.inputs.arch == 'arm64' && 'ubuntu-24.04-arm' || ((github.event.pull_request.head.repo.fork && 'ubuntu-24.04') || vars.KYTHIRA_X64_RUNNER || 'bit63') }}
     timeout-minutes: 240
     # The read-write build-cache key is an environment secret of
     # build-cache-write, whose deployment branches are main only, so a
@@ -142,6 +142,8 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Self-hosted runner baseline
+        uses: ./.github/actions/self-hosted-baseline
 
       - name: Install system dependencies
         run: |
@@ -179,6 +181,13 @@ jobs:
           bucket: ${{ vars.OCI_BUILD_CACHE_BUCKET }}
           namespace: ${{ vars.OCI_BUILD_CACHE_NAMESPACE }}
           region: ${{ vars.OCI_CI_REGION }}
+          kythira-cache-url: ${{ vars.KYTHIRA_BUILD_CACHE_URL }}
+          kythira-cache-rw-user: ${{ vars.KYTHIRA_BUILD_CACHE_RW_USER }}
+          kythira-cache-rw-password: ${{ secrets.KYTHIRA_BUILD_CACHE_RW_PASSWORD }}
+          kythira-cache-pr-user: ${{ vars.KYTHIRA_BUILD_CACHE_PR_USER }}
+          kythira-cache-pr-password: ${{ secrets.KYTHIRA_BUILD_CACHE_PR_PASSWORD }}
+          kythira-cache-ro-user: ${{ vars.KYTHIRA_BUILD_CACHE_RO_USER }}
+          kythira-cache-ro-password: ${{ secrets.KYTHIRA_BUILD_CACHE_RO_PASSWORD }}
 
       - name: Cache vcpkg packages
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0

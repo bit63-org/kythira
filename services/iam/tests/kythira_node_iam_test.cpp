@@ -39,8 +39,11 @@
 #include <atomic>
 #include <chrono>
 #include <csignal>
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <map>
 #include <optional>
 #include <string>
@@ -139,6 +142,10 @@ public:
             "KINESIS_REGION=us-east-1",
             "KINESIS_FORWARD_SECRET=kythira-node-iam-test-forward-secret",
             "KINESIS_PEER_GATEWAYS=" + gateways,
+            // No cloud here: without this the AWS SDK looks up its region from
+            // EC2 instance metadata, which off EC2 can hold up module start until
+            // connections to 169.254.169.254 time out.
+            "AWS_EC2_METADATA_DISABLED=true",
             "PATH=/usr/bin:/bin",
         };
         env.insert(env.end(), extra_env.begin(), extra_env.end());
@@ -482,19 +489,42 @@ BOOST_AUTO_TEST_CASE(iam_module_authorizes_kinesis_in_process, *boost::unit_test
 
 namespace {
 
-/// `kythira_<module>_raft_term_sum` from a member's /metrics.
-auto term_sum(const node_cluster& c, const node_proc& p, const std::string& module)
-    -> std::optional<double> {
-    auto r = https_call(p.metrics, c.pki, http::verb::get, "/metrics");
-    if (!r || r->status != 200) {
-        return std::nullopt;
-    }
+/// `kythira_<module>_raft_term_sum` from a member's /metrics, retried for
+/// up to 15 s: https_call gives up after 5 s, and on a loaded CI host one
+/// scrape can take longer than that. `why` says what the last attempt
+/// got, for the failure message.
+auto term_sum(const node_cluster& c, const node_proc& p, const std::string& module,
+              std::string* why = nullptr) -> std::optional<double> {
     const auto name = "kythira_" + module + "_raft_term_sum ";
-    const auto at = r->body.find(name);
-    if (at == std::string::npos) {
-        return std::nullopt;
+    const auto deadline = std::chrono::steady_clock::now() + 15s;
+    std::string last;
+    do {
+        auto r = https_call(p.metrics, c.pki, http::verb::get, "/metrics");
+        if (!r) {
+            last = "no answer from /metrics on port " + std::to_string(p.metrics) + " (" +
+                   https_call_last_error + ")";
+        } else if (r->status != 200) {
+            last = "/metrics answered " + std::to_string(r->status);
+        } else if (const auto at = r->body.find(name); at == std::string::npos) {
+            last = "/metrics has no " + name + "line:\n" + r->body;
+        } else {
+            return std::stod(r->body.substr(at + name.size()));
+        }
+        std::this_thread::sleep_for(500ms);
+    } while (std::chrono::steady_clock::now() < deadline);
+    if (why != nullptr) {
+        // The node's own log says whether it ever bound the metrics
+        // listener: kythira_node starts it only once every module's start
+        // has returned, and logs "metrics on port N" when it has.
+        std::ifstream in(c.dir() / ("node-" + std::to_string(p.n)) / "node.log");
+        std::string log((std::istreambuf_iterator<char>(in)), {});
+        constexpr std::size_t keep = 4000;
+        if (log.size() > keep) {
+            log = "..." + log.substr(log.size() - keep);
+        }
+        *why = last + "\nnode " + std::to_string(p.n) + " log:\n" + log;
     }
-    return std::stod(r->body.substr(at + name.size()));
+    return std::nullopt;
 }
 
 }  // namespace
@@ -531,8 +561,10 @@ BOOST_AUTO_TEST_CASE(a_saturated_module_starts_no_elections, *boost::unit_test::
     std::map<std::pair<int, std::string>, double> before;
     for (const auto& p : c.nodes) {
         for (const std::string m : {"iam", "kinesis"}) {
-            auto t = term_sum(c, p, m);
-            BOOST_REQUIRE_MESSAGE(t.has_value(), "no " << m << " term on node " << p.n);
+            std::string why;
+            auto t = term_sum(c, p, m, &why);
+            BOOST_REQUIRE_MESSAGE(t.has_value(),
+                                  "no " << m << " term on node " << p.n << ": " << why);
             before[{p.n, m}] = *t;
         }
     }
@@ -560,8 +592,10 @@ BOOST_AUTO_TEST_CASE(a_saturated_module_starts_no_elections, *boost::unit_test::
 
     for (const auto& p : c.nodes) {
         for (const std::string m : {"iam", "kinesis"}) {
-            auto t = term_sum(c, p, m);
-            BOOST_REQUIRE(t.has_value());
+            std::string why;
+            auto t = term_sum(c, p, m, &why);
+            BOOST_REQUIRE_MESSAGE(t.has_value(),
+                                  "no " << m << " term on node " << p.n << ": " << why);
             BOOST_TEST(*t == (before[{p.n, m}]),
                        m << " on node " << p.n << " started an election under the flood");
         }

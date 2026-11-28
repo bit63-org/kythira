@@ -182,7 +182,7 @@ jobs:
   # in step when a gate changes.
   run-plan:
     name: Real Cloud Tests run plan
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.event.pull_request.head.repo.fork && 'ubuntu-24.04') || vars.KYTHIRA_X64_RUNNER || 'bit63' }}
     timeout-minutes: 5
     env:
       MASTER: ${{ github.event.inputs.run_real_cloud_tests == 'true' || (github.event.inputs.run_real_cloud_tests == null && vars.REAL_CLOUD_TESTS_ENABLED == 'true') }}
@@ -267,7 +267,7 @@ jobs:
   # x86_64-only runner. See .kiro/specs/arm64-ci-verification/ Requirement 7.
   aws:
     name: Real Cloud Tests (AWS, ${{ matrix.arch_label }})
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.os == 'ubuntu-24.04' && ((github.event.pull_request.head.repo.fork && 'ubuntu-24.04') || vars.KYTHIRA_X64_RUNNER || 'bit63') || matrix.os }}
     # All three bundle ctest steps below can run sequentially in this one
     # job when every bundle is enabled. Sum of their own worst-case CTest
     # TIMEOUT properties (tests/CMakeLists.txt): 10800s (ec2-quorum-manager)
@@ -345,6 +345,8 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Self-hosted runner baseline
+        uses: ./.github/actions/self-hosted-baseline
 
       - name: Fail closed if AWS_CI_ROLE_ARN is unset
         if: ${{ vars.AWS_CI_ROLE_ARN == '' }}
@@ -447,6 +449,13 @@ jobs:
           bucket: ${{ vars.OCI_BUILD_CACHE_BUCKET }}
           namespace: ${{ vars.OCI_BUILD_CACHE_NAMESPACE }}
           region: ${{ vars.OCI_CI_REGION }}
+          kythira-cache-url: ${{ vars.KYTHIRA_BUILD_CACHE_URL }}
+          kythira-cache-rw-user: ${{ vars.KYTHIRA_BUILD_CACHE_RW_USER }}
+          kythira-cache-rw-password: ${{ secrets.KYTHIRA_BUILD_CACHE_RW_PASSWORD }}
+          kythira-cache-pr-user: ${{ vars.KYTHIRA_BUILD_CACHE_PR_USER }}
+          kythira-cache-pr-password: ${{ secrets.KYTHIRA_BUILD_CACHE_PR_PASSWORD }}
+          kythira-cache-ro-user: ${{ vars.KYTHIRA_BUILD_CACHE_RO_USER }}
+          kythira-cache-ro-password: ${{ secrets.KYTHIRA_BUILD_CACHE_RO_PASSWORD }}
 
       - name: Cache vcpkg packages
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -1195,7 +1204,7 @@ jobs:
       group: real-cloud-aws-asg-${{ github.repository }}
       # A run already holding real groups must reach its own teardown.
       cancel-in-progress: false
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.os == 'ubuntu-24.04' && ((github.event.pull_request.head.repo.fork && 'ubuntu-24.04') || vars.KYTHIRA_X64_RUNNER || 'bit63') || matrix.os }}
     timeout-minutes: 360
     environment: real-cloud-tests
     permissions:
@@ -1228,6 +1237,8 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Self-hosted runner baseline
+        uses: ./.github/actions/self-hosted-baseline
 
       - name: Fail closed if AWS_CI_ROLE_ARN is unset
         if: ${{ vars.AWS_CI_ROLE_ARN == '' }}
@@ -1318,6 +1329,13 @@ jobs:
           bucket: ${{ vars.OCI_BUILD_CACHE_BUCKET }}
           namespace: ${{ vars.OCI_BUILD_CACHE_NAMESPACE }}
           region: ${{ vars.OCI_CI_REGION }}
+          kythira-cache-url: ${{ vars.KYTHIRA_BUILD_CACHE_URL }}
+          kythira-cache-rw-user: ${{ vars.KYTHIRA_BUILD_CACHE_RW_USER }}
+          kythira-cache-rw-password: ${{ secrets.KYTHIRA_BUILD_CACHE_RW_PASSWORD }}
+          kythira-cache-pr-user: ${{ vars.KYTHIRA_BUILD_CACHE_PR_USER }}
+          kythira-cache-pr-password: ${{ secrets.KYTHIRA_BUILD_CACHE_PR_PASSWORD }}
+          kythira-cache-ro-user: ${{ vars.KYTHIRA_BUILD_CACHE_RO_USER }}
+          kythira-cache-ro-password: ${{ secrets.KYTHIRA_BUILD_CACHE_RO_PASSWORD }}
 
       - name: Cache vcpkg packages
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -1479,7 +1497,7 @@ jobs:
       group: real-cloud-aws-ec2-launch-options-${{ github.repository }}
       # A run already holding real instances must reach its own teardown.
       cancel-in-progress: false
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.os == 'ubuntu-24.04' && ((github.event.pull_request.head.repo.fork && 'ubuntu-24.04') || vars.KYTHIRA_X64_RUNNER || 'bit63') || matrix.os }}
     # 155 minutes of worst-case CTest TIMEOUT (tests/CMakeLists.txt), the
     # build, and the audit and sweep.
     timeout-minutes: 300
@@ -1514,6 +1532,8 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Self-hosted runner baseline
+        uses: ./.github/actions/self-hosted-baseline
 
       - name: Fail closed if AWS_CI_ROLE_ARN is unset
         if: ${{ vars.AWS_CI_ROLE_ARN == '' }}
@@ -1603,6 +1623,13 @@ jobs:
           bucket: ${{ vars.OCI_BUILD_CACHE_BUCKET }}
           namespace: ${{ vars.OCI_BUILD_CACHE_NAMESPACE }}
           region: ${{ vars.OCI_CI_REGION }}
+          kythira-cache-url: ${{ vars.KYTHIRA_BUILD_CACHE_URL }}
+          kythira-cache-rw-user: ${{ vars.KYTHIRA_BUILD_CACHE_RW_USER }}
+          kythira-cache-rw-password: ${{ secrets.KYTHIRA_BUILD_CACHE_RW_PASSWORD }}
+          kythira-cache-pr-user: ${{ vars.KYTHIRA_BUILD_CACHE_PR_USER }}
+          kythira-cache-pr-password: ${{ secrets.KYTHIRA_BUILD_CACHE_PR_PASSWORD }}
+          kythira-cache-ro-user: ${{ vars.KYTHIRA_BUILD_CACHE_RO_USER }}
+          kythira-cache-ro-password: ${{ secrets.KYTHIRA_BUILD_CACHE_RO_PASSWORD }}
 
       - name: Cache vcpkg packages
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -1761,7 +1788,7 @@ jobs:
             runner: ubuntu-24.04
           - arch: arm64
             runner: ubuntu-24.04-arm
-    runs-on: ${{ matrix.runner }}
+    runs-on: ${{ matrix.runner == 'ubuntu-24.04' && ((github.event.pull_request.head.repo.fork && 'ubuntu-24.04') || vars.KYTHIRA_X64_RUNNER || 'bit63') || matrix.runner }}
     # 60 minutes only fit a warm vcpkg cache. Run 37125140982 missed the
     # binary cache for folly, protobuf, aws-sdk-cpp and grpc (34 of 131
     # ports on arm64, 27 on x64): x64 was cancelled at 60 minutes while
@@ -1785,6 +1812,8 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Self-hosted runner baseline
+        uses: ./.github/actions/self-hosted-baseline
 
       - name: Fail closed if AWS_CI_ROLE_ARN is unset
         if: ${{ vars.AWS_CI_ROLE_ARN == '' }}
@@ -1868,6 +1897,13 @@ jobs:
           bucket: ${{ vars.OCI_BUILD_CACHE_BUCKET }}
           namespace: ${{ vars.OCI_BUILD_CACHE_NAMESPACE }}
           region: ${{ vars.OCI_CI_REGION }}
+          kythira-cache-url: ${{ vars.KYTHIRA_BUILD_CACHE_URL }}
+          kythira-cache-rw-user: ${{ vars.KYTHIRA_BUILD_CACHE_RW_USER }}
+          kythira-cache-rw-password: ${{ secrets.KYTHIRA_BUILD_CACHE_RW_PASSWORD }}
+          kythira-cache-pr-user: ${{ vars.KYTHIRA_BUILD_CACHE_PR_USER }}
+          kythira-cache-pr-password: ${{ secrets.KYTHIRA_BUILD_CACHE_PR_PASSWORD }}
+          kythira-cache-ro-user: ${{ vars.KYTHIRA_BUILD_CACHE_RO_USER }}
+          kythira-cache-ro-password: ${{ secrets.KYTHIRA_BUILD_CACHE_RO_PASSWORD }}
 
       - name: Cache vcpkg packages
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -1985,7 +2021,7 @@ jobs:
       group: real-cloud-azure-${{ github.repository }}
       cancel-in-progress: false
     name: Real Cloud Tests (Azure)
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.event.pull_request.head.repo.fork && 'ubuntu-24.04') || vars.KYTHIRA_X64_RUNNER || 'bit63' }}
     # 60 minutes was not enough: a real run of this job (PR #125) was killed
     # by the job timeout while still mid-compile, having never reached the
     # actual test-running step at all. Unlike the AWS job above, whose own
@@ -2022,6 +2058,8 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Self-hosted runner baseline
+        uses: ./.github/actions/self-hosted-baseline
 
       - name: Fail closed if Azure CI identity variables are unset
         if: ${{ vars.AZURE_CI_CLIENT_ID == '' || vars.AZURE_CI_TENANT_ID == '' || vars.AZURE_CI_SUBSCRIPTION_ID == '' }}
@@ -2133,6 +2171,13 @@ jobs:
           bucket: ${{ vars.OCI_BUILD_CACHE_BUCKET }}
           namespace: ${{ vars.OCI_BUILD_CACHE_NAMESPACE }}
           region: ${{ vars.OCI_CI_REGION }}
+          kythira-cache-url: ${{ vars.KYTHIRA_BUILD_CACHE_URL }}
+          kythira-cache-rw-user: ${{ vars.KYTHIRA_BUILD_CACHE_RW_USER }}
+          kythira-cache-rw-password: ${{ secrets.KYTHIRA_BUILD_CACHE_RW_PASSWORD }}
+          kythira-cache-pr-user: ${{ vars.KYTHIRA_BUILD_CACHE_PR_USER }}
+          kythira-cache-pr-password: ${{ secrets.KYTHIRA_BUILD_CACHE_PR_PASSWORD }}
+          kythira-cache-ro-user: ${{ vars.KYTHIRA_BUILD_CACHE_RO_USER }}
+          kythira-cache-ro-password: ${{ secrets.KYTHIRA_BUILD_CACHE_RO_PASSWORD }}
 
       - name: Cache vcpkg packages
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -2761,7 +2806,7 @@ jobs:
 
   gcp:
     name: Real Cloud Tests (GCP)
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.event.pull_request.head.repo.fork && 'ubuntu-24.04') || vars.KYTHIRA_X64_RUNNER || 'bit63' }}
     # Same protected environment as the aws/ami-build jobs: the real-cloud
     # repository variables (GCP_CI_WORKLOAD_IDENTITY_PROVIDER,
     # GCP_CI_SERVICE_ACCOUNT, GCP_REAL_CLOUD_TESTS_PROJECT, and the enable
@@ -2789,6 +2834,8 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Self-hosted runner baseline
+        uses: ./.github/actions/self-hosted-baseline
 
       - name: Fail closed if GCP WIF variables are unset
         if: ${{ vars.GCP_CI_WORKLOAD_IDENTITY_PROVIDER == '' || vars.GCP_CI_SERVICE_ACCOUNT == '' }}
@@ -2884,6 +2931,13 @@ jobs:
           bucket: ${{ vars.OCI_BUILD_CACHE_BUCKET }}
           namespace: ${{ vars.OCI_BUILD_CACHE_NAMESPACE }}
           region: ${{ vars.OCI_CI_REGION }}
+          kythira-cache-url: ${{ vars.KYTHIRA_BUILD_CACHE_URL }}
+          kythira-cache-rw-user: ${{ vars.KYTHIRA_BUILD_CACHE_RW_USER }}
+          kythira-cache-rw-password: ${{ secrets.KYTHIRA_BUILD_CACHE_RW_PASSWORD }}
+          kythira-cache-pr-user: ${{ vars.KYTHIRA_BUILD_CACHE_PR_USER }}
+          kythira-cache-pr-password: ${{ secrets.KYTHIRA_BUILD_CACHE_PR_PASSWORD }}
+          kythira-cache-ro-user: ${{ vars.KYTHIRA_BUILD_CACHE_RO_USER }}
+          kythira-cache-ro-password: ${{ secrets.KYTHIRA_BUILD_CACHE_RO_PASSWORD }}
 
       - name: Cache vcpkg packages
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -3212,7 +3266,7 @@ jobs:
   # Configuration, not the runner's architecture.
   oci:
     name: Real Cloud Tests (OCI)
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.event.pull_request.head.repo.fork && 'ubuntu-24.04') || vars.KYTHIRA_X64_RUNNER || 'bit63' }}
     # Worst case: the quorum suite's provision/assess/decommission case waits
     # up to 900s for an instance, plus the ladder walk and the certificates
     # suite's issuance polls. 120 minutes is generous against a measured ~5
@@ -3244,6 +3298,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Self-hosted runner baseline
+        uses: ./.github/actions/self-hosted-baseline
 
       # Mirrors the AWS job's equivalent guard. A provider job with every
       # bundle off would run zero tests and report success, which is the
@@ -3333,6 +3389,13 @@ jobs:
           bucket: ${{ vars.OCI_BUILD_CACHE_BUCKET }}
           namespace: ${{ vars.OCI_BUILD_CACHE_NAMESPACE }}
           region: ${{ vars.OCI_CI_REGION }}
+          kythira-cache-url: ${{ vars.KYTHIRA_BUILD_CACHE_URL }}
+          kythira-cache-rw-user: ${{ vars.KYTHIRA_BUILD_CACHE_RW_USER }}
+          kythira-cache-rw-password: ${{ secrets.KYTHIRA_BUILD_CACHE_RW_PASSWORD }}
+          kythira-cache-pr-user: ${{ vars.KYTHIRA_BUILD_CACHE_PR_USER }}
+          kythira-cache-pr-password: ${{ secrets.KYTHIRA_BUILD_CACHE_PR_PASSWORD }}
+          kythira-cache-ro-user: ${{ vars.KYTHIRA_BUILD_CACHE_RO_USER }}
+          kythira-cache-ro-password: ${{ secrets.KYTHIRA_BUILD_CACHE_RO_PASSWORD }}
 
       - name: Cache vcpkg packages
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -3765,7 +3828,7 @@ jobs:
   # the same contract the oci job follows.
   alibaba:
     name: Real Cloud Tests (Alibaba Cloud)
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.event.pull_request.head.repo.fork && 'ubuntu-24.04') || vars.KYTHIRA_X64_RUNNER || 'bit63' }}
     # 120 minutes covers a normal run with room to spare: the OSS suite
     # takes about 11 minutes. The opt-in segment-size sweep needs much
     # longer. Run 40388183572 spent 10, 60 and 26 minutes on the put,
@@ -3797,6 +3860,8 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Self-hosted runner baseline
+        uses: ./.github/actions/self-hosted-baseline
 
       # Every provider job carries this guard because the failure it prevents
       # actually happened on the azure job: all bundles off means the job
@@ -3858,6 +3923,13 @@ jobs:
           bucket: ${{ vars.OCI_BUILD_CACHE_BUCKET }}
           namespace: ${{ vars.OCI_BUILD_CACHE_NAMESPACE }}
           region: ${{ vars.OCI_CI_REGION }}
+          kythira-cache-url: ${{ vars.KYTHIRA_BUILD_CACHE_URL }}
+          kythira-cache-rw-user: ${{ vars.KYTHIRA_BUILD_CACHE_RW_USER }}
+          kythira-cache-rw-password: ${{ secrets.KYTHIRA_BUILD_CACHE_RW_PASSWORD }}
+          kythira-cache-pr-user: ${{ vars.KYTHIRA_BUILD_CACHE_PR_USER }}
+          kythira-cache-pr-password: ${{ secrets.KYTHIRA_BUILD_CACHE_PR_PASSWORD }}
+          kythira-cache-ro-user: ${{ vars.KYTHIRA_BUILD_CACHE_RO_USER }}
+          kythira-cache-ro-password: ${{ secrets.KYTHIRA_BUILD_CACHE_RO_PASSWORD }}
 
       - name: Cache vcpkg packages
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -4174,7 +4246,7 @@ jobs:
 
   aws-monitoring:
     name: Monitoring config (AWS CloudWatch)
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.event.pull_request.head.repo.fork && 'ubuntu-24.04') || vars.KYTHIRA_X64_RUNNER || 'bit63' }}
     timeout-minutes: 30
     environment: real-cloud-tests
     permissions:
@@ -4190,6 +4262,8 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Self-hosted runner baseline
+        uses: ./.github/actions/self-hosted-baseline
 
       - name: Fail closed if AWS_CI_ROLE_ARN is unset
         if: ${{ vars.AWS_CI_ROLE_ARN == '' }}
@@ -4212,7 +4286,7 @@ jobs:
 
   azure-monitoring:
     name: Monitoring config (Azure Monitor)
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.event.pull_request.head.repo.fork && 'ubuntu-24.04') || vars.KYTHIRA_X64_RUNNER || 'bit63' }}
     timeout-minutes: 30
     environment: real-cloud-tests
     permissions:
@@ -4228,6 +4302,8 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Self-hosted runner baseline
+        uses: ./.github/actions/self-hosted-baseline
 
       - name: Fail closed if Azure monitoring variables are unset
         if: ${{ vars.AZURE_CI_CLIENT_ID == '' || vars.AZURE_CI_TENANT_ID == '' || vars.AZURE_CI_SUBSCRIPTION_ID == '' || vars.AZURE_MONITORING_APP_ID == '' }}
@@ -4250,7 +4326,7 @@ jobs:
 
   gcp-monitoring:
     name: Monitoring config (GCP Cloud Monitoring)
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.event.pull_request.head.repo.fork && 'ubuntu-24.04') || vars.KYTHIRA_X64_RUNNER || 'bit63' }}
     timeout-minutes: 30
     environment: real-cloud-tests
     permissions:
@@ -4266,6 +4342,8 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Self-hosted runner baseline
+        uses: ./.github/actions/self-hosted-baseline
 
       - name: Fail closed if GCP WIF variables are unset
         if: ${{ vars.GCP_CI_WORKLOAD_IDENTITY_PROVIDER == '' || vars.GCP_CI_SERVICE_ACCOUNT == '' || vars.GCP_REAL_CLOUD_TESTS_PROJECT == '' }}
@@ -4291,7 +4369,7 @@ jobs:
 
   oci-monitoring:
     name: Monitoring config (OCI Monitoring)
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.event.pull_request.head.repo.fork && 'ubuntu-24.04') || vars.KYTHIRA_X64_RUNNER || 'bit63' }}
     # The Management Agent's install + registration + first Prometheus
     # scrape cycle dominates; the script's own assertion deadline is 900s.
     timeout-minutes: 45
@@ -4309,6 +4387,8 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Self-hosted runner baseline
+        uses: ./.github/actions/self-hosted-baseline
 
       - name: Fail closed if OCI monitoring variables are unset
         run: |
@@ -4386,7 +4466,7 @@ jobs:
 
   alibaba-monitoring:
     name: Monitoring config (Alibaba CloudMonitor)
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.event.pull_request.head.repo.fork && 'ubuntu-24.04') || vars.KYTHIRA_X64_RUNNER || 'bit63' }}
     timeout-minutes: 30
     environment: real-cloud-tests
     if: |
@@ -4399,6 +4479,8 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Self-hosted runner baseline
+        uses: ./.github/actions/self-hosted-baseline
 
       - name: Fail closed if Alibaba monitoring variables are unset
         if: ${{ vars.ALIBABA_CMS_REMOTE_WRITE_URL == '' || vars.ALIBABA_CMS_PROM_QUERY_URL == '' }}

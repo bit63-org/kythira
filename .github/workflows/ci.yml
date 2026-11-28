@@ -76,8 +76,13 @@ jobs:
       contents: read
       checks: write         # dorny/test-reporter posts inline results
     name: Build & Test (${{ matrix.compiler }}, ${{ matrix.arch_label }})
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: ${{ matrix.timeout_minutes }}
+    runs-on: ${{ matrix.os == 'ubuntu-24.04' && ((github.event.pull_request.head.repo.fork && 'ubuntu-24.04') || vars.KYTHIRA_X64_RUNNER || 'bit63') || matrix.os }}
+    # bit63 legs get a longer limit where the matrix entry sets one: the
+    # self-hosted pods build vcpkg ports with a different compiler build
+    # than the hosted image, so their first runs rebuild dependencies from
+    # source (70-90 min) until main has warmed the kythira cache. Hosted
+    # and fork runs keep the original limits.
+    timeout-minutes: ${{ (matrix.os == 'ubuntu-24.04' && !github.event.pull_request.head.repo.fork && !startsWith(vars.KYTHIRA_X64_RUNNER || 'bit63', 'ubuntu') && matrix.bit63_timeout_minutes) || matrix.timeout_minutes }}
     strategy:
       fail-fast: false
       matrix:
@@ -86,10 +91,16 @@ jobs:
             os: ubuntu-24.04
             arch_label: x64
             timeout_minutes: 180
+            bit63_timeout_minutes: 300
           - compiler: clang++-18
             os: ubuntu-24.04
             arch_label: x64
             timeout_minutes: 300
+            # bit63: about ten jobs share one host, so a leg gets one or two
+            # CPUs once it is busy. PR #943's run spent 71 minutes on a cold
+            # vcpkg build and 3 hours compiling, and 300 minutes cut ctest
+            # off at 656 of 992 tests.
+            bit63_timeout_minutes: 480
             vcpkg_cc: clang-18
             vcpkg_cxx: clang++-18
           - compiler: g++-13
@@ -131,6 +142,9 @@ jobs:
             os: ubuntu-24.04
             arch_label: x64
             timeout_minutes: 300
+            # bit63: same reason as clang++-18 x64 (PR #943 reached 491 of
+            # 992 tests in 300 minutes).
+            bit63_timeout_minutes: 480
             vcpkg_cc: gcc-14
             vcpkg_cxx: g++-14
 
@@ -147,6 +161,8 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Self-hosted runner baseline
+        uses: ./.github/actions/self-hosted-baseline
 
       # A 24 GiB swapfile on the GitHub-hosted x64 runners, the TSan and
       # stdexec legs' fix applied here (see "Add swap headroom and report
@@ -293,6 +309,13 @@ jobs:
           bucket: ${{ vars.OCI_BUILD_CACHE_BUCKET }}
           namespace: ${{ vars.OCI_BUILD_CACHE_NAMESPACE }}
           region: ${{ vars.OCI_CI_REGION }}
+          kythira-cache-url: ${{ vars.KYTHIRA_BUILD_CACHE_URL }}
+          kythira-cache-rw-user: ${{ vars.KYTHIRA_BUILD_CACHE_RW_USER }}
+          kythira-cache-rw-password: ${{ secrets.KYTHIRA_BUILD_CACHE_RW_PASSWORD }}
+          kythira-cache-pr-user: ${{ vars.KYTHIRA_BUILD_CACHE_PR_USER }}
+          kythira-cache-pr-password: ${{ secrets.KYTHIRA_BUILD_CACHE_PR_PASSWORD }}
+          kythira-cache-ro-user: ${{ vars.KYTHIRA_BUILD_CACHE_RO_USER }}
+          kythira-cache-ro-password: ${{ secrets.KYTHIRA_BUILD_CACHE_RO_PASSWORD }}
 
       - name: Cache vcpkg packages
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -746,7 +769,7 @@ jobs:
     # Full matrix only: skipped on stacked PRs (see the note under `on:`).
     if: github.event_name != 'pull_request' || github.base_ref == 'main'
     name: GCP SDK Build (clang++-18, x64)
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.event.pull_request.head.repo.fork && 'ubuntu-24.04') || vars.KYTHIRA_X64_RUNNER || 'bit63' }}
     # 360, not 180: this job's vcpkg ports are clang-built for mold
     # (mold-linker Requirement 9), and a cold google-cloud-cpp install alone
     # took 163 minutes before the OCI binary cache existed.
@@ -764,6 +787,8 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Self-hosted runner baseline
+        uses: ./.github/actions/self-hosted-baseline
 
       - name: Install system dependencies
         run: |
@@ -818,6 +843,13 @@ jobs:
           bucket: ${{ vars.OCI_BUILD_CACHE_BUCKET }}
           namespace: ${{ vars.OCI_BUILD_CACHE_NAMESPACE }}
           region: ${{ vars.OCI_CI_REGION }}
+          kythira-cache-url: ${{ vars.KYTHIRA_BUILD_CACHE_URL }}
+          kythira-cache-rw-user: ${{ vars.KYTHIRA_BUILD_CACHE_RW_USER }}
+          kythira-cache-rw-password: ${{ secrets.KYTHIRA_BUILD_CACHE_RW_PASSWORD }}
+          kythira-cache-pr-user: ${{ vars.KYTHIRA_BUILD_CACHE_PR_USER }}
+          kythira-cache-pr-password: ${{ secrets.KYTHIRA_BUILD_CACHE_PR_PASSWORD }}
+          kythira-cache-ro-user: ${{ vars.KYTHIRA_BUILD_CACHE_RO_USER }}
+          kythira-cache-ro-password: ${{ secrets.KYTHIRA_BUILD_CACHE_RO_PASSWORD }}
 
       - name: Cache vcpkg packages
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -945,7 +977,7 @@ jobs:
     # Full matrix only: skipped on stacked PRs (see the note under `on:`).
     if: github.event_name != 'pull_request' || github.base_ref == 'main'
     name: Ion Serializer Build (g++-14, x64)
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.event.pull_request.head.repo.fork && 'ubuntu-24.04') || vars.KYTHIRA_X64_RUNNER || 'bit63' }}
     timeout-minutes: 300
     # The read-write build-cache key is an environment secret of
     # build-cache-write, whose deployment branches are main only, so a
@@ -960,6 +992,8 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Self-hosted runner baseline
+        uses: ./.github/actions/self-hosted-baseline
 
       - name: Install system dependencies
         run: |
@@ -1024,6 +1058,13 @@ jobs:
           bucket: ${{ vars.OCI_BUILD_CACHE_BUCKET }}
           namespace: ${{ vars.OCI_BUILD_CACHE_NAMESPACE }}
           region: ${{ vars.OCI_CI_REGION }}
+          kythira-cache-url: ${{ vars.KYTHIRA_BUILD_CACHE_URL }}
+          kythira-cache-rw-user: ${{ vars.KYTHIRA_BUILD_CACHE_RW_USER }}
+          kythira-cache-rw-password: ${{ secrets.KYTHIRA_BUILD_CACHE_RW_PASSWORD }}
+          kythira-cache-pr-user: ${{ vars.KYTHIRA_BUILD_CACHE_PR_USER }}
+          kythira-cache-pr-password: ${{ secrets.KYTHIRA_BUILD_CACHE_PR_PASSWORD }}
+          kythira-cache-ro-user: ${{ vars.KYTHIRA_BUILD_CACHE_RO_USER }}
+          kythira-cache-ro-password: ${{ secrets.KYTHIRA_BUILD_CACHE_RO_PASSWORD }}
 
       - name: Cache vcpkg packages
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -1189,7 +1230,7 @@ jobs:
     # Full matrix only: skipped on stacked PRs (see the note under `on:`).
     if: github.event_name != 'pull_request' || github.base_ref == 'main'
     name: Config Variants (clang++-18, x64)
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.event.pull_request.head.repo.fork && 'ubuntu-24.04') || vars.KYTHIRA_X64_RUNNER || 'bit63' }}
     # Sized from build-and-test's 180-minute budget for one full cold build,
     # plus headroom for the two smaller builds. Measured on main: 9.6 min
     # with a warm sccache (run 37567880231) and 39.4 min after a change to
@@ -1211,6 +1252,8 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Self-hosted runner baseline
+        uses: ./.github/actions/self-hosted-baseline
 
       - name: Install system dependencies
         run: |
@@ -1264,6 +1307,13 @@ jobs:
           bucket: ${{ vars.OCI_BUILD_CACHE_BUCKET }}
           namespace: ${{ vars.OCI_BUILD_CACHE_NAMESPACE }}
           region: ${{ vars.OCI_CI_REGION }}
+          kythira-cache-url: ${{ vars.KYTHIRA_BUILD_CACHE_URL }}
+          kythira-cache-rw-user: ${{ vars.KYTHIRA_BUILD_CACHE_RW_USER }}
+          kythira-cache-rw-password: ${{ secrets.KYTHIRA_BUILD_CACHE_RW_PASSWORD }}
+          kythira-cache-pr-user: ${{ vars.KYTHIRA_BUILD_CACHE_PR_USER }}
+          kythira-cache-pr-password: ${{ secrets.KYTHIRA_BUILD_CACHE_PR_PASSWORD }}
+          kythira-cache-ro-user: ${{ vars.KYTHIRA_BUILD_CACHE_RO_USER }}
+          kythira-cache-ro-password: ${{ secrets.KYTHIRA_BUILD_CACHE_RO_PASSWORD }}
 
       # Byte-identical to the x64 clang++-18 build-and-test leg's key, so
       # this job shares that leg's clang-built tree rather than keeping
@@ -1493,7 +1543,7 @@ jobs:
     # Full matrix only: skipped on stacked PRs (see the note under `on:`).
     if: github.event_name != 'pull_request' || github.base_ref == 'main'
     name: Alternate CoAP Backends (g++-13, ${{ matrix.arch_label }})
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.os == 'ubuntu-24.04' && ((github.event.pull_request.head.repo.fork && 'ubuntu-24.04') || vars.KYTHIRA_X64_RUNNER || 'bit63') || matrix.os }}
     strategy:
       fail-fast: false
       matrix:
@@ -1517,6 +1567,8 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Self-hosted runner baseline
+        uses: ./.github/actions/self-hosted-baseline
 
       - name: Install system dependencies
         run: |
@@ -1583,6 +1635,13 @@ jobs:
           bucket: ${{ vars.OCI_BUILD_CACHE_BUCKET }}
           namespace: ${{ vars.OCI_BUILD_CACHE_NAMESPACE }}
           region: ${{ vars.OCI_CI_REGION }}
+          kythira-cache-url: ${{ vars.KYTHIRA_BUILD_CACHE_URL }}
+          kythira-cache-rw-user: ${{ vars.KYTHIRA_BUILD_CACHE_RW_USER }}
+          kythira-cache-rw-password: ${{ secrets.KYTHIRA_BUILD_CACHE_RW_PASSWORD }}
+          kythira-cache-pr-user: ${{ vars.KYTHIRA_BUILD_CACHE_PR_USER }}
+          kythira-cache-pr-password: ${{ secrets.KYTHIRA_BUILD_CACHE_PR_PASSWORD }}
+          kythira-cache-ro-user: ${{ vars.KYTHIRA_BUILD_CACHE_RO_USER }}
+          kythira-cache-ro-password: ${{ secrets.KYTHIRA_BUILD_CACHE_RO_PASSWORD }}
 
       # Distinct key ("-edhoc-coap-alt-"): this tree is the g++-13 edhoc tree
       # plus cantcoap and libnyoci, so restoring the plain edhoc cache would
@@ -1778,13 +1837,15 @@ jobs:
     # Full matrix only: skipped on stacked PRs (see the note under `on:`).
     if: github.event_name != 'pull_request' || github.base_ref == 'main'
     name: DNS Discovery Build (g++-13, x64)
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.event.pull_request.head.repo.fork && 'ubuntu-24.04') || vars.KYTHIRA_X64_RUNNER || 'bit63' }}
     timeout-minutes: 180
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Self-hosted runner baseline
+        uses: ./.github/actions/self-hosted-baseline
 
       - name: Install system dependencies
         run: |
@@ -1807,10 +1868,26 @@ jobs:
             echo "::warning::apt-get install failed (attempt ${attempt}/3), retrying in 30s..."
             sleep 30
           done
-          sudo systemctl disable --now named
           # The package starts the daemon on install; make sure, and fail here
           # rather than as 24 DNSSDExceptions in the Poco test if it did not.
-          sudo systemctl start avahi-daemon
+          # Self-hosted runner pods have no systemd (PID 1 is the runner, and
+          # policy-rc.d stops the packages starting anything), so there named
+          # was never started and avahi-daemon is started by hand behind its
+          # own system D-Bus, which libavahi-client talks to.
+          if [ -d /run/systemd/system ]; then
+            sudo systemctl disable --now named
+            sudo systemctl start avahi-daemon
+          else
+            if [ ! -S /run/dbus/system_bus_socket ]; then
+              sudo mkdir -p /run/dbus
+              sudo dbus-daemon --system --fork
+            fi
+            avahi-daemon --check 2>/dev/null || sudo avahi-daemon --daemonize --no-drop-root --no-chroot
+            for _ in 1 2 3 4 5 6 7 8 9 10; do
+              avahi-daemon --check 2>/dev/null && break
+              sleep 1
+            done
+          fi
           avahi-daemon --check
           if [ -e /etc/apparmor.d/usr.sbin.named ] && [ -d /sys/kernel/security/apparmor ]; then
             sudo apparmor_parser -R /etc/apparmor.d/usr.sbin.named
@@ -1853,6 +1930,13 @@ jobs:
           bucket: ${{ vars.OCI_BUILD_CACHE_BUCKET }}
           namespace: ${{ vars.OCI_BUILD_CACHE_NAMESPACE }}
           region: ${{ vars.OCI_CI_REGION }}
+          kythira-cache-url: ${{ vars.KYTHIRA_BUILD_CACHE_URL }}
+          kythira-cache-rw-user: ${{ vars.KYTHIRA_BUILD_CACHE_RW_USER }}
+          kythira-cache-rw-password: ${{ secrets.KYTHIRA_BUILD_CACHE_RW_PASSWORD }}
+          kythira-cache-pr-user: ${{ vars.KYTHIRA_BUILD_CACHE_PR_USER }}
+          kythira-cache-pr-password: ${{ secrets.KYTHIRA_BUILD_CACHE_PR_PASSWORD }}
+          kythira-cache-ro-user: ${{ vars.KYTHIRA_BUILD_CACHE_RO_USER }}
+          kythira-cache-ro-password: ${{ secrets.KYTHIRA_BUILD_CACHE_RO_PASSWORD }}
 
       # The g++-13 build-and-test legs' key plus the poco-dnssd feature: the
       # tree is theirs with one more port in it. On a miss, every port but
@@ -1984,13 +2068,18 @@ jobs:
     # Full matrix only: skipped on stacked PRs (see the note under `on:`).
     if: github.event_name != 'pull_request' || github.base_ref == 'main'
     name: No Folly (clang++-18, x64)
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.event.pull_request.head.repo.fork && 'ubuntu-24.04') || vars.KYTHIRA_X64_RUNNER || 'bit63' }}
     # One full build and test run, the same work as a build-and-test leg.
     # Measured on main: 12.8 min with a warm sccache (run 37567880231) and
     # 63.8 min after a change to widely included headers (run 37584489048).
     # 300, not 180: the clang-built vcpkg tree this job uses (mold-linker
-    # Requirement 9) costs a cold 78-minute install the first time.
-    timeout-minutes: 300
+    # Requirement 9) costs a cold 78-minute install the first time. bit63
+    # gets 600 because its cold install, sccache and test run all start
+    # empty together until main has warmed the kythira cache: on PR #943
+    # the install took 77 min and the build reached 1558/1732 edges when
+    # 420 ran out (631 cache misses at 31.5 s each, the heavy_tu=1 pool
+    # serialising the tail).
+    timeout-minutes: ${{ (!github.event.pull_request.head.repo.fork && !startsWith(vars.KYTHIRA_X64_RUNNER || 'bit63', 'ubuntu')) && 600 || 300 }}
     # The read-write build-cache key is an environment secret of
     # build-cache-write, whose deployment branches are main only, so a
     # job on any other ref never receives it. Same-repository pull requests
@@ -2004,6 +2093,8 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Self-hosted runner baseline
+        uses: ./.github/actions/self-hosted-baseline
 
       - name: Install system dependencies
         run: |
@@ -2057,6 +2148,13 @@ jobs:
           bucket: ${{ vars.OCI_BUILD_CACHE_BUCKET }}
           namespace: ${{ vars.OCI_BUILD_CACHE_NAMESPACE }}
           region: ${{ vars.OCI_CI_REGION }}
+          kythira-cache-url: ${{ vars.KYTHIRA_BUILD_CACHE_URL }}
+          kythira-cache-rw-user: ${{ vars.KYTHIRA_BUILD_CACHE_RW_USER }}
+          kythira-cache-rw-password: ${{ secrets.KYTHIRA_BUILD_CACHE_RW_PASSWORD }}
+          kythira-cache-pr-user: ${{ vars.KYTHIRA_BUILD_CACHE_PR_USER }}
+          kythira-cache-pr-password: ${{ secrets.KYTHIRA_BUILD_CACHE_PR_PASSWORD }}
+          kythira-cache-ro-user: ${{ vars.KYTHIRA_BUILD_CACHE_RO_USER }}
+          kythira-cache-ro-password: ${{ secrets.KYTHIRA_BUILD_CACHE_RO_PASSWORD }}
 
       # Byte-identical to the x64 clang++-18 build-and-test leg's key, so
       # this job shares that leg's clang-built tree rather than keeping
@@ -2244,11 +2342,14 @@ jobs:
     # Full matrix only: skipped on stacked PRs (see the note under `on:`).
     if: github.event_name != 'pull_request' || github.base_ref == 'main'
     name: clang-tidy (shard ${{ matrix.shard }} of 6)
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.event.pull_request.head.repo.fork && 'ubuntu-24.04') || vars.KYTHIRA_X64_RUNNER || 'bit63' }}
     # Sized for a cold cache (or the cache off): the slowest cold shard took
     # 57 minutes on an EPYC 7763 runner (run 42351017144), plus about 3
-    # minutes of setup. Warm shards finish in under 2 minutes.
-    timeout-minutes: 90
+    # minutes of setup. Warm shards finish in under 2 minutes. On bit63 the
+    # limit is 180: tidy-cache keys hash the clang-tidy binary, which differs
+    # from the hosted image's, so no hosted entry ever hits there and a cold
+    # shard also waits on a cold vcpkg install.
+    timeout-minutes: ${{ (!github.event.pull_request.head.repo.fork && !startsWith(vars.KYTHIRA_X64_RUNNER || 'bit63', 'ubuntu')) && 180 || 90 }}
     strategy:
       fail-fast: false
       matrix:
@@ -2260,6 +2361,8 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Self-hosted runner baseline
+        uses: ./.github/actions/self-hosted-baseline
 
       - name: Install system dependencies
         run: |
@@ -2313,6 +2416,13 @@ jobs:
           bucket: ${{ vars.OCI_BUILD_CACHE_BUCKET }}
           namespace: ${{ vars.OCI_BUILD_CACHE_NAMESPACE }}
           region: ${{ vars.OCI_CI_REGION }}
+          kythira-cache-url: ${{ vars.KYTHIRA_BUILD_CACHE_URL }}
+          kythira-cache-rw-user: ${{ vars.KYTHIRA_BUILD_CACHE_RW_USER }}
+          kythira-cache-rw-password: ${{ secrets.KYTHIRA_BUILD_CACHE_RW_PASSWORD }}
+          kythira-cache-pr-user: ${{ vars.KYTHIRA_BUILD_CACHE_PR_USER }}
+          kythira-cache-pr-password: ${{ secrets.KYTHIRA_BUILD_CACHE_PR_PASSWORD }}
+          kythira-cache-ro-user: ${{ vars.KYTHIRA_BUILD_CACHE_RO_USER }}
+          kythira-cache-ro-password: ${{ secrets.KYTHIRA_BUILD_CACHE_RO_PASSWORD }}
 
       # Byte-identical to the x64 build-and-test legs' key (they set no
       # vcpkg_cxx), so this job shares their tree rather than keeping another
@@ -2452,10 +2562,12 @@ jobs:
     # Full matrix only: skipped on stacked PRs (see the note under `on:`).
     if: github.event_name != 'pull_request' || github.base_ref == 'main'
     name: clang-tidy (${{ matrix.variant }})
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.event.pull_request.head.repo.fork && 'ubuntu-24.04') || vars.KYTHIRA_X64_RUNNER || 'bit63' }}
     # A warm leg is setup plus 1-8 files. 120 covers a vcpkg miss that has to
-    # build the variant's own port (poco-dnssd, ion-c) from source.
-    timeout-minutes: 120
+    # build the variant's own port (poco-dnssd, ion-c) from source. bit63
+    # gets 240: its vcpkg ABI hashes differ from hosted ones, so a cold leg
+    # there rebuilds the whole dependency set, not just the variant's port.
+    timeout-minutes: ${{ (!github.event.pull_request.head.repo.fork && !startsWith(vars.KYTHIRA_X64_RUNNER || 'bit63', 'ubuntu')) && 240 || 120 }}
     strategy:
       fail-fast: false
       matrix:
@@ -2532,6 +2644,8 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Self-hosted runner baseline
+        uses: ./.github/actions/self-hosted-baseline
 
       - name: Install system dependencies
         run: |
@@ -2574,6 +2688,13 @@ jobs:
           bucket: ${{ vars.OCI_BUILD_CACHE_BUCKET }}
           namespace: ${{ vars.OCI_BUILD_CACHE_NAMESPACE }}
           region: ${{ vars.OCI_CI_REGION }}
+          kythira-cache-url: ${{ vars.KYTHIRA_BUILD_CACHE_URL }}
+          kythira-cache-rw-user: ${{ vars.KYTHIRA_BUILD_CACHE_RW_USER }}
+          kythira-cache-rw-password: ${{ secrets.KYTHIRA_BUILD_CACHE_RW_PASSWORD }}
+          kythira-cache-pr-user: ${{ vars.KYTHIRA_BUILD_CACHE_PR_USER }}
+          kythira-cache-pr-password: ${{ secrets.KYTHIRA_BUILD_CACHE_PR_PASSWORD }}
+          kythira-cache-ro-user: ${{ vars.KYTHIRA_BUILD_CACHE_RO_USER }}
+          kythira-cache-ro-password: ${{ secrets.KYTHIRA_BUILD_CACHE_RO_PASSWORD }}
 
       # The exact key the variant's build job saves (dns-discovery-build,
       # gcp-sdk-build, ion-serializer-build, config-variants); restore only.
@@ -2651,7 +2772,7 @@ jobs:
       checks: write         # dorny/test-reporter posts inline results
       pull-requests: write  # sticky coverage comment on the PR
     name: Coverage (clang++-18)
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.event.pull_request.head.repo.fork && 'ubuntu-24.04') || vars.KYTHIRA_X64_RUNNER || 'bit63' }}
     # 300, not 180: the clang-built vcpkg tree (mold-linker Requirement 9)
     # costs a cold 78-minute install the first time.
     timeout-minutes: 300
@@ -2672,6 +2793,8 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Self-hosted runner baseline
+        uses: ./.github/actions/self-hosted-baseline
 
       # Debug + LLVM source-based coverage instrumentation (-g, no
       # optimization, -fprofile-instr-generate/-fcoverage-mapping) produces
@@ -2710,11 +2833,16 @@ jobs:
           # Bounded and retried, like every other install step. This one had
           # neither, and hung for its full 3-hour job budget without ever
           # reaching a compiler.
+          # libclang-rt-18-dev holds libclang_rt.profile, which
+          # -fprofile-instr-generate links. GitHub's image has it from its
+          # full LLVM install; without it every try_compile fails to link and
+          # configure dies at "Could NOT find Threads".
           for attempt in 1 2 3; do
             if timeout 300 sudo apt-get update -q \
                && timeout 600 sudo apt-get install -y --no-install-recommends \
                  clang-18 \
                  llvm-18 \
+                 libclang-rt-18-dev \
                  cmake \
                  ninja-build \
                  libfiu-dev \
@@ -2765,6 +2893,13 @@ jobs:
           bucket: ${{ vars.OCI_BUILD_CACHE_BUCKET }}
           namespace: ${{ vars.OCI_BUILD_CACHE_NAMESPACE }}
           region: ${{ vars.OCI_CI_REGION }}
+          kythira-cache-url: ${{ vars.KYTHIRA_BUILD_CACHE_URL }}
+          kythira-cache-rw-user: ${{ vars.KYTHIRA_BUILD_CACHE_RW_USER }}
+          kythira-cache-rw-password: ${{ secrets.KYTHIRA_BUILD_CACHE_RW_PASSWORD }}
+          kythira-cache-pr-user: ${{ vars.KYTHIRA_BUILD_CACHE_PR_USER }}
+          kythira-cache-pr-password: ${{ secrets.KYTHIRA_BUILD_CACHE_PR_PASSWORD }}
+          kythira-cache-ro-user: ${{ vars.KYTHIRA_BUILD_CACHE_RO_USER }}
+          kythira-cache-ro-password: ${{ secrets.KYTHIRA_BUILD_CACHE_RO_PASSWORD }}
 
       - name: Cache vcpkg packages
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -3107,7 +3242,7 @@ jobs:
       contents: read
       checks: write         # dorny/test-reporter posts inline results
     name: ThreadSanitizer (Beast + Proxygen concurrency suites)
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.event.pull_request.head.repo.fork && 'ubuntu-24.04') || vars.KYTHIRA_X64_RUNNER || 'bit63' }}
     timeout-minutes: 120
 
     # The read-write build-cache key is an environment secret of
@@ -3123,6 +3258,8 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Self-hosted runner baseline
+        uses: ./.github/actions/self-hosted-baseline
 
       - name: Install system dependencies
         run: |
@@ -3181,6 +3318,13 @@ jobs:
           bucket: ${{ vars.OCI_BUILD_CACHE_BUCKET }}
           namespace: ${{ vars.OCI_BUILD_CACHE_NAMESPACE }}
           region: ${{ vars.OCI_CI_REGION }}
+          kythira-cache-url: ${{ vars.KYTHIRA_BUILD_CACHE_URL }}
+          kythira-cache-rw-user: ${{ vars.KYTHIRA_BUILD_CACHE_RW_USER }}
+          kythira-cache-rw-password: ${{ secrets.KYTHIRA_BUILD_CACHE_RW_PASSWORD }}
+          kythira-cache-pr-user: ${{ vars.KYTHIRA_BUILD_CACHE_PR_USER }}
+          kythira-cache-pr-password: ${{ secrets.KYTHIRA_BUILD_CACHE_PR_PASSWORD }}
+          kythira-cache-ro-user: ${{ vars.KYTHIRA_BUILD_CACHE_RO_USER }}
+          kythira-cache-ro-password: ${{ secrets.KYTHIRA_BUILD_CACHE_RO_PASSWORD }}
 
       - name: Cache vcpkg packages
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -3441,7 +3585,7 @@ jobs:
     # Full matrix only: skipped on stacked PRs (see the note under `on:`).
     if: github.event_name != 'pull_request' || github.base_ref == 'main'
     name: Full suite (${{ matrix.backend }} future backend)
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.event.pull_request.head.repo.fork && 'ubuntu-24.04') || vars.KYTHIRA_X64_RUNNER || 'bit63' }}
     # Was 180 ("matches build-and-test's budget"), and that stopped being
     # enough. The stdexec leg is materially heavier than a Build & Test leg,
     # and pooling the heavy TUs (17c720a, df8dbdf) traded wall time for the
@@ -3482,7 +3626,12 @@ jobs:
     # is now ~23x the normal run time; if that becomes the failing mode worth
     # optimising, lower this, do not lower it to reclaim minutes that warm
     # runs were never spending.
-    timeout-minutes: 300
+    #
+    # The stdexec leg gets 480 on bit63. About ten jobs share that host, so a
+    # leg gets one or two CPUs once it is busy: PR #943's stdexec leg built for
+    # 4h04m and was cut off at 473 of 992 tests. Fork PRs and the
+    # KYTHIRA_X64_RUNNER=ubuntu-* kill switch keep 300.
+    timeout-minutes: ${{ (matrix.backend == 'stdexec' && !github.event.pull_request.head.repo.fork && !startsWith(vars.KYTHIRA_X64_RUNNER || 'bit63', 'ubuntu')) && 480 || 300 }}
     strategy:
       fail-fast: false
       matrix:
@@ -3501,6 +3650,8 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Self-hosted runner baseline
+        uses: ./.github/actions/self-hosted-baseline
 
       - name: Install system dependencies
         run: |
@@ -3559,6 +3710,13 @@ jobs:
           bucket: ${{ vars.OCI_BUILD_CACHE_BUCKET }}
           namespace: ${{ vars.OCI_BUILD_CACHE_NAMESPACE }}
           region: ${{ vars.OCI_CI_REGION }}
+          kythira-cache-url: ${{ vars.KYTHIRA_BUILD_CACHE_URL }}
+          kythira-cache-rw-user: ${{ vars.KYTHIRA_BUILD_CACHE_RW_USER }}
+          kythira-cache-rw-password: ${{ secrets.KYTHIRA_BUILD_CACHE_RW_PASSWORD }}
+          kythira-cache-pr-user: ${{ vars.KYTHIRA_BUILD_CACHE_PR_USER }}
+          kythira-cache-pr-password: ${{ secrets.KYTHIRA_BUILD_CACHE_PR_PASSWORD }}
+          kythira-cache-ro-user: ${{ vars.KYTHIRA_BUILD_CACHE_RO_USER }}
+          kythira-cache-ro-password: ${{ secrets.KYTHIRA_BUILD_CACHE_RO_PASSWORD }}
 
       - name: Cache vcpkg packages
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -3699,6 +3857,13 @@ jobs:
       - name: Add swap headroom and report resources
         run: |
           echo "── before ──"; df -h /; free -h
+          # A self-hosted runner pod cannot swapon (no CAP_SYS_ADMIN, and
+          # swap belongs to the host's kubelet anyway); there the host's
+          # memory is the headroom, so only report it.
+          if [ "${{ runner.environment }}" = "self-hosted" ]; then
+            nproc
+            exit 0
+          fi
           sudo swapoff -a || true
           sudo rm -f /mnt/swapfile /swapfile || true
           sudo fallocate -l 24G /mnt/swapfile
@@ -3898,7 +4063,7 @@ jobs:
     # Full matrix only: skipped on stacked PRs (see the note under `on:`).
     if: github.event_name != 'pull_request' || github.base_ref == 'main'
     name: Packer (ca_cluster_node AMI)
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.event.pull_request.head.repo.fork && 'ubuntu-24.04') || vars.KYTHIRA_X64_RUNNER || 'bit63' }}
     timeout-minutes: 15
 
     steps:
@@ -3906,6 +4071,8 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Self-hosted runner baseline
+        uses: ./.github/actions/self-hosted-baseline
 
       # Every network command is bounded and retried. Unbounded, this step hung
       # for its whole 15-minute job budget and reported as a Packer failure —
@@ -3985,7 +4152,7 @@ jobs:
   # first script is the target's whole body, so the two cannot drift.
   kconfig-check:
     name: Kconfig defconfig check
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.event.pull_request.head.repo.fork && 'ubuntu-24.04') || vars.KYTHIRA_X64_RUNNER || 'bit63' }}
     # Needs no build or vcpkg tree: under 10 s on main, cold or warm.
     timeout-minutes: 10
     steps:
@@ -3993,6 +4160,8 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Self-hosted runner baseline
+        uses: ./.github/actions/self-hosted-baseline
       - name: Install kconfiglib
         run: pip3 install --user -r scripts/kconfig/requirements.txt
       - name: Every defconfig loads against Kconfig without a warning
@@ -4010,13 +4179,17 @@ jobs:
         run: python3 scripts/check_module_boundaries.py
 
   workflow-input-limits:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    runs-on: ${{ (github.event.pull_request.head.repo.fork && 'ubuntu-24.04') || vars.KYTHIRA_X64_RUNNER || 'bit63' }}
+    # 15, not 5: on bit63 the baseline step apt-installs compilers and the
+    # compose plugin first, and PR #943's run was cancelled mid-download.
+    timeout-minutes: 15
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Self-hosted runner baseline
+        uses: ./.github/actions/self-hosted-baseline
       - name: No workflow may declare more than 25 workflow_dispatch inputs
         run: |
           python3 - <<'PY'
@@ -4081,18 +4254,20 @@ jobs:
   # changes when provision-oidc-role.sh is re-run, so this is the one place a
   # regression in policies/ shows up before it reaches the account.
   aws-ci-policies:
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.event.pull_request.head.repo.fork && 'ubuntu-24.04') || vars.KYTHIRA_X64_RUNNER || 'bit63' }}
     timeout-minutes: 5
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Self-hosted runner baseline
+        uses: ./.github/actions/self-hosted-baseline
       - name: Lint the AWS CI bundle policies
         run: python3 scripts/ci-cloud-credentials/aws/render-ci-policy.py --check
 
   docs:
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.event.pull_request.head.repo.fork && 'ubuntu-24.04') || vars.KYTHIRA_X64_RUNNER || 'bit63' }}
     timeout-minutes: 30
 
     permissions:
@@ -4104,6 +4279,8 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Self-hosted runner baseline
+        uses: ./.github/actions/self-hosted-baseline
 
       # Bounded and retried. Unbounded, this step hung for the docs job's whole
       # 30-minute budget without ever invoking Doxygen, and reported as a docs
@@ -4192,7 +4369,7 @@ jobs:
   docs-deploy:
     needs: docs
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.event.pull_request.head.repo.fork && 'ubuntu-24.04') || vars.KYTHIRA_X64_RUNNER || 'bit63' }}
     timeout-minutes: 10
 
     permissions:
