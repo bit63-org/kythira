@@ -291,6 +291,18 @@ if(KYTHIRA_KMS_NODE_DAEMON)
         add_dependencies(kms_node_cluster_test kms_node)
         set_tests_properties(kms_node_cluster_test PROPERTIES
             LABELS "integration;kms;kms-module" TIMEOUT 600)
+        # kms-independent-layers task 6: each migration path both ways under
+        # a workload, over the same process harness.
+        kythira_kms_test(kms_node_migration_test kms_node_migration_test.cpp)
+        target_link_libraries(kms_node_migration_test PRIVATE
+            httplib::httplib boost_json OpenSSL::SSL OpenSSL::Crypto kythira_test_support)
+        target_compile_definitions(kms_node_migration_test PRIVATE
+            KMS_NODE_PATH="$<TARGET_FILE:kms_node>"
+            KYTHIRA_SOFTHSM2_LIBRARY="${KYTHIRA_KMS_SOFTHSM2_LIBRARY}"
+            KYTHIRA_SOFTHSM2_UTIL="${KYTHIRA_KMS_SOFTHSM2_UTIL}")
+        add_dependencies(kms_node_migration_test kms_node)
+        set_tests_properties(kms_node_migration_test PROPERTIES
+            LABELS "integration;kms;kms-module" TIMEOUT 1500)
     else()
         message(STATUS "kms_node_cluster_test: needs SoftHSM2 and httplib, not registered")
     endif()
