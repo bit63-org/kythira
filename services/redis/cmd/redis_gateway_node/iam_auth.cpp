@@ -17,6 +17,7 @@
 #include <raft/beast_http_transport_impl.hpp>
 #include <raft/host_node_id.hpp>
 #include <raft/multi_raft_impl.hpp>
+#include <raft/raft_log_kms.hpp>
 
 #include <cstdlib>
 #include <iostream>
@@ -111,6 +112,10 @@ auto start_iam_auth_from_env() -> std::unique_ptr<iam_auth> {
     r.max_staleness =
         std::chrono::seconds(number("KYTHIRA_IAM_MAX_STALENESS_SECS", 60, 24UL * 60 * 60));
     r.partition = env("KYTHIRA_IAM_ARN_PARTITION").value_or("aws");
+    // The replica's Raft log, sealed at rest when KYTHIRA_RAFT_LOG_KMS says
+    // so, under the key ring of its own data directory.
+    r.raft_log = kythira::raft_log_options_for(
+        r.data_dir, kythira::raft_log_encryption_settings::from_environment());
 
     iam::redis_verifier_config v;
     v.account = required("KYTHIRA_IAM_ACCOUNT_ID");

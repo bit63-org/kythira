@@ -68,6 +68,7 @@
 #include <raft/multi_raft_impl.hpp>
 #include <raft/multi_raft_transport_handles.hpp>
 #include <raft/node_core.hpp>
+#include <raft/raft_log_kms.hpp>
 #include <raft/service_module.hpp>
 
 #include <atomic>
@@ -332,7 +333,11 @@ public:
              .election_timeout_max = _cfg.election_timeout_max,
              .heartbeat_interval = _cfg.heartbeat_interval,
              .rpc_timeout = _cfg.rpc_timeout},
-            kythira::log_level::info));
+            kythira::log_level::info,
+            // Sealed at rest when KYTHIRA_RAFT_LOG_KMS says so
+            // (.kiro/specs/raft-log-encryption/); one key ring per data dir.
+            kythira::raft_log_options_for(
+                _cfg.data_dir, kythira::raft_log_encryption_settings::from_environment())));
         _group = kythira::iam::k_iam_group_id;
         if (!_raft->has_group(_group)) {
             std::vector<kythira::host_node_id> learners;

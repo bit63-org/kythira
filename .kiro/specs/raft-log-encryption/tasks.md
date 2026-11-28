@@ -30,13 +30,15 @@
   - Tests with the local provider and a fake per-caller provider
   - _Requirements: 3.3_
 
-- [ ] 5. Service node wiring
+- [x] 5. Service node wiring
   - [x] `KYTHIRA_RAFT_LOG_KMS` / `KYTHIRA_RAFT_LOG_KMS_KEY_ID` read once
     per node; one key ring per data directory passed to every group's
     engine: DynamoDB, Kinesis, the KMS and the HSM
   - [x] `kythira` needs an endpoint (a KMS cannot seal its own log)
   - [x] Operator docs (`doc/kms.md`, "Raft logs at rest")
-  - [ ] The ledger, IAM and Redis modules
+  - [x] The ledger, IAM and Redis modules (IAM through `iam_raft_config`,
+    so the replica a Redis gateway embeds and `--convert-data-dir` seal
+    too; Redis's disk and RocksDB layouts, not the in-memory cache)
   - _Requirements: 6.1_
 
 - [x] 6. Chaos scan without the Raft-log exception

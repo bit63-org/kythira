@@ -282,8 +282,12 @@ restart with `KYTHIRA_RAFT_LOG_ENCRYPTION=decrypt_only` until compaction
 a restart with `KYTHIRA_RAFT_LOG_KMS=off`; a node refuses to load a log
 holding sealed records without its key ring. Nodes that seal and nodes
 that do not replicate with each other: sealing never changes the wire.
-DynamoDB, Kinesis, the KMS and the HSM read these settings; the ledger,
-IAM and Redis do not yet.
+Every module that keeps a Raft log on disk reads these settings:
+DynamoDB, Kinesis, the KMS, the HSM, the ledger, IAM (including the IAM
+replica a Redis gateway embeds, and `iam_node --convert-data-dir`, which
+writes the converted log sealed) and Redis's disk and RocksDB layouts. A
+Redis cache keeps its Raft state in memory and has nothing to seal; its
+chunk store is outside the Raft log and these settings.
 
 ## Operating
 

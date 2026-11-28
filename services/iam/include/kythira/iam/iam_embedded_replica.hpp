@@ -87,6 +87,10 @@ struct embedded_replica_config {
     std::chrono::milliseconds max_staleness = replica_freshness::k_default_max_staleness;
     std::string partition = "aws";
     log_level log = log_level::warning;
+    /// The engine options for the replica's Raft log: a key ring when the
+    /// host seals its Raft logs at rest (`raft_log_options_for`,
+    /// `.kiro/specs/raft-log-encryption/`), else none.
+    kythira::binary_file_persistence_options raft_log;
 };
 
 /// `<id>:<host>:<port>[,...]`, the voters' Raft RPC addresses. An `@...`
@@ -195,7 +199,7 @@ public:
         const auto space = service_node::group_space::standalone(k_iam_module_number);
         _raft = std::make_unique<raft_host>(iam_raft_config<types>(
             _cfg.node_id, typename types::network_client_type{_host->client()},
-            _host->server_for(space), _cfg.data_dir, _cfg.partition, {}, _cfg.log));
+            _host->server_for(space), _cfg.data_dir, _cfg.partition, {}, _cfg.log, _cfg.raft_log));
         if (!_raft->has_group(k_iam_group_id)) {
             _raft->create_group(iam_group_descriptor(voter_ids(), {_cfg.node_id}));
         }

@@ -38,6 +38,7 @@
 #include <raft/multi_raft_impl.hpp>
 #include <raft/multi_raft_transport_handles.hpp>
 #include <raft/persistence.hpp>
+#include <raft/raft_log_kms.hpp>
 #include <kythira/redis/redis_gateway_impl.hpp>
 #include <kythira/redis/redis_kv_mvcc_state_machine.hpp>
 #include <kythira/redis/redis_kv_state_machine.hpp>
@@ -545,6 +546,14 @@ public:
 
 private:
     auto make_config(Host& node, const service_node::group_space& space) -> config_type {
+        // Sealed at rest when KYTHIRA_RAFT_LOG_KMS says so
+        // (.kiro/specs/raft-log-encryption/), one key ring per data dir.
+        // A cache keeps its Raft state in memory and has nothing to seal.
+        kythira::binary_file_persistence_options log_options;
+        if constexpr (Storage::on_disk || Storage::engine) {
+            log_options = kythira::raft_log_options_for(
+                _opt._cache._data_dir, kythira::raft_log_encryption_settings::from_environment());
+        }
         config_type cfg{
             .node_id = _opt._node_id,
             .network_client = typename types::network_client_type{node.client()},
@@ -552,15 +561,16 @@ private:
                                   ? node.mux().view(space.first(), membership_group_id(space) - 1)
                                   : node.server_for(space),
             .store_factory =
-                [this](const std::uint64_t& group) {
+                [this, log_options](const std::uint64_t& group) {
                     if constexpr (Storage::on_disk || Storage::engine) {
                         return typename types::persistence_engine_type{
-                            _opt._cache._data_dir / "raft" / std::to_string(group)};
+                            _opt._cache._data_dir / "raft" / std::to_string(group), log_options};
                     } else {
                         // A cache: in-memory persistence is the honest
                         // choice here. A replica that restarts catches up
                         // from its peers.
                         (void)group;
+                        (void)log_options;
                         return typename types::persistence_engine_type{};
                     }
                 },
