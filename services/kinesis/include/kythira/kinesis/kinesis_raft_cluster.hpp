@@ -18,7 +18,8 @@
 ///   command is proposed: tokens a non-leader took are refunded before it
 ///   forwards, and the leader admits the forwarded command itself.
 /// - `read` runs on this node's replica of the owning group (a replica
-///   read: possibly behind the leader by the entries in flight).
+///   read: possibly behind the leader by the entries in flight), once that
+///   replica has caught up with its group since it started.
 ///
 /// The host must outlive this object. `Host` is a `kythira::multi_raft`
 /// whose state machine is (or wraps, through `with_group_state_machine`) a
@@ -130,21 +131,33 @@ public:
         return out;
     }
 
+    /// Reads this node's replica of the group owning `key`; false when
+    /// there is none, or when it has not caught up with its group since it
+    /// started (`multi_raft::with_current_group_state_machine`): a learner
+    /// still being sent its snapshot, or a restarted follower no leader has
+    /// reached yet, holds an empty or old state machine, and a read of it
+    /// answered `ResourceNotFoundException` for streams the group created
+    /// long ago. A KCL worker takes that answer to `GetRecords` as the end
+    /// of its shard and never reads the shard again. The caller then reads
+    /// another replica (the data API's routes) instead.
     auto read(const std::string& key, const stream_reader& f) -> bool {
         const auto d = _host.resolve(key);
         if (!d) {
             return false;
         }
-        const auto done = _host.with_group_state_machine(
-            d->_group_id, [&f](auto& sm, const auto& /*descriptor*/) {
-                if constexpr (k_transactional) {
-                    f(sm.inner());
-                } else {
-                    f(sm);
-                }
-                return true;
-            });
-        return done.value_or(false);
+        const auto run = [&f](auto& sm, const auto& /*descriptor*/) {
+            if constexpr (k_transactional) {
+                f(sm.inner());
+            } else {
+                f(sm);
+            }
+            return true;
+        };
+        if constexpr (requires { _host.with_current_group_state_machine(d->_group_id, run); }) {
+            return _host.with_current_group_state_machine(d->_group_id, run).value_or(false);
+        } else {
+            return _host.with_group_state_machine(d->_group_id, run).value_or(false);
+        }
     }
 
     // ---- resharding transactions (task 11) ---------------------------------

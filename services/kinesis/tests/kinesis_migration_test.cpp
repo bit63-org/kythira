@@ -746,25 +746,35 @@ public:
              " pushed");
     }
 
-    /// Stops the producer, waits for both consumers to read everything it
-    /// was acknowledged, then stops them.
+    /// Stops the producer, waits for both consumers to read everything the
+    /// stream holds, then stops them.
     void drain() {
         _producing.store(false);
-        // The call in flight finishes first, or its records would be
-        // acknowledged after the count the consumers are held to.
+        // The call in flight finishes first, or its records would land
+        // after the tips the consumers are held to.
         while (!_produced.load()) {
             std::this_thread::sleep_for(1ms);
         }
-        const auto target = acked_count();
+        // Held to what is stored, not to a count of what was acknowledged:
+        // a PutRecords that failed (its front end restarted under it) can
+        // still have stored some of its records, and they count toward
+        // what a consumer has read. Waiting for that many records stopped
+        // the consumers that many records short of the stream's end.
         const auto until = std::chrono::steady_clock::now() + 30s;
-        while (std::chrono::steady_clock::now() < until &&
-               (polled_count() < target || pushed_count() < target)) {
+        std::optional<std::map<std::string, std::string>> tips;
+        while (std::chrono::steady_clock::now() < until) {
+            if (!tips) {
+                tips = stored_tips();
+            }
+            if (tips && read_through(*tips)) {
+                break;
+            }
             std::this_thread::sleep_for(5ms);
         }
-        if (polled_count() < target || pushed_count() < target) {
-            note("consumers stalled: " + std::to_string(target) + " acknowledged, " +
+        if (!tips || !read_through(*tips)) {
+            note("consumers stalled: " + std::to_string(acked_count()) + " acknowledged, " +
                  std::to_string(polled_count()) + " polled, " + std::to_string(pushed_count()) +
-                 " pushed");
+                 " pushed" + (tips ? "" : ", the stream's tips never read"));
         }
         // Give a late duplicate the time to show itself.
         std::this_thread::sleep_for(100ms);
@@ -815,6 +825,50 @@ private:
     void note(std::string problem) {
         const std::scoped_lock lock(_mutex);
         _problems.push_back(std::move(problem));
+    }
+
+    /// The last sequence number stored in each shard (a shard with none is
+    /// left out), read whole through the current endpoint; nullopt when a
+    /// call failed.
+    [[nodiscard]] auto stored_tips() const -> std::optional<std::map<std::string, std::string>> {
+        auto& e = at();
+        std::map<std::string, std::string> out;
+        for (const auto& shard : _shards) {
+            const auto first = e.call("GetShardIterator", {{"StreamName", k_stream},
+                                                           {"ShardId", shard},
+                                                           {"ShardIteratorType", "TRIM_HORIZON"}});
+            if (first.status != 200U) {
+                return std::nullopt;
+            }
+            auto it = str(json::parse(first.body).as_object().at("ShardIterator"));
+            for (;;) {
+                const auto r = e.call("GetRecords", {{"ShardIterator", it}, {"Limit", 1000}});
+                if (r.status != 200U) {
+                    return std::nullopt;
+                }
+                const auto got = json::parse(r.body).as_object();
+                const auto& recs = got.at("Records").as_array();
+                if (recs.empty()) {
+                    break;
+                }
+                out[shard] = str(recs.back().at("SequenceNumber"));
+                it = str(got.at("NextShardIterator"));
+            }
+        }
+        return out;
+    }
+
+    /// Whether both consumers have read every shard through `tips`.
+    [[nodiscard]] auto read_through(const std::map<std::string, std::string>& tips) const -> bool {
+        const std::scoped_lock lock(_mutex);
+        const auto reached = [&](const std::map<std::string, std::vector<read_record>>& got,
+                                 const std::string& shard, const std::string& tip) {
+            const auto it = got.find(shard);
+            return it != got.end() && !it->second.empty() && !seq_less(it->second.back()._seq, tip);
+        };
+        return std::ranges::all_of(tips, [&](const auto& t) {
+            return reached(_polled, t.first, t.second) && reached(_pushed, t.first, t.second);
+        });
     }
 
     [[nodiscard]] auto acked_count() const -> std::size_t {

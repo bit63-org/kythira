@@ -571,6 +571,38 @@ public:
         return std::forward<F>(f)(_state_machine);
     }
 
+    /// @brief `with_state_machine`, but only on a replica whose state machine
+    /// has caught up with its group: a leader that has applied an entry of
+    /// its current term (as `with_leader_state_machine` requires), or a
+    /// follower or learner that an accepted AppendEntries has left holding
+    /// and having applied everything its leader had committed
+    /// (`last_caught_up()`), within `max_staleness` when one is given.
+    ///
+    /// A replica that has never caught up since it started (a learner still
+    /// being sent its snapshot, a restarted follower no leader has reached
+    /// yet) holds an empty or old state machine. Read as if it were current,
+    /// it answers that things do not exist which the group created long ago.
+    /// Returns `std::nullopt` instead, without calling `f`; the caller should
+    /// read another replica. The check and `f` run under one hold of
+    /// `_mutex`, so they agree. Same rules for `f` as `with_state_machine`,
+    /// and `f` must return a value.
+    template<typename F>
+    auto with_current_state_machine(
+        F&& f, std::optional<std::chrono::steady_clock::duration> max_staleness = std::nullopt)
+        -> std::optional<std::invoke_result_t<F, state_machine_type&>> {
+        std::lock_guard<std::mutex> lock(_mutex);
+        if (_state == kythira::server_state::leader) {
+            if (term_at(_last_applied) != std::optional<term_id_type>{_current_term}) {
+                return std::nullopt;
+            }
+        } else if (!_last_caught_up ||
+                   (max_staleness &&
+                    std::chrono::steady_clock::now() - *_last_caught_up > *max_staleness)) {
+            return std::nullopt;
+        }
+        return std::forward<F>(f)(_state_machine);
+    }
+
     /// @brief Whether this node's log holds an administration entry from an
     /// earlier term that it has not yet applied.
     ///
