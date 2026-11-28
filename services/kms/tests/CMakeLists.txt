@@ -129,6 +129,13 @@ kythira_kms_test(kms_front_end_api_test kms_front_end_api_test.cpp)
 set_tests_properties(kms_front_end_api_test PROPERTIES
     LABELS "unit;kms;kms-module" TIMEOUT 120)
 
+# Task 6, Requirement 10.1: the data role's membership calls (evacuate,
+# status, cancel, release) both ways, malformed and mutated bodies, who
+# may call them, and the marker a release leaves.
+kythira_kms_test(kms_membership_test kms_membership_test.cpp)
+set_tests_properties(kms_membership_test PROPERTIES
+    LABELS "unit;kms;kms-module" TIMEOUT 60)
+
 # Task 5, Requirements 3.4, 4.1, 4.4, 4.5 and 9.2-9.4: two-step key
 # creation and the leader's jobs over an in-memory PKCS#11 backend, with
 # the scan of the catalog's log, engine and checkpoint for generated

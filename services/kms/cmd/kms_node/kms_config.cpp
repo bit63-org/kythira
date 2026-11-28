@@ -285,6 +285,27 @@ auto from_env(const env_fn& env) -> kms_options {
                    "nodes only");
     }
 
+    // Task 6: the founding voters; a data node outside them joins.
+    if (const auto v = get_opt(env, "KYTHIRA_KMS_VOTERS"); !v.empty()) {
+        for (const auto& item : list_of(v)) {
+            auto id = kythira::parse_host_peer_node_id(item);
+            if (!id) {
+                throw fail("KYTHIRA_KMS_VOTERS: " + id.error());
+            }
+            if (std::find(o.voters.begin(), o.voters.end(), *id) == o.voters.end()) {
+                o.voters.push_back(std::move(id).value());
+            }
+        }
+        if (o.voters.empty()) {
+            throw fail("KYTHIRA_KMS_VOTERS is empty");
+        }
+    } else {
+        for (const auto& [id, url] : o.api_urls) {
+            o.voters.push_back(id);
+        }
+    }
+    o.discard_catalog = bool_opt(env, "KYTHIRA_KMS_DISCARD_CATALOG", false);
+
     o.insecure_plaintext = bool_opt(env, "KYTHIRA_KMS_INSECURE_PLAINTEXT", false);
     const std::string scheme = o.insecure_plaintext ? "http://" : "https://";
     for (const auto& [id, url] : o.api_urls) {
@@ -579,6 +600,14 @@ auto usage_text() -> std::string_view {
                                      metadata at a read-index point of the
                                      catalog; else a point at most this old
                                      may serve (AWS's eventual consistency)
+  KYTHIRA_KMS_VOTERS                 the catalog's founding voters, ids
+                                     comma-separated (the data nodes in
+                                     KYTHIRA_KMS_API_URLS); a data node not
+                                     listed joins when an evacuation adds it
+                                     (POST /v1/kms/membership/evacuate)
+  KYTHIRA_KMS_DISCARD_CATALOG        true: a node starting without the data
+                                     role discards a catalog replica it still
+                                     holds instead of refusing to start (false)
   KYTHIRA_KMS_PROPOSE_TIMEOUT_MS     one proposal or read barrier (5000)
   KYTHIRA_KMS_ELECTION_TIMEOUT_MIN_MS and the other KYTHIRA_KMS_ Raft tuning
                                      names override the node's KYTHIRA_ ones
