@@ -42,3 +42,47 @@ retryable fault.
   request on every replica. Grant tokens are still accepted and checked
   (one this KMS did not make is `InvalidGrantTokenException`) but carry
   no authority of their own.
+
+## Kythira extensions
+
+These go beyond AWS KMS. An AWS SDK does not send them (botocore's model
+has no such members), so they change nothing for an AWS client; Kythira's
+own services call them through `kms.client` or signed JSON.
+
+- **Decrypt for an HPKE recipient**
+  (`.kiro/specs/ec2-compatible-api/` Requirements 10.2-10.3). AWS's
+  `Recipient` takes a Nitro attestation document and returns the
+  plaintext under the enclave's RSA key; that form still answers
+  `UnsupportedOperationException`. Kythira's takes
+  `KeyEncryptionAlgorithm` `KYTHIRA_HPKE_X25519_SHA256_AES256GCM` with
+  three members, all required:
+
+  | Member | What |
+  |---|---|
+  | `KythiraPublicKey` | the recipient's X25519 public key, 32 bytes |
+  | `KythiraAssociatedData` | the HPKE associated data, 1-1024 bytes |
+  | `KythiraInfo` | the HPKE info, which names the use, 1-1024 bytes |
+
+  KMS opens the ciphertext as any Decrypt does (key policy, grants,
+  encryption context), then seals the plaintext with HPKE (RFC 9180 base
+  mode, DHKEM(X25519, HKDF-SHA256), HKDF-SHA256, AES-256-GCM,
+  `include/kythira/kms/kms_hpke.hpp`) and returns it as
+  `CiphertextForRecipient`: the 32-byte encapsulated key, then the
+  ciphertext and its 16-byte tag. `Plaintext` and `KeyMaterialId` are
+  left out, as AWS leaves them out with a Recipient. The EC2 controller
+  uses it at `AttachVolume` to turn a lineage's wrapped data key into an
+  antikythera `VolumeKey` for one helm, one attachment and one
+  generation, with info `antikythera volume key v1` and the frame's
+  header as associated data, so the controller never holds the key.
+
+  The request is authorized as `kms:Decrypt` with the usual condition
+  keys plus `kms:KythiraRecipientPublicKeySha256`, the lower-case hex
+  SHA-256 of `KythiraPublicKey`. A lineage key's policy allows Decrypt
+  only to the EC2 service principal, only with the lineage's
+  encryption context, and only with this condition key, so the key
+  leaves KMS sealed to a key the controller enrolled. Refusals: the
+  Kythira members without the Kythira algorithm, `AttestationDocument`
+  with it, or a missing member answer `ValidationException`, as does a
+  low-order (all-zero shared secret) public key; the model refuses a key
+  that is not 32 bytes and any member or algorithm it does not know.
+

@@ -1,0 +1,34 @@
+{
+  "shapes": {
+    "KeyEncryptionMechanism": {
+      "type": "string",
+      "enum": ["RSAES_OAEP_SHA_256", "KYTHIRA_HPKE_X25519_SHA256_AES256GCM"]
+    },
+    "RecipientInfo": {
+      "members": {
+        "KythiraPublicKey": {
+          "shape": "KythiraRecipientPublicKeyType",
+          "documentation": "<p>Kythira extension. The recipient's X25519 public key (32 bytes) when <code>KeyEncryptionAlgorithm</code> is <code>KYTHIRA_HPKE_X25519_SHA256_AES256GCM</code>.</p>"
+        },
+        "KythiraAssociatedData": {
+          "shape": "KythiraRecipientBytesType",
+          "documentation": "<p>Kythira extension. The HPKE associated data the plaintext is sealed with.</p>"
+        },
+        "KythiraInfo": {
+          "shape": "KythiraRecipientBytesType",
+          "documentation": "<p>Kythira extension. The HPKE info the plaintext is sealed with, which names its use.</p>"
+        }
+      }
+    },
+    "KythiraRecipientPublicKeyType": {
+      "type": "blob",
+      "max": 32,
+      "min": 32
+    },
+    "KythiraRecipientBytesType": {
+      "type": "blob",
+      "max": 1024,
+      "min": 1
+    }
+  }
+}

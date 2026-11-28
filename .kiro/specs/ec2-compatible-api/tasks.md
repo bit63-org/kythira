@@ -85,12 +85,22 @@ is one PR unless noted.
     changes, fleet reconnects and failed commands at every step
   - _Requirements: 7.1, 7.2, 16.4_
 
-- [ ] 8. KMS recipient decrypt
+- [x] 8. KMS recipient decrypt
   - In `services/kms/`: the Kythira extension of `Decrypt`'s `Recipient`
     (`KYTHIRA_HPKE_X25519_SHA256_AES256GCM`, public key, AAD), key
     policy and condition key, CFRG HPKE vectors and antikythera's
     `volume_key` vectors; documented as a Kythira extension in the KMS
     module's docs
+  - Done (November 28, 2026): `model/kythira-extensions.json` (a merge
+    patch over the AWS model, applied by the shape generator's
+    `--overlay`) adds `KythiraPublicKey`, `KythiraAssociatedData` and
+    `KythiraInfo`; `kms_hpke.hpp` seals; the condition key is
+    `kms:KythiraRecipientPublicKeySha256`. antikythera has no
+    `volume_key` vector file, so `kms_recipient_test` carries a
+    VolumeKey frame made by antikythera's own `helm/hpke.cpp` and
+    `encode_volume_key` (main 99e1a5e) and reproduces it byte for byte.
+    The lineage key policy itself is written by task 11's
+    `CreateVolume`
   - _Requirements: 10.2, 10.3_
 
 - [ ] 9. Volume master

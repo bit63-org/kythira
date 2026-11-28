@@ -43,13 +43,16 @@ set_tests_properties(kms_differential_tool PROPERTIES
 
 # The checked-in shape tables are what core's scripts/gen_aws_json_shapes.py
 # (KYTHIRA_AWS_JSON_SHAPES_GENERATOR) makes of the pinned model, so a model
-# upgrade carries its regenerated header and its diff.
+# upgrade carries its regenerated header and its diff. The Kythira
+# extensions (Decrypt's HPKE recipient) are a merge patch over the AWS
+# model, which stays as botocore ships it.
 add_test(NAME kms_model_header_fresh
     COMMAND "${Python3_EXECUTABLE}" "${KYTHIRA_AWS_JSON_SHAPES_GENERATOR}"
             model/service-2.json
             include/kythira/kms/model/kms_model.hpp
             --namespace kythira::kms::kms_model
             --label services/kms/model/service-2.json
+            --overlay model/kythira-extensions.json
             --check
     WORKING_DIRECTORY "${KYTHIRA_KMS_SOURCE_DIR}")
 set_tests_properties(kms_model_coverage kms_model_coverage_checker kms_model_header_fresh
@@ -147,6 +150,13 @@ set_tests_properties(kms_api_test PROPERTIES LABELS "unit;kms;kms-module" TIMEOU
 # rotation, the HSM away, DryRun, and the authorizer's condition keys.
 kythira_kms_test(kms_crypto_test kms_crypto_test.cpp)
 set_tests_properties(kms_crypto_test PROPERTIES LABELS "unit;kms;kms-module" TIMEOUT 120)
+
+# EC2 task 8 (.kiro/specs/ec2-compatible-api/ Requirements 10.2-10.3):
+# Decrypt's Kythira HPKE recipient, the CFRG vector for its suite, a
+# VolumeKey frame made by antikythera's code, the condition key and the
+# refusals.
+kythira_kms_test(kms_recipient_test kms_recipient_test.cpp)
+set_tests_properties(kms_recipient_test PROPERTIES LABELS "unit;kms;kms-module" TIMEOUT 120)
 
 # Task 8, Requirements 3.2, 5.1, 5.4 and 5.5: RSA-OAEP, Sign and Verify for
 # every RSA and ECC spec and algorithm (RAW and DIGEST), GetPublicKey, data
