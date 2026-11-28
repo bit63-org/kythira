@@ -32,6 +32,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <csignal>
@@ -248,6 +249,12 @@ public:
         std::string urls;
         std::string identities;
         std::string front_ends;
+        // Members with every layer count as front ends once any member
+        // names its roles (a split layout, or one part-way through a
+        // migration); a cluster of co-located members alone lists none.
+        const bool split = std::any_of(_members.begin(), _members.end(), [](const member& o) {
+            return o.runs_kms() && !o.spec.roles.empty();
+        });
         for (std::size_t q = 0; q < _members.size(); ++q) {
             const auto& o = _members[q];
             const auto id = std::to_string(q + 1);
@@ -269,7 +276,7 @@ public:
             }
             // A split layout lists its front ends (task 4): where gateways
             // hand calls, and who shares the quotas.
-            if (!o.spec.roles.empty() && runs(o.spec.roles, "front_end")) {
+            if (split && runs(o.spec.roles, "front_end")) {
                 add(front_ends, id + "=https://localhost:" + std::to_string(o.api));
             }
         }
@@ -486,6 +493,32 @@ public:
     }
     [[nodiscard]] auto dir() const -> const fs::path& { return _dir; }
     [[nodiscard]] auto ca_path() const -> std::string { return pki.ca_path(); }
+
+    /// A call on member i's listener presenting member i's own
+    /// certificate (a listed peer, so trusted as every layer): the
+    /// membership routes an operator uses (task 6).
+    [[nodiscard]] auto as_member(std::size_t i, std::string_view method, std::string_view path,
+                                 const std::string& body = {}) const -> answer {
+        auto cli = client(i, &_members[i].tls);
+        const auto res = method == "GET" ? cli->Get(std::string(path))
+                                         : cli->Post(std::string(path), body, "application/json");
+        answer out;
+        if (!res) {
+            out.status = -1;
+            return out;
+        }
+        out.status = res->status;
+        out.raw = res->body;
+        boost::system::error_code ec;
+        auto v = json::parse(res->body, ec);
+        if (!ec && v.is_object()) {
+            out.body = std::move(v.as_object());
+        }
+        return out;
+    }
+
+    /// Whether member i is running.
+    [[nodiscard]] auto running(std::size_t i) const -> bool { return _members[i].pid > 0; }
 
     /// Member i, with its ports.
     [[nodiscard]] auto at(std::size_t i) const -> const member& { return _members[i]; }

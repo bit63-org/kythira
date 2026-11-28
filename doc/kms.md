@@ -51,8 +51,10 @@ says otherwise (`.kiro/specs/kms-independent-layers/`):
   `KYTHIRA_KMS_PEER_IDENTITIES`, alongside the members.
 - A node without `front_end` refuses a PIN file and never loads a PKCS#11
   module, so data nodes cannot reach the HSM.
-- A gateway needs `front_end` on the same node for now; gateways in front
-  of other nodes' front ends come with the authenticated call.
+- A gateway without `front_end` (`KYTHIRA_KMS_ROLES=gateway`) verifies
+  SigV4 and hands each call to a front end in `KYTHIRA_KMS_FRONT_END_URLS`
+  over `POST /v1/kms/front-end/call`, trying another only when the call
+  cannot have run.
 - Every request reads key metadata at a read-index point of the catalog,
   as co-located members do. `KYTHIRA_KMS_BOUNDED_STALENESS_MS` on a front
   end lets a point that recent serve instead (AWS documents KMS as
@@ -62,6 +64,42 @@ says otherwise (`.kiro/specs/kms-independent-layers/`):
 
 A data node's ready line says `roles=data members=N`; a front end without
 `data` says `data_nodes=N`.
+
+### Moving between layouts
+
+Every layout change works in both directions on a running KMS.
+
+- **Gateway and front end** hold nothing that must move: drain the node
+  (SIGTERM), change `KYTHIRA_KMS_ROLES`, start it again. A front end that
+  holds the job lease releases it as it stops, and another front end takes
+  it at its next pass. List new front ends in `KYTHIRA_KMS_FRONT_END_URLS`
+  on the gateways.
+- **Data** is the catalog's Raft group, so its seats move one at a time:
+  1. Start the new data node with `KYTHIRA_KMS_ROLES` including `data`,
+     listed in every data node's `KYTHIRA_KMS_API_URLS`, and not in
+     `KYTHIRA_KMS_VOTERS` (the founding voters, every listed data node by
+     default). It creates no group and waits to be added.
+  2. Ask any data node to move the seat: `POST /v1/kms/membership/evacuate`
+     with `{"node":"1","targets":["4"],"replicas":3}`, presenting a
+     certificate in `KYTHIRA_KMS_PEER_IDENTITIES`. The call reaches every
+     data node, and the catalog's leader adds the target as a learner,
+     promotes it once it has caught up, hands leadership off if it was the
+     evacuee, and removes the evacuee.
+     `GET /v1/kms/membership/evacuate` on the leader says `"done":true`
+     once the evacuee holds no seat; `POST /v1/kms/membership/cancel`
+     drops the job.
+  3. Release the evacuee (`POST /v1/kms/membership/release` on it) and
+     restart it with its new roles straight away: its replica is never
+     told it left, so a front end on it cannot serve until then. At that
+     start it discards the old replica and remembers it has left
+     (`catalog-left` in its data directory), so it only ever rejoins as in
+     step 1, even if it is a founding voter.
+
+  A node still holding a replica refuses to start without `data`, since
+  its stale configuration could come back and vote; set
+  `KYTHIRA_KMS_DISCARD_CATALOG=true` only for a node known to be out of the
+  group. Each data node's `/metrics` reports `kythira_kms_catalog_voters`
+  and `kythira_kms_catalog_learners` as its replica sees them.
 
 ### With the virtual HSM in the same process
 
@@ -219,6 +257,10 @@ a `kythira_node` that runs the KMS module, both use it by default
 cluster they reach it over HTTPS with `KINESIS_KMS_ENDPOINT` or
 `KYTHIRA_DYNAMODB_KMS_ENDPOINT`, signing as a principal the KMS lists in
 `KYTHIRA_KMS_TRUSTED_SERVICES`.
+
+Only a node whose KMS runs the `front_end` role offers `kms.client`. A
+consumer beside a KMS without one (a gateway or data node alone) must name
+an endpoint, or it refuses to start and says so.
 
 - Every call is made for the consumer's own caller, with `kms:ViaService`
   `kinesis.<region>.amazonaws.com` or `dynamodb.<region>.amazonaws.com`. A

@@ -24,6 +24,7 @@
 #include <optional>
 #include <set>
 #include <string>
+#include <vector>
 #include <string_view>
 
 namespace kythira::kms_node {
@@ -49,6 +50,16 @@ struct kms_options {
     /// it runs `data`.
     std::map<kythira::host_node_id, std::string> api_urls;
     std::filesystem::path data_dir;
+
+    // -- Moving the data role (kms-independent-layers task 6) ----------------------
+    /// The catalog's founding voters (KYTHIRA_KMS_VOTERS; the data nodes
+    /// in api_urls by default). A data node outside them joins: it creates
+    /// no group and takes a replica only when an evacuation adds it.
+    std::vector<kythira::host_node_id> voters;
+    /// Discard a catalog replica left on disk when starting without the
+    /// data role (KYTHIRA_KMS_DISCARD_CATALOG); otherwise such a node
+    /// refuses to start until the replica was evacuated and released.
+    bool discard_catalog = false;
 
     // -- Front ends (kms-independent-layers task 4) -------------------------------
     /// Every front end's KMS API URL (KYTHIRA_KMS_FRONT_END_URLS): where a

@@ -220,11 +220,30 @@ BOOST_FIXTURE_TEST_CASE(layer_identities_name_the_cluster, env_fixture) {
     BOOST_TEST(contains(refusal(), "KYTHIRA_KMS_FRONT_END_PROBE_MS must be at least 1"));
 }
 
+// Task 6: the founding voters are the data nodes unless named, and a node
+// outside them joins.
+BOOST_FIXTURE_TEST_CASE(the_founding_voters, env_fixture) {
+    const auto all = options();
+    BOOST_TEST(all.voters.size() == 3U);
+    BOOST_TEST(!all.discard_catalog);
+    set("KYTHIRA_KMS_VOTERS", "1, 2,2");
+    const auto two = options();
+    BOOST_REQUIRE_EQUAL(two.voters.size(), 2U);
+    BOOST_TEST(kythira::host_node_id_text(two.voters[1]) == "2");
+    set("KYTHIRA_KMS_VOTERS", "1,x y");
+    BOOST_TEST(contains(refusal(), "KYTHIRA_KMS_VOTERS"));
+    set("KYTHIRA_KMS_VOTERS", " , ");
+    BOOST_TEST(contains(refusal(), "KYTHIRA_KMS_VOTERS is empty"));
+    set("KYTHIRA_KMS_VOTERS", "").set("KYTHIRA_KMS_DISCARD_CATALOG", "true");
+    BOOST_TEST(options().discard_catalog);
+}
+
 BOOST_AUTO_TEST_CASE(usage_names_the_new_settings) {
     const auto u = std::string(kn::usage_text());
     for (const auto* name :
          {"KYTHIRA_KMS_ROLES", "KYTHIRA_KMS_BOUNDED_STALENESS_MS", "KYTHIRA_KMS_JOB_LEASE_MS",
-          "KYTHIRA_KMS_FRONT_END_URLS", "KYTHIRA_KMS_FRONT_END_PROBE_MS", "KYTHIRA_KMS_CLUSTER"}) {
+          "KYTHIRA_KMS_FRONT_END_URLS", "KYTHIRA_KMS_FRONT_END_PROBE_MS", "KYTHIRA_KMS_CLUSTER",
+          "KYTHIRA_KMS_VOTERS", "KYTHIRA_KMS_DISCARD_CATALOG"}) {
         BOOST_TEST(contains(u, name), name);
     }
 }

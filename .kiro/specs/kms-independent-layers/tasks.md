@@ -53,6 +53,16 @@ a task that needs one first builds it to that spec's design.
     with a stop and reversal midway; each checks Requirement 10.3
   - docker-chaos scenario of the full path both ways with HSM and KMS
     faults, Docker and rootless Podman
+  - Status: the in-process half is built. The data role moves through
+    `kms_membership.hpp`'s routes (`/v1/kms/membership/evacuate`,
+    `cancel`, `release`) over core's `replica_evacuator` on the catalog
+    group; `KYTHIRA_KMS_VOTERS` names the founding voters and any other
+    data node, or one that has left (`catalog-left`), joins through lazy
+    replica creation; a node still holding a replica refuses to start
+    without `data` (`KYTHIRA_KMS_DISCARD_CATALOG` overrides).
+    `kms_node_migration_test` runs each path both ways under a workload
+    checking Requirement 10.3 after every step. The docker-chaos scenario
+    is still open.
   - _Requirements: 10.1-10.3, 11.2, 11.3_
 
 - [ ] 7. Interoperability with real AWS

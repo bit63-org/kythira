@@ -129,6 +129,13 @@ kythira_kms_test(kms_front_end_api_test kms_front_end_api_test.cpp)
 set_tests_properties(kms_front_end_api_test PROPERTIES
     LABELS "unit;kms;kms-module" TIMEOUT 120)
 
+# Task 6, Requirement 10.1: the data role's membership calls (evacuate,
+# status, cancel, release) both ways, malformed and mutated bodies, who
+# may call them, and the marker a release leaves.
+kythira_kms_test(kms_membership_test kms_membership_test.cpp)
+set_tests_properties(kms_membership_test PROPERTIES
+    LABELS "unit;kms;kms-module" TIMEOUT 60)
+
 # Task 5, Requirements 3.4, 4.1, 4.4, 4.5 and 9.2-9.4: two-step key
 # creation and the leader's jobs over an in-memory PKCS#11 backend, with
 # the scan of the catalog's log, engine and checkpoint for generated
@@ -284,6 +291,18 @@ if(KYTHIRA_KMS_NODE_DAEMON)
         add_dependencies(kms_node_cluster_test kms_node)
         set_tests_properties(kms_node_cluster_test PROPERTIES
             LABELS "integration;kms;kms-module" TIMEOUT 600)
+        # kms-independent-layers task 6: each migration path both ways under
+        # a workload, over the same process harness.
+        kythira_kms_test(kms_node_migration_test kms_node_migration_test.cpp)
+        target_link_libraries(kms_node_migration_test PRIVATE
+            httplib::httplib boost_json OpenSSL::SSL OpenSSL::Crypto kythira_test_support)
+        target_compile_definitions(kms_node_migration_test PRIVATE
+            KMS_NODE_PATH="$<TARGET_FILE:kms_node>"
+            KYTHIRA_SOFTHSM2_LIBRARY="${KYTHIRA_KMS_SOFTHSM2_LIBRARY}"
+            KYTHIRA_SOFTHSM2_UTIL="${KYTHIRA_KMS_SOFTHSM2_UTIL}")
+        add_dependencies(kms_node_migration_test kms_node)
+        set_tests_properties(kms_node_migration_test PROPERTIES
+            LABELS "integration;kms;kms-module" TIMEOUT 1500)
     else()
         message(STATUS "kms_node_cluster_test: needs SoftHSM2 and httplib, not registered")
     endif()

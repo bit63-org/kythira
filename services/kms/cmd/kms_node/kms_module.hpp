@@ -54,6 +54,7 @@
 #include <kythira/kms/kms_audit.hpp>
 #include <kythira/kms/kms_front_end.hpp>
 #include <kythira/kms/kms_front_end_api.hpp>
+#include <kythira/kms/kms_membership.hpp>
 #include <kythira/kms/kms_grants_api.hpp>
 #include <kythira/kms/kms_group_state_machine.hpp>
 #include <kythira/kms/kms_host.hpp>
@@ -75,6 +76,7 @@
 #include <raft/multi_raft_transport_handles.hpp>
 #include <raft/node_core.hpp>
 #include <raft/pkcs11_module.hpp>
+#include <raft/replica_evacuation.hpp>
 #include <raft/rocksdb_kv_engine.hpp>
 #include <raft/service_module.hpp>
 #include <raft/static_keys_file.hpp>
@@ -162,6 +164,7 @@ public:
     using raft_host = kythira::multi_raft<types, std::string, std::uint64_t>;
     using raft_config = kythira::multi_raft_config<types, std::string, std::uint64_t>;
     using kms_host = kythira::kms::basic_kms_host<raft_host, engine_type>;
+    using descriptor_type = typename raft_host::descriptor_type;
     using replica_type = typename kms_host::catalog_type;
     /// Handlers and jobs see the catalog only through this
     /// (kms_catalog_access.hpp), whatever the node's layout.
@@ -197,6 +200,9 @@ public:
             _peer_policy.identities = _opt.peer_identities;
             _peer_policy.allow_plaintext = _opt.insecure_plaintext;
             _peer_policy.cluster = _opt.cluster;
+            if (auto refused = settle_catalog_replica()) {
+                return refused;
+            }
             if (!runs(role::front_end) && !runs(role::gateway)) {
                 return std::nullopt;  // a data node: no authorizer, no HSM client
             }
@@ -281,6 +287,10 @@ public:
             _jobs_running = true;
             _jobs_thread = std::thread([this] { jobs_loop(); });
         }
+        if (_evacuator) {
+            _moving = true;
+            _membership_thread = std::thread([this] { membership_loop(); });
+        }
         if (_directory) {
             _probing = true;
             _probe_thread = std::thread([this] { probe_loop(); });
@@ -351,6 +361,14 @@ public:
         if (_probe_thread.joinable()) {
             _probe_thread.join();
         }
+        {
+            const std::scoped_lock lock(_membership_mutex);
+            _moving.store(false, std::memory_order_release);
+        }
+        _membership_wake.notify_all();
+        if (_membership_thread.joinable()) {
+            _membership_thread.join();
+        }
         // While Raft still ticks: a proposal's commit timeout is checked on
         // the tick, so with the driver stopped a release that cannot
         // commit (the last member stopping) would wait forever.
@@ -390,6 +408,8 @@ public:
         _catalog_client.reset();
         _local.reset();
         _host.reset();
+        _evacuator.reset();
+        _membership_client.reset();
         _raft.reset();
         _started = false;
     }
@@ -468,6 +488,16 @@ public:
         if (_quotas) {
             mine.push_back({"quota_share_members", static_cast<double>(_quotas->members()), {}});
         }
+        if (_raft) {  // task 6: the catalog's configuration as this replica holds it
+            if (auto* n = _raft->group_node(_catalog_group)) {
+                const auto m = n->current_membership();
+                mine.push_back({"catalog_voters", static_cast<double>(m.voters.size()), {}});
+                mine.push_back({"catalog_learners", static_cast<double>(m.learners.size()), {}});
+            } else {
+                mine.push_back({"catalog_voters", 0.0, {}});
+                mine.push_back({"catalog_learners", 0.0, {}});
+            }
+        }
         out.insert(out.end(), mine.begin(), mine.end());
         return out;
     }
@@ -496,9 +526,9 @@ private:
         _ctx = kms_host::make_context();
         _raft = std::make_unique<raft_host>(make_raft_config(host, space));
         typename kms_host::options hopts;
-        for (const auto& [id, url] : _opt.api_urls) {
-            hopts.members.push_back(id);
-        }
+        // The founding voters (task 6): the data nodes in the API URLs
+        // unless KYTHIRA_KMS_VOTERS names fewer.
+        hopts.members = _opt.voters;
         hopts.group = space.to_host(0);
         hopts.propose_timeout = _opt.propose_timeout;
         if (_opt.api_urls.size() > 1) {
@@ -512,9 +542,160 @@ private:
             };
         }
         _host = std::make_unique<kms_host>(*_raft, _ctx, hopts);
-        _host->bootstrap();
+        if (!_joining) {
+            // A joining node (task 6) creates no group: its replica comes
+            // when an evacuation adds it, through lazy replica creation.
+            _host->bootstrap();
+        }
+        _catalog_group = hopts.group;
+        _evacuator = std::make_unique<evacuator_type>(*_raft);
+        _membership_client = std::make_shared<const kythira::mtls::client>(node_client_config());
         _local = std::make_unique<access_type>(access_type::over_host(*_host));
         _catalog_server = kythira::kms::catalog_server_over(*_host, *_local);
+    }
+
+    /// Task 6, before anything opens: a released replica is discarded (and
+    /// a data node then joins rather than re-forming the group from its
+    /// stale membership); a replica still in the group stops a node that
+    /// no longer runs the data role, since it could otherwise come back
+    /// and vote on an old configuration.
+    auto settle_catalog_replica() -> std::optional<std::string> {
+        namespace ms = kythira::kms::membership;
+        const auto marker = ms::read_marker(_opt.data_dir);
+        const bool founding =
+            std::find(_opt.voters.begin(), _opt.voters.end(), _opt.node_id) != _opt.voters.end();
+        // Once a node has left, it only ever rejoins: a founding voter with
+        // an empty directory would otherwise form a second catalog.
+        _joining = runs(role::data) && (!founding || marker.has_value());
+        if (marker == ms::k_marker_released) {
+            ms::discard_replica(_opt.data_dir);
+            log(kythira::log_level::info,
+                "kms: discarded the released catalog replica in " + _opt.data_dir.string());
+        }
+        if (!runs(role::data) && ms::holds_replica(_opt.data_dir)) {
+            if (_opt.discard_catalog) {
+                ms::discard_replica(_opt.data_dir);
+                log(kythira::log_level::warning,
+                    "kms: KYTHIRA_KMS_DISCARD_CATALOG: discarded the catalog replica in " +
+                        _opt.data_dir.string());
+                return std::nullopt;
+            }
+            return "kms: " + _opt.data_dir.string() +
+                   " still holds a catalog replica, but KYTHIRA_KMS_ROLES=" +
+                   _opt.roles.to_string() + " runs no data role: move it off first (POST " +
+                   std::string(ms::k_evacuate_path) + " on a data node, then POST " +
+                   std::string(ms::k_release_path) +
+                   " on this one), or set KYTHIRA_KMS_DISCARD_CATALOG=true if this node is no "
+                   "longer in the catalog group";
+        }
+        return std::nullopt;
+    }
+
+    /// The data nodes' evacuation job: one step on the catalog when this
+    /// node leads it, every 200 ms while a job is set.
+    void membership_loop() {
+        std::unique_lock lock(_membership_mutex);
+        while (_moving.load(std::memory_order_acquire)) {
+            lock.unlock();
+            try {
+                const auto pass = _evacuator->pass();
+                if (!pass._led.empty()) {
+                    const auto& g = pass._led.front();
+                    const std::scoped_lock pl(_pass_mutex);
+                    _last_action = kythira::to_string(g._action);
+                    _last_error = g._error;
+                }
+            } catch (const std::exception& e) {
+                const std::scoped_lock pl(_pass_mutex);
+                _last_error = e.what();
+            }
+            lock.lock();
+            _membership_wake.wait_for(lock, std::chrono::milliseconds(200),
+                                      [this] { return !_moving.load(std::memory_order_acquire); });
+        }
+    }
+
+    /// Passes a membership call on to every other data node, without
+    /// fan-out, so whichever leads the catalog runs the job.
+    void fan_out(std::string_view target, const std::string& body) {
+        for (const auto& [id, url] : _opt.api_urls) {
+            if (id == _opt.node_id) {
+                continue;
+            }
+            const auto r = _membership_client->request("POST", url, std::string(target), body,
+                                                       "application/json", "kythira-kms-member");
+            if (!r || r->first != 200) {
+                log(kythira::log_level::warning,
+                    "kms: membership call " + std::string(target) + " not taken by " + url);
+            }
+        }
+    }
+
+    [[nodiscard]] auto membership_status() const -> kythira::kms::membership::status {
+        namespace ms = kythira::kms::membership;
+        ms::status st;
+        st.self = _opt.node_id;
+        if (auto* n = _raft->group_node(_catalog_group)) {
+            const auto m = n->current_membership();
+            st.voters = m.voters;
+            st.learners = m.learners;
+            st.leader = n->is_leader();
+        }
+        if (const auto j = _evacuator->current()) {
+            st.job = ms::evacuation_request{.node = j->_evacuee,
+                                            .targets = j->_targets,
+                                            .replicas = j->_replicas,
+                                            .fan_out = false};
+            const auto in = [&](const std::vector<kythira::host_node_id>& v) {
+                return std::find(v.begin(), v.end(), j->_evacuee) != v.end();
+            };
+            st.done = st.leader && !in(st.voters) && !in(st.learners);
+        }
+        const std::scoped_lock pl(_pass_mutex);
+        st.action = _last_action;
+        st.error = _last_error;
+        return st;
+    }
+
+    [[nodiscard]] auto membership_handlers() -> kythira::kms::membership::handlers {
+        namespace ms = kythira::kms::membership;
+        const auto ok = [](std::string body) { return ms::answer{200, std::move(body)}; };
+        ms::handlers h;
+        h.evacuate = [this, ok](const ms::evacuation_request& r) {
+            _evacuator->start({._evacuee = r.node, ._targets = r.targets, ._replicas = r.replicas});
+            {
+                const std::scoped_lock pl(_pass_mutex);
+                _last_action.clear();
+                _last_error.clear();
+            }
+            log(kythira::log_level::info,
+                "kms: evacuating the catalog replica of " + kythira::host_node_id_text(r.node));
+            if (r.fan_out) {
+                auto copy = r;
+                copy.fan_out = false;
+                fan_out(ms::k_evacuate_path, ms::to_json(copy));
+            }
+            return ok(ms::to_json(membership_status()));
+        };
+        h.status = [this, ok] { return ok(ms::to_json(membership_status())); };
+        h.cancel = [this, ok](bool spread) {
+            _evacuator->cancel();
+            if (spread) {
+                fan_out(std::string(ms::k_cancel_path) + "?fan_out=false", "{}");
+            }
+            return ok(ms::to_json(membership_status()));
+        };
+        h.release = [this, ok] {
+            if (_host && _host->leads()) {
+                return ms::answer{409, R"({"error":"this node leads the catalog; it is still a )"
+                                       R"(member, so evacuate it first"})"};
+            }
+            ms::write_marker(_opt.data_dir, ms::k_marker_released);
+            log(kythira::log_level::info,
+                "kms: catalog replica released; it is discarded at the next start");
+            return ok(R"({"released":true})");
+        };
+        return h;
     }
 
     /// A front end without the data role: the catalog through the data
@@ -800,8 +981,24 @@ private:
         res.keep_alive(req.keep_alive());
         const std::string_view target(req.target().data(), req.target().size());
         if (!_host &&
-            (kythira::kms::is_catalog_path(target) || kythira::kms::is_peer_path(target))) {
+            (kythira::kms::is_catalog_path(target) || kythira::kms::is_peer_path(target) ||
+             kythira::kms::membership::is_membership_path(target))) {
             return refuse(res, http::status::not_found, "this node runs no KMS data layer");
+        }
+        if (kythira::kms::membership::is_membership_path(target)) {
+            ++_peer_requests;
+            const kythira::kms::peer_caller caller{ctx.tls, ctx.client_verified,
+                                                   ctx.client_uri_sans, ctx.client_dns_sans};
+            const auto answer = kythira::kms::membership::serve(
+                membership_handlers(),
+                kythira::kms::admits(_peer_policy, caller,
+                                     kythira::kms::membership::membership_route_roles),
+                std::string_view(req.method_string()), target, req.body());
+            res.result(static_cast<http::status>(answer.status));
+            res.set(http::field::content_type, "application/json");
+            res.body() = answer.body;
+            res.prepare_payload();
+            return res;
         }
         if (kythira::kms::is_catalog_path(target)) {
             // The data layer's catalog API (kms-independent-layers task 3)
@@ -948,6 +1145,27 @@ private:
         cfg.config._heartbeat_interval = _opt.heartbeat_interval;
         cfg.config._rpc_timeout = _opt.rpc_timeout;
         cfg.config._snapshot_staging_directory = _opt.data_dir / "snapshots";
+        if (_joining) {
+            // Task 6: the catalog's descriptor for the replica a leader's
+            // first message creates here. Its voters seed nothing that
+            // matters (the leader's configuration replaces them); this node
+            // is a learner until promoted, so it never campaigns first.
+            cfg.lookup_descriptor =
+                [group = space.to_host(0), voters = _opt.voters,
+                 self = _opt.node_id](const std::uint64_t& g) -> std::optional<descriptor_type> {
+                if (g != group) {
+                    return std::nullopt;
+                }
+                descriptor_type d{};
+                d._group_id = group;
+                const auto range = group_sm::catalog_range();
+                d._range = kythira::shard_range<std::string>{range.start, range.end};
+                d._epoch = kythira::shard_epoch{};
+                d._voters = voters;
+                d._learners = {self};
+                return d;
+            };
+        }
         return cfg;
     }
 
@@ -1273,6 +1491,23 @@ private:
     std::condition_variable _jobs_wake;
     std::thread _jobs_thread;
     std::atomic<bool> _started{false};
+
+    // Moving the data role (task 6).
+    using evacuator_type = kythira::replica_evacuator<raft_host>;
+    /// A data node outside the founding voters, or one whose replica was
+    /// released: it creates no group and waits to be added.
+    bool _joining = false;
+    std::uint64_t _catalog_group = 0;
+    std::unique_ptr<evacuator_type> _evacuator;
+    std::shared_ptr<const kythira::mtls::client> _membership_client;
+    std::atomic<bool> _moving{false};
+    std::mutex _membership_mutex;
+    std::condition_variable _membership_wake;
+    std::thread _membership_thread;
+    /// The last pass's step on the catalog, for the status route.
+    mutable std::mutex _pass_mutex;
+    std::string _last_action;
+    std::string _last_error;
 };
 
 }  // namespace kythira::kms_node
