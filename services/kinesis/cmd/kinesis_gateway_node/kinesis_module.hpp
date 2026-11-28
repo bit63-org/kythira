@@ -424,8 +424,12 @@ public:
             _kms_client = registry.lookup<service_node::kms_endpoint>(
                 std::string(service_node::interface_names::kms_client));
             if (!_kms_client) {
+                // Only a KMS front end publishes one (.kiro/specs/
+                // kms-independent-layers/ Requirement 8.1).
                 throw std::invalid_argument(
-                    "KINESIS_KMS=kythira: the KMS module publishes no client");
+                    "KINESIS_KMS=kythira: the co-located KMS module publishes no client (it "
+                    "runs no front end; see KYTHIRA_KMS_ROLES): give it the front_end role or "
+                    "set KINESIS_KMS_ENDPOINT to a KMS front end or gateway");
             }
         }
         if (uses_kms("pkcs11") && !_kms_token.module_path) {

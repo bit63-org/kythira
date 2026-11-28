@@ -277,7 +277,9 @@ jobs:
   # Task 5: kythira_node with the KMS module over SoftHSM2
   # (kythira_node_kms_test); task 15: Kinesis on it, beside IAM
   # (kythira_node_kms_kinesis_test); task 12: kms_node, three of them with mutual
-  # TLS forwarding to the catalog's leader (kms_node_cluster_test). The module is offered only where the catalog
+  # TLS forwarding to the catalog's leader (kms_node_cluster_test);
+  # kms-independent-layers task 5: Kinesis and DynamoDB on a co-located and
+  # a remote KMS front end (kythira_node_kms_consumers_test). The module is offered only where the catalog
   # has RocksDB, so this job configures ci_dynamodb_defconfig
   # (ci_full_defconfig with the RocksDB engine) on the tree
   # composite-node.yml and hsm-module.yml's cluster job share.
@@ -368,14 +370,16 @@ jobs:
 
       - name: Build kythira_node, kms_node and the tests
         run: |
-          for t in kythira_node_kms_test kythira_node_kms_kinesis_test kms_node_cluster_test; do
+          for t in kythira_node_kms_test kythira_node_kms_kinesis_test kms_node_cluster_test \
+                   kythira_node_kms_consumers_test; do
             if ! ctest --test-dir build -N -R "^${t}\$" | grep -q '^ *Test *#'; then
               echo "::error::${t} is not registered: no KMS module, no SoftHSM2 or no httplib"
               exit 1
             fi
           done
           cmake --build build -j"$(nproc)" --target kythira_node kythira_node_kms_test \
-            kythira_node_kms_kinesis_test kms_node kms_node_cluster_test
+            kythira_node_kms_kinesis_test kms_node kms_node_cluster_test \
+            kythira_node_kms_consumers_test
 
       # Task 18: boto3, the AWS Encryption SDK and the AWS CLI v2 (on the
       # runner image) against the kms_node cluster, in kms_node_cluster_test.
@@ -387,4 +391,4 @@ jobs:
       - name: Run the tests
         run: >-
           ctest --test-dir build --output-on-failure --no-tests=error
-          -R '^(kythira_node_(kms_test|kms_kinesis_test|offers_kms)|kms_node_(self_test|help|refuses_other_services|needs_kms|cluster_test))$'
+          -R '^(kythira_node_(kms_test|kms_kinesis_test|kms_consumers_test|offers_kms)|kms_node_(self_test|help|refuses_other_services|needs_kms|cluster_test))$'
