@@ -5241,6 +5241,19 @@ set_tests_properties(ca_state_machine_unit_test PROPERTIES
     LABELS "unit;certificate_authority;ca;raft;state_machine"
 )
 
+# az-cold-start Requirement 7: recovery mode after a cold start.
+add_executable(recovery_mode_unit_test recovery_mode_unit_test.cpp)
+target_link_libraries(recovery_mode_unit_test PRIVATE
+    kythira_core_headers
+    Boost::unit_test_framework
+)
+target_compile_features(recovery_mode_unit_test PRIVATE cxx_std_23)
+add_test(NAME recovery_mode_unit_test COMMAND recovery_mode_unit_test)
+set_tests_properties(recovery_mode_unit_test PROPERTIES
+    TIMEOUT 30
+    LABELS "unit;cold_start"
+)
+
 add_executable(acme_jws_unit_test acme_jws_unit_test.cpp)
 target_link_libraries(acme_jws_unit_test PRIVATE
     Boost::unit_test_framework
