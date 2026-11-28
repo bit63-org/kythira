@@ -31,10 +31,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY services/hsm/docker/hsm-chaos/dist/hsm_node /usr/local/bin/hsm_node
 COPY services/hsm/docker/hsm-chaos/dist/kythira_node /usr/local/bin/kythira_node
+# The KMS-layers layout's lone front end reaches the HSM members through the
+# PKCS#11 client library, as a host that runs no HSM would.
+COPY services/hsm/docker/hsm-chaos/dist/libkythira_pkcs11.so /usr/local/lib/libkythira_pkcs11.so
 
 # Fail the image build, naming the library, rather than leave a container
 # to exit 127 with nothing in its log.
-RUN missing="$(for b in /usr/local/bin/hsm_node /usr/local/bin/kythira_node; do \
+RUN missing="$(for b in /usr/local/bin/hsm_node /usr/local/bin/kythira_node \
+                          /usr/local/lib/libkythira_pkcs11.so; do \
                  ldd "$b" | sed -n "s|^|$b: |; /not found/p"; done)"; \
     if [ -n "$missing" ]; then echo "$missing" >&2; exit 1; fi; \
     /usr/local/bin/hsm_node --help >/dev/null && /usr/local/bin/kythira_node --help >/dev/null
