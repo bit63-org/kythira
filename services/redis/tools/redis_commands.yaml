@@ -357,7 +357,7 @@ commands:
     acl: [admin, slow, dangerous]
     keys: [0, 0, 0]
     path: A
-    status: planned
+    status: shipped
     task: 2
   - name: INCR
     id: 31
@@ -368,7 +368,7 @@ commands:
     acl: [write, string, fast]
     keys: [1, 1, 1]
     path: W
-    status: planned
+    status: shipped
     task: 3
   - name: DECR
     id: 32
@@ -379,7 +379,7 @@ commands:
     acl: [write, string, fast]
     keys: [1, 1, 1]
     path: W
-    status: planned
+    status: shipped
     task: 3
   - name: INCRBY
     id: 33
@@ -390,7 +390,7 @@ commands:
     acl: [write, string, fast]
     keys: [1, 1, 1]
     path: W
-    status: planned
+    status: shipped
     task: 3
   - name: DECRBY
     id: 34
@@ -401,7 +401,7 @@ commands:
     acl: [write, string, fast]
     keys: [1, 1, 1]
     path: W
-    status: planned
+    status: shipped
     task: 3
   - name: INCRBYFLOAT
     id: 35
@@ -412,7 +412,7 @@ commands:
     acl: [write, string, fast]
     keys: [1, 1, 1]
     path: W
-    status: planned
+    status: shipped
     task: 3
   - name: SETNX
     id: 36
@@ -423,7 +423,7 @@ commands:
     acl: [write, string, fast]
     keys: [1, 1, 1]
     path: W
-    status: planned
+    status: shipped
     task: 3
   - name: PSETEX
     id: 37
@@ -434,7 +434,7 @@ commands:
     acl: [write, string, slow]
     keys: [1, 1, 1]
     path: W
-    status: planned
+    status: shipped
     task: 3
   - name: GETSET
     id: 38
@@ -445,7 +445,7 @@ commands:
     acl: [write, string, fast]
     keys: [1, 1, 1]
     path: W
-    status: planned
+    status: shipped
     task: 3
   - name: GETDEL
     id: 39
@@ -456,7 +456,7 @@ commands:
     acl: [write, string, fast]
     keys: [1, 1, 1]
     path: W
-    status: planned
+    status: shipped
     task: 3
   - name: GETEX
     id: 40
@@ -467,7 +467,7 @@ commands:
     acl: [write, string, fast]
     keys: [1, 1, 1]
     path: W
-    status: planned
+    status: shipped
     task: 3
   - name: APPEND
     id: 41
@@ -478,7 +478,7 @@ commands:
     acl: [write, string, fast]
     keys: [1, 1, 1]
     path: W
-    status: planned
+    status: shipped
     task: 3
   - name: SETRANGE
     id: 42
@@ -489,7 +489,7 @@ commands:
     acl: [write, string, slow]
     keys: [1, 1, 1]
     path: W
-    status: planned
+    status: shipped
     task: 3
   - name: TYPE
     id: 43
@@ -500,7 +500,7 @@ commands:
     acl: [keyspace, read, fast]
     keys: [1, 1, 1]
     path: R
-    status: planned
+    status: shipped
     task: 3
   - name: UNLINK
     id: 44
@@ -511,7 +511,7 @@ commands:
     acl: [keyspace, write, fast]
     keys: [1, -1, 1]
     path: M
-    status: planned
+    status: shipped
     task: 3
   - name: TOUCH
     id: 45
@@ -522,7 +522,7 @@ commands:
     acl: [keyspace, read, fast]
     keys: [1, -1, 1]
     path: R
-    status: planned
+    status: shipped
     task: 3
   - name: OBJECT
     id: 46
@@ -533,7 +533,7 @@ commands:
     acl: [slow]
     keys: [0, 0, 0]
     path: R
-    status: planned
+    status: shipped
     task: 3
   - name: EXPIRE
     id: 47
@@ -544,7 +544,7 @@ commands:
     acl: [keyspace, write, fast]
     keys: [1, 1, 1]
     path: W
-    status: planned
+    status: shipped
     task: 4
   - name: PEXPIRE
     id: 48
@@ -555,7 +555,7 @@ commands:
     acl: [keyspace, write, fast]
     keys: [1, 1, 1]
     path: W
-    status: planned
+    status: shipped
     task: 4
   - name: EXPIREAT
     id: 49
@@ -566,7 +566,7 @@ commands:
     acl: [keyspace, write, fast]
     keys: [1, 1, 1]
     path: W
-    status: planned
+    status: shipped
     task: 4
   - name: PEXPIREAT
     id: 50
@@ -577,7 +577,7 @@ commands:
     acl: [keyspace, write, fast]
     keys: [1, 1, 1]
     path: W
-    status: planned
+    status: shipped
     task: 4
   - name: PERSIST
     id: 51
@@ -588,7 +588,7 @@ commands:
     acl: [keyspace, write, fast]
     keys: [1, 1, 1]
     path: W
-    status: planned
+    status: shipped
     task: 4
   - name: PTTL
     id: 52
@@ -599,7 +599,7 @@ commands:
     acl: [keyspace, read, fast]
     keys: [1, 1, 1]
     path: R
-    status: planned
+    status: shipped
     task: 4
   - name: EXPIRETIME
     id: 53
@@ -610,7 +610,7 @@ commands:
     acl: [keyspace, read, fast]
     keys: [1, 1, 1]
     path: R
-    status: planned
+    status: shipped
     task: 4
   - name: PEXPIRETIME
     id: 54
@@ -621,7 +621,7 @@ commands:
     acl: [keyspace, read, fast]
     keys: [1, 1, 1]
     path: R
-    status: planned
+    status: shipped
     task: 4
   - name: RENAME
     id: 55
@@ -632,7 +632,7 @@ commands:
     acl: [keyspace, write, slow]
     keys: [1, 2, 1]
     path: M
-    status: planned
+    status: shipped
     task: 6
   - name: RENAMENX
     id: 56
@@ -643,7 +643,7 @@ commands:
     acl: [keyspace, write, fast]
     keys: [1, 2, 1]
     path: M
-    status: planned
+    status: shipped
     task: 6
   - name: COPY
     id: 57
@@ -654,7 +654,7 @@ commands:
     acl: [keyspace, write, slow]
     keys: [1, 2, 1]
     path: M
-    status: planned
+    status: shipped
     task: 6
   - name: MSETNX
     id: 58
@@ -665,7 +665,7 @@ commands:
     acl: [write, string, slow]
     keys: [1, -1, 2]
     path: M
-    status: planned
+    status: shipped
     task: 6
   - name: HSET
     id: 59
@@ -676,7 +676,7 @@ commands:
     acl: [write, hash, fast]
     keys: [1, 1, 1]
     path: W
-    status: planned
+    status: shipped
     task: 7
   - name: HSETNX
     id: 60
@@ -687,7 +687,7 @@ commands:
     acl: [write, hash, fast]
     keys: [1, 1, 1]
     path: W
-    status: planned
+    status: shipped
     task: 7
   - name: HMSET
     id: 61
@@ -698,7 +698,7 @@ commands:
     acl: [write, hash, fast]
     keys: [1, 1, 1]
     path: W
-    status: planned
+    status: shipped
     task: 7
   - name: HGET
     id: 62
@@ -709,7 +709,7 @@ commands:
     acl: [read, hash, fast]
     keys: [1, 1, 1]
     path: R
-    status: planned
+    status: shipped
     task: 7
   - name: HMGET
     id: 63
@@ -720,7 +720,7 @@ commands:
     acl: [read, hash, fast]
     keys: [1, 1, 1]
     path: R
-    status: planned
+    status: shipped
     task: 7
   - name: HDEL
     id: 64
@@ -731,7 +731,7 @@ commands:
     acl: [write, hash, fast]
     keys: [1, 1, 1]
     path: W
-    status: planned
+    status: shipped
     task: 7
   - name: HEXISTS
     id: 65
@@ -742,7 +742,7 @@ commands:
     acl: [read, hash, fast]
     keys: [1, 1, 1]
     path: R
-    status: planned
+    status: shipped
     task: 7
   - name: HLEN
     id: 66
@@ -753,7 +753,7 @@ commands:
     acl: [read, hash, fast]
     keys: [1, 1, 1]
     path: R
-    status: planned
+    status: shipped
     task: 7
   - name: HSTRLEN
     id: 67
@@ -764,7 +764,7 @@ commands:
     acl: [read, hash, fast]
     keys: [1, 1, 1]
     path: R
-    status: planned
+    status: shipped
     task: 7
   - name: HKEYS
     id: 68
@@ -775,7 +775,7 @@ commands:
     acl: [read, hash, slow]
     keys: [1, 1, 1]
     path: R
-    status: planned
+    status: shipped
     task: 7
   - name: HVALS
     id: 69
@@ -786,7 +786,7 @@ commands:
     acl: [read, hash, slow]
     keys: [1, 1, 1]
     path: R
-    status: planned
+    status: shipped
     task: 7
   - name: HGETALL
     id: 70
@@ -797,7 +797,7 @@ commands:
     acl: [read, hash, slow]
     keys: [1, 1, 1]
     path: R
-    status: planned
+    status: shipped
     task: 7
   - name: HINCRBY
     id: 71
@@ -808,7 +808,7 @@ commands:
     acl: [write, hash, fast]
     keys: [1, 1, 1]
     path: W
-    status: planned
+    status: shipped
     task: 7
   - name: HINCRBYFLOAT
     id: 72
@@ -819,7 +819,7 @@ commands:
     acl: [write, hash, fast]
     keys: [1, 1, 1]
     path: W
-    status: planned
+    status: shipped
     task: 7
   - name: HRANDFIELD
     id: 73
@@ -830,7 +830,7 @@ commands:
     acl: [read, hash, slow]
     keys: [1, 1, 1]
     path: R
-    status: planned
+    status: shipped
     task: 7
   - name: SADD
     id: 74
@@ -841,7 +841,7 @@ commands:
     acl: [write, set, fast]
     keys: [1, 1, 1]
     path: W
-    status: planned
+    status: shipped
     task: 8
   - name: SREM
     id: 75
@@ -852,7 +852,7 @@ commands:
     acl: [write, set, fast]
     keys: [1, 1, 1]
     path: W
-    status: planned
+    status: shipped
     task: 8
   - name: SISMEMBER
     id: 76
@@ -863,7 +863,7 @@ commands:
     acl: [read, set, fast]
     keys: [1, 1, 1]
     path: R
-    status: planned
+    status: shipped
     task: 8
   - name: SMISMEMBER
     id: 77
@@ -874,7 +874,7 @@ commands:
     acl: [read, set, fast]
     keys: [1, 1, 1]
     path: R
-    status: planned
+    status: shipped
     task: 8
   - name: SMEMBERS
     id: 78
@@ -885,7 +885,7 @@ commands:
     acl: [read, set, slow]
     keys: [1, 1, 1]
     path: R
-    status: planned
+    status: shipped
     task: 8
   - name: SCARD
     id: 79
@@ -896,7 +896,7 @@ commands:
     acl: [read, set, fast]
     keys: [1, 1, 1]
     path: R
-    status: planned
+    status: shipped
     task: 8
   - name: SPOP
     id: 80
@@ -907,7 +907,7 @@ commands:
     acl: [write, set, fast]
     keys: [1, 1, 1]
     path: W
-    status: planned
+    status: shipped
     task: 8
   - name: SRANDMEMBER
     id: 81
@@ -918,7 +918,7 @@ commands:
     acl: [read, set, slow]
     keys: [1, 1, 1]
     path: R
-    status: planned
+    status: shipped
     task: 8
   - name: SMOVE
     id: 82
@@ -929,7 +929,7 @@ commands:
     acl: [write, set, fast]
     keys: [1, 2, 1]
     path: M
-    status: planned
+    status: shipped
     task: 8
   - name: SINTER
     id: 83
@@ -940,7 +940,7 @@ commands:
     acl: [read, set, slow]
     keys: [1, -1, 1]
     path: M
-    status: planned
+    status: shipped
     task: 8
   - name: SUNION
     id: 84
@@ -951,7 +951,7 @@ commands:
     acl: [read, set, slow]
     keys: [1, -1, 1]
     path: M
-    status: planned
+    status: shipped
     task: 8
   - name: SDIFF
     id: 85
@@ -962,7 +962,7 @@ commands:
     acl: [read, set, slow]
     keys: [1, -1, 1]
     path: M
-    status: planned
+    status: shipped
     task: 8
   - name: SINTERCARD
     id: 86
@@ -973,7 +973,7 @@ commands:
     acl: [read, set, slow]
     keys: [0, 0, 0]
     path: M
-    status: planned
+    status: shipped
     task: 8
   - name: SINTERSTORE
     id: 87
@@ -984,7 +984,7 @@ commands:
     acl: [write, set, slow]
     keys: [1, -1, 1]
     path: M
-    status: planned
+    status: shipped
     task: 8
   - name: SUNIONSTORE
     id: 88
@@ -995,7 +995,7 @@ commands:
     acl: [write, set, slow]
     keys: [1, -1, 1]
     path: M
-    status: planned
+    status: shipped
     task: 8
   - name: SDIFFSTORE
     id: 89
@@ -1006,7 +1006,7 @@ commands:
     acl: [write, set, slow]
     keys: [1, -1, 1]
     path: M
-    status: planned
+    status: shipped
     task: 8
   - name: LPUSH
     id: 90
@@ -1017,7 +1017,7 @@ commands:
     acl: [write, list, fast]
     keys: [1, 1, 1]
     path: W
-    status: planned
+    status: shipped
     task: 9
   - name: RPUSH
     id: 91
@@ -1028,7 +1028,7 @@ commands:
     acl: [write, list, fast]
     keys: [1, 1, 1]
     path: W
-    status: planned
+    status: shipped
     task: 9
   - name: LPUSHX
     id: 92
@@ -1039,7 +1039,7 @@ commands:
     acl: [write, list, fast]
     keys: [1, 1, 1]
     path: W
-    status: planned
+    status: shipped
     task: 9
   - name: RPUSHX
     id: 93
@@ -1050,7 +1050,7 @@ commands:
     acl: [write, list, fast]
     keys: [1, 1, 1]
     path: W
-    status: planned
+    status: shipped
     task: 9
   - name: LPOP
     id: 94
@@ -1061,7 +1061,7 @@ commands:
     acl: [write, list, fast]
     keys: [1, 1, 1]
     path: W
-    status: planned
+    status: shipped
     task: 9
   - name: RPOP
     id: 95
@@ -1072,7 +1072,7 @@ commands:
     acl: [write, list, fast]
     keys: [1, 1, 1]
     path: W
-    status: planned
+    status: shipped
     task: 9
   - name: LLEN
     id: 96
@@ -1083,7 +1083,7 @@ commands:
     acl: [read, list, fast]
     keys: [1, 1, 1]
     path: R
-    status: planned
+    status: shipped
     task: 9
   - name: LINDEX
     id: 97
@@ -1094,7 +1094,7 @@ commands:
     acl: [read, list, slow]
     keys: [1, 1, 1]
     path: R
-    status: planned
+    status: shipped
     task: 9
   - name: LRANGE
     id: 98
@@ -1105,7 +1105,7 @@ commands:
     acl: [read, list, slow]
     keys: [1, 1, 1]
     path: R
-    status: planned
+    status: shipped
     task: 9
   - name: LSET
     id: 99
@@ -1116,7 +1116,7 @@ commands:
     acl: [write, list, slow]
     keys: [1, 1, 1]
     path: W
-    status: planned
+    status: shipped
     task: 9
   - name: LINSERT
     id: 100
@@ -1127,7 +1127,7 @@ commands:
     acl: [write, list, slow]
     keys: [1, 1, 1]
     path: W
-    status: planned
+    status: shipped
     task: 9
   - name: LREM
     id: 101
@@ -1138,7 +1138,7 @@ commands:
     acl: [write, list, slow]
     keys: [1, 1, 1]
     path: W
-    status: planned
+    status: shipped
     task: 9
   - name: LTRIM
     id: 102
@@ -1149,7 +1149,7 @@ commands:
     acl: [write, list, slow]
     keys: [1, 1, 1]
     path: W
-    status: planned
+    status: shipped
     task: 9
   - name: LPOS
     id: 103
@@ -1160,7 +1160,7 @@ commands:
     acl: [read, list, slow]
     keys: [1, 1, 1]
     path: R
-    status: planned
+    status: shipped
     task: 9
   - name: LMOVE
     id: 104
@@ -1171,7 +1171,7 @@ commands:
     acl: [write, list, slow]
     keys: [1, 2, 1]
     path: M
-    status: planned
+    status: shipped
     task: 9
   - name: RPOPLPUSH
     id: 105
@@ -1182,7 +1182,7 @@ commands:
     acl: [write, list, slow]
     keys: [1, 2, 1]
     path: M
-    status: planned
+    status: shipped
     task: 9
   - name: LMPOP
     id: 106
@@ -1193,7 +1193,7 @@ commands:
     acl: [write, list, slow]
     keys: [0, 0, 0]
     path: M
-    status: planned
+    status: shipped
     task: 9
   - name: SCAN
     id: 107
@@ -1204,7 +1204,7 @@ commands:
     acl: [keyspace, read, slow]
     keys: [0, 0, 0]
     path: F
-    status: planned
+    status: shipped
     task: 12
   - name: HSCAN
     id: 108
@@ -1215,7 +1215,7 @@ commands:
     acl: [read, hash, slow]
     keys: [1, 1, 1]
     path: R
-    status: planned
+    status: shipped
     task: 12
   - name: SSCAN
     id: 109
@@ -1226,7 +1226,7 @@ commands:
     acl: [read, set, slow]
     keys: [1, 1, 1]
     path: R
-    status: planned
+    status: shipped
     task: 12
   - name: KEYS
     id: 110
@@ -1237,7 +1237,7 @@ commands:
     acl: [keyspace, read, slow, dangerous]
     keys: [0, 0, 0]
     path: F
-    status: planned
+    status: shipped
     task: 12
   - name: RANDOMKEY
     id: 111
@@ -1248,7 +1248,7 @@ commands:
     acl: [keyspace, read, slow]
     keys: [0, 0, 0]
     path: F
-    status: planned
+    status: shipped
     task: 12
   - name: KYTHIRA.DELPREFIX
     id: 112
@@ -1259,7 +1259,7 @@ commands:
     acl: [keyspace, write, admin, slow, dangerous]
     keys: [0, 0, 0]
     path: A
-    status: planned
+    status: shipped
     task: 13
   - name: KYTHIRA.USAGE
     id: 113
@@ -1270,7 +1270,7 @@ commands:
     acl: [keyspace, read, admin, slow]
     keys: [0, 0, 0]
     path: F
-    status: planned
+    status: shipped
     task: 13
   - name: FLUSHDB
     id: 114
@@ -1281,7 +1281,7 @@ commands:
     acl: [keyspace, write, slow, dangerous]
     keys: [0, 0, 0]
     path: A
-    status: planned
+    status: shipped
     task: 13
   - name: FLUSHALL
     id: 115
@@ -1292,7 +1292,7 @@ commands:
     acl: [keyspace, write, slow, dangerous]
     keys: [0, 0, 0]
     path: A
-    status: planned
+    status: shipped
     task: 13
   - name: MEMORY
     id: 116
@@ -1303,7 +1303,7 @@ commands:
     acl: [slow]
     keys: [0, 0, 0]
     path: R
-    status: planned
+    status: shipped
     task: 13
   - name: SLOWLOG
     id: 117
@@ -1311,11 +1311,22 @@ commands:
     since: 2.2.12
     arity: -2
     flags: []
-    acl: [slow]
+    acl: [admin, slow, dangerous]
     keys: [0, 0, 0]
     path: L
-    status: planned
+    status: shipped
     task: 13
+  - name: KYTHIRA.INSTALL
+    id: 118
+    group: kythira
+    since: 7.0.0
+    arity: -5
+    flags: [write, admin, noscript, loading, stale]
+    acl: [admin, write, slow, dangerous]
+    keys: [1, 1, 1]
+    path: L
+    status: shipped
+    task: 11
 
 # Commands removed after their id was issued: `- name: X` and `id: N` only.
 retired: []

@@ -474,7 +474,10 @@ enum class read_mode : std::uint8_t {
 /// append only.
 enum class read_status : std::uint8_t {
     /// Read; payload: a presence byte and, for a present key, its deadline
-    /// (ms since the Unix epoch, 0 for none) as a varint and its bytes.
+    /// (ms since the Unix epoch, 0 for none) as a varint and its bytes, then,
+    /// for a hash, set or list (redis-general-data-types tasks 7-9), its
+    /// type byte and its body as bytes (redis_kv_state_machine.hpp's
+    /// `put_collection_body`). A string has no trailer.
     ok = 0,
     /// This replica cannot answer at the mode (not the leader, or a leader
     /// still catching up, or no replica of the key's group here); payload:
@@ -500,16 +503,27 @@ template<typename NodeId> struct read_outcome {
     bool found = false;
     std::uint64_t expire_at_ms = 0;
     std::string value;
+    /// `ok`, a present collection: its type byte (never 0, a string) and
+    /// its body. 0 and empty for a string.
+    std::uint8_t type = 0;
+    std::string body;
     /// `not_leader`, `not_replicated`.
     std::optional<NodeId> leader;
 };
 
 /// `ok` for a present key.
-[[nodiscard]] inline auto encode_read_value(std::uint64_t expire_at_ms, std::string_view value)
+/// `type` and `body` describe a collection (`type` != 0); a string passes
+/// neither.
+[[nodiscard]] inline auto encode_read_value(std::uint64_t expire_at_ms, std::string_view value,
+                                            std::uint8_t type = 0, std::string_view body = {})
     -> std::string {
     std::string out{static_cast<char>(read_status::ok), '\1'};
     detail::put_varint(out, expire_at_ms);
     detail::put_bytes(out, value);
+    if (type != 0) {
+        out.push_back(static_cast<char>(type));
+        detail::put_bytes(out, body);
+    }
     return out;
 }
 
@@ -558,6 +572,15 @@ template<typename NodeId>
                 out.found = true;
                 out.expire_at_ms = *expire;
                 out.value = std::move(*value);
+                if (!in.done()) {
+                    const auto type = in.byte();
+                    auto body = type && *type != 0 ? in.bytes() : std::nullopt;
+                    if (!body) {
+                        return std::nullopt;
+                    }
+                    out.type = *type;
+                    out.body = std::move(*body);
+                }
             }
             break;
         }

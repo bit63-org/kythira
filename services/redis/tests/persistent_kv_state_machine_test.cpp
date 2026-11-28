@@ -499,3 +499,468 @@ BOOST_AUTO_TEST_CASE(use_before_open_is_refused) {
 }
 
 BOOST_AUTO_TEST_SUITE_END()
+
+// ---- typed values (redis-general-data-types task 10) -----------------------
+
+namespace {
+
+using kythira::redis_command_id;
+
+const std::string k_max_bytes = "1000000";
+const std::string k_max_count = "100000";
+
+auto gate() -> std::vector<std::byte> {
+    return kythira::encode_redis_kv_command(kythira::redis_kv_format_gate_command{"", 3});
+}
+
+auto exec(redis_command_id id, std::vector<std::string> args, std::uint64_t now = 1000)
+    -> std::vector<std::byte> {
+    kythira::redis_kv_exec_command c;
+    c._key = args.empty() ? "" : args[0];
+    c._command_id = static_cast<std::uint16_t>(id);
+    c._now_ms = now;
+    c._args = std::move(args);
+    return kythira::encode_redis_kv_command(c);
+}
+
+/// A value's type, deadline and elements, in a form two stores can compare.
+auto describe(const kythira::redis_kv_value_entry& e) -> std::string {
+    std::string out = std::string(kythira::redis_value_type_name(kythira::redis_entry_type(e))) +
+                      "@" + std::to_string(e._expire_at_ms) + ":";
+    switch (kythira::redis_entry_type(e)) {
+        case kythira::redis_value_type::string:
+            out.append(reinterpret_cast<const char*>(e._value.data()), e._value.size());
+            break;
+        case kythira::redis_value_type::hash:
+            e._hash->for_each(
+                [&](const std::string& f, const std::string& v) { out += f + "=" + v + ","; });
+            out += "#" + std::to_string(e._hash->bytes());
+            break;
+        case kythira::redis_value_type::set:
+            e._set->for_each([&](const std::string& m) { out += m + ","; });
+            out += "#" + std::to_string(e._set->bytes());
+            break;
+        case kythira::redis_value_type::list:
+            e._list->visit(0, e._list->size() - 1, [&](std::size_t, const std::string& v) {
+                out += v + ",";
+                return true;
+            });
+            out += "#" + std::to_string(e._list->bytes());
+            break;
+    }
+    return out;
+}
+
+auto listing(const psm& p) -> std::vector<std::string> {
+    std::vector<std::string> out;
+    p.for_each_key([&](const std::string& k, const kythira::redis_kv_value_entry& e) {
+        out.push_back(k + "->" + describe(e));
+    });
+    return out;
+}
+
+auto listing(const oracle& o) -> std::vector<std::string> {
+    std::vector<std::string> out;
+    o.for_each_key([&](const std::string& k, const kythira::redis_kv_value_entry& e) {
+        out.push_back(k + "->" + describe(e));
+    });
+    return out;
+}
+
+auto check_same_typed(const psm& p, const oracle& o, const std::vector<std::string>& keys,
+                      std::uint64_t now_ms) -> void {
+    for (const auto& k : keys) {
+        const auto a = p.lookup(k);
+        const auto b = o.lookup(k);
+        BOOST_REQUIRE_MESSAGE((a == nullptr) == (b == nullptr), "presence of "
+                                                                    << k << ": " << (a != nullptr)
+                                                                    << " vs " << (b != nullptr));
+        if (a != nullptr) {
+            BOOST_REQUIRE_EQUAL(describe(*a), describe(*b));
+        }
+    }
+    BOOST_REQUIRE(listing(p) == listing(o));
+    BOOST_REQUIRE_EQUAL(p.approximate_key_count(), o.approximate_key_count());
+    BOOST_REQUIRE_EQUAL(p.approximate_size_bytes(), o.approximate_size_bytes());
+    BOOST_REQUIRE_EQUAL(p.expiring_key_count(), o.expiring_key_count());
+    BOOST_REQUIRE_EQUAL(p.format_level(), o.format_level());
+    BOOST_REQUIRE_EQUAL(p.applied_time_ms(), o.applied_time_ms());
+    const auto pe = p.collect_expired(now_ms, 1000);
+    const auto oe = o.collect_expired(now_ms, 1000);
+    BOOST_REQUIRE_EQUAL(pe.size(), oe.size());
+    for (std::size_t i = 0; i < pe.size(); ++i) {
+        BOOST_REQUIRE_EQUAL(pe[i]._key, oe[i]._key);
+        BOOST_REQUIRE_EQUAL(pe[i]._expire_at_ms, oe[i]._expire_at_ms);
+    }
+}
+
+/// Keys with NUL bytes next to their prefixes, so escaping is exercised
+/// between neighbours.
+auto typed_universe() -> std::vector<std::string> {
+    return {
+        "",  "a", std::string("a\0", 2), std::string("a\0b", 3), std::string("a\0\xFF", 3), "ab",
+        "b", "c"};
+}
+
+/// A random typed or string write, in the front end's normal forms.
+auto random_typed_command(std::mt19937_64& rng, const std::vector<std::string>& keys,
+                          const oracle& o, std::uint64_t now) -> std::vector<std::byte> {
+    auto pick = [&] { return keys[rng() % keys.size()]; };
+    auto item = [&] { return std::string(1, static_cast<char>('a' + rng() % 12)); };
+    auto items = [&](std::vector<std::string> args) {
+        const auto n = 1 + rng() % 4;
+        for (std::size_t i = 0; i < n; ++i) {
+            args.push_back(item());
+        }
+        return args;
+    };
+    const auto side = [&] { return rng() % 2 == 0 ? std::string("LEFT") : std::string("RIGHT"); };
+    switch (rng() % 24) {
+        case 0:
+            return exec(redis_command_id::set, {pick(), item() + item()}, now);
+        case 1:
+        case 2: {
+            std::vector<std::string> args{pick(), k_max_bytes, k_max_count};
+            const auto n = 1 + rng() % 3;
+            for (std::size_t i = 0; i < n; ++i) {
+                args.push_back(item());
+                args.push_back(item() + item());
+            }
+            return exec(redis_command_id::hset, std::move(args), now);
+        }
+        case 3:
+            return exec(redis_command_id::hdel, items({pick()}), now);
+        case 4:
+            return exec(redis_command_id::hincrby, {pick(), k_max_bytes, k_max_count, "n", "3"},
+                        now);
+        case 5:
+        case 6:
+            return exec(redis_command_id::sadd, items({pick(), k_max_bytes, k_max_count}), now);
+        case 7:
+            return exec(redis_command_id::srem, items({pick()}), now);
+        case 8:
+            return exec(redis_command_id::spop, items({pick(), "1"}), now);
+        case 9: {
+            const auto src = pick();
+            const auto dst = pick();
+            return exec(redis_command_id::smove, {src, dst, k_max_bytes, k_max_count, item()}, now);
+        }
+        case 10: {
+            const auto dst = pick();
+            const auto a = pick();
+            const auto b = pick();
+            return exec(redis_command_id::sunionstore, {dst, k_max_bytes, k_max_count, a, b}, now);
+        }
+        case 11:
+            return exec(redis_command_id::lpush, items({pick(), k_max_bytes, k_max_count}), now);
+        case 12:
+            return exec(redis_command_id::rpush, items({pick(), k_max_bytes, k_max_count}), now);
+        case 13:
+            return exec(rng() % 2 == 0 ? redis_command_id::lpop : redis_command_id::rpop,
+                        {pick(), "1", std::to_string(1 + rng() % 3)}, now);
+        case 14: {
+            const auto k = pick();
+            return exec(redis_command_id::lset,
+                        {k, std::to_string(static_cast<int>(rng() % 7) - 3), item(), k_max_bytes},
+                        now);
+        }
+        case 15: {
+            const auto k = pick();
+            const auto where = rng() % 2 == 0 ? std::string("BEFORE") : std::string("AFTER");
+            const auto pivot = item();
+            return exec(redis_command_id::linsert,
+                        {k, where, pivot, item(), k_max_bytes, k_max_count}, now);
+        }
+        case 16: {
+            const auto k = pick();
+            return exec(redis_command_id::lrem,
+                        {k, std::to_string(static_cast<int>(rng() % 5) - 2), item()}, now);
+        }
+        case 17: {
+            const auto k = pick();
+            const auto start = std::to_string(rng() % 3);
+            return exec(redis_command_id::ltrim,
+                        {k, start, std::to_string(static_cast<int>(rng() % 8) - 2)}, now);
+        }
+        case 18: {
+            const auto src = pick();
+            const auto dst = pick();
+            const auto from = side();
+            const auto to = side();
+            return exec(redis_command_id::lmove, {src, dst, from, to, k_max_bytes, k_max_count},
+                        now);
+        }
+        case 19: {
+            const auto k = pick();
+            return exec(redis_command_id::pexpireat, {k, std::to_string(now + 5 + rng() % 40)},
+                        now);
+        }
+        case 20:
+            return exec(redis_command_id::persist, {pick()}, now);
+        case 21: {
+            const auto src = pick();
+            const auto dst = pick();
+            return rng() % 2 == 0 ? exec(redis_command_id::rename, {src, dst}, now)
+                                  : exec(redis_command_id::copy, {src, dst, "REPLACE"}, now);
+        }
+        case 22:
+            return del(pick());
+        default: {
+            auto entries = o.collect_expired(now, 3);
+            if (entries.empty()) {
+                return exec(redis_command_id::del, {pick(), pick()}, now);
+            }
+            return kythira::encode_redis_kv_command(
+                kythira::redis_kv_sweep_command{._entries = entries});
+        }
+    }
+}
+
+}  // namespace
+
+BOOST_AUTO_TEST_SUITE(typed_values)
+
+BOOST_AUTO_TEST_CASE(typed_workloads_match_the_in_memory_machine) {
+    const auto keys = typed_universe();
+    for (std::uint64_t seed = 1; seed <= 25; ++seed) {
+        std::mt19937_64 rng(seed);
+        memory_kv_engine engine;
+        auto p = std::make_unique<psm>("ns/");
+        p->open(engine, k_everything);
+        oracle o;
+        std::uint64_t index = 0;
+        // A few strings before the gate, NUL keys among them, so the gate
+        // has keys to escape.
+        for (const auto& k : keys) {
+            if (rng() % 2 == 0) {
+                ++index;
+                BOOST_REQUIRE(p->apply(set(k, "v" + k), index) == o.apply(set(k, "v" + k), index));
+            }
+        }
+        ++index;
+        BOOST_REQUIRE(p->apply(gate(), index) == o.apply(gate(), index));
+        check_same_typed(*p, o, keys, 0);
+        std::uint64_t now = 1000;
+        for (int step = 0; step < 400; ++step) {
+            now += rng() % 4;
+            const auto cmd = random_typed_command(rng, keys, o, now);
+            ++index;
+            const auto rp = p->apply(cmd, index);
+            const auto ro = o.apply(cmd, index);
+            BOOST_REQUIRE_MESSAGE(rp == ro, "reply differs at seed " << seed << " step " << step);
+            if (step % 40 == 39) {
+                check_same_typed(*p, o, keys, now);
+                // A restart decodes every collection from its rows again.
+                p = std::make_unique<psm>("ns/");
+                p->open(engine, k_everything);
+                check_same_typed(*p, o, keys, now);
+            }
+        }
+    }
+}
+
+BOOST_AUTO_TEST_CASE(an_element_write_rewrites_one_row_and_the_header) {
+    memory_kv_engine engine;
+    psm p("ns/");
+    p.open(engine, k_everything);
+    std::uint64_t index = 0;
+    p.apply(gate(), ++index);
+    std::vector<std::string> fields{"h", k_max_bytes, k_max_count};
+    std::vector<std::string> members{"s", k_max_bytes, k_max_count};
+    std::vector<std::string> elements{"l", k_max_bytes, k_max_count};
+    for (int i = 0; i < 500; ++i) {
+        fields.push_back("f" + std::to_string(i));
+        fields.push_back("v");
+        members.push_back("m" + std::to_string(i));
+        elements.push_back("e" + std::to_string(i));
+    }
+    p.apply(exec(redis_command_id::hset, fields), ++index);
+    p.apply(exec(redis_command_id::sadd, members), ++index);
+    p.apply(exec(redis_command_id::rpush, elements), ++index);
+
+    const auto ops_of = [&](std::vector<std::byte> cmd) {
+        kythira::write_batch batch;
+        (void)p.stage(cmd, batch);
+        p.commit_staged(batch, ++index);
+        return batch.operations().size() - 1;  // less the meta record
+    };
+    BOOST_TEST(ops_of(exec(redis_command_id::hset, {"h", k_max_bytes, k_max_count, "f7", "w"})) ==
+               2U);
+    BOOST_TEST(ops_of(exec(redis_command_id::hdel, {"h", "f9"})) == 2U);
+    BOOST_TEST(ops_of(exec(redis_command_id::sadd, {"s", k_max_bytes, k_max_count, "new"})) == 2U);
+    BOOST_TEST(ops_of(exec(redis_command_id::lpush, {"l", k_max_bytes, k_max_count, "x"})) == 2U);
+    BOOST_TEST(ops_of(exec(redis_command_id::rpush, {"l", k_max_bytes, k_max_count, "y"})) == 2U);
+    BOOST_TEST(ops_of(exec(redis_command_id::lpop, {"l", "0", "1"})) == 2U);
+    BOOST_TEST(ops_of(exec(redis_command_id::rpop, {"l", "0", "1"})) == 2U);
+    BOOST_TEST(ops_of(exec(redis_command_id::lset, {"l", "250", "z", k_max_bytes})) == 2U);
+    BOOST_TEST(ops_of(exec(redis_command_id::pexpireat, {"l", "999999"})) == 1U);
+
+    // And every one of those reads back.
+    psm reopened("ns/");
+    reopened.open(engine, k_everything);
+    const auto l = reopened.lookup("l");
+    BOOST_REQUIRE(l != nullptr);
+    BOOST_TEST(l->_list->size() == 500U);
+    BOOST_TEST(l->_list->at(0) == "e0");
+    BOOST_TEST(l->_list->at(250) == "z");
+    BOOST_TEST(l->_expire_at_ms == 999999U);
+    BOOST_TEST(*reopened.lookup("h")->_hash->find("f7") == "w");
+    BOOST_TEST(reopened.lookup("h")->_hash->find("f9") == nullptr);
+    BOOST_TEST(reopened.lookup("s")->_set->contains("new"));
+}
+
+BOOST_AUTO_TEST_CASE(the_gate_escapes_nul_keys_and_a_newer_reader_is_needed_after_it) {
+    memory_kv_engine engine;
+    psm p("ns/");
+    p.open(engine, k_everything);
+    const std::string nul_key("a\0b", 3);
+    p.apply(set(nul_key, "x"), 1);
+    p.apply(set("c", "y"), 2);
+    BOOST_TEST(engine.get(column_family::data, "ns/" + nul_key).has_value());
+    const auto meta_before = engine.get(column_family::meta, "ns/");
+    BOOST_REQUIRE(meta_before.has_value());
+    BOOST_TEST(meta_before->size() == 32U);  // as every earlier build wrote it
+
+    p.apply(gate(), 3);
+    BOOST_TEST(p.format_level() == 3U);
+    BOOST_TEST(!engine.get(column_family::data, "ns/" + nul_key).has_value());
+    BOOST_TEST(engine
+                   .get(column_family::data, "ns/" + std::string("a\0\xFF"
+                                                                 "b",
+                                                                 4))
+                   .has_value());
+    BOOST_TEST((p.lookup(nul_key)->_value == bytes("x")));
+    BOOST_TEST(engine.get(column_family::meta, "ns/")->size() == 48U);
+
+    // A hash at "a" sorts its rows between "a" and the escaped "a\0b".
+    p.apply(exec(redis_command_id::hset, {"a", k_max_bytes, k_max_count, "f", "v"}), 4);
+    BOOST_TEST((p.lookup(nul_key)->_value == bytes("x")));
+    BOOST_TEST((p.lookup("a")->_type == kythira::redis_value_type::hash));
+    std::vector<std::string> keys;
+    p.for_each_key(
+        [&](const std::string& k, const kythira::redis_kv_value_entry&) { keys.push_back(k); });
+    BOOST_TEST((keys == std::vector<std::string>{"a", nul_key, "c"}));
+
+    // A restart keeps the level.
+    psm reopened("ns/");
+    reopened.open(engine, k_everything);
+    BOOST_TEST(reopened.format_level() == 3U);
+    BOOST_TEST(reopened.lookup("a")->_hash->size() == 1U);
+
+    // A record of a newer format halts rather than being skipped.
+    auto newer = gate();
+    newer[0] = std::byte{0x09};
+    BOOST_CHECK_THROW(reopened.apply(newer, 5), kythira::redis_format_too_new);
+    BOOST_TEST(reopened.applied_index() == 4U);
+}
+
+BOOST_AUTO_TEST_CASE(a_typed_record_before_the_gate_is_refused) {
+    memory_kv_engine engine;
+    psm p("ns/");
+    p.open(engine, k_everything);
+    const auto reply =
+        p.apply(exec(redis_command_id::sadd, {"s", k_max_bytes, k_max_count, "m"}), 1);
+    BOOST_TEST(reply.size() == 1U);
+    BOOST_TEST(static_cast<int>(reply[0]) ==
+               static_cast<int>(kythira::redis_v3_apply_status::refused_before_gate));
+    BOOST_TEST(p.lookup("s") == nullptr);
+    BOOST_TEST(p.applied_index() == 1U);
+}
+
+BOOST_AUTO_TEST_CASE(nul_bounds_refuse_the_gate_and_splits_never_make_one) {
+    memory_kv_engine engine;
+    psm p("ns/");
+    p.open(engine, key_range{.start = std::string("k\0", 2), .end = std::nullopt});
+    p.apply(gate(), 1);
+    BOOST_TEST(p.format_level() == 0U);  // refused: the bound has a NUL byte
+
+    psm q("ns2/");
+    q.open(engine, k_everything);
+    q.apply(set("a", "1"), 1);
+    q.apply(set(std::string("b\0", 2), "2"), 2);
+    q.apply(set("c", "3"), 3);
+    BOOST_TEST(!q.can_split_at(std::string("b\0", 2)));
+    BOOST_TEST(q.can_split_at("b"));
+    for (const auto& k : q.suggest_split_keys(5)) {
+        BOOST_TEST(k.find('\0') == std::string::npos);
+    }
+    const auto children = q.split_at({std::string("b\0", 2), "c"});
+    BOOST_REQUIRE_EQUAL(children.size(), 1U);
+    BOOST_TEST(children[0].start == "c");
+}
+
+BOOST_AUTO_TEST_CASE(split_checkpoint_and_merge_carry_collections_whole) {
+    memory_kv_engine engine;
+    psm parent("ns/");
+    parent.open(engine, k_everything);
+    oracle o;
+    std::uint64_t index = 0;
+    const auto both = [&](const std::vector<std::byte>& cmd) {
+        ++index;
+        BOOST_REQUIRE(parent.apply(cmd, index) == o.apply(cmd, index));
+    };
+    both(gate());
+    both(exec(redis_command_id::hset, {"b", k_max_bytes, k_max_count, "f", "1", "g", "2"}));
+    both(exec(redis_command_id::rpush, {"m", k_max_bytes, k_max_count, "x", "y", "z"}));
+    both(exec(redis_command_id::sadd, {"s", k_max_bytes, k_max_count, "p", "q"}));
+    both(exec(redis_command_id::pexpireat, {"s", "50000"}));
+    both(set("z", "zz"));
+
+    const auto children = parent.split_at({"m"});
+    BOOST_REQUIRE_EQUAL(children.size(), 1U);
+    psm upper("ns/");
+    upper.open(engine, children[0]);
+    BOOST_TEST(upper.format_level() == 3U);
+    BOOST_TEST(upper.applied_time_ms() == parent.applied_time_ms());
+    BOOST_TEST(parent.approximate_key_count() == 1U);  // b
+    BOOST_TEST(upper.approximate_key_count() == 3U);   // m, s, z
+    BOOST_TEST(upper.expiring_key_count() == 1U);
+    BOOST_TEST(parent.approximate_size_bytes() + upper.approximate_size_bytes() ==
+               o.approximate_size_bytes());
+    BOOST_TEST(upper.lookup("m")->_list->size() == 3U);
+
+    // The upper half moves to another engine whole.
+    temp_dir dir;
+    const auto manifest = upper.checkpoint(dir.path() / "cp");
+    memory_kv_engine other;
+    psm moved("ns/");
+    moved.open(other, children[0]);
+    moved.ingest(dir.path() / "cp", manifest, index);
+    BOOST_TEST(moved.format_level() == 3U);
+    BOOST_TEST(describe(*moved.lookup("m")) == describe(*o.lookup("m")));
+    BOOST_TEST(describe(*moved.lookup("s")) == describe(*o.lookup("s")));
+    BOOST_TEST(moved.approximate_size_bytes() == upper.approximate_size_bytes());
+
+    // Merging back restores the whole machine.
+    parent.adopt(children[0]);
+    check_same_typed(parent, o, typed_universe(), 60000);
+    for (const auto& k : {"b", "m", "s", "z"}) {
+        BOOST_TEST(describe(*parent.lookup(k)) == describe(*o.lookup(k)));
+    }
+}
+
+BOOST_AUTO_TEST_CASE(merging_an_untyped_group_into_a_typed_one_escapes_its_keys) {
+    memory_kv_engine engine;
+    psm parent("ns/");
+    parent.open(engine, k_everything);
+    const std::string nul_key("q\0", 2);
+    parent.apply(set("a", "1"), 1);
+    parent.apply(set(nul_key, "2"), 2);
+    const auto children = parent.split_at({"m"});
+    BOOST_REQUIRE_EQUAL(children.size(), 1U);
+    // Only the lower half passes its gate.
+    parent.apply(gate(), 3);
+    parent.apply(exec(redis_command_id::sadd, {"b", k_max_bytes, k_max_count, "x"}), 4);
+    BOOST_TEST(parent.format_level() == 3U);
+
+    parent.adopt(children[0]);
+    BOOST_TEST(parent.format_level() == 3U);
+    BOOST_TEST((parent.lookup(nul_key)->_value == bytes("2")));
+    BOOST_TEST(parent.approximate_key_count() == 3U);
+    psm reopened("ns/");
+    reopened.open(engine, k_everything);
+    BOOST_TEST((reopened.lookup(nul_key)->_value == bytes("2")));
+    BOOST_TEST(reopened.lookup("b")->_set->contains("x"));
+}
+
+BOOST_AUTO_TEST_SUITE_END()

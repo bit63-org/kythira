@@ -16,6 +16,7 @@
 #include <algorithm>
 #include <array>
 #include <charconv>
+#include <cstdio>
 #include <cstring>
 #include <exception>
 #include <filesystem>
@@ -126,6 +127,11 @@ public:
     auto u64() -> std::uint64_t { return be(take(8)); }
     auto str() -> std::string { return std::string(take(u32())); }
     [[nodiscard]] auto empty() const -> bool { return _in.empty(); }
+    [[nodiscard]] auto peek() const -> std::uint8_t {
+        return _in.empty() ? 0 : static_cast<std::uint8_t>(_in[0]);
+    }
+    /// Everything not read yet; the cursor is then empty.
+    auto rest() -> std::string_view { return take(_in.size()); }
 
 private:
     auto take(std::size_t n) -> std::string_view {
@@ -185,8 +191,17 @@ inline auto parse_too_old(std::string_view body) -> std::optional<snapshot_too_o
     return snapshot_too_old_exception(start, safe);
 }
 
-/// The `KYTHIRA.TXN READ` reply body: the committed value and any intent.
-inline auto encode_txn_read(const txn_read_result<std::string>& r) -> std::string {
+/// Marks the typed extension of a `KYTHIRA.TXN READ` reply.
+inline constexpr char k_txn_read_typed = 'T';
+
+/// The `KYTHIRA.TXN READ` reply body: the committed value and any intent,
+/// then, for a live key, the typed extension: `'T'`, `u64` deadline, `u8`
+/// type, and for a collection its body (redis_kv_state_machine.hpp's
+/// `put_collection_body`). A collection's committed value is empty bytes,
+/// so a decoder from before the extension, which ignores what follows the
+/// fields it knows, still sees the key as present.
+inline auto encode_txn_read(const txn_read_result<std::string>& r,
+                            const redis_kv_value_entry* entry = nullptr) -> std::string {
     std::string out;
     out.push_back(static_cast<char>(r._value.has_value() ? 1 : 0));
     if (r._value) {
@@ -204,12 +219,24 @@ inline auto encode_txn_read(const txn_read_result<std::string>& r) -> std::strin
         // tier-1 decoder, which ignores what follows, still reads the rest.
         put_u64(out, r._intent->_start_ts);
     }
+    if (entry != nullptr && r._value) {
+        out.push_back(k_txn_read_typed);
+        put_u64(out, entry->_expire_at_ms);
+        const auto type = redis_entry_type(*entry);
+        out.push_back(static_cast<char>(type));
+        if (type != redis_value_type::string) {
+            std::vector<std::byte> body;
+            redis_kv_detail::put_collection_body(body, *entry);
+            out.append(reinterpret_cast<const char*>(body.data()), body.size());
+        }
+    }
     return out;
 }
 
-inline auto decode_txn_read(std::string_view in) -> txn_read_result<std::string> {
+inline auto decode_txn_read(std::string_view in) -> txn_typed_read {
     txn_read_cursor c(in);
-    txn_read_result<std::string> r;
+    txn_typed_read out;
+    auto& r = out._read;
     if (c.u8() != 0) {
         r._value = to_bytes(c.str());
     }
@@ -224,7 +251,21 @@ inline auto decode_txn_read(std::string_view in) -> txn_read_result<std::string>
         }
         r._intent = std::move(v);
     }
-    return r;
+    if (r._value && c.peek() == static_cast<std::uint8_t>(k_txn_read_typed)) {
+        (void)c.u8();
+        auto e = std::make_shared<redis_kv_value_entry>();
+        e->_expire_at_ms = c.u64();
+        const auto tag = c.u8();
+        if (tag == static_cast<std::uint8_t>(redis_value_type::string)) {
+            e->_value = *r._value;
+        } else {
+            const auto rest = c.rest();
+            redis_kv_detail::reader body(std::as_bytes(std::span(rest.data(), rest.size())));
+            redis_kv_detail::read_collection_body(body, tag, *e);
+        }
+        out._entry = std::move(e);
+    }
+    return out;
 }
 
 }  // namespace redis_gateway_detail
@@ -505,12 +546,13 @@ auto redis_front_end<Host, Logger, Metrics>::audit(session& s, std::string_view 
 
 template<typename Host, typename Logger, typename Metrics>
 auto redis_front_end<Host, Logger, Metrics>::authorize(session& s, std::string_view upper,
-                                                       const std::vector<std::string_view>& keys)
+                                                       const std::vector<std::string_view>& keys,
+                                                       std::optional<unsigned> access)
     -> std::optional<std::string> {
     if (!s._identity) {
         return s._writer.error("NOAUTH Authentication required.");
     }
-    switch (redis_acl::authorize(*s._identity, upper, keys)) {
+    switch (redis_acl::authorize(*s._identity, upper, keys, access)) {
         case acl_decision::allow:
             return std::nullopt;
         case acl_decision::deny_command:
@@ -627,23 +669,27 @@ auto redis_front_end<Host, Logger, Metrics>::data_error(redis_data_status status
 }
 
 template<typename Host, typename Logger, typename Metrics>
-auto redis_front_end<Host, Logger, Metrics>::submit(session& s, const std::string& key,
-                                                    const std::vector<std::byte>& command,
-                                                    std::string& error_reply,
-                                                    std::optional<node_id_type>& forward_to)
-    -> bool {
+auto redis_front_end<Host, Logger, Metrics>::submit(
+    session& s, const std::string& key, const std::vector<std::byte>& command,
+    std::string& error_reply, std::optional<node_id_type>& forward_to,
+    std::vector<std::byte>* result, const std::vector<std::string>* keys, bool* moved) -> bool {
     // A key a transaction holds refuses plain writes. The gateway finishes
     // that transaction if its time is up, then tries once more
     // (multi-raft-transactions design "Error Handling").
     std::exception_ptr failure;
     for (int attempt = 0; !failure; ++attempt) {
         try {
-            auto future = _data.propose(key, command, _config._command_timeout);
+            auto future = keys != nullptr
+                              ? _data.propose_keys(*keys, command, _config._command_timeout)
+                              : _data.propose(key, command, _config._command_timeout);
             if (!future.wait(_config._command_timeout)) {
                 error_reply = s._writer.error("ERR timeout submitting to shard, retry");
                 return false;
             }
-            (void)std::move(future).get();
+            auto applied = std::move(future).get();
+            if (result != nullptr) {
+                *result = std::move(applied);
+            }
             return true;
         } catch (const key_locked_exception<std::string>& e) {
             if (attempt == 0 && resolve_lock(e.key(), e.holder(), e.primary())) {
@@ -665,6 +711,15 @@ auto redis_front_end<Host, Logger, Metrics>::submit(session& s, const std::strin
     } catch (const unrouted_key_exception<std::string>&) {
         error_reply = s._writer.error("ERR no shard owns this key");
         return false;
+    } catch (const shard_epoch_mismatch_exception<group_id_type, std::string, node_id_type>& e) {
+        // A key of a multi-key entry is no longer in the group it was
+        // planned for; take the routes the refusal carried.
+        (void)_data.learn_routes(e.current_descriptors());
+        if (moved != nullptr) {
+            *moved = true;
+        }
+        error_reply = s._writer.error("ERR shard layout changed, retry");
+        return false;
     } catch (const std::exception& e) {
         _logger.log(log_level::debug, "redis gateway: submit failed", {{"error", e.what()}});
         error_reply = s._writer.error("ERR shard has no reachable leader, retry");
@@ -678,6 +733,13 @@ template<typename Host, typename Logger, typename Metrics>
 auto redis_front_end<Host, Logger, Metrics>::read_local(session& s, const std::string& key)
     -> read_result {
     read_result r;
+    if constexpr (!k_string_only_store) {
+        if (s._txn_view != nullptr) {
+            // Inside a transaction: what it reads, with its own writes.
+            r._entry = s._txn_view->find(key);
+            return r;
+        }
+    }
     if (_data.remote_for(key)) {
         // No replica here: the data node runs the barrier and the lookup,
         // and answers with the entry's bytes (KYTHIRA.DATA READ).
@@ -837,9 +899,15 @@ auto redis_front_end<Host, Logger, Metrics>::forward(session& s, const resp_comm
         return std::nullopt;
     }
     auto reply = forward_argv(cmd._argv, to, resp_to_upper(cmd._argv[0]));
-    // The internal hop speaks RESP2; a RESP3 client expects `_` for null.
-    if (reply && s._writer.version() >= 3 && *reply == "$-1\r\n") {
-        *reply = "_\r\n";
+    // The internal hop speaks RESP2; a RESP3 client expects `_` for every
+    // null, nested ones included. Shapes RESP2 flattens (maps, sets) are
+    // restored by the handlers that know them.
+    if (reply && s._writer.version() >= 3 &&
+        (reply->find("$-1\r\n") != std::string::npos ||
+         reply->find("*-1\r\n") != std::string::npos)) {
+        if (auto tree = parse_resp2_reply(*reply)) {
+            *reply = render_redis_reply(*tree, s._writer.version());
+        }
     }
     return reply;
 }
@@ -966,11 +1034,22 @@ auto redis_front_end<Host, Logger, Metrics>::execute_command(session& s, std::st
         return handle_data(s, cmd);
     }
 
-    if (_config._transactions) {
+    if (s._txn_view != nullptr) {
+        // EXEC evaluating its queue: every write is an `exec` record the
+        // view takes, so the plain SET/SETEX/DEL paths and the
+        // transaction surface step aside.
+        if (upper == "MSET" || upper == "MGET") {
+            return txn_view_mset_mget(s, upper, cmd);
+        }
+    } else if (_config._transactions) {
         if (s._in_multi && upper != "EXEC" && upper != "DISCARD" && upper != "MULTI") {
             return queue_in_multi(s, upper, cmd);
         }
-        if (is_txn_command(upper, cmd)) {
+        // Multi-key DEL plans as one record per group once the typed-values
+        // gate is up (Requirement 6.1); before it, a transaction as before.
+        const bool planned_del = (upper == "DEL" || upper == "UNLINK") && cmd._argv.size() > 2 &&
+                                 typed_ready(cmd._argv[1]);
+        if (!planned_del && is_txn_command(upper, cmd)) {
             return execute_txn_command(s, upper, cmd);
         }
     }
@@ -1011,8 +1090,13 @@ auto redis_front_end<Host, Logger, Metrics>::execute_command(session& s, std::st
         return handle_get(s, cmd);
     }
     if (upper == "EXISTS") {
-        if (auto e = arity(2, 2)) {
+        if (auto e = arity(2, std::numeric_limits<std::size_t>::max())) {
             return *e;
+        }
+        if (cmd._argv.size() > 2) {
+            // Each key read where it lives, at the connection's isolation
+            // (Requirement 6.4): no transaction needed.
+            return handle_key_read(s, upper, cmd);
         }
         return handle_exists(s, cmd);
     }
@@ -1035,28 +1119,206 @@ auto redis_front_end<Host, Logger, Metrics>::execute_command(session& s, std::st
         return handle_ttl(s, cmd);
     }
     if (upper == "SET") {
-        if (auto e = arity(3, 3)) {
+        if (auto e = arity(3, std::numeric_limits<std::size_t>::max())) {
             return *e;
+        }
+        if (cmd._argv.size() > 3 || s._txn_view != nullptr) {
+            return handle_string_write(s, upper, cmd);
+        }
+        if (mutable_exec(s, cmd._argv[1])) {
+            auto reply = handle_string_write(s, upper, cmd);
+            if (!refused_by_remote_gate(cmd._argv[1], reply)) {
+                return reply;
+            }
         }
         return handle_set(s, cmd, false);
     }
-    if (upper == "SETEX") {
+    if (upper == "SETNX" || upper == "GETSET" || upper == "INCRBY" || upper == "DECRBY" ||
+        upper == "APPEND" || upper == "INCRBYFLOAT") {
+        if (auto e = arity(3, 3)) {
+            return *e;
+        }
+        return handle_string_write(s, upper, cmd);
+    }
+    if (upper == "INCR" || upper == "DECR" || upper == "GETDEL") {
+        if (auto e = arity(2, 2)) {
+            return *e;
+        }
+        return handle_string_write(s, upper, cmd);
+    }
+    if (upper == "PSETEX" || upper == "SETRANGE") {
         if (auto e = arity(4, 4)) {
             return *e;
         }
-        return handle_set(s, cmd, true);
+        return handle_string_write(s, upper, cmd);
     }
-    if (upper == "DEL") {
+    if (upper == "GETEX") {
+        if (auto e = arity(2, 4)) {
+            return *e;
+        }
+        return handle_string_write(s, upper, cmd);
+    }
+    if (upper == "EXPIRE" || upper == "PEXPIRE" || upper == "EXPIREAT" || upper == "PEXPIREAT") {
+        if (auto e = arity(3, std::numeric_limits<std::size_t>::max())) {
+            return *e;
+        }
+        return handle_string_write(s, upper, cmd);
+    }
+    if (upper == "PERSIST") {
+        if (auto e = arity(2, 2)) {
+            return *e;
+        }
+        return handle_string_write(s, upper, cmd);
+    }
+    if (upper == "TYPE" || upper == "PTTL" || upper == "EXPIRETIME" || upper == "PEXPIRETIME") {
+        if (auto e = arity(2, 2)) {
+            return *e;
+        }
+        return handle_key_read(s, upper, cmd);
+    }
+    if (upper == "TOUCH") {
+        if (auto e = arity(2, std::numeric_limits<std::size_t>::max())) {
+            return *e;
+        }
+        return handle_key_read(s, upper, cmd);
+    }
+    if (upper == "OBJECT") {
+        if (auto e = arity(2, std::numeric_limits<std::size_t>::max())) {
+            return *e;
+        }
+        return handle_key_read(s, upper, cmd);
+    }
+    if (upper == "MEMORY") {
+        if (auto e = arity(2, 5)) {
+            return *e;
+        }
+        return handle_memory(s, cmd);
+    }
+    if (upper == "KYTHIRA.USAGE") {
+        if (auto e = arity(1, 8)) {
+            return *e;
+        }
+        return handle_usage(s, cmd);
+    }
+    if (upper == "UNLINK" || upper == "DEL") {
+        if (s._txn_view != nullptr && cmd._argv.size() >= 2) {
+            return handle_multi_key_write(s, upper, cmd);
+        }
+        if (cmd._argv.size() > 2 && typed_ready(cmd._argv[1])) {
+            auto reply = handle_multi_key_write(s, upper, cmd);
+            if (_config._transactions && refused_by_remote_gate(cmd._argv[1], reply)) {
+                return execute_txn_command(s, upper, cmd);
+            }
+            return reply;
+        }
         if (auto e = arity(2, 2)) {
             return *e;
         }
         return handle_del(s, cmd);
     }
+    if (upper == "RENAME" || upper == "RENAMENX") {
+        if (auto e = arity(3, 3)) {
+            return *e;
+        }
+        return handle_multi_key_write(s, upper, cmd);
+    }
+    if (upper == "COPY") {
+        if (auto e = arity(3, std::numeric_limits<std::size_t>::max())) {
+            return *e;
+        }
+        return handle_multi_key_write(s, upper, cmd);
+    }
+    if (upper == "MSETNX") {
+        if (cmd._argv.size() < 3 || cmd._argv.size() % 2 == 0) {
+            return s._writer.error("ERR wrong number of arguments for 'msetnx' command");
+        }
+        return handle_multi_key_write(s, upper, cmd);
+    }
+    if (upper == "SETEX") {
+        if (auto e = arity(4, 4)) {
+            return *e;
+        }
+        if (s._txn_view != nullptr) {
+            return handle_string_write(s, upper, cmd);
+        }
+        if (mutable_exec(s, cmd._argv[1])) {
+            auto reply = handle_string_write(s, upper, cmd);
+            if (!refused_by_remote_gate(cmd._argv[1], reply)) {
+                return reply;
+            }
+        }
+        return handle_set(s, cmd, true);
+    }
+    if (upper == "SCAN") {
+        if (auto e = arity(2, std::numeric_limits<std::size_t>::max())) {
+            return *e;
+        }
+        return handle_scan(s, cmd);
+    }
+    if (upper == "HSCAN" || upper == "SSCAN") {
+        if (auto e = arity(3, std::numeric_limits<std::size_t>::max())) {
+            return *e;
+        }
+        return handle_member_scan(s, upper, cmd);
+    }
+    if (upper == "KEYS") {
+        if (auto e = arity(2, 2)) {
+            return *e;
+        }
+        return handle_keys(s, cmd);
+    }
+    if (upper == "RANDOMKEY") {
+        if (auto e = arity(1, 1)) {
+            return *e;
+        }
+        return handle_randomkey(s);
+    }
+    if (upper == "KYTHIRA.DELPREFIX") {
+        if (auto e = arity(2, 2)) {
+            return *e;
+        }
+        return handle_delprefix(s, cmd);
+    }
+    if (upper == "FLUSHDB" || upper == "FLUSHALL") {
+        if (auto e = arity(1, 2)) {
+            return *e;
+        }
+        return handle_flush(s, upper, cmd);
+    }
+    if (upper == "KYTHIRA.RANGEDEL") {
+        return handle_internal_rangedel(s, cmd);
+    }
+    if (upper == "KYTHIRA.CURSOR") {
+        return handle_internal_cursor(s, cmd);
+    }
+    if (const auto* info = find_redis_command(upper);
+        info != nullptr &&
+        (info->group == "hash" || info->group == "set" || info->group == "list") &&
+        info->status == redis_command_status::shipped) {
+        const auto argc = static_cast<std::ptrdiff_t>(cmd._argv.size());
+        const bool pairs = upper == "HSET" || upper == "HMSET";
+        if ((info->arity > 0 && argc != info->arity) || (info->arity < 0 && argc < -info->arity) ||
+            (pairs && argc % 2 != 0) || (upper == "HRANDFIELD" && argc > 4) ||
+            ((upper == "SPOP" || upper == "SRANDMEMBER" || upper == "LPOP" || upper == "RPOP") &&
+             argc > 3)) {
+            return *arity(std::numeric_limits<std::size_t>::max(), 0);
+        }
+        return handle_collection(s, *info, cmd);
+    }
     if (upper == "INFO") {
         if (auto e = authorize(s, upper, {})) {
             return *e;
         }
-        return handle_info(s);
+        return handle_info(s, cmd);
+    }
+    if (upper == "SLOWLOG") {
+        if (auto e = arity(2, 3)) {
+            return *e;
+        }
+        if (auto e = authorize(s, upper, {})) {
+            return *e;
+        }
+        return handle_slowlog(s, cmd);
     }
     if (upper == "DBSIZE") {
         if (auto e = authorize(s, upper, {})) {
@@ -1069,6 +1331,18 @@ auto redis_front_end<Host, Logger, Metrics>::execute_command(session& s, std::st
     }
     if (upper == "KYTHIRA.ADVISE") {
         return handle_advise(s, cmd);
+    }
+    if (upper == "KYTHIRA.INSTALL") {
+        // An exec record id a transaction's commit applies
+        // (redis_install_exec.hpp), never a command anyone sends.
+        audit(s, "KYTHIRA.INSTALL", "record-only command from a client");
+        return s._writer.error("NOPERM KYTHIRA.INSTALL is internal to the gateways");
+    }
+    if (upper == "KYTHIRA.FORMAT") {
+        return handle_format(s, cmd);
+    }
+    if (upper == "KYTHIRA.EXEC") {
+        return handle_internal_exec(s, cmd);
     }
 
     // Requirement 1.8: unknown commands are an error, not a disconnect.
@@ -1100,6 +1374,9 @@ auto redis_front_end<Host, Logger, Metrics>::handle_get(session& s, const resp_c
         ++_stats._misses;
         emit("redis.misses", "GET");
         return s._writer.null();
+    }
+    if (auto typed = redis_collection_read(r._entry.get(), redis_command_id::get, {}, now_ms())) {
+        return render_redis_reply(*typed, s._writer.version());
     }
     auto bytes = value_access::read(r._context, *r._entry);
     if (!bytes) {
@@ -1154,6 +1431,10 @@ auto redis_front_end<Host, Logger, Metrics>::handle_strlen(session& s, const res
         return r._error;
     }
     bool present = r._entry && !is_expired(*r._entry);
+    if (auto typed =
+            redis_collection_read(r._entry.get(), redis_command_id::strlen, {}, now_ms())) {
+        return render_redis_reply(*typed, s._writer.version());
+    }
     return s._writer.integer(present ? static_cast<std::int64_t>(value_access::size(*r._entry))
                                      : 0);
 }
@@ -1192,14 +1473,23 @@ auto redis_front_end<Host, Logger, Metrics>::handle_getrange(session& s, const r
     if (!r._entry || is_expired(*r._entry)) {
         return s._writer.bulk("");
     }
-    // Redis semantics: negative indexes count from the end, both ends are
-    // inclusive, and out-of-range bounds clamp rather than error.
+    if (auto typed =
+            redis_collection_read(r._entry.get(), redis_command_id::getrange,
+                                  std::span<const std::string>(cmd._argv).subspan(2), now_ms())) {
+        return render_redis_reply(*typed, s._writer.version());
+    }
+    // Redis 7 (getrangeCommand): negative indexes count from the end, both
+    // ends are inclusive, and out-of-range bounds clamp to the string
+    // rather than error, so `0 -100` on a short string is its first byte.
+    if (start < 0 && end < 0 && start > end) {
+        return s._writer.bulk("");
+    }
     const auto len = static_cast<std::int64_t>(value_access::size(*r._entry));
     if (start < 0) {
         start = std::max<std::int64_t>(0, len + start);
     }
     if (end < 0) {
-        end = len + end;
+        end = std::max<std::int64_t>(0, len + end);
     }
     if (end >= len) {
         end = len - 1;
@@ -1304,7 +1594,7 @@ auto redis_front_end<Host, Logger, Metrics>::handle_set(session& s, const resp_c
         }
     }
 
-    if (_config._immutable_values) {
+    if (_config._immutable_values && !redis_acl::key_is_mutable(*s._identity, key)) {
         // sccache keys are content hashes, so a rewrite is either the same
         // bytes (sccache rewriting its `.sccache_check` probe) or a bug
         // somewhere. The first is a free no-op; the second is refused.
@@ -1425,20 +1715,33 @@ auto redis_front_end<Host, Logger, Metrics>::handle_del(session& s, const resp_c
     return s._writer.integer(live ? 1 : 0);
 }
 
+/// `DBSIZE`, exact (task 13, Requirement 8.5): each group's key count, read
+/// from the group at the connection's consistency, walking the groups in
+/// key order so a split or merge never counts a range twice. As in Redis,
+/// keys past their deadline but not yet swept count.
 template<typename Host, typename Logger, typename Metrics>
 auto redis_front_end<Host, Logger, Metrics>::handle_dbsize(session& s) -> std::string {
-    std::size_t keys = 0;
-    for (const auto& g : _data.local_groups()) {
-        if (auto* node = _data.local_replica(g)) {
-            keys += node->with_state_machine(
-                [](auto& sm) { return redis_gateway_detail::kv_of(sm).approximate_key_count(); });
+    std::uint64_t keys = 0;
+    std::string from;
+    const redis_scan_filter all;
+    for (;;) {
+        std::string error;
+        auto page = fetch_page(s, from, std::nullopt, 0, 0, all, error);
+        if (!page) {
+            return error;
         }
+        keys += page->_approximate_keys;
+        if (!page->_range_end || *page->_range_end <= from) {
+            break;
+        }
+        from = *page->_range_end;
     }
     return s._writer.integer(static_cast<std::int64_t>(keys));
 }
 
 template<typename Host, typename Logger, typename Metrics>
-auto redis_front_end<Host, Logger, Metrics>::handle_info(session& s) -> std::string {
+auto redis_front_end<Host, Logger, Metrics>::handle_info(session& s, const resp_command& cmd)
+    -> std::string {
     std::size_t keys = 0;
     std::size_t expiring = 0;
     std::size_t bytes = 0;
@@ -1462,99 +1765,264 @@ auto redis_front_end<Host, Logger, Metrics>::handle_info(session& s) -> std::str
     }
     auto uptime = std::chrono::duration_cast<std::chrono::seconds>(
         std::chrono::steady_clock::now() - _started_at);
-    std::ostringstream out;
-    out << "# Server\r\n"
-        << "redis_version:" << _config._redis_compat_version << "\r\n"
-        << "server_name:kythira\r\n"
-        << "kythira_version:" << _config._kythira_version << "\r\n"
-        << "kythira_gateway:1\r\n"
-        << "redis_mode:" << server_mode() << "\r\n"
-        << "uptime_in_seconds:" << uptime.count() << "\r\n"
-        << "kythira_roles:" << _config._layer_roles.to_string() << "\r\n"
-        << "kythira_membership:" << membership_mode_name() << "\r\n"
-        << "kythira_member_drain:" << layers::to_string(_member_drain.load()) << "\r\n"
-        << "kythira_front_end_index:" << _config._front_end_index << "\r\n"
-        << "kythira_front_end_calls_served:" << _stats._front_end_calls_served.load() << "\r\n"
-        << "\r\n# Clients\r\n"
-        << "connected_clients:" << _stats._connections_current.load() << "\r\n"
-        << "maxclients:" << _config._max_clients << "\r\n"
-        << "rejected_connections:" << _stats._connections_rejected.load() << "\r\n"
-        << "\r\n# Memory\r\n"
-        << "used_memory_dataset:" << bytes << "\r\n"
-        << "\r\n# Keyspace\r\n"
-        << "local_shards:" << shards << "\r\n"
-        << "local_shards_led:" << led << "\r\n"
-        << "db0:keys=" << keys << ",expires=" << expiring << ",avg_ttl=0\r\n"
-        << "\r\n# Stats\r\n"
-        << "total_commands_processed:" << _stats._commands.load() << "\r\n"
-        << "total_connections_received:" << _stats._connections_accepted.load() << "\r\n"
-        << "total_net_input_bytes:" << _stats._bytes_in.load() << "\r\n"
-        << "total_net_output_bytes:" << _stats._bytes_out.load() << "\r\n"
-        << "keyspace_hits:" << _stats._hits.load() << "\r\n"
-        << "keyspace_misses:" << _stats._misses.load() << "\r\n"
-        << "evicted_keys:" << _stats._evictions.load() << "\r\n"
-        << "expired_keys:" << _stats._expirations.load() << "\r\n"
-        << "kythira_writes:" << _stats._writes.load() << "\r\n"
-        << "kythira_deletes:" << _stats._deletes.load() << "\r\n"
-        << "kythira_value_conflicts:" << _stats._value_conflicts.load() << "\r\n"
-        << "kythira_oversize_rejections:" << _stats._oversize_rejections.load() << "\r\n"
-        << "kythira_auth_failures:" << _stats._auth_failures.load() << "\r\n"
-        << "kythira_auth_busy:" << _stats._auth_busy.load() << "\r\n"
-        << "kythira_authz_denials:" << _stats._authz_denials.load() << "\r\n"
-        << "kythira_forwards:" << _stats._forwards.load() << "\r\n"
-        << "kythira_forward_failures:" << _stats._forward_failures.load() << "\r\n"
-        << "kythira_shed:" << _stats._shed.load() << "\r\n"
-        << "kythira_output_stalls:" << _stats._output_stalls.load() << "\r\n";
-    if (_cache_hooks._advisory || _cache_hooks._write_refusal) {
-        out << "kythira_space_refusals:" << _stats._space_refusals.load() << "\r\n"
-            << "kythira_advisories_sent:" << _stats._advisories_sent.load() << "\r\n"
-            << "kythira_advisory_failures:" << _stats._advisory_failures.load() << "\r\n"
-            << "kythira_advisories_received:" << _stats._advisories_received.load() << "\r\n"
-            << "kythira_touches_dropped:" << _stats._touches_dropped.load() << "\r\n";
+    // The sections asked for (Redis 7 takes several); none is `default`.
+    std::set<std::string> want;
+    for (std::size_t i = 1; i < cmd._argv.size(); ++i) {
+        std::string lower = cmd._argv[i];
+        for (auto& c : lower) {
+            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        }
+        want.insert(lower);
     }
-    if (_cache_hooks._info) {
+    if (want.empty()) {
+        want.insert("default");
+    }
+    const bool all = want.contains("all") || want.contains("everything");
+    const bool by_default = all || want.contains("default");
+    const auto wanted = [&](std::string_view name, bool in_default) {
+        return (in_default && by_default) || all || want.contains(std::string(name));
+    };
+    std::ostringstream out;
+    const auto section = [&](std::string_view title) {
+        if (out.tellp() > 0) {
+            out << "\r\n";
+        }
+        out << "# " << title << "\r\n";
+    };
+    if (wanted("server", true)) {
+        section("Server");
+        out << "redis_version:" << _config._redis_compat_version << "\r\n"
+            << "server_name:kythira\r\n"
+            << "kythira_version:" << _config._kythira_version << "\r\n"
+            << "kythira_gateway:1\r\n"
+            << "kythira_format_level:" << reported_format_level() << "\r\n"
+            << "redis_mode:" << server_mode() << "\r\n"
+            << "uptime_in_seconds:" << uptime.count() << "\r\n"
+            << "kythira_roles:" << _config._layer_roles.to_string() << "\r\n"
+            << "kythira_membership:" << membership_mode_name() << "\r\n"
+            << "kythira_member_drain:" << layers::to_string(_member_drain.load()) << "\r\n"
+            << "kythira_front_end_index:" << _config._front_end_index << "\r\n"
+            << "kythira_front_end_calls_served:" << _stats._front_end_calls_served.load() << "\r\n";
+    }
+    if (wanted("clients", true)) {
+        section("Clients");
+        out << "connected_clients:" << _stats._connections_current.load() << "\r\n"
+            << "maxclients:" << _config._max_clients << "\r\n"
+            << "rejected_connections:" << _stats._connections_rejected.load() << "\r\n";
+    }
+    if (wanted("memory", true)) {
+        section("Memory");
+        out << "used_memory_dataset:" << bytes << "\r\n";
+    }
+    if (wanted("stats", true)) {
+        section("Stats");
+        out << "total_commands_processed:" << _stats._commands.load() << "\r\n"
+            << "total_connections_received:" << _stats._connections_accepted.load() << "\r\n"
+            << "total_net_input_bytes:" << _stats._bytes_in.load() << "\r\n"
+            << "total_net_output_bytes:" << _stats._bytes_out.load() << "\r\n"
+            << "keyspace_hits:" << _stats._hits.load() << "\r\n"
+            << "keyspace_misses:" << _stats._misses.load() << "\r\n"
+            << "evicted_keys:" << _stats._evictions.load() << "\r\n"
+            << "expired_keys:" << _stats._expirations.load() << "\r\n"
+            << "kythira_writes:" << _stats._writes.load() << "\r\n"
+            << "kythira_deletes:" << _stats._deletes.load() << "\r\n"
+            << "kythira_value_conflicts:" << _stats._value_conflicts.load() << "\r\n"
+            << "kythira_oversize_rejections:" << _stats._oversize_rejections.load() << "\r\n"
+            << "kythira_auth_failures:" << _stats._auth_failures.load() << "\r\n"
+            << "kythira_auth_busy:" << _stats._auth_busy.load() << "\r\n"
+            << "kythira_authz_denials:" << _stats._authz_denials.load() << "\r\n"
+            << "kythira_forwards:" << _stats._forwards.load() << "\r\n"
+            << "kythira_forward_failures:" << _stats._forward_failures.load() << "\r\n"
+            << "kythira_shed:" << _stats._shed.load() << "\r\n"
+            << "kythira_output_stalls:" << _stats._output_stalls.load() << "\r\n";
+        if (_cache_hooks._advisory || _cache_hooks._write_refusal) {
+            out << "kythira_space_refusals:" << _stats._space_refusals.load() << "\r\n"
+                << "kythira_advisories_sent:" << _stats._advisories_sent.load() << "\r\n"
+                << "kythira_advisory_failures:" << _stats._advisory_failures.load() << "\r\n"
+                << "kythira_advisories_received:" << _stats._advisories_received.load() << "\r\n"
+                << "kythira_touches_dropped:" << _stats._touches_dropped.load() << "\r\n";
+        }
+    }
+    if (wanted("commandstats", false)) {
+        section("Commandstats");
+        out << commandstats_text();
+    }
+    if (wanted("errorstats", true)) {
+        section("Errorstats");
+        out << errorstats_text();
+    }
+    if (wanted("keyspace", true)) {
+        // The whole keyspace, each group read once in key order, as DBSIZE
+        // reads it; this node's own replicas follow. INFO is what health
+        // checks and operators read, so a group it cannot page (no leader,
+        // or a peer from before KYTHIRA.DATA PAGE during a rolling upgrade)
+        // must not turn the whole answer into an error: db0 then counts
+        // this node's replicas, as INFO did before, and
+        // kythira_keyspace_scope says which count it is.
+        std::uint64_t all_keys = 0;
+        std::uint64_t all_expiring = 0;
+        bool whole = true;
+        std::string from;
+        const redis_scan_filter none;
+        for (;;) {
+            std::string error;
+            auto page = fetch_page(s, from, std::nullopt, 0, 0, none, error);
+            if (!page) {
+                whole = false;
+                break;
+            }
+            all_keys += page->_approximate_keys;
+            all_expiring += page->_expiring_keys;
+            if (!page->_range_end || *page->_range_end <= from) {
+                break;
+            }
+            from = *page->_range_end;
+        }
+        if (!whole) {
+            all_keys = keys;
+            all_expiring = expiring;
+        }
+        section("Keyspace");
+        out << "db0:keys=" << all_keys << ",expires=" << all_expiring << ",avg_ttl=0\r\n"
+            << "kythira_keyspace_scope:" << (whole ? "cluster" : "local") << "\r\n"
+            << "local_shards:" << shards << "\r\n"
+            << "local_shards_led:" << led << "\r\n"
+            << "local_keys:" << keys << "\r\n"
+            << "local_expires:" << expiring << "\r\n";
+    }
+    if (_cache_hooks._info && by_default) {
         out << "\r\n" << _cache_hooks._info();
     }
     return s._writer.bulk(out.str());
 }
 
+/// `COMMAND`, `COMMAND COUNT|LIST|INFO [name...]|DOCS [name...]`, answered
+/// from the command registry (redis-general-data-types Requirement 1.3):
+/// exactly the commands this node accepts, which are the registry's shipped
+/// ones less the transaction commands when transactions are off.
 template<typename Host, typename Logger, typename Metrics>
 auto redis_front_end<Host, Logger, Metrics>::handle_command(session& s, const resp_command& cmd)
     -> std::string {
     if (auto e = authorize(s, "COMMAND", {})) {
         return *e;
     }
-    static constexpr std::array<std::string_view, 17> names = {
-        "GET",   "SET",    "SETEX",  "DEL",  "EXISTS",  "STRLEN", "GETRANGE", "PING", "AUTH",
-        "HELLO", "SELECT", "CLIENT", "QUIT", "COMMAND", "INFO",   "DBSIZE",   "TTL"};
+    const auto accepted = [this](const redis_command_info& c) {
+        if (c.status != redis_command_status::shipped) {
+            return false;
+        }
+        const bool txn = c.name == "MULTI" || c.name == "EXEC" || c.name == "DISCARD" ||
+                         c.name == "WATCH" || c.name == "UNWATCH" ||
+                         c.name == "KYTHIRA.ISOLATION" || c.name == "KYTHIRA.TXN";
+        return !txn || _config._transactions;
+    };
+    const auto lower = [](std::string_view n) {
+        std::string out(n);
+        for (auto& ch : out) {
+            ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+        }
+        return out;
+    };
+    const auto& w = s._writer;
+    const auto info = [&](const redis_command_info& c) {
+        static constexpr std::array<std::string_view, 14> flag_names = {
+            "write",       "readonly",   "denyoom",      "admin",   "noscript",
+            "loading",     "stale",      "skip_slowlog", "fast",    "no_auth",
+            "movablekeys", "allow_busy", "no_multi",     "blocking"};
+        static constexpr std::array<std::string_view, 14> category_names = {
+            "@keyspace", "@read",      "@write",      "@set",        "@list",
+            "@hash",     "@string",    "@admin",      "@fast",       "@slow",
+            "@blocking", "@dangerous", "@connection", "@transaction"};
+        std::vector<std::string> flags;
+        for (std::size_t i = 0; i < flag_names.size(); ++i) {
+            if ((c.flags & (1U << i)) != 0U) {
+                flags.push_back(w.simple_string(flag_names[i]));
+            }
+        }
+        std::vector<std::string> categories;
+        for (std::size_t i = 0; i < category_names.size(); ++i) {
+            if ((c.acl_categories & (1U << i)) != 0U) {
+                categories.push_back(w.simple_string(category_names[i]));
+            }
+        }
+        std::vector<std::string> key_specs;
+        if (c.first_key > 0) {
+            // One key specification from the legacy triple; its flags follow
+            // the command's access (RO/ACCESS for reads, RW/UPDATE otherwise).
+            const bool ro = (c.flags & redis_command_flag::readonly) != 0U;
+            const auto last = c.last_key < 0 ? -1 : c.last_key - c.first_key;
+            key_specs.push_back(w.map(
+                {{"flags", w.array({w.simple_string(ro ? "RO" : "RW"),
+                                    w.simple_string(ro ? "ACCESS" : "UPDATE")})},
+                 {"begin_search", w.map({{"type", w.bulk("index")},
+                                         {"spec", w.map({{"index", w.integer(c.first_key)}})}})},
+                 {"find_keys", w.map({{"type", w.bulk("range")},
+                                      {"spec", w.map({{"lastkey", w.integer(last)},
+                                                      {"keystep", w.integer(c.step)},
+                                                      {"limit", w.integer(0)}})}})}}));
+        }
+        return w.array({w.bulk(lower(c.name)), w.integer(c.arity), w.array(flags),
+                        w.integer(c.first_key), w.integer(c.last_key), w.integer(c.step),
+                        w.array(categories), w.array({}), w.array(key_specs), w.array({})});
+    };
+    const auto docs = [&](const redis_command_info& c) {
+        return w.map({{"since", w.bulk(c.since)}, {"group", w.bulk(c.group)}});
+    };
+    std::vector<const redis_command_info*> all;
+    for (const auto& c : k_redis_commands) {
+        if (accepted(c)) {
+            all.push_back(&c);
+        }
+    }
+    const auto lookup = [&](const std::string& name) -> const redis_command_info* {
+        const auto* c = find_redis_command(resp_to_upper(name));
+        return c != nullptr && accepted(*c) ? c : nullptr;
+    };
     if (cmd._argv.size() >= 2) {
         auto sub = resp_to_upper(cmd._argv[1]);
-        if (sub == "COUNT") {
-            return s._writer.integer(static_cast<std::int64_t>(names.size()));
+        if (sub == "COUNT" && cmd._argv.size() == 2) {
+            return w.integer(static_cast<std::int64_t>(all.size()));
         }
-        if (sub == "LIST") {
+        if (sub == "LIST" && cmd._argv.size() == 2) {
             std::vector<std::string> out;
-            for (auto n : names) {
-                out.push_back(s._writer.bulk(n));
+            for (const auto* c : all) {
+                out.push_back(w.bulk(lower(c->name)));
             }
-            return s._writer.array(out);
+            return w.array(out);
         }
-        if (sub == "DOCS" || sub == "INFO") {
-            return s._writer.array({});
+        if (sub == "INFO") {
+            std::vector<std::string> out;
+            if (cmd._argv.size() == 2) {
+                for (const auto* c : all) {
+                    out.push_back(info(*c));
+                }
+            }
+            for (std::size_t i = 2; i < cmd._argv.size(); ++i) {
+                const auto* c = lookup(cmd._argv[i]);
+                out.push_back(c != nullptr ? info(*c) : w.null_array());
+            }
+            return w.array(out);
         }
-        return s._writer.error("ERR unknown subcommand '" + cmd._argv[1] + "'. Try COMMAND HELP.");
+        if (sub == "DOCS") {
+            std::vector<std::pair<std::string, std::string>> out;
+            if (cmd._argv.size() == 2) {
+                for (const auto* c : all) {
+                    out.emplace_back(lower(c->name), docs(*c));
+                }
+            }
+            for (std::size_t i = 2; i < cmd._argv.size(); ++i) {
+                if (const auto* c = lookup(cmd._argv[i])) {
+                    out.emplace_back(lower(c->name), docs(*c));
+                }
+            }
+            return w.map(out);
+        }
+        return w.error("ERR unknown subcommand '" + cmd._argv[1] + "'. Try COMMAND HELP.");
     }
     std::vector<std::string> out;
-    for (auto n : names) {
-        std::string lower(n);
-        for (auto& c : lower) {
-            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-        }
-        out.push_back(
-            s._writer.array({s._writer.bulk(lower), s._writer.integer(-1), s._writer.array({}),
-                             s._writer.integer(0), s._writer.integer(0), s._writer.integer(0)}));
+    for (const auto* c : all) {
+        out.push_back(info(*c));
     }
-    return s._writer.array(out);
+    return w.array(out);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1605,7 +2073,22 @@ template<typename Host, typename Logger, typename Metrics>
 auto redis_front_end<Host, Logger, Metrics>::txn_client::read(const std::string& key,
                                                               std::chrono::milliseconds timeout)
     -> txn_read_result<std::string> {
-    return _front_end.txn_read(key, timeout);
+    return keep(key, _front_end.txn_read(key, timeout));
+}
+
+template<typename Host, typename Logger, typename Metrics>
+auto redis_front_end<Host, Logger, Metrics>::txn_client::keep(
+    const std::string& key, redis_gateway_detail::txn_typed_read r)
+    -> txn_read_result<std::string> {
+    _entries.insert_or_assign(key, std::move(r._entry));
+    return std::move(r._read);
+}
+
+template<typename Host, typename Logger, typename Metrics>
+auto redis_front_end<Host, Logger, Metrics>::txn_client::entry_of(const std::string& key) const
+    -> std::shared_ptr<const redis_kv_value_entry> {
+    auto it = _entries.find(key);
+    return it == _entries.end() ? nullptr : it->second;
 }
 
 template<typename Host, typename Logger, typename Metrics>
@@ -1628,7 +2111,7 @@ auto redis_front_end<Host, Logger, Metrics>::txn_client::read_at(const std::stri
     -> txn_read_result<std::string>
 requires k_snapshot
 {
-    return _front_end.txn_read_at(key, ts, timeout);
+    return keep(key, _front_end.txn_read_at(key, ts, timeout));
 }
 
 /// The host's oracle when it leads the oracle group, else the leader's
@@ -1698,7 +2181,7 @@ template<typename Host, typename Logger, typename Metrics>
 auto redis_front_end<Host, Logger, Metrics>::txn_read_at_local(const std::string& key,
                                                                std::uint64_t ts,
                                                                std::chrono::milliseconds timeout)
-    -> std::optional<txn_read_result<std::string>> {
+    -> std::optional<redis_gateway_detail::txn_typed_read> {
     if constexpr (!k_snapshot) {
         return std::nullopt;
     } else {
@@ -1734,12 +2217,13 @@ auto redis_front_end<Host, Logger, Metrics>::txn_read_at_local(const std::string
                 return std::nullopt;
             }
             auto& [entry, intent] = **looked;
-            txn_read_result<std::string> out;
-            out._intent = std::move(intent);
+            redis_gateway_detail::txn_typed_read out;
+            out._read._intent = std::move(intent);
             // As a plain GET: a version whose TTL has run out is a miss.
             if (entry && !is_expired(*entry)) {
                 const auto view = value_access::read({}, *entry)->view();
-                out._value = std::vector<std::byte>(view.begin(), view.end());
+                out._read._value = std::vector<std::byte>(view.begin(), view.end());
+                out._entry = entry;
             }
             return out;
         } catch (const snapshot_too_old_exception&) {
@@ -1754,7 +2238,7 @@ auto redis_front_end<Host, Logger, Metrics>::txn_read_at_local(const std::string
 template<typename Host, typename Logger, typename Metrics>
 auto redis_front_end<Host, Logger, Metrics>::txn_read_at(const std::string& key, std::uint64_t ts,
                                                          std::chrono::milliseconds timeout)
-    -> txn_read_result<std::string> {
+    -> redis_gateway_detail::txn_typed_read {
     const auto deadline = std::chrono::steady_clock::now() + timeout;
     auto left = [&deadline] {
         return std::max(std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -1871,7 +2355,7 @@ auto redis_front_end<Host, Logger, Metrics>::txn_send(const std::vector<std::str
 
 template<typename Host, typename Logger, typename Metrics>
 auto redis_front_end<Host, Logger, Metrics>::txn_read_local(const std::string& key)
-    -> std::optional<txn_read_result<std::string>> {
+    -> std::optional<redis_gateway_detail::txn_typed_read> {
     if constexpr (!k_transactional) {
         return std::nullopt;
     } else {
@@ -1895,14 +2379,17 @@ auto redis_front_end<Host, Logger, Metrics>::txn_read_local(const std::string& k
             return std::nullopt;
         }
         auto& [entry, context, intent] = *looked;
-        txn_read_result<std::string> out;
-        out._intent = std::move(intent);
+        redis_gateway_detail::txn_typed_read out;
+        out._read._intent = std::move(intent);
         // A leader whose node lacks the bytes answers a miss, as a plain
         // GET on it does (read_local()).
         if (entry && !is_expired(*entry) && value_access::servable(*entry)) {
             if (auto bytes = value_access::read(context, *entry)) {
                 const auto view = bytes->view();
-                out._value = std::vector<std::byte>(view.begin(), view.end());
+                out._read._value = std::vector<std::byte>(view.begin(), view.end());
+                if constexpr (!k_string_only_store) {
+                    out._entry = entry;
+                }
             }
         }
         return out;
@@ -1912,7 +2399,7 @@ auto redis_front_end<Host, Logger, Metrics>::txn_read_local(const std::string& k
 template<typename Host, typename Logger, typename Metrics>
 auto redis_front_end<Host, Logger, Metrics>::txn_read(const std::string& key,
                                                       std::chrono::milliseconds timeout)
-    -> txn_read_result<std::string> {
+    -> redis_gateway_detail::txn_typed_read {
     const auto deadline = std::chrono::steady_clock::now() + timeout;
     std::string last = "no reachable leader for the key's shard";
     for (;;) {
@@ -2246,7 +2733,7 @@ auto redis_front_end<Host, Logger, Metrics>::handle_mset(session& s, const resp_
             }
             std::size_t bytes = 0;
             for (const auto& [key, value] : pairs) {
-                if (_config._immutable_values) {
+                if (_config._immutable_values && !redis_acl::key_is_mutable(*s._identity, key)) {
                     if (auto existing = coordinator.get(key)) {
                         if (redis_gateway_detail::to_string(*existing) == value) {
                             continue;
@@ -2353,7 +2840,10 @@ auto redis_front_end<Host, Logger, Metrics>::handle_multi_del(session& s, const 
 }
 
 /// Inside `MULTI`: check and queue. A refused command dooms the `EXEC`
-/// (EXECABORT), as in Redis.
+/// (EXECABORT), as in Redis: one `EXEC` cannot run (a server, connection
+/// or keyspace-wide command), a wrong argument count, or a refused
+/// authorization. Every other error is that command's element of the
+/// `EXEC` reply, as Redis reports a runtime error (task 11).
 template<typename Host, typename Logger, typename Metrics>
 auto redis_front_end<Host, Logger, Metrics>::queue_in_multi(session& s, std::string_view upper,
                                                             const resp_command& cmd)
@@ -2362,75 +2852,60 @@ auto redis_front_end<Host, Logger, Metrics>::queue_in_multi(session& s, std::str
         s._multi_failed = true;
         return reply;
     };
-    const auto argc = cmd._argv.size();
-    bool arity_ok = false;
-    std::vector<std::string_view> keys;
-    if (upper == "GET" || upper == "EXISTS") {
-        arity_ok = argc == 2;
-    } else if (upper == "SET") {
-        arity_ok = argc == 3;
-    } else if (upper == "SETEX") {
-        arity_ok = argc == 4;
-    } else if (upper == "DEL" || upper == "MGET") {
-        arity_ok = argc >= 2;
-    } else if (upper == "MSET") {
-        arity_ok = argc >= 3 && argc % 2 == 1;
-    } else {
+    const auto* info = find_redis_command(upper);
+    const bool keyed_group =
+        info != nullptr && (info->group == "string" || info->group == "generic" ||
+                            info->group == "hash" || info->group == "set" || info->group == "list");
+    const bool queueable =
+        keyed_group && info->status == redis_command_status::shipped &&
+        (info->flags & redis_command_flag::no_multi) == 0 &&
+        (info->flags & redis_command_flag::blocking) == 0 &&
+        (info->first_key > 0 || (info->flags & redis_command_flag::movablekeys) != 0) &&
+        !k_string_only_store;
+    if (!queueable) {
         return refuse(s._writer.error("ERR " + std::string(upper) +
                                       " is not supported inside MULTI on this gateway"));
     }
-    if (!arity_ok) {
+    const auto argc = static_cast<std::ptrdiff_t>(cmd._argv.size());
+    const bool arity_ok =
+        (info->arity > 0 && argc == info->arity) || (info->arity < 0 && argc >= -info->arity);
+    if (!arity_ok || (upper == "MSET" && argc % 2 == 0)) {
         std::string lower = cmd._argv[0];
         for (auto& c : lower) {
             c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
         }
         return refuse(s._writer.error("ERR wrong number of arguments for '" + lower + "' command"));
     }
-    const bool pairs = upper == "MSET";
-    for (std::size_t i = 1; i < argc; i += pairs ? 2 : 1) {
-        keys.emplace_back(cmd._argv[i]);
-        if (upper == "SET" || upper == "SETEX") {
-            break;
+    // The registry's key positions; a command with movable keys has its
+    // keys checked when EXEC runs it, as that command's error.
+    std::vector<std::string_view> keys;
+    if (info->first_key > 0) {
+        const auto first = std::ptrdiff_t{info->first_key};
+        const auto last_key = std::ptrdiff_t{info->last_key};
+        const std::ptrdiff_t last = last_key < 0 ? argc + last_key : last_key;
+        const std::ptrdiff_t step = std::max<std::ptrdiff_t>(std::ptrdiff_t{info->step}, 1);
+        for (std::ptrdiff_t i = first; i <= last && i < argc; i += step) {
+            keys.emplace_back(cmd._argv[static_cast<std::size_t>(i)]);
         }
     }
     if (auto e = authorize(s, upper, keys)) {
         return refuse(*e);
     }
-    if (upper == "SETEX") {
-        std::int64_t seconds = 0;
-        try {
-            std::size_t used = 0;
-            seconds = std::stoll(cmd._argv[2], &used);
-            if (used != cmd._argv[2].size()) {
-                throw std::invalid_argument("seconds");
-            }
-        } catch (const std::exception&) {
-            return refuse(s._writer.error("ERR value is not an integer or out of range"));
-        }
-        if (seconds <= 0) {
-            return refuse(s._writer.error("ERR invalid expire time in 'setex' command"));
-        }
-    }
-    if (upper == "SET" || upper == "SETEX" || upper == "MSET") {
-        for (std::size_t i = upper == "MSET" ? 2 : argc - 1; i < argc; i += 2) {
-            if (cmd._argv[i].size() > _config._max_value_bytes) {
-                ++_stats._oversize_rejections;
-                return refuse(s._writer.error("ERR value exceeds the configured maximum of " +
-                                              std::to_string(_config._max_value_bytes) + " bytes"));
-            }
-        }
-    }
     s._queued.push_back(cmd);
     return s._writer.simple_string("QUEUED");
 }
 
-/// `EXEC`: the queued commands as one transaction. Reads run now, at the
-/// connection's isolation, and see the transaction's own earlier writes, as
-/// a Redis `MULTI` does. Writes are buffered and committed together; if the
-/// commit does not commit, `EXEC` answers with that error instead of the
-/// array, and nothing applied. A `SET` whose key holds other bytes under
-/// `_immutable_values` is that element's error and writes nothing, the way
-/// Redis reports a per-command runtime error inside `EXEC`.
+/// `EXEC`: the queued commands as one transaction (task 11, design
+/// Component 5). Each runs through its usual handler against the
+/// transaction's view: reads see what the transaction read with its own
+/// earlier writes on top, as a Redis `MULTI` does, and writes are `exec`
+/// records the same appliers `apply()` runs evaluate against the view, so
+/// each reply is known before the commit. The commit then installs each
+/// changed key's resulting value (redis_txn_view.hpp); if it does not
+/// commit, `EXEC` answers with that error instead of the array, and
+/// nothing applied. A command's own error (a value conflict under
+/// `_immutable_values`, `WRONGTYPE`, a syntax error) is its element and
+/// writes nothing, the way Redis reports a runtime error inside `EXEC`.
 template<typename Host, typename Logger, typename Metrics>
 auto redis_front_end<Host, Logger, Metrics>::handle_exec(session& s) -> std::string {
     auto queued = std::move(s._queued);
@@ -2438,7 +2913,7 @@ auto redis_front_end<Host, Logger, Metrics>::handle_exec(session& s) -> std::str
     // EXEC unwatches whatever its outcome, as in Redis.
     const auto watched = std::exchange(s._watched, {});
     const auto watch_ts = std::exchange(s._watch_ts, 0);
-    if constexpr (!k_transactional) {
+    if constexpr (!k_transactional || k_string_only_store) {
         return s._writer.error("ERR transactions are not built in");
     } else {
         try {
@@ -2458,92 +2933,27 @@ auto redis_front_end<Host, Logger, Metrics>::handle_exec(session& s) -> std::str
             for (const auto& key : watched) {
                 coordinator.watch(key);
             }
-            // The transaction's own view: a buffered write, or a deletion.
-            std::map<std::string, std::optional<std::string>> mine;
-            auto view = [&](const std::string& key) -> std::optional<std::string> {
-                if (auto it = mine.find(key); it != mine.end()) {
-                    return it->second;
-                }
-                if (auto v = coordinator.get(key)) {
-                    return redis_gateway_detail::to_string(*v);
-                }
-                return std::nullopt;
-            };
-            auto conflicts = [&](const std::string& key, const std::string& value) {
-                if (!_config._immutable_values) {
-                    return false;
-                }
-                auto existing = view(key);
-                return existing.has_value() && *existing != value;
-            };
+            auto view = make_txn_view(coordinator, client);
             std::vector<std::string> replies;
             replies.reserve(queued.size());
-            std::size_t writes = 0;
-            std::size_t deletes = 0;
-            for (const auto& cmd : queued) {
-                const auto upper = resp_to_upper(cmd._argv[0]);
-                if (upper == "GET") {
-                    auto v = view(cmd._argv[1]);
-                    replies.push_back(v ? s._writer.bulk(*v) : s._writer.null());
-                } else if (upper == "EXISTS") {
-                    replies.push_back(s._writer.integer(view(cmd._argv[1]).has_value() ? 1 : 0));
-                } else if (upper == "MGET") {
-                    std::vector<std::string> out;
-                    for (std::size_t i = 1; i < cmd._argv.size(); ++i) {
-                        auto v = view(cmd._argv[i]);
-                        out.push_back(v ? s._writer.bulk(*v) : s._writer.null());
+            s._txn_view = &view;
+            try {
+                for (const auto& cmd : queued) {
+                    replies.push_back(execute_command(s, resp_to_upper(cmd._argv[0]), cmd));
+                    if (auto failed = view.failure()) {
+                        // A read the transaction could not make: a reply
+                        // built around it is not the transaction's.
+                        std::rethrow_exception(failed);
                     }
-                    replies.push_back(s._writer.array(out));
-                } else if (upper == "SET" || upper == "SETEX") {
-                    const auto& key = cmd._argv[1];
-                    const auto& value = cmd._argv.back();
-                    if (conflicts(key, value)) {
-                        ++_stats._value_conflicts;
-                        replies.push_back(
-                            s._writer.error("ERR value conflict for an existing key"));
-                        continue;
-                    }
-                    std::uint64_t expire_at = 0;
-                    if (upper == "SETEX") {
-                        expire_at =
-                            now_ms() + static_cast<std::uint64_t>(std::stoll(cmd._argv[2])) * 1000U;
-                    }
-                    coordinator.put(key, set_command(key, value, expire_at));
-                    mine.insert_or_assign(key, value);
-                    ++writes;
-                    replies.push_back(s._writer.simple_string("OK"));
-                } else if (upper == "MSET") {
-                    bool refused = false;
-                    for (std::size_t i = 1; i < cmd._argv.size() && !refused; i += 2) {
-                        refused = conflicts(cmd._argv[i], cmd._argv[i + 1]);
-                    }
-                    if (refused) {
-                        ++_stats._value_conflicts;
-                        replies.push_back(
-                            s._writer.error("ERR value conflict for an existing key"));
-                        continue;
-                    }
-                    for (std::size_t i = 1; i < cmd._argv.size(); i += 2) {
-                        coordinator.put(cmd._argv[i],
-                                        set_command(cmd._argv[i], cmd._argv[i + 1], 0));
-                        mine.insert_or_assign(cmd._argv[i], cmd._argv[i + 1]);
-                        ++writes;
-                    }
-                    replies.push_back(s._writer.simple_string("OK"));
-                } else {  // DEL
-                    std::int64_t count = 0;
-                    for (std::size_t i = 1; i < cmd._argv.size(); ++i) {
-                        const auto& key = cmd._argv[i];
-                        if (view(key).has_value()) {
-                            ++count;
-                            coordinator.put(key,
-                                            encode_redis_kv_command(redis_kv_del_command{key}));
-                            mine.insert_or_assign(key, std::nullopt);
-                        }
-                    }
-                    deletes += static_cast<std::size_t>(count);
-                    replies.push_back(s._writer.integer(count));
                 }
+            } catch (...) {
+                s._txn_view = nullptr;
+                throw;
+            }
+            s._txn_view = nullptr;
+            if (auto refused = stage_txn_writes(s, coordinator, view)) {
+                coordinator.rollback();
+                return *refused;
             }
             auto outcome = coordinator.commit();
             // A watched key that changed fails one of two ways: read
@@ -2559,8 +2969,6 @@ auto redis_front_end<Host, Logger, Metrics>::handle_exec(session& s) -> std::str
                  !outcome._holder.has_value() && outcome._conflict_key.has_value() &&
                  watched.contains(*outcome._conflict_key));
             if (!watched.empty() && outcome._kind == txn_outcome_kind::aborted && watched_changed) {
-                // Redis's answer for a watched key that changed: a null
-                // array, nothing applied.
                 ++_stats._txn_aborted;
                 emit("redis.txn.aborted", "watch");
                 return s._writer.null_array();
@@ -2568,13 +2976,141 @@ auto redis_front_end<Host, Logger, Metrics>::handle_exec(session& s) -> std::str
             if (auto e = outcome_error(s, outcome); !e.empty()) {
                 return e;
             }
-            _stats._writes += writes;
-            _stats._deletes += deletes;
+            for (const auto& [key, entry] : view.writes()) {
+                if (entry) {
+                    ++_stats._writes;
+                } else {
+                    ++_stats._deletes;
+                }
+                if (auto desc = _data.route(key)) {
+                    if (entry) {
+                        touch_lru(desc->group_id(), key);
+                    } else {
+                        forget_lru(desc->group_id(), key);
+                    }
+                }
+            }
             return s._writer.array(replies);
         } catch (const std::exception& e) {
             return s._writer.error(std::string("ERR transaction failed: ") + e.what() + ", retry");
         }
     }
+}
+
+template<typename Host, typename Logger, typename Metrics>
+auto redis_front_end<Host, Logger, Metrics>::make_txn_view(coordinator_type& coordinator,
+                                                           txn_client& client) -> redis_txn_view {
+    return redis_txn_view([&coordinator, &client](const std::string& key) {
+        auto value = coordinator.get(key);
+        if (!value) {
+            return redis_txn_view::entry_handle{};
+        }
+        if (auto entry = client.entry_of(key)) {
+            return entry;
+        }
+        // A shard that answered without the typed extension: a string
+        // whose deadline that gateway does not say.
+        auto entry = std::make_shared<redis_kv_value_entry>();
+        entry->_value = std::move(*value);
+        return redis_txn_view::entry_handle{std::move(entry)};
+    });
+}
+
+template<typename Host, typename Logger, typename Metrics>
+auto redis_front_end<Host, Logger, Metrics>::stage_txn_writes(session& s,
+                                                              coordinator_type& coordinator,
+                                                              const redis_txn_view& view)
+    -> std::optional<std::string> {
+    const auto now = now_ms();
+    for (const auto& [key, entry] : view.writes()) {
+        if (entry && redis_entry_type(*entry) != redis_value_type::string) {
+            // A collection commits as `KYTHIRA.INSTALL`, an `exec` record
+            // only a group past the gate applies. A group with no replica
+            // here is checked by the commands that made the collection.
+            if (auto refused = format_refusal(s, key, k_redis_typed_values_level)) {
+                return refused;
+            }
+        }
+        coordinator.put(key, redis_txn_write_record(key, entry, now));
+    }
+    return std::nullopt;
+}
+
+template<typename Host, typename Logger, typename Metrics>
+auto redis_front_end<Host, Logger, Metrics>::txn_view_exec(session& s, std::string_view name,
+                                                           const std::string& key,
+                                                           redis_command_id id,
+                                                           const std::vector<std::string>& args,
+                                                           const std::string& mutable_bits)
+    -> std::string {
+    const auto t = now_ms();
+    const auto record = make_redis_exec_record(key, static_cast<std::uint16_t>(id), args, t,
+                                               _config._immutable_values, mutable_bits);
+    auto reply = apply_redis_exec(*s._txn_view, record, t);
+    if (!reply) {
+        return s._writer.error("ERR unknown command id " +
+                               std::to_string(static_cast<unsigned>(id)));
+    }
+    if (reply->is_error() && reply->_text.rfind("ERR value conflict", 0) == 0) {
+        ++_stats._value_conflicts;
+        emit("redis.value_conflicts", name);
+    }
+    return render_redis_reply(*reply, s._writer.version());
+}
+
+/// `MSET` and `MGET` against a transaction's view. `MSET` under
+/// `_immutable_values` refuses the whole command when a key outside the
+/// user's mutable prefixes holds other bytes, as outside a transaction.
+template<typename Host, typename Logger, typename Metrics>
+auto redis_front_end<Host, Logger, Metrics>::txn_view_mset_mget(session& s, std::string_view upper,
+                                                                const resp_command& cmd)
+    -> std::string {
+    auto& view = *s._txn_view;
+    const auto t = now_ms();
+    const auto live = [&](const redis_txn_view::entry_handle& e) {
+        return e && (e->_expire_at_ms == 0 || e->_expire_at_ms > t);
+    };
+    if (upper == "MGET") {
+        std::vector<std::string> out;
+        for (std::size_t i = 1; i < cmd._argv.size(); ++i) {
+            auto e = view.find(cmd._argv[i]);
+            // As Redis: a key holding another type reads as nil.
+            if (live(e) && redis_entry_type(*e) == redis_value_type::string) {
+                out.push_back(s._writer.bulk(std::span<const std::byte>(e->_value)));
+            } else {
+                out.push_back(s._writer.null());
+            }
+        }
+        return s._writer.array(out);
+    }
+    if (cmd._argv.size() < 3 || cmd._argv.size() % 2 == 0) {
+        return s._writer.error("ERR wrong number of arguments for 'mset' command");
+    }
+    for (std::size_t i = 2; i < cmd._argv.size(); i += 2) {
+        if (cmd._argv[i].size() > _config._max_value_bytes) {
+            ++_stats._oversize_rejections;
+            return s._writer.error("ERR value exceeds the configured maximum of " +
+                                   std::to_string(_config._max_value_bytes) + " bytes");
+        }
+    }
+    if (_config._immutable_values) {
+        for (std::size_t i = 1; i < cmd._argv.size(); i += 2) {
+            const auto& key = cmd._argv[i];
+            if (redis_acl::key_is_mutable(*s._identity, key)) {
+                continue;
+            }
+            auto e = view.find(key);
+            if (live(e) && (redis_entry_type(*e) != redis_value_type::string ||
+                            redis_gateway_detail::to_string(e->_value) != cmd._argv[i + 1])) {
+                ++_stats._value_conflicts;
+                return s._writer.error("ERR value conflict for an existing key");
+            }
+        }
+    }
+    for (std::size_t i = 1; i < cmd._argv.size(); i += 2) {
+        view.put(cmd._argv[i], redis_gateway_detail::to_bytes(cmd._argv[i + 1]), 0);
+    }
+    return s._writer.simple_string("OK");
 }
 
 /// `KYTHIRA.TXN SEND <envelope> <key>...` and `KYTHIRA.TXN READ <key>`: the
@@ -2605,7 +3141,8 @@ auto redis_front_end<Host, Logger, Metrics>::handle_internal_txn(session& s,
             if (!local) {
                 return s._writer.error("ERR shard has no reachable leader, retry");
             }
-            return s._writer.bulk(redis_gateway_detail::encode_txn_read(*local));
+            return s._writer.bulk(
+                redis_gateway_detail::encode_txn_read(local->_read, local->_entry.get()));
         }
         if (sub == "TS") {
             // Tier 2: timestamps from this host's oracle, never forwarded.
@@ -2639,7 +3176,8 @@ auto redis_front_end<Host, Logger, Metrics>::handle_internal_txn(session& s,
                 if (!local) {
                     return s._writer.error("ERR shard has no reachable leader, retry");
                 }
-                return s._writer.bulk(redis_gateway_detail::encode_txn_read(*local));
+                return s._writer.bulk(
+                    redis_gateway_detail::encode_txn_read(local->_read, local->_entry.get()));
             } catch (const snapshot_too_old_exception& e) {
                 return s._writer.error(std::string(redis_gateway_detail::k_too_old_prefix) +
                                        std::to_string(e.start_ts()) + " " +
@@ -2790,6 +3328,11 @@ auto redis_front_end<Host, Logger, Metrics>::handle_data(session& s, const resp_
     }
     if (cmd._argv.size() < 3) {
         return s._writer.error("ERR wrong number of arguments for 'kythira.data' command");
+    }
+    // The scan family's pages and the usage walk (tasks 12-13) share the
+    // command name with the data-layer API.
+    if (const auto first = resp_to_upper(cmd._argv[1]); first == "PAGE" || first == "USAGE") {
+        return handle_internal_page(s, cmd);
     }
     if (!_data.running()) {
         return s._writer.error("LOADING Kythira is loading the dataset in memory");
@@ -2972,9 +3515,19 @@ auto redis_front_end<Host, Logger, Metrics>::data_read(redis_data_wire::read_mod
         return redis_data_wire::encode_read_miss();  // as read_local(): unvouched bytes
     }
     const auto view = bytes->view();
-    return redis_data_wire::encode_read_value(
-        outcome._entry->_expire_at_ms,
-        std::string_view(reinterpret_cast<const char*>(view.data()), view.size()));
+    const std::string_view value(reinterpret_cast<const char*>(view.data()), view.size());
+    if constexpr (!k_string_only_store) {
+        // A hash, set or list travels whole, so the front end evaluates the
+        // typed read as a co-located one would.
+        if (const auto type = redis_entry_type(*outcome._entry); type != redis_value_type::string) {
+            std::vector<std::byte> body;
+            redis_kv_detail::put_collection_body(body, *outcome._entry);
+            return redis_data_wire::encode_read_value(
+                outcome._entry->_expire_at_ms, value, static_cast<std::uint8_t>(type),
+                std::string_view(reinterpret_cast<const char*>(body.data()), body.size()));
+        }
+    }
+    return redis_data_wire::encode_read_value(outcome._entry->_expire_at_ms, value);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -3288,6 +3841,2793 @@ auto redis_front_end<Host, Logger, Metrics>::handle_advise(session& s, const res
         _cache_hooks._on_advisory(cmd._argv[1]);
     }
     return s._writer.simple_string("OK");
+}
+
+// ── format level and gate (redis-general-data-types task 2) ─────────────────
+
+namespace redis_gateway_detail {
+template<typename Id> auto describe_id(const Id& id) -> std::string {
+    if constexpr (requires { std::to_string(id); }) {
+        return std::to_string(id);
+    } else if constexpr (requires(std::ostream& os) { os << id; }) {
+        std::ostringstream out;
+        out << id;
+        return out.str();
+    } else {
+        return "?";
+    }
+}
+}  // namespace redis_gateway_detail
+
+template<typename Host, typename Logger, typename Metrics>
+auto redis_front_end<Host, Logger, Metrics>::call_peer(const node_id_type& node,
+                                                       const std::vector<std::string>& argv)
+    -> std::optional<std::string> {
+    if (_config._internal_secret.empty() ||
+        (!_config._forward_tls && !_config._allow_plaintext_forwarding)) {
+        return std::nullopt;
+    }
+    auto endpoint = forward_endpoint(node);
+    if (!endpoint) {
+        return std::nullopt;
+    }
+    const auto budget = _config._command_timeout.count() > 0
+                            ? std::chrono::steady_clock::duration{_config._command_timeout}
+                            : std::chrono::steady_clock::duration{std::chrono::seconds{5}};
+    try {
+        auto sock = forward_socket(*endpoint, std::chrono::steady_clock::now() + budget);
+        resp_writer w;
+        std::vector<std::string> parts;
+        parts.reserve(argv.size());
+        for (const auto& a : argv) {
+            parts.push_back(w.bulk(a));
+        }
+        auto wire = w.array(parts);
+        sock->write(boost::asio::buffer(wire));
+        std::string buf;
+        std::array<char, 512> chunk{};
+        std::size_t len = 0;
+        while ((len = resp_reply_length(buf)) == 0) {
+            if (buf.size() > 64U * 1024U) {
+                throw std::runtime_error("oversized reply from peer gateway");
+            }
+            auto n = sock->read_some(boost::asio::buffer(chunk));
+            buf.append(chunk.data(), n);
+        }
+        buf.resize(len);
+        return_forward_socket(*endpoint, std::move(sock));
+        return buf;
+    } catch (const std::exception& e) {
+        _logger.log(log_level::debug, "redis gateway: peer call failed",
+                    {{"endpoint", *endpoint},
+                     {"command", argv.empty() ? "" : argv[0]},
+                     {"error", e.what()}});
+        return std::nullopt;
+    }
+}
+
+template<typename Host, typename Logger, typename Metrics>
+auto redis_front_end<Host, Logger, Metrics>::peer_format_level(const node_id_type& node)
+    -> std::optional<std::uint16_t> {
+    auto reply = call_peer(node, {"KYTHIRA.FORMAT", "LEVEL"});
+    if (!reply || reply->size() < 4 || (*reply)[0] != ':') {
+        return std::nullopt;
+    }
+    try {
+        std::size_t used = 0;
+        const auto body = reply->substr(1, reply->size() - 3);
+        const auto v = std::stoul(body, &used);
+        if (used != body.size() || v > 0xFFFFU) {
+            return std::nullopt;
+        }
+        return static_cast<std::uint16_t>(v);
+    } catch (const std::exception&) {
+        return std::nullopt;
+    }
+}
+
+template<typename Host, typename Logger, typename Metrics>
+auto redis_front_end<Host, Logger, Metrics>::group_format_level(const std::string& key)
+    -> std::optional<std::uint16_t> {
+    if constexpr (k_node_format_level < k_redis_typed_values_level) {
+        (void)key;
+        return k_redis_base_format_level;
+    } else {
+        redis_data_status status{};
+        std::optional<node_id_type> leader;
+        auto* node = _data.replica_for(key, status, leader);
+        if (node == nullptr) {
+            return std::nullopt;
+        }
+        return node->with_state_machine(
+            [](auto& sm) { return redis_gateway_detail::kv_of(sm).format_level(); });
+    }
+}
+
+template<typename Host, typename Logger, typename Metrics>
+auto redis_front_end<Host, Logger, Metrics>::format_refusal(session& s, const std::string& key,
+                                                            std::uint16_t level)
+    -> std::optional<std::string> {
+    if constexpr (k_string_only_store) {
+        (void)key;
+        (void)level;
+        return s._writer.error(std::string(k_redis_string_only_store_error));
+    }
+    auto have = group_format_level(key);
+    if (have && *have < level) {
+        return s._writer.error(std::string(k_redis_format_gate_error));
+    }
+    return std::nullopt;
+}
+
+template<typename Host, typename Logger, typename Metrics>
+auto redis_front_end<Host, Logger, Metrics>::mutable_exec(const session& s, const std::string& key)
+    -> bool {
+    if (!_config._immutable_values || !s._identity ||
+        !redis_acl::key_is_mutable(*s._identity, key)) {
+        return false;
+    }
+    return typed_ready(key);
+}
+
+template<typename Host, typename Logger, typename Metrics>
+auto redis_front_end<Host, Logger, Metrics>::typed_ready(const std::string& key) -> bool {
+    const auto have = group_format_level(key);
+    return !have || *have >= k_redis_typed_values_level;
+}
+
+/// typed_ready() cannot see the gate of a group with no replica here (a
+/// front end without data), so it guesses the gate is up and the command
+/// takes its typed path. If the data node then refused the record before
+/// its gate, nothing was applied, and the caller retries on the path a node
+/// that could see the gate would have taken.
+template<typename Host, typename Logger, typename Metrics>
+auto redis_front_end<Host, Logger, Metrics>::refused_by_remote_gate(const std::string& key,
+                                                                    std::string_view reply)
+    -> bool {
+    return !group_format_level(key) && reply.size() == k_redis_format_gate_error.size() + 3 &&
+           reply.front() == '-' &&
+           reply.substr(1, k_redis_format_gate_error.size()) == k_redis_format_gate_error;
+}
+
+/// The `KYTHIRA.FORMAT STATUS` reply, encoded as RESP2 bulk text: this
+/// node's level, then each local replica's gate.
+template<typename Host, typename Logger, typename Metrics>
+auto redis_front_end<Host, Logger, Metrics>::format_status_text() -> std::string {
+    std::ostringstream out;
+    out << "node_level:" << reported_format_level() << "\r\n"
+        << "binary_level:" << k_redis_format_level << "\r\n";
+    for (const auto& g : _data.local_groups()) {
+        auto* node = _data.local_replica(g);
+        if (node == nullptr) {
+            continue;
+        }
+        std::uint16_t level = 0;
+        if constexpr (k_node_format_level >= k_redis_typed_values_level) {
+            level = node->with_state_machine(
+                [](auto& sm) { return redis_gateway_detail::kv_of(sm).format_level(); });
+        }
+        out << "group:" << redis_gateway_detail::describe_id(g)
+            << ":gate=" << (level == 0 ? k_redis_base_format_level : level) << "\r\n";
+    }
+    resp_writer w;
+    return w.bulk(out.str());
+}
+
+/// `KYTHIRA.FORMAT STATUS`: this node's level and each local group's gate.
+/// `KYTHIRA.FORMAT LEVEL`: this node's level, as an integer (what peers ask).
+/// `KYTHIRA.FORMAT UPGRADE <level>`: see `format_upgrade`.
+/// `KYTHIRA.FORMAT GATE <level> <key>`: internal only; propose the gate to
+/// `key`'s group from here, its leader.
+template<typename Host, typename Logger, typename Metrics>
+auto redis_front_end<Host, Logger, Metrics>::handle_format(session& s, const resp_command& cmd)
+    -> std::string {
+    if (cmd._argv.size() < 2) {
+        return s._writer.error("ERR wrong number of arguments for 'kythira.format' command");
+    }
+    const auto sub = resp_to_upper(cmd._argv[1]);
+    const bool internal_hop = s._internal && (sub == "LEVEL" || sub == "GATE" || sub == "STATUS");
+    if (!internal_hop) {
+        if (auto e = authorize(s, "KYTHIRA.FORMAT", {})) {
+            return *e;
+        }
+    }
+    auto parse_level = [](const std::string& text) -> std::optional<std::uint16_t> {
+        if (text.empty() || text.size() > 5 ||
+            !std::ranges::all_of(text, [](char c) { return c >= '0' && c <= '9'; })) {
+            return std::nullopt;
+        }
+        const auto v = std::stoul(text);
+        return v <= 0xFFFFU ? std::optional<std::uint16_t>(static_cast<std::uint16_t>(v))
+                            : std::nullopt;
+    };
+    if (sub == "LEVEL" && cmd._argv.size() == 2) {
+        return s._writer.integer(reported_format_level());
+    }
+    if (sub == "STATUS" && cmd._argv.size() == 2) {
+        return format_status_text();
+    }
+    if (sub == "UPGRADE" && cmd._argv.size() == 3) {
+        auto level = parse_level(cmd._argv[2]);
+        if (!level) {
+            return s._writer.error("ERR KYTHIRA.FORMAT UPGRADE needs a format level");
+        }
+        return format_upgrade(s, *level);
+    }
+    if (sub == "GATE" && cmd._argv.size() == 4) {
+        if (!s._internal) {
+            ++_stats._authz_denials;
+            return s._writer.error("NOPERM KYTHIRA.FORMAT GATE is for peer gateways only");
+        }
+        auto level = parse_level(cmd._argv[2]);
+        if (!level || *level > reported_format_level()) {
+            return s._writer.error("ERR KYTHIRA.FORMAT GATE above this node's format level");
+        }
+        const auto entry =
+            encode_redis_kv_command(redis_kv_format_gate_command{cmd._argv[3], *level});
+        try {
+            auto future = _data.propose(cmd._argv[3], entry, _config._command_timeout);
+            if (!future.wait(_config._command_timeout)) {
+                return s._writer.error("ERR timeout proposing the format gate");
+            }
+            (void)std::move(future).get();
+            return s._writer.simple_string("OK");
+        } catch (const std::exception& e) {
+            return s._writer.error(std::string("ERR format gate not applied: ") + e.what());
+        }
+    }
+    return s._writer.error(
+        "ERR unknown subcommand or wrong number of arguments for "
+        "'KYTHIRA.FORMAT'. Try STATUS, LEVEL or UPGRADE <level>");
+}
+
+/// Design Component 8: refuse unless every node holding a replica of any
+/// group reports at least `level`, naming the ones that do not; then propose
+/// `format_gate{level}` to every group, from here when this node leads it
+/// and through its leader otherwise, until each applies. Groups a split made
+/// meanwhile inherit the gate through `split_state`; the walk is repeated
+/// until it finds no group it has not gated. Safe to repeat: a gate at or
+/// below a group's level changes nothing.
+template<typename Host, typename Logger, typename Metrics>
+auto redis_front_end<Host, Logger, Metrics>::format_upgrade(session& s, std::uint16_t level)
+    -> std::string {
+    if (level < k_redis_typed_values_level || level > k_redis_format_level) {
+        return s._writer.error("ERR KYTHIRA.FORMAT UPGRADE level must be between " +
+                               std::to_string(k_redis_typed_values_level) + " and " +
+                               std::to_string(k_redis_format_level));
+    }
+    auto routes = _data.all_routes();
+    if (routes.empty()) {
+        return s._writer.error("ERR KYTHIRA.FORMAT routing is still loading, retry");
+    }
+    // 1. Every node with a replica of any group, and this one.
+    std::set<node_id_type> nodes{_data.self()};
+    for (const auto& r : routes) {
+        nodes.insert(r.voters().begin(), r.voters().end());
+        nodes.insert(r.learners().begin(), r.learners().end());
+    }
+    std::vector<std::string> behind;
+    for (const auto& n : nodes) {
+        const auto have =
+            n == _data.self() ? std::optional(reported_format_level()) : peer_format_level(n);
+        if (!have) {
+            behind.push_back(redis_gateway_detail::describe_id(n) + " (no answer)");
+        } else if (*have < level) {
+            behind.push_back(redis_gateway_detail::describe_id(n) + " (level " +
+                             std::to_string(*have) + ")");
+        }
+    }
+    if (!behind.empty()) {
+        std::string names;
+        for (const auto& b : behind) {
+            names += (names.empty() ? "" : ", ") + b;
+        }
+        return s._writer.error("ERR KYTHIRA.FORMAT cannot reach level " + std::to_string(level) +
+                               ": nodes below it: " + names);
+    }
+    // 2. Gate every group.
+    std::set<group_id_type> gated;
+    const auto deadline = std::chrono::steady_clock::now() +
+                          std::max(_config._command_timeout * 4, std::chrono::milliseconds{1000});
+    for (int pass = 0; pass < 8; ++pass) {
+        if (pass > 0) {
+            routes = _data.all_routes();
+        }
+        bool any_new = false;
+        for (const auto& r : routes) {
+            if (gated.contains(r.group_id())) {
+                continue;
+            }
+            any_new = true;
+            const std::string key = r.range()._start.value_or(std::string{});
+            const auto entry = encode_redis_kv_command(redis_kv_format_gate_command{key, level});
+            std::optional<node_id_type> to;
+            while (std::chrono::steady_clock::now() < deadline) {
+                try {
+                    auto future = _data.propose(key, entry, _config._command_timeout);
+                    if (future.wait(_config._command_timeout)) {
+                        (void)std::move(future).get();
+                        gated.insert(r.group_id());
+                        break;
+                    }
+                } catch (const shard_not_leader_exception<group_id_type, node_id_type>& e) {
+                    to = e.leader_hint();
+                } catch (const std::exception&) {
+                    to.reset();
+                }
+                if (!to) {
+                    to = _data.leader_of(key);
+                }
+                if (to && *to != _data.self()) {
+                    auto reply =
+                        call_peer(*to, {"KYTHIRA.FORMAT", "GATE", std::to_string(level), key});
+                    if (reply && reply->rfind("+OK", 0) == 0) {
+                        gated.insert(r.group_id());
+                        break;
+                    }
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds{50});
+                to.reset();
+            }
+            if (!gated.contains(r.group_id())) {
+                return s._writer.error("ERR KYTHIRA.FORMAT could not gate group " +
+                                       redis_gateway_detail::describe_id(r.group_id()) +
+                                       "; the gate is idempotent, retry");
+            }
+        }
+        if (!any_new) {
+            break;
+        }
+    }
+    // 3. Until every replica has applied it, a node whose replica of a
+    // group lags would still refuse typed commands for that group; wait
+    // (within the same budget) until every node reports every group it
+    // holds at the level, so OK means typed values work everywhere.
+    const auto all_at_level = [level](std::string_view status) {
+        std::size_t pos = 0;
+        while ((pos = status.find("gate=", pos)) != std::string_view::npos) {
+            pos += 5;
+            std::uint16_t have = 0;
+            const auto end = status.find_first_not_of("0123456789", pos);
+            const auto digits = status.substr(pos, end - pos);
+            if (std::from_chars(digits.data(), digits.data() + digits.size(), have).ec !=
+                    std::errc{} ||
+                have < level) {
+                return false;
+            }
+        }
+        return true;
+    };
+    std::set<node_id_type> waiting = nodes;
+    while (!waiting.empty() && std::chrono::steady_clock::now() < deadline) {
+        for (auto it = waiting.begin(); it != waiting.end();) {
+            std::optional<std::string> status;
+            if (*it == _data.self()) {
+                status = format_status_text();
+            } else {
+                status = call_peer(*it, {"KYTHIRA.FORMAT", "STATUS"});
+            }
+            if (status && status->starts_with('$') && all_at_level(*status)) {
+                it = waiting.erase(it);
+            } else {
+                ++it;
+            }
+        }
+        if (!waiting.empty()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds{20});
+        }
+    }
+    if (!waiting.empty()) {
+        // The gate is committed in every group; the laggards apply it as
+        // they catch up.
+        _logger.log(log_level::warning, "redis gateway: format gate not yet applied everywhere",
+                    {{"level", std::to_string(level)}, {"nodes", std::to_string(waiting.size())}});
+    }
+    _logger.log(log_level::info, "redis gateway: format gate applied",
+                {{"level", std::to_string(level)}, {"groups", std::to_string(gated.size())}});
+    return s._writer.simple_string("OK");
+}
+
+// ── tier 1 strings (redis-general-data-types task 3) ────────────────────────
+
+template<typename Host, typename Logger, typename Metrics>
+auto redis_front_end<Host, Logger, Metrics>::propose_exec(
+    session& s, const resp_command& cmd, const std::string& key, redis_command_id id,
+    std::vector<std::string> args, bool may_grow, std::optional<std::string> mutable_bits,
+    int replans) -> std::string {
+    const auto name = resp_to_upper(cmd._argv[0]);
+    const auto keys = redis_exec_keys(id, args);
+    // Requirement 5: whether each key is in one of the user's mutable
+    // prefixes. apply() decides against the stored value.
+    std::string bits;
+    if (mutable_bits) {
+        bits = *mutable_bits;
+    } else {
+        for (const auto& k : keys) {
+            bits += s._identity && redis_acl::key_is_mutable(*s._identity, k) ? '1' : '0';
+        }
+    }
+    if (s._txn_view != nullptr) {
+        return txn_view_exec(s, name, key, id, args, bits);
+    }
+    // The hop to a leader elsewhere carries the record, not the command.
+    resp_command hop;
+    hop._argv = {"KYTHIRA.EXEC", std::to_string(static_cast<unsigned>(id)), bits,
+                 may_grow ? "1" : "0"};
+    hop._argv.insert(hop._argv.end(), args.begin(), args.end());
+    // Plan (Component 5): every key in one group, or a cross-group write.
+    if (keys.size() > 1) {
+        std::optional<group_id_type> group;
+        bool split = false;
+        for (const auto& k : keys) {
+            auto desc = _data.route(k);
+            if (!desc) {
+                return s._writer.error("ERR no shard owns this key");
+            }
+            if (group && *group != desc->group_id()) {
+                split = true;
+            }
+            group = desc->group_id();
+        }
+        if (split) {
+            return cross_group_exec(s, id, args, bits);
+        }
+    }
+    std::string error;
+    std::optional<node_id_type> forward_to;
+    // No replica here (a front end without data, task 16): the record goes
+    // to the data node over KYTHIRA.DATA PROPOSE, where apply() refuses it
+    // before the gate as it would locally.
+    const bool remote = _data.remote_for(key);
+    if (!remote) {
+        auto* node = locate(key, error, forward_to);
+        if (node != nullptr && !node->is_leader()) {
+            forward_to = node->known_leader();
+            error = s._writer.error("ERR shard has no reachable leader, retry");
+            node = nullptr;
+        }
+        if (node == nullptr) {
+            if (forward_to) {
+                if (auto reply = forward(s, hop, *forward_to)) {
+                    return *reply;
+                }
+            }
+            return error;
+        }
+    }
+    if (auto refused = format_refusal(s, key, k_redis_typed_values_level)) {
+        return *refused;
+    }
+    // The space hooks belong to the disk-backed store, which a front end
+    // without data cannot run.
+    if (may_grow && !remote) {
+        if (auto refused = space_refusal(key)) {
+            ++_stats._space_refusals;
+            emit("redis.space_refusals", name);
+            return s._writer.error("ERR " + *refused + ", retry later");
+        }
+    }
+    const auto exec = make_redis_exec_record(key, static_cast<std::uint16_t>(id), args, now_ms(),
+                                             _config._immutable_values, bits);
+    const auto encoded = encode_redis_kv_command(exec);
+    std::vector<std::byte> result;
+    bool moved = false;
+    if (!submit(s, key, encoded, error, forward_to, &result, keys.size() > 1 ? &keys : nullptr,
+                &moved)) {
+        if (moved && replans < 3) {
+            // A split moved a key between routing and submission
+            // (Requirement 6.5): the routes are learnt, so plan again.
+            return propose_exec(s, cmd, key, id, std::move(args), may_grow, bits, replans + 1);
+        }
+        if (forward_to) {
+            if (auto reply = forward(s, hop, *forward_to)) {
+                return *reply;
+            }
+        }
+        return error;
+    }
+    if (result.size() == 1 &&
+        result[0] == static_cast<std::byte>(redis_v3_apply_status::refused_before_gate)) {
+        return s._writer.error(std::string(k_redis_format_gate_error));
+    }
+    redis_reply reply;
+    try {
+        reply = decode_redis_reply(result);
+    } catch (const redis_reply_error& e) {
+        _logger.log(log_level::error, "redis gateway: undecodable exec reply",
+                    {{"command", name}, {"error", e.what()}});
+        return s._writer.error("ERR internal error decoding the reply");
+    }
+    if (reply.is_error()) {
+        if (reply._text.rfind("ERR value conflict", 0) == 0) {
+            ++_stats._value_conflicts;
+            emit("redis.value_conflicts", name);
+        }
+    } else {
+        ++_stats._writes;
+        emit("redis.writes", name);
+        if (auto desc = _data.route(key)) {
+            if (id == redis_command_id::getdel) {
+                forget_lru(desc->group_id(), key);
+            } else {
+                touch_lru(desc->group_id(), key);
+            }
+        }
+    }
+    return render_redis_reply(reply, s._writer.version());
+}
+
+namespace redis_gateway_detail {
+/// A positive expiry in `unit_ms` units from `text`, as an absolute ms
+/// deadline from `now`; `nullopt` when not a positive integer or when it
+/// overflows (Redis: "invalid expire time").
+inline auto absolute_deadline(std::string_view text, std::uint64_t unit_ms, bool absolute,
+                              std::uint64_t now) -> std::optional<std::uint64_t> {
+    const auto v = redis_string_detail::parse_int64(text);
+    if (!v || *v <= 0) {
+        return std::nullopt;
+    }
+    const auto u = static_cast<std::uint64_t>(*v);
+    if (u > std::numeric_limits<std::uint64_t>::max() / unit_ms / 2) {
+        return std::nullopt;
+    }
+    const auto ms = u * unit_ms;
+    if (absolute) {
+        return ms;
+    }
+    if (ms > std::numeric_limits<std::uint64_t>::max() / 2 - now) {
+        return std::nullopt;
+    }
+    return now + ms;
+}
+}  // namespace redis_gateway_detail
+
+template<typename Host, typename Logger, typename Metrics>
+auto redis_front_end<Host, Logger, Metrics>::handle_internal_exec(session& s,
+                                                                  const resp_command& cmd)
+    -> std::string {
+    if (!s._internal) {
+        audit(s, "KYTHIRA.EXEC", "internal command from a client");
+        return s._writer.error("NOPERM KYTHIRA.EXEC is internal to the gateways");
+    }
+    const auto& a = cmd._argv;
+    if (a.size() < 5 || a[2].empty() || a[2].find_first_not_of("01") != std::string::npos ||
+        (a[3] != "0" && a[3] != "1")) {
+        return s._writer.error("ERR syntax error");
+    }
+    const auto id = redis_string_detail::parse_u64(a[1]);
+    if (!id || *id > 0xFFFFU) {
+        return s._writer.error("ERR syntax error");
+    }
+    const auto command = static_cast<redis_command_id>(*id);
+    const auto* info = find_redis_command(command);
+    if (info == nullptr || info->status != redis_command_status::shipped) {
+        return s._writer.error("ERR unknown command id " + a[1]);
+    }
+    std::vector<std::string> args(a.begin() + 4, a.end());
+    const auto keys = redis_exec_keys(command, args);
+    if (keys.empty()) {
+        return s._writer.error("ERR syntax error");
+    }
+    const auto& key = keys.front();
+    return propose_exec(s, cmd, key, command, std::move(args), a[3] == "1", a[2]);
+}
+
+template<typename Host, typename Logger, typename Metrics>
+auto redis_front_end<Host, Logger, Metrics>::handle_string_write(session& s, std::string_view upper,
+                                                                 const resp_command& cmd)
+    -> std::string {
+    const auto& a = cmd._argv;
+    const auto& key = a[1];
+    if (auto e = authorize(s, upper, {key})) {
+        return *e;
+    }
+    std::string lower(upper);
+    for (auto& c : lower) {
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    }
+    const auto syntax = [&] { return s._writer.error("ERR syntax error"); };
+    const auto bad_expire = [&] {
+        return s._writer.error("ERR invalid expire time in '" + lower + "' command");
+    };
+    const auto oversize = [&](std::size_t n) -> std::optional<std::string> {
+        if (n > _config._max_value_bytes) {
+            ++_stats._oversize_rejections;
+            emit("redis.oversize_rejections", upper);
+            return s._writer.error("ERR value exceeds the configured maximum of " +
+                                   std::to_string(_config._max_value_bytes) + " bytes");
+        }
+        return std::nullopt;
+    };
+    const auto max_bytes = std::to_string(_config._max_value_bytes);
+    using redis_gateway_detail::absolute_deadline;
+
+    if (upper == "SET") {
+        bool nx = false;
+        bool xx = false;
+        bool get = false;
+        bool keepttl = false;
+        std::optional<std::uint64_t> pxat;
+        bool expiry_given = false;
+        for (std::size_t i = 3; i < a.size(); ++i) {
+            const auto opt = resp_to_upper(a[i]);
+            if (opt == "NX" && !xx) {
+                nx = true;
+            } else if (opt == "XX" && !nx) {
+                xx = true;
+            } else if (opt == "GET") {
+                get = true;
+            } else if (opt == "KEEPTTL" && !expiry_given) {
+                keepttl = true;
+            } else if ((opt == "EX" || opt == "PX" || opt == "EXAT" || opt == "PXAT") && !keepttl &&
+                       !expiry_given && i + 1 < a.size()) {
+                expiry_given = true;
+                const bool seconds = opt == "EX" || opt == "EXAT";
+                const bool absolute = opt == "EXAT" || opt == "PXAT";
+                pxat = absolute_deadline(a[++i], seconds ? 1000 : 1, absolute, now_ms());
+                if (!pxat) {
+                    return bad_expire();
+                }
+            } else {
+                return syntax();
+            }
+        }
+        if (get) {
+            if (auto e =
+                    authorize(s, upper, {key}, redis_key_access::read | redis_key_access::write)) {
+                return *e;
+            }
+        }
+        if (auto e = oversize(a[2].size())) {
+            return *e;
+        }
+        std::vector<std::string> args{key, a[2]};
+        if (nx) {
+            args.emplace_back("NX");
+        }
+        if (xx) {
+            args.emplace_back("XX");
+        }
+        if (get) {
+            args.emplace_back("GET");
+        }
+        if (pxat) {
+            args.emplace_back("PXAT");
+            args.push_back(std::to_string(*pxat));
+        } else if (keepttl) {
+            args.emplace_back("KEEPTTL");
+        }
+        return propose_exec(s, cmd, key, redis_command_id::set, std::move(args), true);
+    }
+    if (upper == "SETNX") {
+        if (auto e = oversize(a[2].size())) {
+            return *e;
+        }
+        return propose_exec(s, cmd, key, redis_command_id::setnx, {key, a[2]}, true);
+    }
+    if (upper == "GETSET") {
+        if (auto e = oversize(a[2].size())) {
+            return *e;
+        }
+        return propose_exec(s, cmd, key, redis_command_id::set, {key, a[2], "GET"}, true);
+    }
+    if (upper == "SETEX") {
+        const auto pxat = absolute_deadline(a[2], 1000, false, now_ms());
+        if (!pxat) {
+            return bad_expire();
+        }
+        if (auto e = oversize(a[3].size())) {
+            return *e;
+        }
+        return propose_exec(s, cmd, key, redis_command_id::set,
+                            {key, a[3], "PXAT", std::to_string(*pxat)}, true);
+    }
+    if (upper == "PSETEX") {
+        const auto pxat = absolute_deadline(a[2], 1, false, now_ms());
+        if (!pxat) {
+            return bad_expire();
+        }
+        if (auto e = oversize(a[3].size())) {
+            return *e;
+        }
+        return propose_exec(s, cmd, key, redis_command_id::set,
+                            {key, a[3], "PXAT", std::to_string(*pxat)}, true);
+    }
+    if (upper == "INCR" || upper == "DECR" || upper == "INCRBY" || upper == "DECRBY") {
+        std::int64_t delta = upper == "DECR" ? -1 : 1;
+        if (upper == "INCRBY" || upper == "DECRBY") {
+            const auto v = redis_string_detail::parse_int64(a[2]);
+            if (!v) {
+                return s._writer.error("ERR value is not an integer or out of range");
+            }
+            if (upper == "DECRBY") {
+                if (*v == std::numeric_limits<std::int64_t>::min()) {
+                    return s._writer.error("ERR decrement would overflow");
+                }
+                delta = -*v;
+            } else {
+                delta = *v;
+            }
+        }
+        return propose_exec(s, cmd, key, redis_command_id::incrby, {key, std::to_string(delta)},
+                            true);
+    }
+    if (upper == "INCRBYFLOAT") {
+        const auto incr = parse_redis_float128(a[2]);
+        if (!incr || !is_finite_redis_float128(*incr)) {
+            return s._writer.error(incr ? "ERR increment would produce NaN or Infinity"
+                                        : "ERR value is not a valid float");
+        }
+        return propose_exec(s, cmd, key, redis_command_id::incrbyfloat, {key, a[2]}, true);
+    }
+    if (upper == "GETDEL") {
+        return propose_exec(s, cmd, key, redis_command_id::getdel, {key}, false);
+    }
+    if (upper == "GETEX") {
+        std::vector<std::string> args{key};
+        if (a.size() >= 3) {
+            const auto opt = resp_to_upper(a[2]);
+            if (opt == "PERSIST" && a.size() == 3) {
+                args.emplace_back("PERSIST");
+            } else if ((opt == "EX" || opt == "PX" || opt == "EXAT" || opt == "PXAT") &&
+                       a.size() == 4) {
+                const bool seconds = opt == "EX" || opt == "EXAT";
+                const bool absolute = opt == "EXAT" || opt == "PXAT";
+                const auto pxat = absolute_deadline(a[3], seconds ? 1000 : 1, absolute, now_ms());
+                if (!pxat) {
+                    return bad_expire();
+                }
+                args.emplace_back("PXAT");
+                args.push_back(std::to_string(*pxat));
+            } else {
+                return syntax();
+            }
+        }
+        return propose_exec(s, cmd, key, redis_command_id::getex, std::move(args), false);
+    }
+    if (upper == "APPEND") {
+        if (auto e = oversize(a[2].size())) {
+            return *e;
+        }
+        return propose_exec(s, cmd, key, redis_command_id::append, {key, a[2], max_bytes}, true);
+    }
+    if (upper == "EXPIRE" || upper == "PEXPIRE" || upper == "EXPIREAT" || upper == "PEXPIREAT") {
+        // Redis order: options, then the integer, then overflow.
+        unsigned flags = 0;
+        std::vector<std::string> names;
+        for (std::size_t i = 3; i < a.size(); ++i) {
+            const auto f = redis_expiry_detail::parse_expire_flag(a[i]);
+            if (!f) {
+                return s._writer.error("ERR Unsupported option " + a[i]);
+            }
+            flags |= *f;
+            names.push_back(resp_to_upper(a[i]));
+        }
+        if (const auto conflict = redis_expiry_detail::expire_flags_conflict(flags);
+            !conflict.empty()) {
+            return s._writer.error(std::string(conflict));
+        }
+        const auto v = redis_string_detail::parse_int64(a[2]);
+        if (!v) {
+            return s._writer.error("ERR value is not an integer or out of range");
+        }
+        constexpr auto k_max = std::numeric_limits<std::int64_t>::max();
+        constexpr auto k_min = std::numeric_limits<std::int64_t>::min();
+        auto when = *v;
+        if (upper == "EXPIRE" || upper == "EXPIREAT") {
+            if (when > k_max / 1000 || when < k_min / 1000) {
+                return bad_expire();
+            }
+            when *= 1000;
+        }
+        if (upper == "EXPIRE" || upper == "PEXPIRE") {
+            const auto now = static_cast<std::int64_t>(now_ms());
+            if (when > k_max - now) {
+                return bad_expire();
+            }
+            when += now;
+        }
+        std::vector<std::string> args{key, std::to_string(when)};
+        args.insert(args.end(), names.begin(), names.end());
+        return propose_exec(s, cmd, key, redis_command_id::pexpireat, std::move(args), false);
+    }
+    if (upper == "PERSIST") {
+        return propose_exec(s, cmd, key, redis_command_id::persist, {key}, false);
+    }
+    if (upper == "SETRANGE") {
+        const auto offset = redis_string_detail::parse_int64(a[2]);
+        if (!offset) {
+            return s._writer.error("ERR value is not an integer or out of range");
+        }
+        if (*offset < 0) {
+            return s._writer.error("ERR offset is out of range");
+        }
+        if (static_cast<std::uint64_t>(*offset) + a[3].size() >
+            std::min<std::uint64_t>(_config._max_value_bytes, k_redis_max_string_bytes)) {
+            return s._writer.error(std::string(redis_string_detail::k_too_big));
+        }
+        return propose_exec(s, cmd, key, redis_command_id::setrange,
+                            {key, std::to_string(*offset), a[3], max_bytes}, true);
+    }
+    return syntax();
+}
+
+template<typename Host, typename Logger, typename Metrics>
+auto redis_front_end<Host, Logger, Metrics>::handle_multi_key_write(session& s,
+                                                                    std::string_view upper,
+                                                                    const resp_command& cmd)
+    -> std::string {
+    const auto& a = cmd._argv;
+    std::vector<std::string> args;
+    redis_command_id id{};
+    bool may_grow = false;
+    if (upper == "DEL" || upper == "UNLINK") {
+        id = upper == "DEL" ? redis_command_id::del : redis_command_id::unlink;
+        args.assign(a.begin() + 1, a.end());
+    } else if (upper == "RENAME" || upper == "RENAMENX") {
+        id = upper == "RENAME" ? redis_command_id::rename : redis_command_id::renamenx;
+        args = {a[1], a[2]};
+    } else if (upper == "COPY") {
+        id = redis_command_id::copy;
+        args = {a[1], a[2]};
+        may_grow = true;
+        bool replace = false;
+        for (std::size_t i = 3; i < a.size(); ++i) {
+            const auto opt = resp_to_upper(a[i]);
+            if (opt == "REPLACE") {
+                replace = true;
+            } else if (opt == "DB" && i + 1 < a.size()) {
+                // One database (D-numbered limitation of the spec).
+                const auto db = redis_string_detail::parse_int64(a[++i]);
+                if (!db) {
+                    return s._writer.error("ERR value is not an integer or out of range");
+                }
+                if (*db != 0) {
+                    return s._writer.error("ERR DB index is out of range");
+                }
+            } else {
+                return s._writer.error("ERR syntax error");
+            }
+        }
+        if (replace) {
+            args.emplace_back("REPLACE");
+        }
+    } else if (upper == "MSETNX") {
+        id = redis_command_id::msetnx;
+        args.assign(a.begin() + 1, a.end());
+        may_grow = true;
+        for (std::size_t i = 1; i < args.size(); i += 2) {
+            if (args[i].size() > _config._max_value_bytes) {
+                ++_stats._oversize_rejections;
+                emit("redis.oversize_rejections", upper);
+                return s._writer.error("ERR value exceeds the configured maximum of " +
+                                       std::to_string(_config._max_value_bytes) + " bytes");
+            }
+        }
+    } else {
+        return s._writer.error("ERR syntax error");
+    }
+    // Views into the command's own arguments, which outlive the call.
+    std::vector<std::string_view> key_views;
+    for (const auto pos : redis_exec_key_positions(id, args)) {
+        key_views.emplace_back(a[pos + 1]);
+    }
+    if (auto e = authorize(s, upper, key_views)) {
+        return *e;
+    }
+    const auto first = args[0];
+    return propose_exec(s, cmd, first, id, std::move(args), may_grow);
+}
+
+/// A multi-key write across groups (Requirement 6.2): one transaction at
+/// the connection's isolation. The record is evaluated against the
+/// transaction's view by the appliers `apply()` runs, so every command,
+/// a collection's included, crosses groups the same way (task 11); the
+/// commit installs each changed key's resulting value.
+template<typename Host, typename Logger, typename Metrics>
+auto redis_front_end<Host, Logger, Metrics>::cross_group_exec(session& s, redis_command_id id,
+                                                              const std::vector<std::string>& args,
+                                                              const std::string& mutable_bits)
+    -> std::string {
+    if constexpr (!k_transactional || k_string_only_store) {
+        return s._writer.error("CROSSSLOT Keys in request don't hash to the same slot");
+    } else {
+        if (!_config._transactions) {
+            return s._writer.error("CROSSSLOT Keys in request don't hash to the same slot");
+        }
+        const auto keys = redis_exec_keys(id, args);
+        if (keys.empty()) {
+            return s._writer.error("ERR syntax error");
+        }
+        try {
+            txn_client client(*this);
+            coordinator_type coordinator(client);
+            coordinator.begin(make_options(s));
+            auto view = make_txn_view(coordinator, client);
+            const auto t = now_ms();
+            const auto record =
+                make_redis_exec_record(keys.front(), static_cast<std::uint16_t>(id), args, t,
+                                       _config._immutable_values, mutable_bits);
+            std::optional<redis_reply> reply;
+            try {
+                reply = apply_redis_exec(view, record, t);
+            } catch (...) {
+                if (auto failed = view.failure()) {
+                    std::rethrow_exception(failed);
+                }
+                throw;
+            }
+            if (!reply) {
+                coordinator.rollback();
+                return s._writer.error("ERR syntax error");
+            }
+            if (reply->is_error() || view.writes().empty()) {
+                coordinator.rollback();
+                if (reply->is_error() && reply->_text.rfind("ERR value conflict", 0) == 0) {
+                    ++_stats._value_conflicts;
+                    emit("redis.value_conflicts", "exec");
+                }
+                return render_redis_reply(*reply, s._writer.version());
+            }
+            if (auto refused = stage_txn_writes(s, coordinator, view)) {
+                coordinator.rollback();
+                return *refused;
+            }
+            auto outcome = coordinator.commit();
+            if (auto e = outcome_error(s, outcome); !e.empty()) {
+                return e;
+            }
+            ++_stats._writes;
+            for (const auto& [key, entry] : view.writes()) {
+                if (auto desc = _data.route(key)) {
+                    if (entry) {
+                        touch_lru(desc->group_id(), key);
+                    } else {
+                        forget_lru(desc->group_id(), key);
+                    }
+                }
+            }
+            return render_redis_reply(*reply, s._writer.version());
+        } catch (const std::exception& e) {
+            return s._writer.error(std::string("ERR transaction failed: ") + e.what() + ", retry");
+        }
+    }
+}
+
+template<typename Host, typename Logger, typename Metrics>
+auto redis_front_end<Host, Logger, Metrics>::handle_key_read(session& s, std::string_view upper,
+                                                             const resp_command& cmd)
+    -> std::string {
+    std::vector<std::string_view> keys;
+    std::size_t first = 1;
+    if (upper == "OBJECT") {
+        const auto sub = resp_to_upper(cmd._argv[1]);
+        if (sub != "ENCODING" || cmd._argv.size() != 3) {
+            return s._writer.error("ERR unknown subcommand or wrong number of arguments for '" +
+                                   cmd._argv[1] + "'. Try OBJECT HELP.");
+        }
+        first = 2;
+    }
+    for (std::size_t i = first; i < cmd._argv.size(); ++i) {
+        keys.emplace_back(cmd._argv[i]);
+    }
+    if (auto e = authorize(s, upper, keys)) {
+        return *e;
+    }
+    std::int64_t touched = 0;
+    for (std::size_t i = first; i < cmd._argv.size(); ++i) {
+        const auto& key = cmd._argv[i];
+        auto r = read_local(s, key);
+        if (!r._error.empty()) {
+            if (r._forward_to && cmd._argv.size() == first + 1) {
+                if (auto reply = forward(s, cmd, *r._forward_to)) {
+                    return *reply;
+                }
+            } else if (r._forward_to && (upper == "TOUCH" || upper == "EXISTS")) {
+                // One key of several: ask its node about that key alone.
+                resp_command one{{std::string(upper), key}};
+                const auto reply = forward(s, one, *r._forward_to);
+                if (reply && *reply == ":1\r\n") {
+                    ++touched;
+                    continue;
+                }
+                if (reply && *reply == ":0\r\n") {
+                    continue;
+                }
+            }
+            return r._error;
+        }
+        const bool present = r._entry && !is_expired(*r._entry);
+        if (upper == "PTTL" || upper == "EXPIRETIME" || upper == "PEXPIRETIME") {
+            const auto id = upper == "PTTL"         ? redis_command_id::pttl
+                            : upper == "EXPIRETIME" ? redis_command_id::expiretime
+                                                    : redis_command_id::pexpiretime;
+            const auto reply = redis_expiry_read_reply(
+                id, present, present ? r._entry->_expire_at_ms : 0, now_ms());
+            return render_redis_reply(*reply, s._writer.version());
+        }
+        if (upper == "TYPE" || upper == "OBJECT") {
+            const std::vector<std::string> encoding{"ENCODING"};
+            if (auto typed = redis_collection_read(
+                    r._entry.get(),
+                    upper == "TYPE" ? redis_command_id::type : redis_command_id::object, encoding,
+                    now_ms())) {
+                return render_redis_reply(*typed, s._writer.version());
+            }
+        }
+        if (upper == "TYPE") {
+            return s._writer.simple_string(present ? "string" : "none");
+        }
+        if (upper == "OBJECT") {
+            if (!present) {
+                return s._writer.null();
+            }
+            // D16: the encoding Redis would choose for these bytes.
+            const auto size = value_access::size(*r._entry);
+            if (size <= 20) {
+                auto bytes = value_access::read(r._context, *r._entry);
+                if (bytes) {
+                    const auto view = bytes->view();
+                    const std::string_view text(reinterpret_cast<const char*>(view.data()),
+                                                view.size());
+                    if (redis_string_detail::parse_int64(text)) {
+                        return s._writer.bulk("int");
+                    }
+                }
+            }
+            return s._writer.bulk(size <= 44 ? "embstr" : "raw");
+        }
+        touched += present ? 1 : 0;
+        if (present && upper == "TOUCH") {
+            if (auto desc = _data.route(key)) {
+                touch_lru(desc->group_id(), key);
+            }
+        }
+    }
+    return s._writer.integer(touched);
+}
+
+template<typename Host, typename Logger, typename Metrics>
+auto redis_front_end<Host, Logger, Metrics>::handle_collection(session& s,
+                                                               const redis_command_info& info,
+                                                               const resp_command& cmd)
+    -> std::string {
+    const auto id = static_cast<redis_command_id>(info.id);
+    const auto& a = cmd._argv;
+    const auto& key = a[1];
+    const std::string upper(info.name);
+    const auto max_bytes = std::to_string(_config._max_collection_bytes);
+    const auto max_count = std::to_string(_config._max_collection_elements);
+
+    if (auto reply = handle_list_command(s, info, cmd)) {
+        return *reply;
+    }
+    // Commands naming several keys.
+    switch (id) {
+        case redis_command_id::sinter:
+        case redis_command_id::sunion:
+        case redis_command_id::sdiff:
+        case redis_command_id::sintercard:
+            return handle_set_algebra(s, id, cmd);
+        case redis_command_id::smove: {
+            if (auto e = authorize(s, upper, {a[1], a[2]})) {
+                return *e;
+            }
+            return propose_exec(s, cmd, a[1], id, {a[1], a[2], max_bytes, max_count, a[3]}, true);
+        }
+        case redis_command_id::sinterstore:
+        case redis_command_id::sunionstore:
+        case redis_command_id::sdiffstore: {
+            std::vector<std::string_view> sources(a.begin() + 2, a.end());
+            if (auto e = authorize(s, upper, {a[1]}, redis_key_access::write)) {
+                return *e;
+            }
+            if (auto e = authorize(s, upper, sources, redis_key_access::read)) {
+                return *e;
+            }
+            std::vector<std::string> args{a[1], max_bytes, max_count};
+            args.insert(args.end(), a.begin() + 2, a.end());
+            return propose_exec(s, cmd, a[1], id, std::move(args), true);
+        }
+        default:
+            break;
+    }
+    if (auto e = authorize(s, upper, {key})) {
+        return *e;
+    }
+    if (id == redis_command_id::spop) {
+        return handle_spop(s, cmd);
+    }
+    if (id == redis_command_id::sadd) {
+        std::vector<std::string> args{key, max_bytes, max_count};
+        args.insert(args.end(), a.begin() + 2, a.end());
+        return propose_exec(s, cmd, key, id, std::move(args), true);
+    }
+    if (id == redis_command_id::srem) {
+        std::vector<std::string> args(a.begin() + 1, a.end());
+        return propose_exec(s, cmd, key, id, std::move(args), false);
+    }
+    if (redis_hash_detail::is_hash_write(id)) {
+        std::vector<std::string> args{key};
+        if (id != redis_command_id::hdel) {
+            args.push_back(std::to_string(_config._max_collection_bytes));
+            args.push_back(std::to_string(_config._max_collection_elements));
+        }
+        if (id == redis_command_id::hincrby && !redis_string_detail::parse_int64(a[3])) {
+            return s._writer.error("ERR value is not an integer or out of range");
+        }
+        if (id == redis_command_id::hincrbyfloat && !parse_redis_float128(a[3])) {
+            return s._writer.error("ERR value is not a valid float");
+        }
+        args.insert(args.end(), a.begin() + 2, a.end());
+        return propose_exec(s, cmd, key, id, std::move(args), id != redis_command_id::hdel);
+    }
+
+    // A read: arguments the data side expects already valid.
+    std::vector<std::string> args(a.begin() + 2, a.end());
+    if (id == redis_command_id::lindex || id == redis_command_id::lrange) {
+        for (const auto& v : args) {
+            if (!redis_string_detail::parse_int64(v)) {
+                return s._writer.error("ERR value is not an integer or out of range");
+            }
+        }
+    }
+    if (id == redis_command_id::lpos) {
+        // LPOS key element [RANK r] [COUNT n] [MAXLEN m], in normal form
+        // `element rank count maxlen with-count`.
+        std::string rank = "1";
+        std::string count = "0";
+        std::string maxlen = "0";
+        bool with_count = false;
+        for (std::size_t i = 1; i < args.size(); i += 2) {
+            const auto opt = resp_to_upper(args[i]);
+            if (i + 1 >= args.size() || (opt != "RANK" && opt != "COUNT" && opt != "MAXLEN")) {
+                return s._writer.error("ERR syntax error");
+            }
+            const auto v = redis_string_detail::parse_int64(args[i + 1]);
+            if (!v) {
+                return s._writer.error("ERR value is not an integer or out of range");
+            }
+            if (opt == "RANK") {
+                if (*v == 0) {
+                    return s._writer.error(
+                        "ERR RANK can't be zero: use 1 to start from the first match, 2 from the "
+                        "second ... or use negative to start from the end of the list");
+                }
+                if (*v == std::numeric_limits<std::int64_t>::min()) {
+                    return s._writer.error("ERR value is out of range");
+                }
+                rank = args[i + 1];
+            } else if (opt == "COUNT") {
+                if (*v < 0) {
+                    return s._writer.error("ERR COUNT can't be negative");
+                }
+                count = args[i + 1];
+                with_count = true;
+            } else {
+                if (*v < 0) {
+                    return s._writer.error("ERR MAXLEN can't be negative");
+                }
+                maxlen = args[i + 1];
+            }
+        }
+        args = {args[0], rank, count, maxlen, with_count ? "1" : "0"};
+    }
+    if (id == redis_command_id::srandmember && !args.empty() &&
+        !redis_string_detail::parse_int64(args[0])) {
+        return s._writer.error("ERR value is not an integer or out of range");
+    }
+    if (id == redis_command_id::hrandfield && !args.empty()) {
+        if (!redis_string_detail::parse_int64(args[0])) {
+            return s._writer.error("ERR value is not an integer or out of range");
+        }
+        if (args.size() == 2) {
+            if (resp_to_upper(args[1]) != "WITHVALUES") {
+                return s._writer.error("ERR syntax error");
+            }
+            args[1] = "WITHVALUES";
+        }
+    }
+    if (auto refused = format_refusal(s, key, k_redis_typed_values_level)) {
+        return *refused;
+    }
+    auto r = read_local(s, key);
+    if (!r._error.empty()) {
+        if (r._forward_to) {
+            if (auto reply = forward(s, cmd, *r._forward_to)) {
+                if (s._writer.version() < 3) {
+                    return *reply;
+                }
+                // The internal hop answers in RESP2; give a RESP3 client the
+                // shapes it expects (Redis's own RESP2 downgrade, undone).
+                auto tree = parse_resp2_reply(*reply);
+                if (!tree) {
+                    return *reply;
+                }
+                if (id == redis_command_id::hgetall && tree->_kind == redis_reply_kind::array) {
+                    tree = redis_reply::map(std::move(tree->_elements));
+                } else if (id == redis_command_id::smembers &&
+                           tree->_kind == redis_reply_kind::array) {
+                    tree = redis_reply::set(std::move(tree->_elements));
+                } else if (id == redis_command_id::hrandfield && args.size() == 2 &&
+                           tree->_kind == redis_reply_kind::array) {
+                    std::vector<redis_reply> pairs;
+                    for (std::size_t i = 0; i + 1 < tree->_elements.size(); i += 2) {
+                        pairs.push_back(redis_reply::array(
+                            {std::move(tree->_elements[i]), std::move(tree->_elements[i + 1])}));
+                    }
+                    tree = redis_reply::array(std::move(pairs));
+                }
+                return render_redis_reply(*tree, s._writer.version());
+            }
+        }
+        return r._error;
+    }
+    if constexpr (requires(const entry_type& e) {
+                      e._value;
+                      e._expire_at_ms;
+                  }) {
+        // The handle keeps the entry, and its immutable hash, alive: the
+        // reply is built here, after the lock (Requirement 10.2).
+        auto reply = evaluate_redis_read(r._entry.get(), id, args, now_ms());
+        if (!reply) {
+            return s._writer.error("ERR unknown command id " + std::to_string(info.id));
+        }
+        if (id == redis_command_id::hrandfield && args.size() == 2 && s._writer.version() < 3) {
+            *reply = redis_flatten_pairs(std::move(*reply));
+        }
+        return render_redis_reply(*reply, s._writer.version());
+    } else {
+        return s._writer.error(std::string(k_redis_string_only_store_error));
+    }
+}
+
+template<typename Host, typename Logger, typename Metrics>
+auto redis_front_end<Host, Logger, Metrics>::handle_spop(session& s, const resp_command& cmd)
+    -> std::string {
+    const auto& key = cmd._argv[1];
+    std::optional<std::int64_t> count;
+    if (cmd._argv.size() == 3) {
+        count = redis_string_detail::parse_int64(cmd._argv[2]);
+        if (!count || *count < 0) {
+            return s._writer.error("ERR value is out of range, must be positive");
+        }
+    }
+    if (auto refused = format_refusal(s, key, k_redis_typed_values_level)) {
+        return *refused;
+    }
+    const auto empty_reply = [&] { return count ? s._writer.array({}) : s._writer.null(); };
+    if (count && *count == 0) {
+        return empty_reply();
+    }
+    // Pick distinct members from the set as this node, or the leader, sees
+    // it; apply() removes only those still there, so a stale pick costs a
+    // smaller pop, never a wrong one.
+    const std::vector<std::string> pick_args{std::to_string(count.value_or(1))};
+    std::optional<redis_reply> picked;
+    auto r = read_local(s, key);
+    if (r._error.empty()) {
+        if constexpr (requires(const entry_type& e) {
+                          e._value;
+                          e._expire_at_ms;
+                      }) {
+            picked = evaluate_redis_read(r._entry.get(), redis_command_id::srandmember, pick_args,
+                                         now_ms());
+        } else {
+            return s._writer.error(std::string(k_redis_string_only_store_error));
+        }
+    } else if (r._forward_to) {
+        if (auto reply =
+                forward_argv({"SRANDMEMBER", key, pick_args[0]}, *r._forward_to, "SRANDMEMBER")) {
+            picked = parse_resp2_reply(*reply);
+        }
+    }
+    if (!picked) {
+        return r._error.empty() ? s._writer.error("ERR shard has no reachable leader, retry")
+                                : r._error;
+    }
+    if (picked->is_error()) {
+        return render_redis_reply(*picked, s._writer.version());
+    }
+    std::vector<std::string> args{key, count ? "1" : "0"};
+    for (auto& m : picked->_elements) {
+        args.push_back(std::move(m._text));
+    }
+    if (args.size() == 2) {
+        return empty_reply();
+    }
+    return propose_exec(s, cmd, key, redis_command_id::spop, std::move(args), false);
+}
+
+template<typename Host, typename Logger, typename Metrics>
+auto redis_front_end<Host, Logger, Metrics>::set_members_of(session& s, const std::string& key)
+    -> std::variant<std::vector<std::string>, std::string> {
+    auto r = read_local(s, key);
+    if (r._error.empty()) {
+        if (!r._entry || is_expired(*r._entry)) {
+            return std::vector<std::string>{};
+        }
+        if constexpr (requires(const entry_type& e) { e._set; }) {
+            if (r._entry->_type == redis_value_type::set) {
+                std::vector<std::string> out;
+                out.reserve(r._entry->_set->size());
+                r._entry->_set->for_each([&](const std::string& m) { out.push_back(m); });
+                return out;
+            }
+        }
+        return s._writer.error(std::string(k_redis_wrongtype));
+    }
+    if (!r._forward_to) {
+        return r._error;
+    }
+    auto reply = forward_argv({"SMEMBERS", key}, *r._forward_to, "SMEMBERS");
+    if (!reply) {
+        return r._error;
+    }
+    auto tree = parse_resp2_reply(*reply);
+    if (!tree || tree->_kind != redis_reply_kind::array) {
+        return tree && tree->is_error() ? *reply : r._error;
+    }
+    std::vector<std::string> out;
+    out.reserve(tree->_elements.size());
+    for (auto& m : tree->_elements) {
+        out.push_back(std::move(m._text));
+    }
+    return out;
+}
+
+template<typename Host, typename Logger, typename Metrics>
+auto redis_front_end<Host, Logger, Metrics>::handle_set_algebra(session& s, redis_command_id id,
+                                                                const resp_command& cmd)
+    -> std::string {
+    const auto& a = cmd._argv;
+    std::size_t first = 1;
+    std::size_t last = a.size();
+    std::size_t limit = 0;
+    if (id == redis_command_id::sintercard) {
+        const auto n = redis_string_detail::parse_int64(a[1]);
+        if (!n || *n <= 0) {
+            return s._writer.error("ERR numkeys should be greater than 0");
+        }
+        if (static_cast<std::uint64_t>(*n) > a.size() - 2) {
+            return s._writer.error("ERR Number of keys can't be greater than number of args");
+        }
+        first = 2;
+        last = 2 + static_cast<std::size_t>(*n);
+        for (std::size_t i = last; i < a.size(); i += 2) {
+            if (resp_to_upper(a[i]) != "LIMIT" || i + 1 >= a.size()) {
+                return s._writer.error("ERR syntax error");
+            }
+            const auto v = redis_string_detail::parse_int64(a[i + 1]);
+            if (!v) {
+                return s._writer.error("ERR value is not an integer or out of range");
+            }
+            if (*v < 0) {
+                return s._writer.error("ERR LIMIT can't be negative");
+            }
+            limit = static_cast<std::size_t>(*v);
+        }
+    }
+    std::vector<std::string_view> keys(a.begin() + static_cast<std::ptrdiff_t>(first),
+                                       a.begin() + static_cast<std::ptrdiff_t>(last));
+    if (auto e = authorize(s, resp_to_upper(a[0]), keys, redis_key_access::read)) {
+        return *e;
+    }
+    if (auto refused = format_refusal(s, a[first], k_redis_typed_values_level)) {
+        return *refused;
+    }
+    // Each key read where it lives, at the connection's consistency, as a
+    // multi-key EXISTS (Requirement 6.4).
+    std::vector<redis_set> sets;
+    sets.reserve(keys.size());
+    for (const auto key : keys) {
+        auto members = set_members_of(s, std::string(key));
+        if (auto* error = std::get_if<std::string>(&members)) {
+            return *error;
+        }
+        sets.push_back(
+            redis_set::from_sorted(std::get<std::vector<std::string>>(std::move(members))));
+    }
+    std::vector<const redis_set*> views;
+    for (const auto& set : sets) {
+        views.push_back(&set);
+    }
+    auto result = redis_set_detail::combine(id, views, limit);
+    if (id == redis_command_id::sintercard) {
+        return s._writer.integer(static_cast<std::int64_t>(result.size()));
+    }
+    std::vector<redis_reply> out;
+    out.reserve(result.size());
+    for (auto& m : result) {
+        out.push_back(redis_reply::bulk(std::move(m)));
+    }
+    return render_redis_reply(redis_reply::set(std::move(out)), s._writer.version());
+}
+
+template<typename Host, typename Logger, typename Metrics>
+auto redis_front_end<Host, Logger, Metrics>::handle_list_command(session& s,
+                                                                 const redis_command_info& info,
+                                                                 const resp_command& cmd)
+    -> std::optional<std::string> {
+    const auto id = static_cast<redis_command_id>(info.id);
+    if (!redis_list_detail::is_list_write(id) && id != redis_command_id::rpoplpush) {
+        return std::nullopt;
+    }
+    const auto& a = cmd._argv;
+    const std::string upper(info.name);
+    const auto max_bytes = std::to_string(_config._max_collection_bytes);
+    const auto max_count = std::to_string(_config._max_collection_elements);
+    const auto not_integer = [&] {
+        return s._writer.error("ERR value is not an integer or out of range");
+    };
+    const auto side = [](const std::string& v) -> std::optional<std::string> {
+        auto u = resp_to_upper(v);
+        return u == "LEFT" || u == "RIGHT" ? std::optional(u) : std::nullopt;
+    };
+    using redis_string_detail::parse_int64;
+
+    if (id == redis_command_id::lmove || id == redis_command_id::rpoplpush) {
+        if (auto e =
+                authorize(s, upper, {a[1]}, redis_key_access::read | redis_key_access::write)) {
+            return e;
+        }
+        if (auto e = authorize(s, upper, {a[2]}, redis_key_access::write)) {
+            return e;
+        }
+        std::string from = "RIGHT";
+        std::string to = "LEFT";
+        if (id == redis_command_id::lmove) {
+            const auto f = side(a[3]);
+            const auto t = side(a[4]);
+            if (!f || !t) {
+                return s._writer.error("ERR syntax error");
+            }
+            from = *f;
+            to = *t;
+        }
+        return propose_exec(s, cmd, a[1], redis_command_id::lmove,
+                            {a[1], a[2], from, to, max_bytes, max_count}, true);
+    }
+    if (id == redis_command_id::lmpop) {
+        const auto n = parse_int64(a[1]);
+        if (!n) {
+            return not_integer();
+        }
+        if (*n <= 0) {
+            return s._writer.error("ERR numkeys should be greater than 0");
+        }
+        const auto numkeys = static_cast<std::size_t>(*n);
+        if (a.size() < numkeys + 3) {
+            return s._writer.error("ERR syntax error");
+        }
+        const auto dir = side(a[numkeys + 2]);
+        if (!dir) {
+            return s._writer.error("ERR syntax error");
+        }
+        std::string count = "1";
+        if (a.size() == numkeys + 5 && resp_to_upper(a[numkeys + 3]) == "COUNT") {
+            const auto c = parse_int64(a[numkeys + 4]);
+            if (!c || *c <= 0) {
+                return s._writer.error("ERR count should be greater than 0");
+            }
+            count = a[numkeys + 4];
+        } else if (a.size() != numkeys + 3) {
+            return s._writer.error("ERR syntax error");
+        }
+        std::vector<std::string_view> keys(a.begin() + 2,
+                                           a.begin() + 2 + static_cast<std::ptrdiff_t>(numkeys));
+        if (auto e = authorize(s, upper, keys, redis_key_access::read | redis_key_access::write)) {
+            return e;
+        }
+        std::vector<std::string> args{a[1]};
+        args.insert(args.end(), keys.begin(), keys.end());
+        args.push_back(*dir);
+        args.push_back(count);
+        return propose_exec(s, cmd, a[2], id, std::move(args), false);
+    }
+
+    const auto& key = a[1];
+    if (auto e = authorize(s, upper, {key})) {
+        return e;
+    }
+    switch (id) {
+        case redis_command_id::lpush:
+        case redis_command_id::rpush:
+        case redis_command_id::lpushx:
+        case redis_command_id::rpushx: {
+            std::vector<std::string> args{key, max_bytes, max_count};
+            args.insert(args.end(), a.begin() + 2, a.end());
+            return propose_exec(s, cmd, key, id, std::move(args), true);
+        }
+        case redis_command_id::lpop:
+        case redis_command_id::rpop: {
+            if (a.size() == 3) {
+                const auto c = parse_int64(a[2]);
+                if (!c || *c < 0) {
+                    return s._writer.error("ERR value is out of range, must be positive");
+                }
+                return propose_exec(s, cmd, key, id, {key, "1", a[2]}, false);
+            }
+            return propose_exec(s, cmd, key, id, {key, "0", "1"}, false);
+        }
+        case redis_command_id::lset:
+            if (!parse_int64(a[2])) {
+                return not_integer();
+            }
+            return propose_exec(s, cmd, key, id, {key, a[2], a[3], max_bytes}, true);
+        case redis_command_id::linsert: {
+            const auto where = resp_to_upper(a[2]);
+            if (where != "BEFORE" && where != "AFTER") {
+                return s._writer.error("ERR syntax error");
+            }
+            return propose_exec(s, cmd, key, id, {key, where, a[3], a[4], max_bytes, max_count},
+                                true);
+        }
+        case redis_command_id::lrem:
+            if (!parse_int64(a[2])) {
+                return not_integer();
+            }
+            return propose_exec(s, cmd, key, id, {key, a[2], a[3]}, false);
+        case redis_command_id::ltrim:
+            if (!parse_int64(a[2]) || !parse_int64(a[3])) {
+                return not_integer();
+            }
+            return propose_exec(s, cmd, key, id, {key, a[2], a[3]}, false);
+        default:
+            return std::nullopt;
+    }
+}
+
+// ── the SCAN family (redis-general-data-types task 12) ──────────────────────
+
+namespace redis_gateway_detail {
+/// What a SCAN page does with `key` for `identity` (Requirement 7.6).
+inline auto scan_verdict(const redis_identity& identity, const redis_scan_filter& filter,
+                         const std::string& key, redis_value_type type) -> redis_scan_verdict {
+    if (!redis_acl::key_permits(identity, key, redis_key_access::read)) {
+        return redis_scan_verdict::hidden;
+    }
+    return filter.keeps(key, type) ? redis_scan_verdict::kept : redis_scan_verdict::filtered;
+}
+}  // namespace redis_gateway_detail
+
+template<typename Host, typename Logger, typename Metrics>
+auto redis_front_end<Host, Logger, Metrics>::cursor_index_of(const node_id_type& node) const
+    -> std::uint16_t {
+    if constexpr (std::is_integral_v<node_id_type>) {
+        if (node >= 1 && static_cast<std::uint64_t>(node) <= k_redis_cursor_max_index) {
+            return static_cast<std::uint16_t>(node);
+        }
+    }
+    const auto h = std::hash<std::string>{}(redis_gateway_detail::describe_id(node));
+    return static_cast<std::uint16_t>(1 + h % k_redis_cursor_max_index);
+}
+
+template<typename Host, typename Logger, typename Metrics>
+auto redis_front_end<Host, Logger, Metrics>::node_of_cursor_index(std::uint16_t index)
+    -> std::optional<node_id_type> {
+    if (cursor_index_of(_data.self()) == index) {
+        return _data.self();
+    }
+    for (const auto& r : _data.all_routes()) {
+        for (const auto& n : r.voters()) {
+            if (cursor_index_of(n) == index) {
+                return n;
+            }
+        }
+        for (const auto& n : r.learners()) {
+            if (cursor_index_of(n) == index) {
+                return n;
+            }
+        }
+    }
+    return std::nullopt;
+}
+
+template<typename Host, typename Logger, typename Metrics>
+auto redis_front_end<Host, Logger, Metrics>::keep_cursor(scan_cursor c, std::uint64_t id)
+    -> std::uint64_t {
+    std::lock_guard lock(_cursor_mutex);
+    c._touched = std::chrono::steady_clock::now();
+    while (id == 0) {
+        id = _cursor_rng() & k_redis_cursor_id_mask;
+        if (_cursors.contains(id)) {
+            id = 0;
+        }
+    }
+    _cursors.insert_or_assign(id, std::move(c));
+    while (_cursors.size() > std::max<std::size_t>(_config._max_cursors, 1)) {
+        auto oldest = _cursors.begin();
+        for (auto it = _cursors.begin(); it != _cursors.end(); ++it) {
+            if (it->second._touched < oldest->second._touched) {
+                oldest = it;
+            }
+        }
+        _cursors.erase(oldest);
+    }
+    return redis_cursor_make(cursor_index_of(_data.self()), id);
+}
+
+template<typename Host, typename Logger, typename Metrics>
+auto redis_front_end<Host, Logger, Metrics>::find_cursor(std::uint64_t cursor,
+                                                         const std::string& user)
+    -> std::optional<scan_cursor> {
+    std::lock_guard lock(_cursor_mutex);
+    auto it = _cursors.find(redis_cursor_id(cursor));
+    if (it == _cursors.end()) {
+        return std::nullopt;
+    }
+    const auto now = std::chrono::steady_clock::now();
+    if (now - it->second._touched > _config._cursor_idle) {
+        _cursors.erase(it);
+        emit("redis.cursors_expired", "SCAN");
+        return std::nullopt;
+    }
+    if (it->second._user != user) {
+        return std::nullopt;
+    }
+    it->second._touched = now;
+    return it->second;
+}
+
+template<typename Host, typename Logger, typename Metrics>
+auto redis_front_end<Host, Logger, Metrics>::drop_cursor(std::uint64_t cursor) -> void {
+    std::lock_guard lock(_cursor_mutex);
+    _cursors.erase(redis_cursor_id(cursor));
+}
+
+template<typename Host, typename Logger, typename Metrics>
+auto redis_front_end<Host, Logger, Metrics>::forward_cursor(session& s, std::uint64_t cursor,
+                                                            const resp_command& cmd)
+    -> std::string {
+    auto invalid = s._writer.error("ERR invalid cursor");
+    if (s._internal) {
+        return invalid;  // one hop: the issuer never forwards again
+    }
+    const auto node = node_of_cursor_index(redis_cursor_index(cursor));
+    if (!node || *node == _data.self()) {
+        return invalid;
+    }
+    std::vector<std::string> argv{"KYTHIRA.CURSOR", s._identity->_user};
+    argv.insert(argv.end(), cmd._argv.begin(), cmd._argv.end());
+    auto reply = forward_argv(argv, *node, "KYTHIRA.CURSOR");
+    if (!reply) {
+        return invalid;
+    }
+    return *reply;
+}
+
+template<typename Host, typename Logger, typename Metrics>
+auto redis_front_end<Host, Logger, Metrics>::fetch_page(session& s, const std::string& from,
+                                                        const std::optional<std::string>& to,
+                                                        std::size_t count, std::size_t skip,
+                                                        const redis_scan_filter& filter,
+                                                        std::string& error)
+    -> std::optional<redis_scan_page> {
+    const bool any_replica = _config._read_consistency == redis_read_consistency::any_replica;
+    const auto& identity = *s._identity;
+    const auto keep = [&](const std::string& key, redis_value_type type) {
+        return redis_gateway_detail::scan_verdict(identity, filter, key, type);
+    };
+    const auto deadline = std::chrono::steady_clock::now() + _config._command_timeout;
+    std::string last = "no reachable leader for the key's shard";
+    for (;;) {
+        auto outcome = _data.page(from, to, count, skip, any_replica, now_ms(), keep);
+        if (outcome._status == redis_data_status::ok) {
+            return std::move(outcome._page);
+        }
+        if (outcome._leader && *outcome._leader != _data.self()) {
+            auto reply = forward_argv({"KYTHIRA.DATA", "PAGE", from, to ? "1" : "0",
+                                       to.value_or(""), std::to_string(count), std::to_string(skip),
+                                       filter._pattern, filter._type, identity._user},
+                                      *outcome._leader, "KYTHIRA.DATA");
+            if (reply) {
+                auto parsed = redis_gateway_detail::parse_peer_reply(*reply);
+                using kind = redis_gateway_detail::peer_reply::kind;
+                if (parsed._kind == kind::bulk) {
+                    try {
+                        return decode_redis_scan_page(parsed._body);
+                    } catch (const std::exception& e) {
+                        error = s._writer.error(std::string("ERR ") + e.what());
+                        return std::nullopt;
+                    }
+                }
+                if (parsed._kind != kind::error ||
+                    parsed._body.find("retry") == std::string::npos) {
+                    error =
+                        s._writer.error("ERR peer gateway refused a SCAN page: " + parsed._body);
+                    return std::nullopt;
+                }
+                last = parsed._body;
+            }
+        }
+        if (!_running.load() || std::chrono::steady_clock::now() >= deadline) {
+            error = s._writer.error("ERR " + last + ", retry");
+            return std::nullopt;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds{10});
+    }
+}
+
+template<typename Host, typename Logger, typename Metrics>
+auto redis_front_end<Host, Logger, Metrics>::handle_internal_page(session& s,
+                                                                  const resp_command& cmd)
+    -> std::string {
+    if (!s._internal) {
+        audit(s, "KYTHIRA.DATA", "internal command from a client");
+        return s._writer.error("NOPERM KYTHIRA.DATA is internal to the gateways");
+    }
+    const auto& a = cmd._argv;
+    if (a.size() == 9 && resp_to_upper(a[1]) == "USAGE") {
+        return handle_internal_usage(s, cmd);
+    }
+    if (a.size() != 10 || resp_to_upper(a[1]) != "PAGE" || (a[3] != "0" && a[3] != "1")) {
+        return s._writer.error("ERR syntax error");
+    }
+    const auto count = redis_string_detail::parse_u64(a[5]);
+    const auto skip = redis_string_detail::parse_u64(a[6]);
+    if (!count || !skip) {
+        return s._writer.error("ERR syntax error");
+    }
+    auto identity = _acl.identity_of(a[9]);
+    if (!identity) {
+        return s._writer.error("ERR invalid cursor");
+    }
+    redis_scan_filter filter{a[7], a[8]};
+    const auto keep = [&](const std::string& key, redis_value_type type) {
+        return redis_gateway_detail::scan_verdict(*identity, filter, key, type);
+    };
+    const std::optional<std::string> to = a[3] == "1" ? std::optional(a[4]) : std::nullopt;
+    auto outcome = _data.page(
+        a[2], to, static_cast<std::size_t>(*count), static_cast<std::size_t>(*skip),
+        _config._read_consistency == redis_read_consistency::any_replica, now_ms(), keep);
+    if (outcome._status != redis_data_status::ok) {
+        return s._writer.error("ERR shard has no reachable leader, retry");
+    }
+    return s._writer.bulk(encode_redis_scan_page(outcome._page));
+}
+
+template<typename Host, typename Logger, typename Metrics>
+auto redis_front_end<Host, Logger, Metrics>::handle_internal_cursor(session& s,
+                                                                    const resp_command& cmd)
+    -> std::string {
+    if (!s._internal) {
+        audit(s, "KYTHIRA.CURSOR", "internal command from a client");
+        return s._writer.error("NOPERM KYTHIRA.CURSOR is internal to the gateways");
+    }
+    if (cmd._argv.size() < 4) {
+        return s._writer.error("ERR syntax error");
+    }
+    auto identity = _acl.identity_of(cmd._argv[1]);
+    if (!identity) {
+        return s._writer.error("ERR invalid cursor");
+    }
+    resp_command inner;
+    inner._argv.assign(cmd._argv.begin() + 2, cmd._argv.end());
+    const auto upper = resp_to_upper(inner._argv[0]);
+    if (upper != "SCAN" && upper != "HSCAN" && upper != "SSCAN") {
+        return s._writer.error("ERR syntax error");
+    }
+    // The call runs as the user who holds the cursor: their scopes filter
+    // the keys, and the cursor's owner must be them.
+    auto saved = std::exchange(s._identity, std::move(identity));
+    std::string reply;
+    try {
+        reply = upper == "SCAN" ? handle_scan(s, inner) : handle_member_scan(s, upper, inner);
+    } catch (...) {
+        s._identity = std::move(saved);
+        throw;
+    }
+    s._identity = std::move(saved);
+    return reply;
+}
+
+namespace redis_gateway_detail {
+/// The `[cursor, [elements]]` reply of the SCAN family.
+inline auto scan_reply(const resp_writer& w, std::uint64_t cursor,
+                       const std::vector<std::string>& elements) -> std::string {
+    std::vector<std::string> encoded;
+    encoded.reserve(elements.size());
+    for (const auto& e : elements) {
+        encoded.push_back(w.bulk(e));
+    }
+    return w.array({w.bulk(std::to_string(cursor)), w.array(encoded)});
+}
+
+/// Parses `[MATCH p] [COUNT n] [TYPE t]` from `argv[first]` on; `type_ok`
+/// says whether TYPE is allowed. The error reply, or nothing.
+inline auto parse_scan_options(const resp_writer& w, const std::vector<std::string>& argv,
+                               std::size_t first, bool type_ok, redis_scan_filter& filter,
+                               std::size_t& count) -> std::optional<std::string> {
+    for (std::size_t i = first; i < argv.size(); i += 2) {
+        const auto opt = resp_to_upper(argv[i]);
+        if (i + 1 >= argv.size()) {
+            return w.error("ERR syntax error");
+        }
+        if (opt == "MATCH") {
+            filter._pattern = argv[i + 1];
+        } else if (opt == "COUNT") {
+            const auto n = redis_string_detail::parse_int64(argv[i + 1]);
+            if (!n) {
+                return w.error("ERR value is not an integer or out of range");
+            }
+            if (*n < 1) {
+                return w.error("ERR syntax error");
+            }
+            count = static_cast<std::size_t>(std::min<std::int64_t>(*n, 1000000));
+        } else if (opt == "TYPE" && type_ok) {
+            filter._type = argv[i + 1];
+        } else {
+            return w.error("ERR syntax error");
+        }
+    }
+    return std::nullopt;
+}
+}  // namespace redis_gateway_detail
+
+/// Design Component 7. The cursor's state is the next key to read (and
+/// the end of a MATCH prefix's range); each call reads pages from the
+/// groups owning the keys after it, in key order, until it has examined
+/// `COUNT` live keys or reached the end. Because the position is a key,
+/// a split, merge or leader change between calls moves nothing a later
+/// page would miss or repeat.
+template<typename Host, typename Logger, typename Metrics>
+auto redis_front_end<Host, Logger, Metrics>::handle_scan(session& s, const resp_command& cmd)
+    -> std::string {
+    if (auto e = authorize(s, "SCAN", {})) {
+        return *e;
+    }
+    const auto cursor = redis_string_detail::parse_u64(cmd._argv[1]);
+    if (!cursor) {
+        return s._writer.error("ERR invalid cursor");
+    }
+    redis_scan_filter filter;
+    std::size_t count = 10;
+    if (auto e = redis_gateway_detail::parse_scan_options(s._writer, cmd._argv, 2, true, filter,
+                                                          count)) {
+        return *e;
+    }
+    const auto& identity = *s._identity;
+    scan_cursor state;
+    if (*cursor == 0) {
+        const auto prefix = redis_glob_literal_prefix(filter._pattern);
+        // A MATCH outside every scope the user may read returns nothing
+        // (Requirement 7.6): the same answer as a keyspace without them.
+        const auto compatible = [&](const std::vector<std::string>& scopes) {
+            return std::ranges::any_of(scopes, [&](const std::string& scope) {
+                return prefix.starts_with(scope) || scope.starts_with(prefix);
+            });
+        };
+        if (!compatible(identity._key_prefixes) && !compatible(identity._read_prefixes)) {
+            return redis_gateway_detail::scan_reply(s._writer, 0, {});
+        }
+        state._user = identity._user;
+        state._from = prefix;
+        if (!prefix.empty()) {
+            state._to = redis_prefix_successor(prefix);
+        }
+    } else {
+        if (redis_cursor_index(*cursor) != cursor_index_of(_data.self())) {
+            return forward_cursor(s, *cursor, cmd);
+        }
+        auto found = find_cursor(*cursor, identity._user);
+        if (!found || found->_members) {
+            return s._writer.error("ERR invalid cursor");
+        }
+        state = std::move(*found);
+    }
+    std::vector<std::string> keys;
+    std::size_t budget = count;
+    bool done = false;
+    while (budget > 0) {
+        std::string error;
+        auto page = fetch_page(s, state._from, state._to, budget, 0, filter, error);
+        if (!page) {
+            return error;
+        }
+        keys.insert(keys.end(), std::make_move_iterator(page->_keys.begin()),
+                    std::make_move_iterator(page->_keys.end()));
+        if (page->_last) {
+            state._from = *page->_last + '\0';
+        }
+        if (!page->_exhausted) {
+            break;
+        }
+        budget -= std::min<std::size_t>(budget, page->_examined);
+        if (!page->_range_end || (state._to && *page->_range_end >= *state._to)) {
+            done = true;
+            break;
+        }
+        state._from = std::max(state._from, *page->_range_end);
+    }
+    if (done) {
+        if (*cursor != 0) {
+            drop_cursor(*cursor);
+        }
+        return redis_gateway_detail::scan_reply(s._writer, 0, keys);
+    }
+    const auto next = keep_cursor(std::move(state), *cursor == 0 ? 0 : redis_cursor_id(*cursor));
+    return redis_gateway_detail::scan_reply(s._writer, next, keys);
+}
+
+/// `HSCAN` / `SSCAN`: a collection small enough for Redis's compact
+/// encodings comes back whole with cursor 0, as from Redis; a larger one is
+/// walked in element order, its cursor holding the last element returned.
+template<typename Host, typename Logger, typename Metrics>
+auto redis_front_end<Host, Logger, Metrics>::handle_member_scan(session& s, std::string_view upper,
+                                                                const resp_command& cmd)
+    -> std::string {
+    const auto& key = cmd._argv[1];
+    if (auto e = authorize(s, upper, {key})) {
+        return *e;
+    }
+    const auto cursor = redis_string_detail::parse_u64(cmd._argv[2]);
+    if (!cursor) {
+        return s._writer.error("ERR invalid cursor");
+    }
+    redis_scan_filter filter;
+    std::size_t count = 10;
+    if (auto e = redis_gateway_detail::parse_scan_options(s._writer, cmd._argv, 3, false, filter,
+                                                          count)) {
+        return *e;
+    }
+    if constexpr (k_string_only_store) {
+        return s._writer.error(std::string(k_redis_string_only_store_error));
+    } else {
+        const auto& user = s._identity->_user;
+        scan_cursor state;
+        if (*cursor != 0) {
+            if (redis_cursor_index(*cursor) != cursor_index_of(_data.self())) {
+                return forward_cursor(s, *cursor, cmd);
+            }
+            auto found = find_cursor(*cursor, user);
+            if (!found || !found->_members || found->_key != key) {
+                return s._writer.error("ERR invalid cursor");
+            }
+            state = std::move(*found);
+        } else {
+            state._members = true;
+            state._user = user;
+            state._key = key;
+        }
+        auto r = read_local(s, key);
+        if (!r._error.empty()) {
+            if (*cursor == 0 && r._forward_to && !s._internal) {
+                // The walk's cursor lives where the collection is read.
+                std::vector<std::string> argv{"KYTHIRA.CURSOR", user};
+                argv.insert(argv.end(), cmd._argv.begin(), cmd._argv.end());
+                if (auto reply = forward_argv(argv, *r._forward_to, "KYTHIRA.CURSOR")) {
+                    return *reply;
+                }
+            }
+            return r._error;
+        }
+        if (auto refused = format_refusal(s, key, k_redis_typed_values_level)) {
+            return *refused;
+        }
+        const auto t = now_ms();
+        const bool present =
+            r._entry && (r._entry->_expire_at_ms == 0 || r._entry->_expire_at_ms > t);
+        if (!present) {
+            if (*cursor != 0) {
+                drop_cursor(*cursor);
+            }
+            return redis_gateway_detail::scan_reply(s._writer, 0, {});
+        }
+        const auto want = upper == "HSCAN" ? redis_value_type::hash : redis_value_type::set;
+        if (redis_entry_type(*r._entry) != want) {
+            return s._writer.error(std::string(k_redis_wrongtype));
+        }
+        std::vector<std::string> out;
+        const auto matches = [&](const std::string& element) {
+            return filter._pattern.empty() || redis_glob_match(filter._pattern, element);
+        };
+        bool more = false;
+        std::size_t examined = 0;
+        const auto take = [&](const std::string& element, const std::string* value) {
+            if (examined == count) {
+                more = true;
+                return false;
+            }
+            ++examined;
+            state._from = element;
+            state._started = true;
+            if (matches(element)) {
+                out.push_back(element);
+                if (value != nullptr) {
+                    out.push_back(*value);
+                }
+            }
+            return true;
+        };
+        bool whole = false;
+        if (want == redis_value_type::hash) {
+            const auto& h = *r._entry->_hash;
+            whole = *cursor == 0 && redis_hash_encoding(h) == "listpack";
+            if (whole) {
+                h.for_each([&](const std::string& f, const std::string& v) {
+                    if (matches(f)) {
+                        out.push_back(f);
+                        out.push_back(v);
+                    }
+                });
+            } else {
+                h.visit_after(state._from, !state._started,
+                              [&](const auto& e) { return take(e.first, &e.second); });
+            }
+        } else {
+            const auto& set = *r._entry->_set;
+            bool small = set.size() <= 128;
+            set.for_each([&](const std::string& m) { small = small && m.size() <= 64; });
+            whole = *cursor == 0 && (small || redis_set_encoding(set) == "intset");
+            if (whole) {
+                set.for_each([&](const std::string& m) {
+                    if (matches(m)) {
+                        out.push_back(m);
+                    }
+                });
+            } else {
+                set.visit_after(state._from, !state._started,
+                                [&](const std::string& m) { return take(m, nullptr); });
+            }
+        }
+        if (whole || !more) {
+            if (*cursor != 0) {
+                drop_cursor(*cursor);
+            }
+            return redis_gateway_detail::scan_reply(s._writer, 0, out);
+        }
+        const auto next =
+            keep_cursor(std::move(state), *cursor == 0 ? 0 : redis_cursor_id(*cursor));
+        return redis_gateway_detail::scan_reply(s._writer, next, out);
+    }
+}
+
+/// `KEYS pattern`: admin only (by its ACL role); every matching key the
+/// user may read, or an error past `_keys_limit` rather than a truncated
+/// list (Requirement 7.7).
+template<typename Host, typename Logger, typename Metrics>
+auto redis_front_end<Host, Logger, Metrics>::handle_keys(session& s, const resp_command& cmd)
+    -> std::string {
+    if (auto e = authorize(s, "KEYS", {})) {
+        return *e;
+    }
+    redis_scan_filter filter{cmd._argv[1], {}};
+    const auto prefix = redis_glob_literal_prefix(filter._pattern);
+    std::string from = prefix;
+    const std::optional<std::string> to =
+        prefix.empty() ? std::nullopt : redis_prefix_successor(prefix);
+    std::vector<std::string> keys;
+    for (;;) {
+        std::string error;
+        auto page = fetch_page(s, from, to, 1000, 0, filter, error);
+        if (!page) {
+            return error;
+        }
+        keys.insert(keys.end(), std::make_move_iterator(page->_keys.begin()),
+                    std::make_move_iterator(page->_keys.end()));
+        if (keys.size() > _config._keys_limit) {
+            return s._writer.error("ERR KEYS would return more than " +
+                                   std::to_string(_config._keys_limit) +
+                                   " keys (KYTHIRA_REDIS_KEYS_LIMIT); use SCAN");
+        }
+        if (page->_last) {
+            from = *page->_last + '\0';
+        }
+        if (!page->_exhausted) {
+            continue;
+        }
+        if (!page->_range_end || (to && *page->_range_end >= *to)) {
+            break;
+        }
+        from = std::max(from, *page->_range_end);
+    }
+    std::vector<std::string> encoded;
+    encoded.reserve(keys.size());
+    for (const auto& k : keys) {
+        encoded.push_back(s._writer.bulk(k));
+    }
+    return s._writer.array(encoded);
+}
+
+/// `RANDOMKEY`: a group chosen with probability proportional to its
+/// approximate key count (Requirement 7.8), then a key at a random rank in
+/// it. The rank walk costs up to the group's key count; a user with scopes
+/// gets a key in them, or nil.
+template<typename Host, typename Logger, typename Metrics>
+auto redis_front_end<Host, Logger, Metrics>::handle_randomkey(session& s) -> std::string {
+    if (auto e = authorize(s, "RANDOMKEY", {})) {
+        return *e;
+    }
+    struct candidate {
+        std::string _from;
+        std::uint64_t _keys = 0;
+    };
+    std::vector<candidate> groups;
+    std::uint64_t total = 0;
+    const redis_scan_filter all;
+    for (const auto& r : _data.all_routes()) {
+        candidate c{r.range()._start.value_or(std::string{}), 0};
+        std::string error;
+        auto page = fetch_page(s, c._from, std::nullopt, 0, 0, all, error);
+        if (!page) {
+            return error;
+        }
+        c._keys = page->_approximate_keys;
+        total += c._keys;
+        groups.push_back(std::move(c));
+    }
+    thread_local std::mt19937_64 rng{std::random_device{}()};
+    for (int attempt = 0; attempt < 4 && total > 0; ++attempt) {
+        auto pick = rng() % total;
+        const candidate* chosen = &groups.front();
+        for (const auto& g : groups) {
+            if (pick < g._keys) {
+                chosen = &g;
+                break;
+            }
+            pick -= g._keys;
+        }
+        const auto rank = chosen->_keys == 0 ? 0 : rng() % chosen->_keys;
+        for (const auto skip : {rank, std::uint64_t{0}}) {
+            std::string error;
+            auto page = fetch_page(s, chosen->_from, std::nullopt, 64,
+                                   static_cast<std::size_t>(skip), all, error);
+            if (!page) {
+                return error;
+            }
+            if (!page->_keys.empty()) {
+                return s._writer.bulk(page->_keys.front());
+            }
+        }
+    }
+    return s._writer.null();
+}
+
+// ── admin tools (redis-general-data-types task 13) ──────────────────────────
+
+namespace redis_gateway_detail {
+/// The internal `KYTHIRA.RANGEDEL` reply body: the count, then a space and
+/// the last key removed when there is one.
+inline auto encode_range_delete(std::uint64_t count, const std::optional<std::string>& last)
+    -> std::string {
+    auto out = std::to_string(count);
+    if (last) {
+        out += ' ';
+        out += *last;
+    }
+    return out;
+}
+
+/// `bytes` for an audit line: printable ASCII as it is, anything else and
+/// the backslash as `\xHH`.
+inline auto printable_bytes(std::string_view bytes) -> std::string {
+    static constexpr std::string_view k_hex = "0123456789abcdef";
+    std::string out;
+    for (const char c : bytes) {
+        const auto u = static_cast<unsigned char>(c);
+        if (u >= 0x20 && u < 0x7F && c != '\\') {
+            out.push_back(c);
+        } else {
+            out += "\\x";
+            out.push_back(k_hex[u >> 4U]);
+            out.push_back(k_hex[u & 0xFU]);
+        }
+    }
+    return out;
+}
+}  // namespace redis_gateway_detail
+
+template<typename Host, typename Logger, typename Metrics>
+auto redis_front_end<Host, Logger, Metrics>::range_delete_page(session& s, const std::string& lo,
+                                                               const std::optional<std::string>& hi,
+                                                               std::string& error)
+    -> std::optional<range_delete_result> {
+    if constexpr (k_string_only_store) {
+        error = s._writer.error(std::string(k_redis_string_only_store_error));
+        return std::nullopt;
+    } else {
+        const auto max_keys = std::max<std::uint32_t>(_config._range_delete_keys, 1);
+        std::optional<node_id_type> forward_to;
+        auto* node = locate(lo, error, forward_to);
+        if (node != nullptr && !node->is_leader()) {
+            forward_to = node->known_leader();
+            error = s._writer.error("ERR shard has no reachable leader, retry");
+            node = nullptr;
+        }
+        const auto via_peer = [&]() -> std::optional<range_delete_result> {
+            if (!forward_to || s._internal) {
+                return std::nullopt;
+            }
+            auto reply = forward_argv({"KYTHIRA.RANGEDEL", lo, hi ? "1" : "0", hi.value_or("")},
+                                      *forward_to, "KYTHIRA.RANGEDEL");
+            if (!reply) {
+                return std::nullopt;
+            }
+            const auto parsed = redis_gateway_detail::parse_peer_reply(*reply);
+            if (parsed._kind != redis_gateway_detail::peer_reply::kind::bulk) {
+                if (parsed._kind == redis_gateway_detail::peer_reply::kind::error) {
+                    error = s._writer.error(parsed._body);
+                }
+                return std::nullopt;
+            }
+            const auto space = parsed._body.find(' ');
+            const auto count = redis_string_detail::parse_u64(parsed._body.substr(0, space));
+            if (!count) {
+                error = s._writer.error("ERR malformed KYTHIRA.RANGEDEL reply");
+                return std::nullopt;
+            }
+            range_delete_result r{*count, std::nullopt};
+            if (space != std::string::npos) {
+                r._last = parsed._body.substr(space + 1);
+            }
+            return r;
+        };
+        if (node == nullptr) {
+            return via_peer();
+        }
+        if (auto refused = format_refusal(s, lo, k_redis_typed_values_level)) {
+            error = *refused;
+            return std::nullopt;
+        }
+        const auto record = encode_redis_kv_command(
+            redis_kv_range_delete_command{lo, lo, hi.value_or(std::string{}), max_keys});
+        std::vector<std::byte> result;
+        if (!submit(s, lo, record, error, forward_to, &result)) {
+            return via_peer();
+        }
+        if (result.size() == 1 &&
+            result[0] == static_cast<std::byte>(redis_v3_apply_status::refused_before_gate)) {
+            error = s._writer.error(std::string(k_redis_format_gate_error));
+            return std::nullopt;
+        }
+        try {
+            const auto reply = decode_redis_reply(result);
+            if (reply._elements.size() != 2) {
+                throw redis_reply_error("range delete reply is not a pair");
+            }
+            range_delete_result r{static_cast<std::uint64_t>(reply._elements[0]._integer),
+                                  std::nullopt};
+            if (reply._elements[1]._kind != redis_reply_kind::null) {
+                r._last = reply._elements[1]._text;
+            }
+            return r;
+        } catch (const std::exception& e) {
+            _logger.log(log_level::error, "redis gateway: undecodable range delete reply",
+                        {{"error", e.what()}});
+            error = s._writer.error("ERR internal error decoding the reply");
+            return std::nullopt;
+        }
+    }
+}
+
+/// Design Component 7 "Prefix delete": the group owning `from` deletes up
+/// to `_range_delete_keys` keys of `[from, min(hi, its range end))`; a full
+/// entry goes again from its last key, a short one moves on to the next
+/// group. The next group starts where the group owning `from` ends after
+/// the entry applied, so a split that moved part of the range away
+/// between routing and apply sends the walk on to the child rather than
+/// past it.
+template<typename Host, typename Logger, typename Metrics>
+auto redis_front_end<Host, Logger, Metrics>::range_delete(session& s, const std::string& lo,
+                                                          const std::optional<std::string>& hi,
+                                                          std::uint64_t& deleted,
+                                                          std::string& error) -> bool {
+    const auto max_keys = std::max<std::uint32_t>(_config._range_delete_keys, 1);
+    std::string from = lo;
+    const auto end_of =
+        [this](const std::string& key) -> std::optional<std::optional<std::string>> {
+        auto desc = _data.route(key);
+        if (!desc) {
+            return std::nullopt;
+        }
+        return desc->range()._end;
+    };
+    const auto earlier = [](const std::optional<std::string>& a,
+                            const std::optional<std::string>& b) {
+        if (!a) {
+            return b;
+        }
+        if (!b) {
+            return a;
+        }
+        return std::min(*a, *b) == *a ? a : b;
+    };
+    for (;;) {
+        const auto end = end_of(from);
+        if (!end) {
+            error = s._writer.error("ERR no shard owns this key");
+            return false;
+        }
+        const auto bound = earlier(hi, *end);
+        auto page = range_delete_page(s, from, bound, error);
+        if (!page) {
+            return false;
+        }
+        deleted += page->_count;
+        emit("redis.prefix_delete_keys", "KYTHIRA.DELPREFIX",
+             static_cast<std::int64_t>(page->_count));
+        if (page->_count >= max_keys && page->_last) {
+            from = *page->_last + '\0';
+            continue;
+        }
+        const auto now = end_of(from);
+        const auto next = now ? earlier(bound, *now) : bound;
+        if (!next || (hi && *next >= *hi)) {
+            return true;
+        }
+        from = *next;
+    }
+}
+
+template<typename Host, typename Logger, typename Metrics>
+auto redis_front_end<Host, Logger, Metrics>::handle_delprefix(session& s, const resp_command& cmd)
+    -> std::string {
+    if (auto e = authorize(s, "KYTHIRA.DELPREFIX", {})) {
+        return *e;
+    }
+    const auto& prefix = cmd._argv[1];
+    if (prefix.empty()) {
+        return s._writer.error("ERR KYTHIRA.DELPREFIX needs a non-empty prefix; use FLUSHALL");
+    }
+    std::uint64_t deleted = 0;
+    std::string error;
+    const bool ok = range_delete(s, prefix, redis_prefix_successor(prefix), deleted, error);
+    audit(s, "KYTHIRA.DELPREFIX",
+          "prefix=" + redis_gateway_detail::printable_bytes(prefix) +
+              " deleted=" + std::to_string(deleted) + (ok ? "" : " failed"));
+    if (!ok) {
+        return error;
+    }
+    return s._writer.integer(static_cast<std::int64_t>(deleted));
+}
+
+template<typename Host, typename Logger, typename Metrics>
+auto redis_front_end<Host, Logger, Metrics>::handle_flush(session& s, std::string_view upper,
+                                                          const resp_command& cmd) -> std::string {
+    if (auto e = authorize(s, upper, {})) {
+        return *e;
+    }
+    if (cmd._argv.size() == 2) {
+        const auto mode = resp_to_upper(cmd._argv[1]);
+        if (mode != "ASYNC" && mode != "SYNC") {
+            return s._writer.error("ERR syntax error");
+        }
+    }
+    if (!_config._allow_flush) {
+        audit(s, upper, "refused: KYTHIRA_REDIS_ALLOW_FLUSH is off");
+        return s._writer.error("ERR " + std::string(upper) +
+                               " is disabled on this cluster (KYTHIRA_REDIS_ALLOW_FLUSH)");
+    }
+    std::uint64_t deleted = 0;
+    std::string error;
+    const bool ok = range_delete(s, std::string{}, std::nullopt, deleted, error);
+    audit(s, upper, "range=all deleted=" + std::to_string(deleted) + (ok ? "" : " failed"));
+    if (!ok) {
+        return error;
+    }
+    return s._writer.simple_string("OK");
+}
+
+template<typename Host, typename Logger, typename Metrics>
+auto redis_front_end<Host, Logger, Metrics>::handle_internal_rangedel(session& s,
+                                                                      const resp_command& cmd)
+    -> std::string {
+    if (!s._internal) {
+        audit(s, "KYTHIRA.RANGEDEL", "internal command from a client");
+        return s._writer.error("NOPERM KYTHIRA.RANGEDEL is internal to the gateways");
+    }
+    const auto& a = cmd._argv;
+    if (a.size() != 4 || (a[2] != "0" && a[2] != "1")) {
+        return s._writer.error("ERR syntax error");
+    }
+    const std::optional<std::string> hi = a[2] == "1" ? std::optional(a[3]) : std::nullopt;
+    std::string error;
+    auto page = range_delete_page(s, a[1], hi, error);
+    if (!page) {
+        return error.empty() ? s._writer.error("ERR shard has no reachable leader, retry") : error;
+    }
+    return s._writer.bulk(redis_gateway_detail::encode_range_delete(page->_count, page->_last));
+}
+
+template<typename Host, typename Logger, typename Metrics>
+auto redis_front_end<Host, Logger, Metrics>::fetch_usage(session& s, const std::string& from,
+                                                         const std::optional<std::string>& to,
+                                                         std::size_t depth,
+                                                         const std::string& delim,
+                                                         std::string& error)
+    -> std::optional<redis_usage_page> {
+    const bool any_replica = _config._read_consistency == redis_read_consistency::any_replica;
+    const auto& identity = *s._identity;
+    const auto keep = [&](const std::string& key) {
+        return redis_acl::key_permits(identity, key, redis_key_access::read);
+    };
+    const auto deadline = std::chrono::steady_clock::now() + _config._command_timeout;
+    std::string last = "no reachable leader for the key's shard";
+    for (;;) {
+        auto outcome = _data.usage(from, to, k_usage_page_keys, any_replica, now_ms(), depth, delim,
+                                   k_usage_max_buckets, keep);
+        if (outcome._status == redis_data_status::ok) {
+            return std::move(outcome._page);
+        }
+        if (outcome._leader && *outcome._leader != _data.self() && !s._internal) {
+            auto reply =
+                forward_argv({"KYTHIRA.DATA", "USAGE", from, to ? "1" : "0", to.value_or(""),
+                              std::to_string(depth), delim, identity._user, "0"},
+                             *outcome._leader, "KYTHIRA.DATA");
+            if (reply) {
+                auto parsed = redis_gateway_detail::parse_peer_reply(*reply);
+                using kind = redis_gateway_detail::peer_reply::kind;
+                if (parsed._kind == kind::bulk) {
+                    try {
+                        return decode_redis_usage_page(parsed._body);
+                    } catch (const std::exception& e) {
+                        error = s._writer.error(std::string("ERR ") + e.what());
+                        return std::nullopt;
+                    }
+                }
+                if (parsed._kind != kind::error ||
+                    parsed._body.find("retry") == std::string::npos) {
+                    error =
+                        s._writer.error("ERR peer gateway refused a usage page: " + parsed._body);
+                    return std::nullopt;
+                }
+                last = parsed._body;
+            }
+        }
+        if (!_running.load() || std::chrono::steady_clock::now() >= deadline) {
+            error = s._writer.error("ERR " + last + ", retry");
+            return std::nullopt;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds{10});
+    }
+}
+
+/// `KYTHIRA.DATA USAGE from has_to to depth delim user 0`.
+template<typename Host, typename Logger, typename Metrics>
+auto redis_front_end<Host, Logger, Metrics>::handle_internal_usage(session& s,
+                                                                   const resp_command& cmd)
+    -> std::string {
+    const auto& a = cmd._argv;
+    const auto depth = redis_string_detail::parse_u64(a[5]);
+    if ((a[3] != "0" && a[3] != "1") || !depth) {
+        return s._writer.error("ERR syntax error");
+    }
+    auto identity = _acl.identity_of(a[7]);
+    if (!identity) {
+        return s._writer.error("ERR unknown user");
+    }
+    const auto keep = [&](const std::string& key) {
+        return redis_acl::key_permits(*identity, key, redis_key_access::read);
+    };
+    const std::optional<std::string> to = a[3] == "1" ? std::optional(a[4]) : std::nullopt;
+    auto outcome =
+        _data.usage(a[2], to, k_usage_page_keys,
+                    _config._read_consistency == redis_read_consistency::any_replica, now_ms(),
+                    static_cast<std::size_t>(*depth), a[6], k_usage_max_buckets, keep);
+    if (outcome._status != redis_data_status::ok) {
+        return s._writer.error("ERR shard has no reachable leader, retry");
+    }
+    return s._writer.bulk(encode_redis_usage_page(outcome._page));
+}
+
+/// `KYTHIRA.USAGE [prefix] [DEPTH d] [DELIM c]` (Requirement 8.4): keys and
+/// approximate bytes (key plus value) per bucket, the key cut after its
+/// `d`-th `c`, over the prefix's range, read from each group's replica
+/// without a log entry and merged here. Buckets past `k_usage_max_buckets`
+/// are summed in a last row whose name is nil. Rows come largest first.
+template<typename Host, typename Logger, typename Metrics>
+auto redis_front_end<Host, Logger, Metrics>::handle_usage(session& s, const resp_command& cmd)
+    -> std::string {
+    if (auto e = authorize(s, "KYTHIRA.USAGE", {})) {
+        return *e;
+    }
+    const auto& a = cmd._argv;
+    std::string prefix;
+    std::size_t first = 1;
+    if (a.size() % 2 == 0) {
+        prefix = a[1];
+        first = 2;
+    }
+    std::size_t depth = 1;
+    std::string delim = ":";
+    for (std::size_t i = first; i + 1 < a.size(); i += 2) {
+        const auto opt = resp_to_upper(a[i]);
+        if (opt == "DEPTH") {
+            const auto d = redis_string_detail::parse_u64(a[i + 1]);
+            if (!d || *d > 1024) {
+                return s._writer.error("ERR value is not an integer or out of range");
+            }
+            depth = static_cast<std::size_t>(*d);
+        } else if (opt == "DELIM") {
+            delim = a[i + 1];
+        } else {
+            return s._writer.error("ERR syntax error");
+        }
+    }
+    std::string from = prefix;
+    const std::optional<std::string> to =
+        prefix.empty() ? std::nullopt : redis_prefix_successor(prefix);
+    redis_usage_page total;
+    for (;;) {
+        std::string error;
+        auto page = fetch_usage(s, from, to, depth, delim, error);
+        if (!page) {
+            return error;
+        }
+        for (const auto& [bucket, t] : page->_buckets) {
+            total.add(bucket, t._keys, t._bytes, k_usage_max_buckets);
+        }
+        total._other._keys += page->_other._keys;
+        total._other._bytes += page->_other._bytes;
+        if (!page->_exhausted && page->_last) {
+            from = *page->_last + '\0';
+            continue;
+        }
+        if (!page->_range_end || (to && *page->_range_end >= *to) || *page->_range_end <= from) {
+            break;
+        }
+        from = *page->_range_end;
+    }
+    std::vector<std::pair<std::string, redis_usage_page::tally>> rows(total._buckets.begin(),
+                                                                      total._buckets.end());
+    std::stable_sort(rows.begin(), rows.end(), [](const auto& x, const auto& y) {
+        return x.second._bytes > y.second._bytes;
+    });
+    std::vector<std::string> out;
+    out.reserve(rows.size() + 1);
+    for (const auto& [bucket, t] : rows) {
+        out.push_back(s._writer.array({s._writer.bulk(bucket),
+                                       s._writer.integer(static_cast<std::int64_t>(t._keys)),
+                                       s._writer.integer(static_cast<std::int64_t>(t._bytes))}));
+    }
+    if (total._other._keys > 0) {
+        out.push_back(s._writer.array(
+            {s._writer.null(), s._writer.integer(static_cast<std::int64_t>(total._other._keys)),
+             s._writer.integer(static_cast<std::int64_t>(total._other._bytes))}));
+    }
+    audit(s, "KYTHIRA.USAGE",
+          "prefix=" + redis_gateway_detail::printable_bytes(prefix) +
+              " buckets=" + std::to_string(rows.size()));
+    return s._writer.array(out);
+}
+
+/// `MEMORY USAGE key [SAMPLES n]` (Requirement 8.5): the key's and its
+/// value's bytes plus 16, as collections count each element; nil for a
+/// missing key. Other `MEMORY` subcommands are not offered.
+template<typename Host, typename Logger, typename Metrics>
+auto redis_front_end<Host, Logger, Metrics>::handle_memory(session& s, const resp_command& cmd)
+    -> std::string {
+    const auto& a = cmd._argv;
+    if (resp_to_upper(a[1]) != "USAGE" || (a.size() != 3 && a.size() != 5)) {
+        return s._writer.error("ERR unknown subcommand or wrong number of arguments for '" + a[1] +
+                               "'. Try MEMORY HELP.");
+    }
+    if (a.size() == 5 &&
+        (resp_to_upper(a[3]) != "SAMPLES" || !redis_string_detail::parse_int64(a[4]))) {
+        return s._writer.error("ERR syntax error");
+    }
+    const auto& key = a[2];
+    if (auto e = authorize(s, "MEMORY", {key})) {
+        return *e;
+    }
+    auto r = read_local(s, key);
+    if (!r._error.empty()) {
+        if (r._forward_to) {
+            if (auto reply = forward(s, cmd, *r._forward_to)) {
+                return *reply;
+            }
+        }
+        return r._error;
+    }
+    if (!r._entry || is_expired(*r._entry)) {
+        return s._writer.null();
+    }
+    return s._writer.integer(
+        static_cast<std::int64_t>(key.size() + redis_gateway_detail::entry_bytes(*r._entry) + 16));
+}
+
+// ── commandstats, errorstats and the slow log (task 13, Requirement 22) ─────
+
+namespace redis_gateway_detail {
+/// The first word of an error reply (`ERR`, `WRONGTYPE`, ...), or nothing
+/// when `reply` is not an error.
+inline auto error_code(const std::string& reply) -> std::optional<std::string> {
+    if (reply.empty() || reply[0] != '-') {
+        return std::nullopt;
+    }
+    const auto end = reply.find_first_of(" \r", 1);
+    return reply.substr(1, (end == std::string::npos ? reply.size() : end) - 1);
+}
+
+/// Whether an error refused the command before it ran (Redis's
+/// `rejected_calls`) rather than during it (`failed_calls`).
+inline auto is_rejection(const std::string& reply) -> bool {
+    return reply.starts_with("-NOAUTH") || reply.starts_with("-NOPERM") ||
+           reply.starts_with("-ERR wrong number of arguments") ||
+           reply.starts_with("-ERR unknown command") || reply.starts_with("-EXECABORT");
+}
+
+/// A slow-log argument list: the command name and its keys as sent, every
+/// other argument (values, options, credentials) replaced, at most 32
+/// arguments of at most 128 bytes, as Redis truncates them.
+inline auto slowlog_args(const redis_command_info* info, const std::vector<std::string>& argv)
+    -> std::vector<std::string> {
+    std::vector<std::string> out;
+    const auto n = static_cast<std::ptrdiff_t>(argv.size());
+    std::vector<bool> is_key(argv.size(), false);
+    if (info != nullptr && info->first_key > 0) {
+        const auto first = static_cast<std::ptrdiff_t>(static_cast<unsigned char>(info->first_key));
+        const std::ptrdiff_t last = info->last_key < 0 ? n + info->last_key : info->last_key;
+        const std::ptrdiff_t step = std::max<std::ptrdiff_t>(info->step, 1);
+        for (std::ptrdiff_t i = first; i <= last && i < n; i += step) {
+            is_key[static_cast<std::size_t>(i)] = true;
+        }
+    }
+    for (std::size_t i = 0; i < argv.size(); ++i) {
+        if (out.size() == 31 && argv.size() > 32) {
+            out.push_back("... (" + std::to_string(argv.size() - 31) + " more arguments)");
+            break;
+        }
+        if (i == 0 || is_key[i]) {
+            const auto& a = argv[i];
+            out.push_back(a.size() > 128 ? a.substr(0, 128) + "... (" +
+                                               std::to_string(a.size() - 128) + " more bytes)"
+                                         : a);
+        } else {
+            out.emplace_back("(redacted)");
+        }
+    }
+    return out;
+}
+}  // namespace redis_gateway_detail
+
+template<typename Host, typename Logger, typename Metrics>
+auto redis_front_end<Host, Logger, Metrics>::record_command(
+    const session& s, std::string_view upper, const resp_command& cmd, const std::string& reply,
+    std::chrono::steady_clock::duration elapsed) -> void {
+    const auto usec = static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(elapsed).count());
+    const auto* info = find_redis_command(upper);
+    const auto code = redis_gateway_detail::error_code(reply);
+    if (info != nullptr) {
+        auto& t = _command_tallies[static_cast<std::size_t>(info - k_redis_commands.data())];
+        if (code && redis_gateway_detail::is_rejection(reply)) {
+            t._rejected.fetch_add(1, std::memory_order_relaxed);
+        } else {
+            t._calls.fetch_add(1, std::memory_order_relaxed);
+            t._usec.fetch_add(usec, std::memory_order_relaxed);
+            if (code) {
+                t._failed.fetch_add(1, std::memory_order_relaxed);
+            }
+        }
+    }
+    if (code) {
+        std::lock_guard lock(_errorstats_mutex);
+        // Bounded as Redis bounds it: past 128 codes only known ones count.
+        if (auto it = _errorstats.find(*code); it != _errorstats.end()) {
+            ++it->second;
+        } else if (_errorstats.size() < 128) {
+            _errorstats.emplace(*code, 1);
+        }
+    }
+    const auto threshold = _config._slowlog_slower_than_us;
+    if (threshold < 0 || usec < static_cast<std::uint64_t>(threshold) || upper == "SLOWLOG" ||
+        upper == "AUTH" || upper == "HELLO" || _config._slowlog_max_len == 0) {
+        return;
+    }
+    slowlog_entry e;
+    e._usec = usec;
+    e._unix_seconds = std::chrono::duration_cast<std::chrono::seconds>(
+                          std::chrono::system_clock::now().time_since_epoch())
+                          .count();
+    e._args = redis_gateway_detail::slowlog_args(info, cmd._argv);
+    e._client = s._source;
+    e._name = s._client_name;
+    std::lock_guard lock(_slowlog_mutex);
+    e._id = _slowlog_next_id++;
+    _slowlog.push_front(std::move(e));
+    while (_slowlog.size() > _config._slowlog_max_len) {
+        _slowlog.pop_back();
+    }
+}
+
+template<typename Host, typename Logger, typename Metrics>
+auto redis_front_end<Host, Logger, Metrics>::commandstats_text() const -> std::string {
+    std::ostringstream out;
+    for (std::size_t i = 0; i < k_redis_commands.size(); ++i) {
+        const auto& t = _command_tallies[i];
+        const auto calls = t._calls.load(std::memory_order_relaxed);
+        const auto rejected = t._rejected.load(std::memory_order_relaxed);
+        if (calls == 0 && rejected == 0) {
+            continue;
+        }
+        std::string name(k_redis_commands[i].name);
+        for (auto& c : name) {
+            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        }
+        const auto usec = t._usec.load(std::memory_order_relaxed);
+        char per_call[32];
+        std::snprintf(per_call, sizeof(per_call), "%.2f",
+                      calls == 0 ? 0.0 : static_cast<double>(usec) / static_cast<double>(calls));
+        out << "cmdstat_" << name << ":calls=" << calls << ",usec=" << usec
+            << ",usec_per_call=" << per_call << ",rejected_calls=" << rejected
+            << ",failed_calls=" << t._failed.load(std::memory_order_relaxed) << "\r\n";
+    }
+    return out.str();
+}
+
+template<typename Host, typename Logger, typename Metrics>
+auto redis_front_end<Host, Logger, Metrics>::errorstats_text() const -> std::string {
+    std::ostringstream out;
+    std::lock_guard lock(_errorstats_mutex);
+    for (const auto& [code, count] : _errorstats) {
+        out << "errorstat_" << code << ":count=" << count << "\r\n";
+    }
+    return out.str();
+}
+
+/// `SLOWLOG GET [n] | LEN | RESET | HELP`, as Redis answers it: each entry
+/// is `[id, unix time, microseconds, [arguments], client address, client
+/// name]`, newest first, with values never shown.
+template<typename Host, typename Logger, typename Metrics>
+auto redis_front_end<Host, Logger, Metrics>::handle_slowlog(session& s, const resp_command& cmd)
+    -> std::string {
+    const auto sub = resp_to_upper(cmd._argv[1]);
+    if (sub == "LEN" && cmd._argv.size() == 2) {
+        std::lock_guard lock(_slowlog_mutex);
+        return s._writer.integer(static_cast<std::int64_t>(_slowlog.size()));
+    }
+    if (sub == "RESET" && cmd._argv.size() == 2) {
+        {
+            std::lock_guard lock(_slowlog_mutex);
+            _slowlog.clear();
+        }
+        audit(s, "SLOWLOG", "reset");
+        return s._writer.simple_string("OK");
+    }
+    if (sub == "GET") {
+        std::size_t count = 10;
+        if (cmd._argv.size() == 3) {
+            const auto n = redis_string_detail::parse_int64(cmd._argv[2]);
+            if (!n || *n < -1) {
+                return s._writer.error("ERR count should be greater than or equal to -1");
+            }
+            count =
+                *n == -1 ? std::numeric_limits<std::size_t>::max() : static_cast<std::size_t>(*n);
+        }
+        std::vector<std::string> entries;
+        std::lock_guard lock(_slowlog_mutex);
+        for (const auto& e : _slowlog) {
+            if (entries.size() >= count) {
+                break;
+            }
+            std::vector<std::string> args;
+            args.reserve(e._args.size());
+            for (const auto& a : e._args) {
+                args.push_back(s._writer.bulk(a));
+            }
+            entries.push_back(s._writer.array(
+                {s._writer.integer(static_cast<std::int64_t>(e._id)),
+                 s._writer.integer(e._unix_seconds),
+                 s._writer.integer(static_cast<std::int64_t>(e._usec)), s._writer.array(args),
+                 s._writer.bulk(e._client), s._writer.bulk(e._name)}));
+        }
+        return s._writer.array(entries);
+    }
+    if (sub == "HELP" && cmd._argv.size() == 2) {
+        std::vector<std::string> lines;
+        for (const auto* l :
+             {"SLOWLOG <subcommand> [<arg> [value] [opt] ...]. Subcommands are:", "GET [<count>]",
+              "    Return top <count> entries from the slowlog (default: 10, -1 mean all).", "LEN",
+              "    Return the length of the slowlog.", "RESET", "    Reset the slowlog.", "HELP",
+              "    Print this help."}) {
+            lines.push_back(s._writer.simple_string(l));
+        }
+        return s._writer.array(lines);
+    }
+    return s._writer.error("ERR unknown subcommand or wrong number of arguments for '" +
+                           cmd._argv[1] + "'. Try SLOWLOG HELP.");
 }
 
 }  // namespace kythira

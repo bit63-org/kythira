@@ -84,6 +84,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <string>
 #include <thread>
 #include <utility>
@@ -107,6 +108,9 @@ BOOST_GLOBAL_FIXTURE(folly_init_fixture);
 namespace {
 
 using kythira::hibernation_mode;
+using kythira::k_redis_base_format_level;
+using kythira::k_redis_format_level;
+using kythira::k_redis_typed_values_level;
 using kythira::multi_raft;
 using kythira::multi_raft_config;
 using kythira::redis_acl;
@@ -272,7 +276,10 @@ auto acl_text() -> std::string {
            // IAM task 21: an IAM-only user (no password, still enabled) and
            // one that takes either.
            "user iamfarm disabled read_write sccache/ auth=iam\n" + "user bothfarm " +
-           redis_acl::hash_secret("both-secret", k_kdf_iters) + " read_write sccache/ auth=both\n";
+           redis_acl::hash_secret("both-secret", k_kdf_iters) + " read_write sccache/ auth=both\n" +
+           // redis-general-data-types task 5: a user whose counters may change.
+           "user counter " + redis_acl::hash_secret("counter-secret", k_kdf_iters) +
+           " read_write sccache/ mutable~sccache/counters/*\n";
 }
 
 // ── a throwaway PKI for the TLS cases ────────────────────────────────────────
@@ -573,8 +580,12 @@ public:
     /// a case installs cache hooks.
     using gateway_setup = std::function<void(node_id_t, gateway_type&)>;
 
+    /// Adjusts one node's gateway configuration before it is built: where a
+    /// case makes one node differ from the others.
+    using config_tweak = std::function<void(node_id_t, redis_gateway_config&)>;
+
     explicit cluster(redis_gateway_config base = {}, bool plaintext_forwarding = true,
-                     const gateway_setup& setup = {}) {
+                     const gateway_setup& setup = {}, const config_tweak& tweak = {}) {
         _acl.reload(acl_text());
         for (node_id_t id = 1; id <= k_node_count; ++id) {
             _hosts.push_back(std::make_unique<host_type>(make_config(id)));
@@ -595,6 +606,9 @@ public:
             cfg._allow_plaintext_forwarding =
                 base._allow_plaintext_forwarding || plaintext_forwarding;
             const node_id_t from = static_cast<node_id_t>(i + 1);
+            if (tweak) {
+                tweak(from, cfg);
+            }
             auto resolver = [this, from](const node_id_t& to) -> std::optional<std::string> {
                 if (auto endpoint = endpoint_override(from, to)) {
                     return endpoint;
@@ -784,6 +798,33 @@ public:
         return *_front_ends.back();
     }
 
+    /// Split `group` at `at` from its leader; the child's id, or nothing.
+    auto split(group_id_type group, const std::string& at) -> std::optional<group_id_type> {
+        const auto leader = leader_of(group);
+        if (leader == 0 ||
+            !settle(host(leader).split_shard(group, {at}, std::chrono::seconds{5}))) {
+            return std::nullopt;
+        }
+        const auto d = host(leader).resolve(at);
+        if (!d || d->_group_id == group) {
+            return std::nullopt;
+        }
+        return d->_group_id;
+    }
+    /// Merge `source` into `target` from the source's leader.
+    auto merge(group_id_type source, group_id_type target) -> bool {
+        const auto leader = leader_of(source);
+        return leader != 0 &&
+               settle(host(leader).merge_shards(source, target, std::chrono::seconds{5}));
+    }
+    /// Hand `group`'s leadership to another live node.
+    auto move_leader(group_id_type group) -> bool {
+        const auto from = leader_of(group);
+        const auto to = a_follower_of(group);
+        return from != 0 && to != 0 &&
+               settle(host(from).transfer_leadership(group, to, std::chrono::seconds{3}));
+    }
+
     /// Run the gateway's maintenance on the leader of `group` right now.
     auto maintain(group_id_type group) -> std::size_t {
         auto leader = leader_of(group);
@@ -794,6 +835,19 @@ public:
     }
 
 private:
+    template<typename Future> static auto settle(Future&& f) -> bool {
+        if (!f.wait(std::chrono::seconds{8})) {
+            return false;
+        }
+        try {
+            std::ignore = std::forward<Future>(f).get();
+            return true;
+        } catch (const std::exception& e) {
+            BOOST_TEST_MESSAGE("refused: " << e.what());
+            return false;
+        }
+    }
+
     auto make_config(node_id_t id) -> config_type {
         config_type cfg{
             .node_id = id,
@@ -808,6 +862,15 @@ private:
         cfg.hibernation = hibernation_mode::off;
         cfg.executor_stripes = 2;
         cfg.partitioner = kythira::make_partitioner<key_type>(kythira::redis_kv_partitioner{});
+        // Split children take ids from one authority shared by every node.
+        cfg.allocate_group_ids = [this](std::size_t n) {
+            std::lock_guard<std::mutex> lock(_ids_mutex);
+            std::vector<group_id_type> out;
+            for (std::size_t i = 0; i < n; ++i) {
+                out.push_back(_next_group_id++);
+            }
+            return out;
+        };
         with_state_machines(cfg);
         return cfg;
     }
@@ -848,6 +911,8 @@ private:
     std::mutex _routes_mutex;
     std::map<std::pair<node_id_t, node_id_t>, node_id_t> _routes;
     std::map<std::pair<node_id_t, node_id_t>, std::string> _endpoint_overrides;
+    std::mutex _ids_mutex;
+    group_id_type _next_group_id{100};
 };
 
 /// Accepts connections on loopback and never answers: a peer gateway that
@@ -936,8 +1001,8 @@ BOOST_AUTO_TEST_CASE(sccache_handshake_pipeline_and_round_trip, *boost::unit_tes
     BOOST_CHECK_EQUAL(client.call({"SELECT", "1"}), "-ERR DB index is out of range\r\n");
     BOOST_CHECK_EQUAL(client.call({"ECHO", "hi"}), bulk("hi"));
     BOOST_CHECK_EQUAL(client.call({"GET"}), "-ERR wrong number of arguments for 'get' command\r\n");
-    auto unknown = client.call({"FLUSHALL"});
-    BOOST_CHECK(unknown.rfind("-ERR unknown command 'FLUSHALL'", 0) == 0);
+    auto unknown = client.call({"KYTHIRA.NOSUCH"});
+    BOOST_CHECK(unknown.rfind("-ERR unknown command 'KYTHIRA.NOSUCH'", 0) == 0);
     // ...and the connection is still usable afterwards (Requirement 1.8).
     BOOST_CHECK_EQUAL(client.call({"PING"}), "+PONG\r\n");
     BOOST_CHECK_EQUAL(client.call({"QUIT"}), "+OK\r\n");
@@ -1032,7 +1097,17 @@ BOOST_AUTO_TEST_CASE(authentication_and_authorization, *boost::unit_test::timeou
         BOOST_CHECK(info.find("kythira_roles:gateway,front_end,data\r\n") != std::string::npos);
         BOOST_CHECK(info.find("kythira_authz_denials:") != std::string::npos);
         BOOST_CHECK_EQUAL(ops.call({"DBSIZE"}), ":1\r\n");
-        BOOST_CHECK_EQUAL(ops.call({"COMMAND", "COUNT"}), ":17\r\n");
+        // COMMAND answers from the registry: its shipped commands, less the
+        // transaction commands this cluster (transactions off) refuses.
+        const auto shipped = std::ranges::count_if(kythira::k_redis_commands, [](const auto& cmd) {
+            return cmd.status == kythira::redis_command_status::shipped && cmd.name != "MULTI" &&
+                   cmd.name != "EXEC" && cmd.name != "DISCARD" && cmd.name != "WATCH" &&
+                   cmd.name != "UNWATCH" && cmd.name != "KYTHIRA.ISOLATION" &&
+                   cmd.name != "KYTHIRA.TXN";
+        });
+        BOOST_CHECK_EQUAL(ops.call({"COMMAND", "COUNT"}), ":" + std::to_string(shipped) + "\r\n");
+        BOOST_CHECK(ops.call({"COMMAND", "INFO", "incr", "nosuch"})
+                        .starts_with("*2\r\n*10\r\n$4\r\nincr\r\n:2\r\n"));
     }
 }
 
@@ -2183,7 +2258,1208 @@ BOOST_AUTO_TEST_CASE(resp_replies_match_the_golden_file, *boost::unit_test::time
     record(v3, "v3", {"QUIT"});
     BOOST_CHECK(v3.wait_closed());
 
+    if constexpr (gateway_type::k_string_only_store) {
+        // The file was recorded before the gate. The disk-backed cache never
+        // passes it and says why instead (Requirement 13.3); every other
+        // byte is the same.
+        const std::string refusal = escape(std::string(kythira::k_redis_string_only_store_error));
+        const std::string gate = escape(std::string(kythira::k_redis_format_gate_error));
+        for (auto at = out.find(refusal); at != std::string::npos;
+             at = out.find(refusal, at + gate.size())) {
+            out.replace(at, refusal.size(), gate);
+        }
+    }
     kythira::testing::golden::check_golden("resp_replies.txt", out);
+}
+
+// ── format level and gate (redis-general-data-types task 2) ─────────────────
+
+namespace {
+/// Every local group's gate level from `KYTHIRA.FORMAT STATUS`.
+auto gate_levels(resp_client& ops) -> std::vector<std::string> {
+    const auto status = ops.call({"KYTHIRA.FORMAT", "STATUS"});
+    std::vector<std::string> out;
+    for (std::size_t at = status.find("group:"); at != std::string::npos;
+         at = status.find("group:", at + 1)) {
+        const auto eq = status.find(":gate=", at);
+        const auto end = status.find("\r\n", eq);
+        out.push_back(status.substr(eq + 6, end - eq - 6));
+    }
+    return out;
+}
+}  // namespace
+
+// Requirement 14.3: one node still on an older binary (it reports level 2)
+// blocks the gate, and the refusal names it; nothing is gated.
+BOOST_AUTO_TEST_CASE(one_old_level_node_blocks_the_format_gate, *boost::unit_test::timeout(120)) {
+    cluster c({}, true, {}, [](node_id_t id, redis_gateway_config& cfg) {
+        if (id == 3) {
+            cfg._reported_format_level = k_redis_base_format_level;
+        }
+    });
+    BOOST_REQUIRE(c.await_all_leaders(std::chrono::seconds{20}));
+    resp_client ops(c.port(1));
+    BOOST_REQUIRE_EQUAL(ops.auth("ops", "ops-secret"), "+OK\r\n");
+    const auto refused = ops.call({"KYTHIRA.FORMAT", "UPGRADE", "3"});
+    BOOST_TEST_INFO(refused);
+    BOOST_CHECK(refused.rfind("-ERR KYTHIRA.FORMAT cannot reach level 3", 0) == 0);
+    BOOST_CHECK(refused.find("3 (level 2)") != std::string::npos);
+    BOOST_CHECK_EQUAL(ops.call({"KYTHIRA.FORMAT", "LEVEL"}),
+                      ":" + std::to_string(gateway_type::k_node_format_level) + "\r\n");
+    for (node_id_t id = 1; id <= 3; ++id) {
+        resp_client each(c.port(id));
+        BOOST_REQUIRE_EQUAL(each.auth("ops", "ops-secret"), "+OK\r\n");
+        for (const auto& level : gate_levels(each)) {
+            BOOST_CHECK_EQUAL(level, "2");
+        }
+    }
+    resp_client old(c.port(3));
+    BOOST_REQUIRE_EQUAL(old.auth("ops", "ops-secret"), "+OK\r\n");
+    BOOST_CHECK(old.call({"INFO"}).find("\r\nkythira_format_level:2\r\n") != std::string::npos);
+}
+
+// With every node at the binary's level, UPGRADE gates every group on every
+// replica, from whichever node it is sent to (it proposes through each
+// group's leader); repeating it changes nothing. A store that does not read
+// the newer formats yet reports level 2 and is always refused.
+BOOST_AUTO_TEST_CASE(the_format_gate_reaches_every_group, *boost::unit_test::timeout(120)) {
+    cluster c;
+    BOOST_REQUIRE(c.await_all_leaders(std::chrono::seconds{20}));
+    const auto follower = c.a_follower_of(k_sccache_group);
+    resp_client ops(c.port(follower));
+    BOOST_REQUIRE_EQUAL(ops.auth("ops", "ops-secret"), "+OK\r\n");
+    if constexpr (gateway_type::k_node_format_level < k_redis_typed_values_level) {
+        BOOST_CHECK(ops.call({"KYTHIRA.FORMAT", "UPGRADE", "3"}).find("(level 2)") !=
+                    std::string::npos);
+        return;
+    }
+    BOOST_CHECK_EQUAL(ops.call({"KYTHIRA.FORMAT", "UPGRADE", "3"}), "+OK\r\n");
+    for (node_id_t id = 1; id <= 3; ++id) {
+        resp_client each(c.port(id));
+        BOOST_REQUIRE_EQUAL(each.auth("ops", "ops-secret"), "+OK\r\n");
+        std::vector<std::string> levels;
+        for (int i = 0; i < 100; ++i) {
+            levels = gate_levels(each);
+            if (!levels.empty() &&
+                std::ranges::all_of(levels, [](const auto& l) { return l == "3"; })) {
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds{20});
+        }
+        BOOST_CHECK_EQUAL(levels.size(), 2U);
+        for (const auto& level : levels) {
+            BOOST_CHECK_EQUAL(level, "3");
+        }
+    }
+    BOOST_CHECK_EQUAL(ops.call({"KYTHIRA.FORMAT", "UPGRADE", "3"}), "+OK\r\n");
+    // Plain commands keep working after the gate.
+    resp_client farm(c.port(follower));
+    BOOST_REQUIRE_EQUAL(farm.auth("farm", "farm-secret"), "+OK\r\n");
+    BOOST_CHECK_EQUAL(farm.call({"SET", "sccache/after-gate", "v"}), "+OK\r\n");
+    BOOST_CHECK_EQUAL(farm.call({"GET", "sccache/after-gate"}), bulk("v"));
+}
+
+// KYTHIRA.FORMAT is an admin command; the gate hop is for peers only, and
+// levels outside what the binary knows are refused.
+BOOST_AUTO_TEST_CASE(kythira_format_is_admin_only, *boost::unit_test::timeout(120)) {
+    cluster c;
+    BOOST_REQUIRE(c.await_all_leaders(std::chrono::seconds{20}));
+    resp_client farm(c.port(1));
+    BOOST_REQUIRE_EQUAL(farm.auth("farm", "farm-secret"), "+OK\r\n");
+    BOOST_CHECK(farm.call({"KYTHIRA.FORMAT", "STATUS"}).rfind("-NOPERM", 0) == 0);
+    BOOST_CHECK(farm.call({"KYTHIRA.FORMAT", "UPGRADE", "3"}).rfind("-NOPERM", 0) == 0);
+    resp_client ops(c.port(1));
+    BOOST_REQUIRE_EQUAL(ops.auth("ops", "ops-secret"), "+OK\r\n");
+    BOOST_CHECK(ops.call({"KYTHIRA.FORMAT", "GATE", "3", "a"}).rfind("-NOPERM", 0) == 0);
+    BOOST_CHECK(ops.call({"KYTHIRA.FORMAT", "UPGRADE", "4"}).rfind("-ERR", 0) == 0);
+    BOOST_CHECK(ops.call({"KYTHIRA.FORMAT", "UPGRADE", "2"}).rfind("-ERR", 0) == 0);
+    BOOST_CHECK(ops.call({"KYTHIRA.FORMAT", "UPGRADE", "x"}).rfind("-ERR", 0) == 0);
+    BOOST_CHECK(ops.call({"KYTHIRA.FORMAT"}).rfind("-ERR wrong number", 0) == 0);
+    const auto status = ops.call({"KYTHIRA.FORMAT", "STATUS"});
+    BOOST_CHECK(status.find("binary_level:" + std::to_string(k_redis_format_level)) !=
+                std::string::npos);
+}
+
+// ── tier 1 strings (redis-general-data-types task 3) ────────────────────────
+
+namespace {
+/// A cluster with mutable values and the format gate passed.
+auto typed_cluster(redis_gateway_config cfg = {}) -> std::unique_ptr<cluster> {
+    cfg._immutable_values = false;
+    auto c = std::make_unique<cluster>(cfg);
+    BOOST_REQUIRE(c->await_all_leaders(std::chrono::seconds{20}));
+    resp_client ops(c->port(1));
+    BOOST_REQUIRE_EQUAL(ops.auth("ops", "ops-secret"), "+OK\r\n");
+    BOOST_REQUIRE_EQUAL(ops.call({"KYTHIRA.FORMAT", "UPGRADE", "3"}), "+OK\r\n");
+    return c;
+}
+}  // namespace
+
+// Before the gate the new commands answer the gate error; plain SET, GET
+// and DEL keep working (Requirement 14.3).
+BOOST_AUTO_TEST_CASE(string_commands_wait_for_the_format_gate, *boost::unit_test::timeout(120)) {
+    if constexpr (gateway_type::k_node_format_level < k_redis_typed_values_level) {
+        return;
+    }
+    redis_gateway_config cfg;
+    cfg._immutable_values = false;
+    cluster c(cfg);
+    BOOST_REQUIRE(c.await_all_leaders(std::chrono::seconds{20}));
+    resp_client farm(c.port(c.leader_of(k_sccache_group)));
+    BOOST_REQUIRE_EQUAL(farm.auth("farm", "farm-secret"), "+OK\r\n");
+    BOOST_CHECK_EQUAL(farm.call({"INCR", "sccache/n"}),
+                      "-ERR this cluster has not enabled typed values yet (KYTHIRA.FORMAT)\r\n");
+    BOOST_CHECK_EQUAL(farm.call({"SET", "sccache/k", "v"}), "+OK\r\n");
+    resp_client ops(c.port(1));
+    BOOST_REQUIRE_EQUAL(ops.auth("ops", "ops-secret"), "+OK\r\n");
+    BOOST_REQUIRE_EQUAL(ops.call({"KYTHIRA.FORMAT", "UPGRADE", "3"}), "+OK\r\n");
+    BOOST_CHECK_EQUAL(farm.call({"INCR", "sccache/n"}), ":1\r\n");
+}
+
+// The disk-backed build cache holds only strings: every command that needs
+// the typed-values level answers that it needs another store, on the leader
+// and through a follower alike, and plain strings keep working
+// (Requirement 13.3). Its formats are pinned by state_machines.txt.
+BOOST_AUTO_TEST_CASE(the_file_store_refuses_typed_commands, *boost::unit_test::timeout(120)) {
+    if constexpr (!gateway_type::k_string_only_store) {
+        return;
+    }
+    cluster c;
+    BOOST_REQUIRE(c.await_all_leaders(std::chrono::seconds{20}));
+    const std::string refusal =
+        "-ERR this command needs KYTHIRA_CACHE_PERSISTENCE=memory or engine\r\n";
+    for (const auto id : {c.leader_of(k_sccache_group), c.a_follower_of(k_sccache_group)}) {
+        resp_client farm(c.port(id));
+        BOOST_REQUIRE_EQUAL(farm.auth("farm", "farm-secret"), "+OK\r\n");
+        BOOST_CHECK_EQUAL(farm.call({"INCR", "sccache/n"}), refusal);
+        BOOST_CHECK_EQUAL(farm.call({"APPEND", "sccache/n", "x"}), refusal);
+        BOOST_CHECK_EQUAL(farm.call({"HSET", "sccache/h", "f", "v"}), refusal);
+        BOOST_CHECK_EQUAL(farm.call({"SADD", "sccache/s", "m"}), refusal);
+        BOOST_CHECK_EQUAL(farm.call({"LPUSH", "sccache/l", "e"}), refusal);
+        BOOST_CHECK_EQUAL(farm.call({"HGET", "sccache/h", "f"}), refusal);
+    }
+    resp_client farm(c.port(c.leader_of(k_sccache_group)));
+    BOOST_REQUIRE_EQUAL(farm.auth("farm", "farm-secret"), "+OK\r\n");
+    BOOST_CHECK_EQUAL(farm.call({"SET", "sccache/k", "v"}), "+OK\r\n");
+    BOOST_CHECK_EQUAL(farm.call({"GET", "sccache/k"}), bulk("v"));
+}
+
+// Replies match Redis 7.2 byte for byte, sent to a follower so each write
+// is forwarded to its leader and decided in apply().
+BOOST_AUTO_TEST_CASE(tier_one_string_commands, *boost::unit_test::timeout(120)) {
+    if constexpr (gateway_type::k_node_format_level < k_redis_typed_values_level) {
+        return;
+    }
+    auto c = typed_cluster();
+    resp_client r(c->port(c->a_follower_of(k_sccache_group)));
+    BOOST_REQUIRE_EQUAL(r.auth("farm", "farm-secret"), "+OK\r\n");
+    const auto call = [&](const std::vector<std::string>& argv) { return r.call(argv); };
+
+    // INCR family
+    BOOST_CHECK_EQUAL(call({"INCR", "sccache/n"}), ":1\r\n");
+    BOOST_CHECK_EQUAL(call({"INCRBY", "sccache/n", "41"}), ":42\r\n");
+    BOOST_CHECK_EQUAL(call({"DECR", "sccache/n"}), ":41\r\n");
+    BOOST_CHECK_EQUAL(call({"DECRBY", "sccache/n", "-9"}), ":50\r\n");
+    BOOST_CHECK_EQUAL(call({"GET", "sccache/n"}), bulk("50"));
+    BOOST_CHECK_EQUAL(call({"INCRBY", "sccache/n", "x"}),
+                      "-ERR value is not an integer or out of range\r\n");
+    BOOST_CHECK_EQUAL(call({"SET", "sccache/big", "9223372036854775807"}), "+OK\r\n");
+    BOOST_CHECK_EQUAL(call({"INCR", "sccache/big"}),
+                      "-ERR increment or decrement would overflow\r\n");
+    BOOST_CHECK_EQUAL(call({"DECRBY", "sccache/n", "-9223372036854775808"}),
+                      "-ERR decrement would overflow\r\n");
+    BOOST_CHECK_EQUAL(call({"SET", "sccache/s", "abc"}), "+OK\r\n");
+    BOOST_CHECK_EQUAL(call({"INCR", "sccache/s"}),
+                      "-ERR value is not an integer or out of range\r\n");
+
+    // INCRBYFLOAT in binary128 (D1)
+    BOOST_CHECK_EQUAL(call({"INCRBYFLOAT", "sccache/f", "10.5"}), bulk("10.5"));
+    BOOST_CHECK_EQUAL(call({"INCRBYFLOAT", "sccache/f", "0.1"}), bulk("10.6"));
+    BOOST_CHECK_EQUAL(call({"INCRBYFLOAT", "sccache/f", "-5.0e3"}), bulk("-4989.4"));
+    BOOST_CHECK_EQUAL(call({"INCRBYFLOAT", "sccache/f", "x"}),
+                      "-ERR value is not a valid float\r\n");
+    BOOST_CHECK_EQUAL(call({"INCRBYFLOAT", "sccache/f", "inf"}),
+                      "-ERR increment would produce NaN or Infinity\r\n");
+    BOOST_CHECK_EQUAL(call({"INCRBYFLOAT", "sccache/s", "1"}),
+                      "-ERR value is not a valid float\r\n");
+
+    // SET options
+    BOOST_CHECK_EQUAL(call({"SET", "sccache/s", "x", "NX"}), "$-1\r\n");
+    BOOST_CHECK_EQUAL(call({"SET", "sccache/s", "x", "XX", "GET"}), bulk("abc"));
+    BOOST_CHECK_EQUAL(call({"SET", "sccache/new", "y", "XX"}), "$-1\r\n");
+    BOOST_CHECK_EQUAL(call({"SET", "sccache/new", "y", "nx", "px", "60000"}), "+OK\r\n");
+    const auto pttl = call({"TTL", "sccache/new"});
+    BOOST_CHECK(pttl == ":60\r\n" || pttl == ":59\r\n");
+    BOOST_CHECK_EQUAL(call({"SET", "sccache/new", "z", "KEEPTTL"}), "+OK\r\n");
+    const auto kept = call({"TTL", "sccache/new"});
+    BOOST_CHECK(kept == ":60\r\n" || kept == ":59\r\n");
+    BOOST_CHECK_EQUAL(call({"SET", "sccache/new", "z", "NX", "XX"}), "-ERR syntax error\r\n");
+    BOOST_CHECK_EQUAL(call({"SET", "sccache/new", "z", "EX", "0"}),
+                      "-ERR invalid expire time in 'set' command\r\n");
+    BOOST_CHECK_EQUAL(call({"SET", "sccache/new", "z", "EX", "10", "KEEPTTL"}),
+                      "-ERR syntax error\r\n");
+    BOOST_CHECK_EQUAL(call({"SET", "sccache/gone", "z", "PXAT", "1"}), "+OK\r\n");
+    BOOST_CHECK_EQUAL(call({"GET", "sccache/gone"}), "$-1\r\n");
+
+    // SETNX, GETSET, PSETEX, GETDEL, GETEX
+    BOOST_CHECK_EQUAL(call({"SETNX", "sccache/nx", "1"}), ":1\r\n");
+    BOOST_CHECK_EQUAL(call({"SETNX", "sccache/nx", "2"}), ":0\r\n");
+    BOOST_CHECK_EQUAL(call({"GETSET", "sccache/nx", "3"}), bulk("1"));
+    BOOST_CHECK_EQUAL(call({"GETSET", "sccache/fresh", "3"}), "$-1\r\n");
+    BOOST_CHECK_EQUAL(call({"PSETEX", "sccache/ps", "100000", "v"}), "+OK\r\n");
+    BOOST_CHECK_EQUAL(call({"PSETEX", "sccache/ps", "0", "v"}),
+                      "-ERR invalid expire time in 'psetex' command\r\n");
+    BOOST_CHECK_EQUAL(call({"GETEX", "sccache/ps", "PERSIST"}), bulk("v"));
+    BOOST_CHECK_EQUAL(call({"TTL", "sccache/ps"}), ":-1\r\n");
+    BOOST_CHECK_EQUAL(call({"GETEX", "sccache/ps", "EX", "100"}), bulk("v"));
+    BOOST_CHECK_EQUAL(call({"TTL", "sccache/ps"}), ":100\r\n");
+    BOOST_CHECK_EQUAL(call({"GETEX", "sccache/ps", "BOGUS"}), "-ERR syntax error\r\n");
+    BOOST_CHECK_EQUAL(call({"GETDEL", "sccache/ps"}), bulk("v"));
+    BOOST_CHECK_EQUAL(call({"GETDEL", "sccache/ps"}), "$-1\r\n");
+    BOOST_CHECK_EQUAL(call({"GETEX", "sccache/ps"}), "$-1\r\n");
+
+    // APPEND, SETRANGE, GETRANGE (G2)
+    BOOST_CHECK_EQUAL(call({"APPEND", "sccache/a", "Hello"}), ":5\r\n");
+    BOOST_CHECK_EQUAL(call({"APPEND", "sccache/a", " World"}), ":11\r\n");
+    BOOST_CHECK_EQUAL(call({"SETRANGE", "sccache/a", "6", "Redis"}), ":11\r\n");
+    BOOST_CHECK_EQUAL(call({"GET", "sccache/a"}), bulk("Hello Redis"));
+    BOOST_CHECK_EQUAL(call({"SETRANGE", "sccache/pad", "3", "x"}), ":4\r\n");
+    BOOST_CHECK_EQUAL(call({"GET", "sccache/pad"}), bulk(std::string("\0\0\0x", 4)));
+    BOOST_CHECK_EQUAL(call({"SETRANGE", "sccache/pad", "-1", "x"}),
+                      "-ERR offset is out of range\r\n");
+    BOOST_CHECK_EQUAL(call({"SETRANGE", "sccache/none", "5", ""}), ":0\r\n");
+    BOOST_CHECK_EQUAL(call({"GETRANGE", "sccache/a", "0", "-100"}), bulk("H"));
+    BOOST_CHECK_EQUAL(call({"GETRANGE", "sccache/a", "-3", "-5"}), bulk(""));
+    BOOST_CHECK_EQUAL(call({"GETRANGE", "sccache/a", "-5", "-1"}), bulk("Redis"));
+
+    // TYPE, TOUCH, OBJECT ENCODING, UNLINK
+    BOOST_CHECK_EQUAL(call({"TYPE", "sccache/a"}), "+string\r\n");
+    BOOST_CHECK_EQUAL(call({"TYPE", "sccache/missing"}), "+none\r\n");
+    BOOST_CHECK_EQUAL(call({"TOUCH", "sccache/a", "sccache/missing"}), ":1\r\n");
+    BOOST_CHECK_EQUAL(call({"OBJECT", "ENCODING", "sccache/n"}), bulk("int"));
+    BOOST_CHECK_EQUAL(call({"OBJECT", "ENCODING", "sccache/a"}), bulk("embstr"));
+    BOOST_CHECK_EQUAL(call({"OBJECT", "ENCODING", "sccache/missing"}), "$-1\r\n");
+    BOOST_CHECK_EQUAL(call({"UNLINK", "sccache/a"}), ":1\r\n");
+    BOOST_CHECK_EQUAL(call({"UNLINK", "sccache/a"}), ":0\r\n");
+
+    // RESP3 renders the same replies with its own null.
+    BOOST_REQUIRE(call({"HELLO", "3"}).starts_with('%'));
+    BOOST_CHECK_EQUAL(call({"GETDEL", "sccache/a"}), "_\r\n");
+    BOOST_CHECK_EQUAL(call({"SET", "sccache/nx", "4", "GET"}), bulk("3"));
+}
+
+// The immutable-value rule (D11) holds for the new commands: creating a key
+// works, changing a live value is refused and counted.
+BOOST_AUTO_TEST_CASE(immutable_values_refuse_string_mutations, *boost::unit_test::timeout(120)) {
+    if constexpr (gateway_type::k_node_format_level < k_redis_typed_values_level) {
+        return;
+    }
+    cluster c;  // _immutable_values on, as by default
+    BOOST_REQUIRE(c.await_all_leaders(std::chrono::seconds{20}));
+    resp_client ops(c.port(1));
+    BOOST_REQUIRE_EQUAL(ops.auth("ops", "ops-secret"), "+OK\r\n");
+    BOOST_REQUIRE_EQUAL(ops.call({"KYTHIRA.FORMAT", "UPGRADE", "3"}), "+OK\r\n");
+    resp_client r(c.port(c.leader_of(k_sccache_group)));
+    BOOST_REQUIRE_EQUAL(r.auth("farm", "farm-secret"), "+OK\r\n");
+    BOOST_CHECK_EQUAL(r.call({"INCR", "sccache/n"}), ":1\r\n");
+    BOOST_CHECK_EQUAL(r.call({"INCR", "sccache/n"}), "-ERR value conflict for an existing key\r\n");
+    BOOST_CHECK_EQUAL(r.call({"APPEND", "sccache/n", "x"}),
+                      "-ERR value conflict for an existing key\r\n");
+    BOOST_CHECK_EQUAL(r.call({"SET", "sccache/n", "1", "XX", "GET"}), bulk("1"));
+    // Requirement 5.2: the deadline and the key itself are protected too.
+    BOOST_CHECK_EQUAL(r.call({"EXPIRE", "sccache/n", "100"}),
+                      "-ERR value conflict for an existing key\r\n");
+    BOOST_CHECK_EQUAL(r.call({"GETDEL", "sccache/n"}),
+                      "-ERR value conflict for an existing key\r\n");
+    BOOST_CHECK_EQUAL(r.call({"DEL", "sccache/n"}), ":1\r\n");
+    BOOST_CHECK_GE(c.gateway(c.leader_of(k_sccache_group)).stats()._value_conflicts.load(), 2U);
+
+    // A user's mutable prefix may change, through exec records and plain SET.
+    resp_client m(c.port(c.a_follower_of(k_sccache_group)));
+    BOOST_REQUIRE_EQUAL(m.auth("counter", "counter-secret"), "+OK\r\n");
+    BOOST_CHECK_EQUAL(m.call({"INCR", "sccache/counters/a"}), ":1\r\n");
+    BOOST_CHECK_EQUAL(m.call({"INCR", "sccache/counters/a"}), ":2\r\n");
+    BOOST_CHECK_EQUAL(m.call({"SET", "sccache/counters/a", "7"}), "+OK\r\n");
+    BOOST_CHECK_EQUAL(m.call({"EXPIRE", "sccache/counters/a", "100"}), ":1\r\n");
+    BOOST_CHECK_EQUAL(m.call({"GETDEL", "sccache/counters/a"}), bulk("7"));
+    BOOST_CHECK_EQUAL(m.call({"SET", "sccache/plain", "1"}), "+OK\r\n");
+    BOOST_CHECK_EQUAL(m.call({"SET", "sccache/plain", "2"}),
+                      "-ERR value conflict for an existing key\r\n");
+    // The same prefix is not mutable for a user without it.
+    BOOST_CHECK_EQUAL(r.call({"SET", "sccache/counters/b", "1"}), "+OK\r\n");
+    BOOST_CHECK_EQUAL(r.call({"INCR", "sccache/counters/b"}),
+                      "-ERR value conflict for an existing key\r\n");
+}
+
+// Task 6: multi-key commands. Keys in one group make one record; this
+// build has no transactions, so keys in two groups answer -CROSSSLOT and
+// change nothing (Requirement 6.3). Sent to a follower: the record hops.
+BOOST_AUTO_TEST_CASE(multi_key_commands, *boost::unit_test::timeout(120)) {
+    if constexpr (gateway_type::k_node_format_level < k_redis_typed_values_level) {
+        return;
+    }
+    auto c = typed_cluster();
+    resp_client r(c->port(c->a_follower_of(k_sccache_group)));
+    BOOST_REQUIRE_EQUAL(r.auth("ops", "ops-secret"), "+OK\r\n");
+    const auto call = [&](const std::vector<std::string>& argv) { return r.call(argv); };
+    const std::string crossslot = "-CROSSSLOT Keys in request don't hash to the same slot\r\n";
+
+    BOOST_CHECK_EQUAL(call({"MSETNX", "sccache/a", "1", "sccache/b", "2"}), ":1\r\n");
+    BOOST_CHECK_EQUAL(call({"MSETNX", "sccache/b", "x", "sccache/c", "3"}), ":0\r\n");
+    BOOST_CHECK_EQUAL(call({"EXISTS", "sccache/a", "sccache/b", "sccache/c", "a/x"}), ":2\r\n");
+    BOOST_CHECK_EQUAL(call({"SET", "sccache/t", "v", "PX", "100000"}), "+OK\r\n");
+    BOOST_CHECK_EQUAL(call({"RENAME", "sccache/t", "sccache/u"}), "+OK\r\n");
+    BOOST_CHECK_EQUAL(call({"GET", "sccache/u"}), bulk("v"));
+    BOOST_CHECK(call({"PTTL", "sccache/u"}) != ":-1\r\n");
+    BOOST_CHECK_EQUAL(call({"RENAME", "sccache/t", "sccache/u"}), "-ERR no such key\r\n");
+    BOOST_CHECK_EQUAL(call({"RENAMENX", "sccache/u", "sccache/a"}), ":0\r\n");
+    BOOST_CHECK_EQUAL(call({"COPY", "sccache/u", "sccache/a"}), ":0\r\n");
+    BOOST_CHECK_EQUAL(call({"COPY", "sccache/u", "sccache/a", "DB", "0", "REPLACE"}), ":1\r\n");
+    BOOST_CHECK_EQUAL(call({"COPY", "sccache/u", "sccache/a", "DB", "1"}),
+                      "-ERR DB index is out of range\r\n");
+    BOOST_CHECK_EQUAL(call({"GET", "sccache/a"}), bulk("v"));
+    BOOST_CHECK_EQUAL(call({"DEL", "sccache/a", "sccache/b", "sccache/zz"}), ":2\r\n");
+    BOOST_CHECK_EQUAL(call({"UNLINK", "sccache/u", "sccache/a"}), ":1\r\n");
+
+    // Across the "m" cut: refused, nothing changed.
+    BOOST_CHECK_EQUAL(call({"SET", "a/x", "1"}), "+OK\r\n");
+    BOOST_CHECK_EQUAL(call({"RENAME", "a/x", "sccache/x"}), crossslot);
+    BOOST_CHECK_EQUAL(call({"MSETNX", "a/y", "1", "sccache/y", "2"}), crossslot);
+    BOOST_CHECK_EQUAL(call({"DEL", "a/x", "sccache/c"}), crossslot);
+    BOOST_CHECK_EQUAL(call({"GET", "a/x"}), bulk("1"));
+    BOOST_CHECK_EQUAL(call({"EXISTS", "a/y", "sccache/y", "sccache/x"}), ":0\r\n");
+    BOOST_CHECK(call({"MSETNX", "a", "1", "b"}).starts_with("-ERR wrong number of arguments"));
+}
+
+// Task 7: hashes end to end, from a follower (writes go to the leader as
+// exec records, reads are forwarded), with type errors both ways, the
+// collection limits and RESP2/RESP3 shapes.
+BOOST_AUTO_TEST_CASE(hash_commands, *boost::unit_test::timeout(120)) {
+    if constexpr (gateway_type::k_node_format_level < k_redis_typed_values_level) {
+        return;
+    }
+    redis_gateway_config cfg;
+    cfg._max_collection_elements = 3;
+    auto c = typed_cluster(cfg);
+    resp_client r(c->port(c->a_follower_of(k_sccache_group)));
+    BOOST_REQUIRE_EQUAL(r.auth("ops", "ops-secret"), "+OK\r\n");
+    const auto call = [&](const std::vector<std::string>& argv) { return r.call(argv); };
+    const std::string wrongtype =
+        "-WRONGTYPE Operation against a key holding the wrong kind of value\r\n";
+
+    BOOST_CHECK_EQUAL(call({"HSET", "sccache/h", "b", "2", "a", "1"}), ":2\r\n");
+    BOOST_CHECK_EQUAL(call({"HSETNX", "sccache/h", "a", "x"}), ":0\r\n");
+    BOOST_CHECK_EQUAL(call({"HMSET", "sccache/h", "a", "one"}), "+OK\r\n");
+    BOOST_CHECK_EQUAL(call({"HGET", "sccache/h", "a"}), bulk("one"));
+    BOOST_CHECK_EQUAL(call({"HMGET", "sccache/h", "a", "zz"}), "*2\r\n$3\r\none\r\n$-1\r\n");
+    BOOST_CHECK_EQUAL(call({"HLEN", "sccache/h"}), ":2\r\n");
+    BOOST_CHECK_EQUAL(call({"HEXISTS", "sccache/h", "b"}), ":1\r\n");
+    BOOST_CHECK_EQUAL(call({"HSTRLEN", "sccache/h", "a"}), ":3\r\n");
+    BOOST_CHECK_EQUAL(call({"HKEYS", "sccache/h"}), "*2\r\n$1\r\na\r\n$1\r\nb\r\n");
+    BOOST_CHECK_EQUAL(call({"HVALS", "sccache/h"}), "*2\r\n$3\r\none\r\n$1\r\n2\r\n");
+    BOOST_CHECK_EQUAL(call({"HGETALL", "sccache/h"}),
+                      "*4\r\n$1\r\na\r\n$3\r\none\r\n$1\r\nb\r\n$1\r\n2\r\n");
+    BOOST_CHECK_EQUAL(call({"HINCRBY", "sccache/h", "n", "5"}), ":5\r\n");
+    BOOST_CHECK_EQUAL(call({"HINCRBY", "sccache/h", "n", "x"}),
+                      "-ERR value is not an integer or out of range\r\n");
+    BOOST_CHECK_EQUAL(call({"HINCRBYFLOAT", "sccache/h", "n", "0.5"}), bulk("5.5"));
+    BOOST_CHECK_EQUAL(call({"TYPE", "sccache/h"}), "+hash\r\n");
+    BOOST_CHECK_EQUAL(call({"OBJECT", "ENCODING", "sccache/h"}), bulk("listpack"));
+    // The element limit is the record's: a fourth field is refused.
+    BOOST_CHECK_EQUAL(call({"HSET", "sccache/h", "d", "4"}),
+                      "-ERR collection exceeds the configured maximum of 3 elements\r\n");
+    // HRANDFIELD picks on the serving node; every pick is a field.
+    const auto pick = call({"HRANDFIELD", "sccache/h"});
+    BOOST_CHECK(pick == bulk("a") || pick == bulk("b") || pick == bulk("n"));
+    BOOST_CHECK(call({"HRANDFIELD", "sccache/h", "5"}).starts_with("*3\r\n"));
+    BOOST_CHECK(call({"HRANDFIELD", "sccache/h", "-5", "withvalues"}).starts_with("*10\r\n"));
+    BOOST_CHECK_EQUAL(call({"HRANDFIELD", "sccache/h", "1", "VALUES"}), "-ERR syntax error\r\n");
+
+    // Type errors both ways change nothing.
+    BOOST_CHECK_EQUAL(call({"SET", "sccache/s", "v"}), "+OK\r\n");
+    BOOST_CHECK_EQUAL(call({"HSET", "sccache/s", "f", "v"}), wrongtype);
+    BOOST_CHECK_EQUAL(call({"HGET", "sccache/s", "f"}), wrongtype);
+    BOOST_CHECK_EQUAL(call({"GET", "sccache/h"}), wrongtype);
+    BOOST_CHECK_EQUAL(call({"STRLEN", "sccache/h"}), wrongtype);
+    BOOST_CHECK_EQUAL(call({"INCR", "sccache/h"}), wrongtype);
+    BOOST_CHECK_EQUAL(call({"APPEND", "sccache/h", "x"}), wrongtype);
+    BOOST_CHECK_EQUAL(call({"GET", "sccache/s"}), bulk("v"));
+
+    // Deadlines, renames and deletes keep or drop the whole hash.
+    BOOST_CHECK_EQUAL(call({"EXPIRE", "sccache/h", "1000"}), ":1\r\n");
+    BOOST_CHECK_EQUAL(call({"HDEL", "sccache/h", "n"}), ":1\r\n");
+    BOOST_CHECK(call({"PTTL", "sccache/h"}) != ":-1\r\n");
+    BOOST_CHECK_EQUAL(call({"RENAME", "sccache/h", "sccache/h2"}), "+OK\r\n");
+    BOOST_CHECK_EQUAL(call({"HGET", "sccache/h2", "b"}), bulk("2"));
+    BOOST_CHECK_EQUAL(call({"HDEL", "sccache/h2", "a", "b"}), ":2\r\n");
+    BOOST_CHECK_EQUAL(call({"EXISTS", "sccache/h2"}), ":0\r\n");
+    BOOST_CHECK_EQUAL(call({"HGETALL", "sccache/h2"}), "*0\r\n");
+    BOOST_CHECK_EQUAL(call({"HGET", "sccache/h2", "a"}), "$-1\r\n");
+
+    // A collection does not cross groups until task 11.
+    BOOST_CHECK_EQUAL(call({"HSET", "a/h", "f", "v"}), ":1\r\n");
+    BOOST_CHECK_EQUAL(call({"RENAME", "a/h", "sccache/x"}),
+                      "-CROSSSLOT Keys in request don't hash to the same slot\r\n");
+
+    // RESP3: HGETALL is a map; HRANDFIELD WITHVALUES gives pairs.
+    BOOST_CHECK(call({"HELLO", "3"}).starts_with("%"));
+    BOOST_CHECK_EQUAL(call({"HGETALL", "a/h"}), "%1\r\n$1\r\nf\r\n$1\r\nv\r\n");
+    BOOST_CHECK_EQUAL(call({"HRANDFIELD", "a/h", "1", "WITHVALUES"}),
+                      "*1\r\n*2\r\n$1\r\nf\r\n$1\r\nv\r\n");
+    // Task 12: a small hash comes back whole.
+    BOOST_CHECK_EQUAL(call({"HSCAN", "a/h", "0"}), "*2\r\n$1\r\n0\r\n*2\r\n$1\r\nf\r\n$1\r\nv\r\n");
+}
+
+// Task 8: sets end to end from a follower: SPOP picked by the serving
+// side and removed in apply(), multi-key writes in one group, the algebra
+// across groups read key by key.
+BOOST_AUTO_TEST_CASE(set_commands, *boost::unit_test::timeout(120)) {
+    if constexpr (gateway_type::k_node_format_level < k_redis_typed_values_level) {
+        return;
+    }
+    auto c = typed_cluster();
+    resp_client r(c->port(c->a_follower_of(k_sccache_group)));
+    BOOST_REQUIRE_EQUAL(r.auth("ops", "ops-secret"), "+OK\r\n");
+    const auto call = [&](const std::vector<std::string>& argv) { return r.call(argv); };
+    const std::string crossslot = "-CROSSSLOT Keys in request don't hash to the same slot\r\n";
+
+    BOOST_CHECK_EQUAL(call({"SADD", "sccache/x", "b", "a", "c"}), ":3\r\n");
+    BOOST_CHECK_EQUAL(call({"SADD", "sccache/y", "c", "d"}), ":2\r\n");
+    BOOST_CHECK_EQUAL(call({"SMEMBERS", "sccache/x"}), "*3\r\n$1\r\na\r\n$1\r\nb\r\n$1\r\nc\r\n");
+    BOOST_CHECK_EQUAL(call({"SCARD", "sccache/x"}), ":3\r\n");
+    BOOST_CHECK_EQUAL(call({"SISMEMBER", "sccache/x", "a"}), ":1\r\n");
+    BOOST_CHECK_EQUAL(call({"SMISMEMBER", "sccache/x", "a", "z"}), "*2\r\n:1\r\n:0\r\n");
+    BOOST_CHECK_EQUAL(call({"SINTER", "sccache/x", "sccache/y"}), "*1\r\n$1\r\nc\r\n");
+    BOOST_CHECK_EQUAL(call({"SINTERCARD", "2", "sccache/x", "sccache/y", "LIMIT", "5"}), ":1\r\n");
+    BOOST_CHECK_EQUAL(call({"SDIFF", "sccache/x", "sccache/y"}), "*2\r\n$1\r\na\r\n$1\r\nb\r\n");
+    BOOST_CHECK_EQUAL(call({"SUNIONSTORE", "sccache/u", "sccache/x", "sccache/y"}), ":4\r\n");
+    BOOST_CHECK_EQUAL(call({"SMOVE", "sccache/u", "sccache/v", "d"}), ":1\r\n");
+    BOOST_CHECK_EQUAL(call({"SMEMBERS", "sccache/v"}), "*1\r\n$1\r\nd\r\n");
+    BOOST_CHECK_EQUAL(call({"TYPE", "sccache/v"}), "+set\r\n");
+    BOOST_CHECK_EQUAL(call({"OBJECT", "ENCODING", "sccache/v"}), bulk("hashtable"));
+
+    // SPOP: every pop is a member that was there, and they run out.
+    std::set<std::string> popped;
+    for (int i = 0; i < 3; ++i) {
+        const auto reply = call({"SPOP", "sccache/x"});
+        BOOST_REQUIRE(reply.starts_with("$1\r\n"));
+        popped.insert(reply.substr(4, 1));
+    }
+    BOOST_CHECK((popped == std::set<std::string>{"a", "b", "c"}));
+    BOOST_CHECK_EQUAL(call({"SPOP", "sccache/x"}), "$-1\r\n");
+    BOOST_CHECK_EQUAL(call({"SPOP", "sccache/y", "5"}).substr(0, 4), "*2\r\n");
+    BOOST_CHECK_EQUAL(call({"EXISTS", "sccache/y"}), ":0\r\n");
+    BOOST_CHECK_EQUAL(call({"SPOP", "sccache/y", "-1"}),
+                      "-ERR value is out of range, must be positive\r\n");
+
+    // Type errors and groups.
+    BOOST_CHECK_EQUAL(call({"SET", "sccache/s", "v"}), "+OK\r\n");
+    BOOST_CHECK_EQUAL(call({"SADD", "sccache/s", "m"}),
+                      "-WRONGTYPE Operation against a key holding the wrong kind of value\r\n");
+    BOOST_CHECK_EQUAL(call({"SINTER", "sccache/u", "sccache/s"}),
+                      "-WRONGTYPE Operation against a key holding the wrong kind of value\r\n");
+    BOOST_CHECK_EQUAL(call({"SADD", "a/z", "c", "q"}), ":2\r\n");
+    BOOST_CHECK_EQUAL(call({"SINTER", "a/z", "sccache/u"}), "*1\r\n$1\r\nc\r\n");
+    BOOST_CHECK_EQUAL(call({"SMOVE", "a/z", "sccache/u", "q"}), crossslot);
+    BOOST_CHECK_EQUAL(call({"SUNIONSTORE", "a/w", "a/z", "sccache/u"}), crossslot);
+
+    BOOST_CHECK(call({"HELLO", "3"}).starts_with("%"));
+    BOOST_CHECK_EQUAL(call({"SMEMBERS", "a/z"}), "~2\r\n$1\r\nc\r\n$1\r\nq\r\n");
+    BOOST_CHECK_EQUAL(call({"SMEMBERS", "sccache/v"}), "~1\r\n$1\r\nd\r\n");
+    BOOST_CHECK_EQUAL(call({"SDIFF", "a/z", "sccache/u"}), "~1\r\n$1\r\nq\r\n");
+}
+
+// Task 9: lists end to end from a follower; the blocking forms stay
+// unknown until phase 2.
+BOOST_AUTO_TEST_CASE(list_commands, *boost::unit_test::timeout(120)) {
+    if constexpr (gateway_type::k_node_format_level < k_redis_typed_values_level) {
+        return;
+    }
+    auto c = typed_cluster();
+    resp_client r(c->port(c->a_follower_of(k_sccache_group)));
+    BOOST_REQUIRE_EQUAL(r.auth("ops", "ops-secret"), "+OK\r\n");
+    const auto call = [&](const std::vector<std::string>& argv) { return r.call(argv); };
+
+    BOOST_CHECK_EQUAL(call({"RPUSH", "sccache/l", "b", "c"}), ":2\r\n");
+    BOOST_CHECK_EQUAL(call({"LPUSH", "sccache/l", "a"}), ":3\r\n");
+    BOOST_CHECK_EQUAL(call({"LPUSHX", "sccache/none", "a"}), ":0\r\n");
+    BOOST_CHECK_EQUAL(call({"LRANGE", "sccache/l", "0", "-1"}),
+                      "*3\r\n$1\r\na\r\n$1\r\nb\r\n$1\r\nc\r\n");
+    BOOST_CHECK_EQUAL(call({"LLEN", "sccache/l"}), ":3\r\n");
+    BOOST_CHECK_EQUAL(call({"LINDEX", "sccache/l", "-1"}), bulk("c"));
+    BOOST_CHECK_EQUAL(call({"LINDEX", "sccache/l", "x"}),
+                      "-ERR value is not an integer or out of range\r\n");
+    BOOST_CHECK_EQUAL(call({"LSET", "sccache/l", "1", "B"}), "+OK\r\n");
+    BOOST_CHECK_EQUAL(call({"LINSERT", "sccache/l", "before", "B", "x"}), ":4\r\n");
+    BOOST_CHECK_EQUAL(call({"LPOS", "sccache/l", "x"}), ":1\r\n");
+    BOOST_CHECK_EQUAL(call({"LPOS", "sccache/l", "x", "RANK", "0"}).substr(0, 25),
+                      "-ERR RANK can't be zero: ");
+    BOOST_CHECK_EQUAL(call({"LREM", "sccache/l", "0", "x"}), ":1\r\n");
+    BOOST_CHECK_EQUAL(call({"LTRIM", "sccache/l", "0", "1"}), "+OK\r\n");
+    BOOST_CHECK_EQUAL(call({"RPOPLPUSH", "sccache/l", "sccache/m"}), bulk("B"));
+    BOOST_CHECK_EQUAL(call({"LMOVE", "sccache/m", "sccache/l", "left", "right"}), bulk("B"));
+    BOOST_CHECK_EQUAL(call({"LMPOP", "2", "sccache/none", "sccache/l", "LEFT", "COUNT", "5"}),
+                      "*2\r\n$9\r\nsccache/l\r\n*2\r\n$1\r\na\r\n$1\r\nB\r\n");
+    BOOST_CHECK_EQUAL(call({"LMPOP", "1", "sccache/l", "LEFT"}), "*-1\r\n");
+    BOOST_CHECK_EQUAL(call({"RPUSH", "sccache/l", "1", "2", "3"}), ":3\r\n");
+    BOOST_CHECK_EQUAL(call({"LPOP", "sccache/l"}), bulk("1"));
+    BOOST_CHECK_EQUAL(call({"RPOP", "sccache/l", "5"}), "*2\r\n$1\r\n3\r\n$1\r\n2\r\n");
+    BOOST_CHECK_EQUAL(call({"LPOP", "sccache/l"}), "$-1\r\n");
+    BOOST_CHECK_EQUAL(call({"LPOP", "sccache/l", "2"}), "*-1\r\n");
+    BOOST_CHECK_EQUAL(call({"RPUSH", "sccache/t", "x"}), ":1\r\n");
+    BOOST_CHECK_EQUAL(call({"TYPE", "sccache/t"}), "+list\r\n");
+    BOOST_CHECK_EQUAL(call({"OBJECT", "ENCODING", "sccache/t"}), bulk("quicklist"));
+    BOOST_CHECK_EQUAL(call({"GET", "sccache/t"}),
+                      "-WRONGTYPE Operation against a key holding the wrong kind of value\r\n");
+    BOOST_CHECK_EQUAL(call({"RPUSH", "a/t", "y"}), ":1\r\n");
+    BOOST_CHECK_EQUAL(call({"LMOVE", "a/t", "sccache/t", "LEFT", "LEFT"}),
+                      "-CROSSSLOT Keys in request don't hash to the same slot\r\n");
+    for (const auto* name : {"BLPOP", "BRPOP", "BLMOVE", "BRPOPLPUSH", "BLMPOP"}) {
+        BOOST_CHECK(call({name, "sccache/t", "0"}).starts_with("-ERR unknown command"));
+    }
+    BOOST_CHECK(call({"HELLO", "3"}).starts_with("%"));
+    BOOST_CHECK_EQUAL(call({"LPOP", "sccache/none", "2"}), "_\r\n");
+    BOOST_CHECK_EQUAL(call({"LRANGE", "a/t", "0", "-1"}), "*1\r\n$1\r\ny\r\n");
+}
+
+namespace {
+/// The cursor and elements of a RESP2 SCAN-family reply.
+auto parse_scan(const std::string& reply) -> std::pair<std::string, std::vector<std::string>> {
+    BOOST_REQUIRE_MESSAGE(reply.starts_with("*2\r\n$"), reply);
+    std::size_t at = 0;
+    const auto line = [&] {
+        const auto end = reply.find("\r\n", at);
+        BOOST_REQUIRE(end != std::string::npos);
+        auto out = reply.substr(at, end - at);
+        at = end + 2;
+        return out;
+    };
+    const auto bulk_at = [&] {
+        const auto n = std::stoul(line().substr(1));
+        auto out = reply.substr(at, n);
+        at += n + 2;
+        return out;
+    };
+    (void)line();
+    auto cursor = bulk_at();
+    const auto count = std::stoul(line().substr(1));
+    std::vector<std::string> elements;
+    for (std::size_t i = 0; i < count; ++i) {
+        elements.push_back(bulk_at());
+    }
+    BOOST_REQUIRE_EQUAL(at, reply.size());
+    return {cursor, elements};
+}
+
+/// Every element a walk returns: `head` is `{"SCAN"}` or `{"HSCAN", key}`,
+/// `tail` the options; between calls `between(call_number)` runs.
+auto scan_walk(resp_client& r, const std::vector<std::string>& head,
+               const std::vector<std::string>& tail = {},
+               const std::function<void(int)>& between = {}) -> std::vector<std::string> {
+    std::vector<std::string> out;
+    std::string cursor = "0";
+    for (int call = 0; call < 10000; ++call) {
+        auto argv = head;
+        argv.push_back(cursor);
+        argv.insert(argv.end(), tail.begin(), tail.end());
+        auto [next, elements] = parse_scan(r.call(argv));
+        out.insert(out.end(), elements.begin(), elements.end());
+        if (next == "0") {
+            return out;
+        }
+        cursor = next;
+        if (between) {
+            between(call);
+        }
+    }
+    BOOST_FAIL("the walk never ended");
+    return out;
+}
+
+auto sorted(std::vector<std::string> v) -> std::vector<std::string> {
+    std::sort(v.begin(), v.end());
+    return v;
+}
+
+auto numbered(const std::string& prefix, int n) -> std::vector<std::string> {
+    std::vector<std::string> out;
+    for (int i = 0; i < n; ++i) {
+        out.push_back(prefix + (i < 10 ? "0" : "") + std::to_string(i));
+    }
+    return out;
+}
+}  // namespace
+
+// Task 12 (Requirement 7): SCAN, HSCAN, SSCAN, KEYS and RANDOMKEY over
+// both groups, from a node that leads neither or both.
+BOOST_AUTO_TEST_CASE(scan_family, *boost::unit_test::timeout(180)) {
+    if constexpr (gateway_type::k_node_format_level < k_redis_typed_values_level) {
+        return;
+    }
+    redis_gateway_config cfg;
+    cfg._keys_limit = 50;
+    cfg._cursor_idle = std::chrono::milliseconds{3000};
+    auto c = typed_cluster(cfg);
+    resp_client ops(c->port(1));
+    BOOST_REQUIRE_EQUAL(ops.auth("ops", "ops-secret"), "+OK\r\n");
+    resp_client ops2(c->port(2));
+    BOOST_REQUIRE_EQUAL(ops2.auth("ops", "ops-secret"), "+OK\r\n");
+    resp_client farm(c->port(3));
+    BOOST_REQUIRE_EQUAL(farm.auth("farm", "farm-secret"), "+OK\r\n");
+
+    // A command far wider than the old 64-argument limit is accepted, and
+    // still fits once forwarding to the leader adds its own arguments.
+    {
+        resp_client wide(c->port(c->a_follower_of(k_sccache_group)));
+        BOOST_REQUIRE_EQUAL(wide.auth("ops", "ops-secret"), "+OK\r\n");
+        std::vector<std::string> sadd{"SADD", "sccache/wide"};
+        for (int i = 0; i < 500; ++i) {
+            sadd.push_back(std::to_string(i));
+        }
+        BOOST_CHECK_EQUAL(wide.call(sadd), ":500\r\n");
+        BOOST_CHECK_EQUAL(wide.call({"DEL", "sccache/wide"}), ":1\r\n");
+    }
+
+    // 40 strings in each group, a hash and a set in the upper one.
+    const auto lower = numbered("a/k", 40);
+    const auto upper = numbered("sccache/k", 40);
+    for (const auto& k : lower) {
+        BOOST_REQUIRE_EQUAL(ops.call({"SET", k, "v"}), "+OK\r\n");
+    }
+    for (const auto& k : upper) {
+        BOOST_REQUIRE_EQUAL(ops.call({"SET", k, "v"}), "+OK\r\n");
+    }
+    std::vector<std::string> fields;
+    std::vector<std::string> members;
+    for (int batch = 0; batch < 10; ++batch) {
+        std::vector<std::string> hset{"HSET", "sccache/h"};
+        std::vector<std::string> sadd{"SADD", "sccache/s"};
+        for (int i = batch * 30; i < (batch + 1) * 30; ++i) {
+            if (i < 200) {
+                fields.push_back("f" + std::to_string(i));
+                hset.push_back(fields.back());
+                hset.push_back(std::to_string(i));
+            }
+            members.push_back("m" + std::to_string(i));
+            sadd.push_back(members.back());
+        }
+        if (hset.size() > 2) {
+            const auto added = ops.call(hset);
+            BOOST_REQUIRE_MESSAGE(added.starts_with(":"), added);
+        }
+        BOOST_REQUIRE_EQUAL(ops.call(sadd), ":30\r\n");
+    }
+    BOOST_REQUIRE_EQUAL(ops.call({"HLEN", "sccache/h"}), ":200\r\n");
+    std::vector<std::string> all = lower;
+    all.insert(all.end(), upper.begin(), upper.end());
+    all.push_back("sccache/h");
+    all.push_back("sccache/s");
+    std::sort(all.begin(), all.end());
+
+    // A full walk returns every key exactly once, in any COUNT.
+    for (const auto* count : {"1", "7", "10", "1000"}) {
+        BOOST_CHECK(sorted(scan_walk(ops, {"SCAN"}, {"COUNT", count})) == all);
+    }
+    // MATCH narrows the walk to the prefix's range; TYPE filters by type.
+    BOOST_CHECK(sorted(scan_walk(ops, {"SCAN"}, {"MATCH", "a/k1*"})) ==
+                std::vector<std::string>(lower.begin() + 10, lower.begin() + 20));
+    const auto one = parse_scan(ops.call({"SCAN", "0", "MATCH", "a/k1*", "COUNT", "1000"}));
+    BOOST_CHECK_EQUAL(one.first, "0");
+    BOOST_CHECK_EQUAL(one.second.size(), 10u);
+    BOOST_CHECK(scan_walk(ops, {"SCAN"}, {"MATCH", "*k3?", "COUNT", "5"}).size() == 20u);
+    BOOST_CHECK(scan_walk(ops, {"SCAN"}, {"TYPE", "HASH"}) ==
+                std::vector<std::string>{"sccache/h"});
+    BOOST_CHECK(scan_walk(ops, {"SCAN"}, {"TYPE", "set"}) == std::vector<std::string>{"sccache/s"});
+    BOOST_CHECK_EQUAL(scan_walk(ops, {"SCAN"}, {"TYPE", "string"}).size(), 80u);
+    BOOST_CHECK(scan_walk(ops, {"SCAN"}, {"TYPE", "zset"}).empty());
+    BOOST_CHECK_EQUAL(ops.call({"SCAN", "0", "COUNT", "0"}), "-ERR syntax error\r\n");
+    BOOST_CHECK_EQUAL(ops.call({"SCAN", "0", "COUNT", "x"}),
+                      "-ERR value is not an integer or out of range\r\n");
+    BOOST_CHECK_EQUAL(ops.call({"SCAN", "0", "MATCH"}), "-ERR syntax error\r\n");
+
+    // A user sees only the keys their scopes let them read, and a MATCH
+    // outside every scope ends at once.
+    std::vector<std::string> farm_keys;
+    for (const auto& k : all) {
+        if (k.starts_with("sccache/")) {
+            farm_keys.push_back(k);
+        }
+    }
+    BOOST_CHECK(sorted(scan_walk(farm, {"SCAN"}, {"COUNT", "9"})) == farm_keys);
+    BOOST_CHECK_EQUAL(farm.call({"SCAN", "0", "MATCH", "a/*"}), "*2\r\n$1\r\n0\r\n*0\r\n");
+    // Keys outside the scopes are not counted against COUNT either: the
+    // 40 keys of the lower group cost the first call nothing.
+    BOOST_CHECK_EQUAL(parse_scan(farm.call({"SCAN", "0", "COUNT", "40"})).second.size(), 40u);
+
+    // A cursor is resumed on any node: the issuer serves it.
+    const auto first = parse_scan(ops.call({"SCAN", "0", "COUNT", "5"}));
+    BOOST_REQUIRE_NE(first.first, "0");
+    auto rest = parse_scan(ops2.call({"SCAN", first.first, "COUNT", "1000"}));
+    BOOST_CHECK_EQUAL(rest.first, "0");
+    rest.second.insert(rest.second.end(), first.second.begin(), first.second.end());
+    BOOST_CHECK(sorted(rest.second) == all);
+    // A finished, unknown, malformed or someone else's cursor is invalid.
+    const std::string invalid = "-ERR invalid cursor\r\n";
+    BOOST_CHECK_EQUAL(ops.call({"SCAN", first.first}), invalid);
+    BOOST_CHECK_EQUAL(ops.call({"SCAN", "12345"}), invalid);
+    BOOST_CHECK_EQUAL(ops.call({"SCAN", "x"}), invalid);
+    const auto held = parse_scan(ops.call({"SCAN", "0", "COUNT", "5"})).first;
+    BOOST_CHECK_EQUAL(farm.call({"SCAN", held}), invalid);
+    BOOST_CHECK_EQUAL(ops.call({"KYTHIRA.CURSOR", "ops", "SCAN", held}).substr(0, 7), "-NOPERM");
+
+    // HSCAN and SSCAN walk a large collection in element order; a small
+    // one comes back whole.
+    auto pairs = scan_walk(ops2, {"HSCAN", "sccache/h"}, {"COUNT", "33"});
+    BOOST_REQUIRE_EQUAL(pairs.size(), 400u);
+    std::vector<std::string> got_fields;
+    for (std::size_t i = 0; i < pairs.size(); i += 2) {
+        got_fields.push_back(pairs[i]);
+        BOOST_CHECK_EQUAL(pairs[i], "f" + pairs[i + 1]);
+    }
+    BOOST_CHECK(sorted(got_fields) == sorted(fields));
+    BOOST_CHECK_EQUAL(scan_walk(ops, {"HSCAN", "sccache/h"}, {"MATCH", "f1?"}).size(), 20u);
+    BOOST_CHECK(sorted(scan_walk(farm, {"SSCAN", "sccache/s"}, {"COUNT", "50"})) ==
+                sorted(members));
+    BOOST_CHECK_EQUAL(ops.call({"SADD", "a/small", "x", "y"}), ":2\r\n");
+    BOOST_CHECK_EQUAL(ops.call({"SSCAN", "a/small", "0", "COUNT", "1"}),
+                      "*2\r\n$1\r\n0\r\n*2\r\n$1\r\nx\r\n$1\r\ny\r\n");
+    BOOST_CHECK_EQUAL(ops.call({"SSCAN", "a/none", "0"}), "*2\r\n$1\r\n0\r\n*0\r\n");
+    BOOST_CHECK(ops.call({"HSCAN", "sccache/s", "0"}).starts_with("-WRONGTYPE"));
+    BOOST_CHECK(ops.call({"SSCAN", "a/k00", "0"}).starts_with("-WRONGTYPE"));
+    BOOST_CHECK(ops.call({"SSCAN", "sccache/s", "0", "TYPE", "set"}) == "-ERR syntax error\r\n");
+    const auto member_cursor =
+        parse_scan(ops.call({"SSCAN", "sccache/s", "0", "COUNT", "5"})).first;
+    BOOST_CHECK_EQUAL(ops.call({"SSCAN", "sccache/h", member_cursor}), invalid);
+    BOOST_CHECK_EQUAL(ops.call({"SCAN", member_cursor}), invalid);
+    BOOST_CHECK_EQUAL(ops.call({"DEL", "a/small"}), ":1\r\n");
+
+    // KEYS: admin only, every match, or an error rather than a truncated
+    // list past the limit.
+    const auto keys = ops.call({"KEYS", "a/k0*"});
+    BOOST_CHECK(keys.starts_with("*10\r\n"));
+    BOOST_CHECK(ops.call({"KEYS", "*"}).starts_with("-ERR KEYS would return more than 50 keys"));
+    BOOST_CHECK_EQUAL(ops.call({"KEYS", "nothing*"}), "*0\r\n");
+    BOOST_CHECK(farm.call({"KEYS", "sccache/*"}).starts_with("-NOPERM"));
+
+    // RANDOMKEY returns some key.
+    for (int i = 0; i < 10; ++i) {
+        const auto pick = ops2.call({"RANDOMKEY"});
+        BOOST_REQUIRE(pick.starts_with("$"));
+        const auto key = pick.substr(pick.find("\r\n") + 2, pick.size() - pick.find("\r\n") - 4);
+        BOOST_CHECK(std::binary_search(all.begin(), all.end(), key));
+    }
+
+    // An idle cursor expires.
+    const auto idle = parse_scan(ops.call({"SCAN", "0", "COUNT", "5"})).first;
+    std::this_thread::sleep_for(std::chrono::milliseconds{3500});
+    BOOST_CHECK_EQUAL(ops.call({"SCAN", idle}), invalid);
+}
+
+// Task 12 (Requirement 7.3): the cursor holds a key, not a slot, so a walk
+// that runs while a group splits, merges back and changes leader returns
+// every key that existed throughout exactly once.
+BOOST_AUTO_TEST_CASE(a_walk_survives_splits_merges_and_leader_moves,
+                     *boost::unit_test::timeout(240)) {
+    if constexpr (gateway_type::k_node_format_level < k_redis_typed_values_level) {
+        return;
+    }
+    auto c = typed_cluster();
+    resp_client ops(c->port(2));
+    BOOST_REQUIRE_EQUAL(ops.auth("ops", "ops-secret"), "+OK\r\n");
+    auto all = numbered("a/k", 60);
+    const auto upper = numbered("x/k", 30);
+    all.insert(all.end(), upper.begin(), upper.end());
+    for (const auto& k : all) {
+        BOOST_REQUIRE_EQUAL(ops.call({"SET", k, "v"}), "+OK\r\n");
+    }
+    std::sort(all.begin(), all.end());
+
+    // Round 0 splits the lower group, round 1 the upper one (a group just
+    // merged is in its cooldown).
+    for (int round = 0; round < 2; ++round) {
+        const group_id_type parent = round == 0 ? 1 : 2;
+        std::optional<group_id_type> child;
+        int splits = 0;
+        int merges = 0;
+        int moves = 0;
+        const auto got = scan_walk(ops, {"SCAN"}, {"COUNT", "6"}, [&](int call) {
+            switch (call % 4) {
+                case 0:
+                    if (!child) {
+                        child = c->split(parent, round == 0 ? "a/k30" : "x/k15");
+                        splits += child ? 1 : 0;
+                    }
+                    break;
+                case 1:
+                    moves += c->move_leader(3 - parent) ? 1 : 0;
+                    break;
+                case 2:
+                    if (child) {
+                        moves += c->move_leader(*child) ? 1 : 0;
+                    }
+                    break;
+                default:
+                    if (child && c->merge(*child, parent)) {
+                        ++merges;
+                        child.reset();
+                    }
+                    break;
+            }
+        });
+        BOOST_TEST_MESSAGE("round " << round << ": " << splits << " splits, " << merges
+                                    << " merges, " << moves << " leader moves");
+        BOOST_CHECK(sorted(got) == all);
+        BOOST_CHECK_GT(splits, 0);
+        BOOST_CHECK_GT(merges + moves, 0);
+        if (child) {
+            // A child split off by the last call may not have elected a
+            // leader yet, or may still be in its post-split cooldown:
+            // retry the clean-up merge for a while.
+            bool merged = false;
+            const auto give_up = std::chrono::steady_clock::now() + std::chrono::seconds{15};
+            while (!(merged = c->merge(*child, parent)) &&
+                   std::chrono::steady_clock::now() < give_up) {
+                std::this_thread::sleep_for(std::chrono::milliseconds{200});
+            }
+            BOOST_CHECK(merged);
+        }
+    }
+}
+
+// Task 13 (Requirement 8.1-8.3, 8.5): prefix delete group by group in
+// bounded entries, the flush guard, and an exact DBSIZE.
+BOOST_AUTO_TEST_CASE(prefix_delete_flush_and_dbsize, *boost::unit_test::timeout(240)) {
+    if constexpr (gateway_type::k_node_format_level < k_redis_typed_values_level) {
+        return;
+    }
+    redis_gateway_config cfg;
+    cfg._range_delete_keys = 7;
+    auto c = typed_cluster(cfg);
+    resp_client ops(c->port(c->a_follower_of(k_sccache_group)));
+    BOOST_REQUIRE_EQUAL(ops.auth("ops", "ops-secret"), "+OK\r\n");
+    resp_client farm(c->port(1));
+    BOOST_REQUIRE_EQUAL(farm.auth("farm", "farm-secret"), "+OK\r\n");
+
+    for (const auto& k : numbered("a/x/", 20)) {
+        BOOST_REQUIRE_EQUAL(ops.call({"SET", k, "v"}), "+OK\r\n");
+    }
+    for (const auto& k : numbered("a/y/", 5)) {
+        BOOST_REQUIRE_EQUAL(ops.call({"SET", k, "v"}), "+OK\r\n");
+    }
+    for (const auto& k : numbered("sccache/x/", 15)) {
+        BOOST_REQUIRE_EQUAL(ops.call({"SET", k, "v"}), "+OK\r\n");
+    }
+    BOOST_REQUIRE_EQUAL(ops.call({"HSET", "sccache/x/h", "f", "v"}), ":1\r\n");
+    BOOST_REQUIRE_EQUAL(ops.call({"SET", "sccache/y", "v"}), "+OK\r\n");
+    // Every group counted once, from any node.
+    BOOST_CHECK_EQUAL(ops.call({"DBSIZE"}), ":42\r\n");
+    BOOST_CHECK_EQUAL(farm.call({"DBSIZE"}), ":42\r\n");
+
+    // 20 keys in entries of 7; the neighbouring prefix stays.
+    BOOST_CHECK_EQUAL(ops.call({"KYTHIRA.DELPREFIX", "a/x/"}), ":20\r\n");
+    BOOST_CHECK_EQUAL(ops.call({"EXISTS", "a/x/00", "a/x/19"}), ":0\r\n");
+    BOOST_CHECK_EQUAL(ops.call({"EXISTS", "a/y/00", "a/y/04"}), ":2\r\n");
+    BOOST_CHECK_EQUAL(ops.call({"KYTHIRA.DELPREFIX", "a/x/"}), ":0\r\n");
+    // A prefix whose range two groups share: both are walked.
+    const auto child = c->split(k_sccache_group, "sccache/x/07");
+    BOOST_REQUIRE(child.has_value());
+    BOOST_CHECK_EQUAL(ops.call({"DBSIZE"}), ":22\r\n");
+    BOOST_CHECK_EQUAL(ops.call({"KYTHIRA.DELPREFIX", "sccache/x/"}), ":16\r\n");
+    BOOST_CHECK_EQUAL(ops.call({"GET", "sccache/y"}), bulk("v"));
+    BOOST_CHECK_EQUAL(ops.call({"DBSIZE"}), ":6\r\n");
+
+    // Admin only, never an empty prefix, and the internal hop is internal.
+    BOOST_CHECK(farm.call({"KYTHIRA.DELPREFIX", "sccache/"}).starts_with("-NOPERM"));
+    BOOST_CHECK_EQUAL(ops.call({"KYTHIRA.DELPREFIX", ""}),
+                      "-ERR KYTHIRA.DELPREFIX needs a non-empty prefix; use FLUSHALL\r\n");
+    BOOST_CHECK(ops.call({"KYTHIRA.RANGEDEL", "a", "0", ""}).starts_with("-NOPERM"));
+    // Flushing is off unless the cluster turns it on.
+    BOOST_CHECK_EQUAL(ops.call({"FLUSHALL"}),
+                      "-ERR FLUSHALL is disabled on this cluster (KYTHIRA_REDIS_ALLOW_FLUSH)\r\n");
+    BOOST_CHECK_EQUAL(ops.call({"FLUSHDB", "ASYNC"}),
+                      "-ERR FLUSHDB is disabled on this cluster (KYTHIRA_REDIS_ALLOW_FLUSH)\r\n");
+    BOOST_CHECK(farm.call({"FLUSHDB"}).starts_with("-NOPERM"));
+    BOOST_CHECK_EQUAL(ops.call({"DBSIZE"}), ":6\r\n");
+}
+
+BOOST_AUTO_TEST_CASE(flush_when_the_cluster_allows_it, *boost::unit_test::timeout(180)) {
+    if constexpr (gateway_type::k_node_format_level < k_redis_typed_values_level) {
+        return;
+    }
+    redis_gateway_config cfg;
+    cfg._allow_flush = true;
+    cfg._range_delete_keys = 5;
+    auto c = typed_cluster(cfg);
+    resp_client ops(c->port(1));
+    BOOST_REQUIRE_EQUAL(ops.auth("ops", "ops-secret"), "+OK\r\n");
+    for (const auto& k : numbered("a/", 12)) {
+        BOOST_REQUIRE_EQUAL(ops.call({"SET", k, "v"}), "+OK\r\n");
+    }
+    for (const auto& k : numbered("sccache/", 12)) {
+        BOOST_REQUIRE_EQUAL(ops.call({"RPUSH", k, "v"}), ":1\r\n");
+    }
+    BOOST_CHECK_EQUAL(ops.call({"DBSIZE"}), ":24\r\n");
+    BOOST_CHECK_EQUAL(ops.call({"FLUSHDB", "NOW"}), "-ERR syntax error\r\n");
+    BOOST_CHECK_EQUAL(ops.call({"FLUSHALL", "SYNC"}), "+OK\r\n");
+    BOOST_CHECK_EQUAL(ops.call({"DBSIZE"}), ":0\r\n");
+    BOOST_CHECK_EQUAL(ops.call({"SET", "a/again", "v"}), "+OK\r\n");
+    BOOST_CHECK_EQUAL(ops.call({"FLUSHDB"}), "+OK\r\n");
+    BOOST_CHECK_EQUAL(ops.call({"DBSIZE"}), ":0\r\n");
+}
+
+// Task 13 (Requirement 8.4-8.5): usage per bucket over both groups, and
+// MEMORY USAGE.
+BOOST_AUTO_TEST_CASE(usage_and_memory_usage, *boost::unit_test::timeout(180)) {
+    if constexpr (gateway_type::k_node_format_level < k_redis_typed_values_level) {
+        return;
+    }
+    auto c = typed_cluster();
+    resp_client ops(c->port(c->a_follower_of(k_sccache_group)));
+    BOOST_REQUIRE_EQUAL(ops.auth("ops", "ops-secret"), "+OK\r\n");
+    resp_client farm(c->port(1));
+    BOOST_REQUIRE_EQUAL(farm.auth("farm", "farm-secret"), "+OK\r\n");
+    for (const auto& k : numbered("a/x/", 20)) {  // 6-byte keys, 1-byte values
+        BOOST_REQUIRE_EQUAL(ops.call({"SET", k, "v"}), "+OK\r\n");
+    }
+    for (const auto& k : numbered("a/y/", 3)) {
+        BOOST_REQUIRE_EQUAL(ops.call({"SET", k, "vv"}), "+OK\r\n");
+    }
+    for (const auto& k : numbered("sccache/", 2)) {
+        BOOST_REQUIRE_EQUAL(ops.call({"SET", k, "v"}), "+OK\r\n");
+    }
+    const auto row = [](const std::string& bucket, int keys, int bytes) {
+        return "*3\r\n" + bulk(bucket) + ":" + std::to_string(keys) +
+               "\r\n:" + std::to_string(bytes) + "\r\n";
+    };
+    // Depth 1 at "/": one bucket per top-level prefix, largest first.
+    BOOST_CHECK_EQUAL(ops.call({"KYTHIRA.USAGE", "DELIM", "/"}),
+                      "*2\r\n" + row("a/", 23, 20 * 7 + 3 * 8) + row("sccache/", 2, 2 * 11));
+    // A prefix and a deeper cut.
+    BOOST_CHECK_EQUAL(ops.call({"KYTHIRA.USAGE", "a/", "DEPTH", "2", "DELIM", "/"}),
+                      "*2\r\n" + row("a/x/", 20, 140) + row("a/y/", 3, 24));
+    BOOST_CHECK_EQUAL(ops.call({"KYTHIRA.USAGE", "zzz"}), "*0\r\n");
+    BOOST_CHECK_EQUAL(ops.call({"KYTHIRA.USAGE", "a/", "DEPTH", "x"}),
+                      "-ERR value is not an integer or out of range\r\n");
+    BOOST_CHECK_EQUAL(ops.call({"KYTHIRA.USAGE", "a/", "WIDTH", "1"}), "-ERR syntax error\r\n");
+    BOOST_CHECK(farm.call({"KYTHIRA.USAGE"}).starts_with("-NOPERM"));
+
+    BOOST_CHECK_EQUAL(ops.call({"MEMORY", "USAGE", "a/x/00"}), ":23\r\n");
+    BOOST_CHECK_EQUAL(ops.call({"MEMORY", "USAGE", "a/x/00", "SAMPLES", "5"}), ":23\r\n");
+    BOOST_CHECK_EQUAL(ops.call({"MEMORY", "USAGE", "a/none"}), "$-1\r\n");
+    BOOST_CHECK(ops.call({"MEMORY", "DOCTOR"}).starts_with("-ERR unknown subcommand"));
+    BOOST_CHECK_EQUAL(ops.call({"MEMORY", "USAGE", "a/x/00", "SAMPLES"}),
+                      "-ERR unknown subcommand or wrong number of arguments for 'USAGE'. Try "
+                      "MEMORY HELP.\r\n");
+    BOOST_CHECK_EQUAL(farm.call({"MEMORY", "USAGE", "sccache/00"}), ":27\r\n");
+    BOOST_CHECK(farm.call({"MEMORY", "USAGE", "a/x/00"}).starts_with("-NOPERM"));
+}
+
+// Task 13 (Requirement 22.2-22.3): INFO's keyspace, commandstats and
+// errorstats sections in Redis's format, and the slow log with values
+// never shown.
+BOOST_AUTO_TEST_CASE(info_sections_and_slowlog, *boost::unit_test::timeout(180)) {
+    if constexpr (gateway_type::k_node_format_level < k_redis_typed_values_level) {
+        return;
+    }
+    redis_gateway_config cfg;
+    cfg._slowlog_slower_than_us = 0;  // every command
+    cfg._slowlog_max_len = 5;
+    auto c = typed_cluster(cfg);
+    resp_client ops(c->port(2));
+    BOOST_REQUIRE_EQUAL(ops.auth("ops", "ops-secret"), "+OK\r\n");
+    resp_client farm(c->port(2));
+    BOOST_REQUIRE_EQUAL(farm.auth("farm", "farm-secret"), "+OK\r\n");
+    BOOST_REQUIRE_EQUAL(ops.call({"SET", "a/k", "v"}), "+OK\r\n");
+    BOOST_REQUIRE_EQUAL(ops.call({"EXPIRE", "a/k", "1000"}), ":1\r\n");
+    BOOST_REQUIRE_EQUAL(ops.call({"SET", "sccache/k", "v"}), "+OK\r\n");
+    BOOST_REQUIRE_EQUAL(ops.call({"GET", "a/k"}), bulk("v"));
+    BOOST_REQUIRE(ops.call({"GET"}).starts_with("-ERR wrong number"));
+    BOOST_REQUIRE(ops.call({"HSET", "a/k", "f", "v"}).starts_with("-WRONGTYPE"));
+    BOOST_REQUIRE(farm.call({"GET", "a/k"}).starts_with("-NOPERM"));
+
+    const auto info = [&](std::vector<std::string> argv) {
+        argv.insert(argv.begin(), "INFO");
+        const auto reply = ops.call(argv);
+        BOOST_REQUIRE(reply.starts_with("$"));
+        return reply.substr(reply.find("\r\n") + 2);
+    };
+    const auto stats = info({"commandstats"});
+    BOOST_CHECK(stats.starts_with("# Commandstats\r\n"));
+    BOOST_CHECK(stats.find("cmdstat_get:calls=1,usec=") != std::string::npos);
+    BOOST_CHECK(stats.find(",rejected_calls=2,failed_calls=0\r\n") != std::string::npos);
+    BOOST_CHECK(stats.find("cmdstat_set:calls=2,") != std::string::npos);
+    BOOST_CHECK(stats.find("cmdstat_hset:calls=1,") != std::string::npos);
+    BOOST_CHECK(stats.find("rejected_calls=0,failed_calls=1\r\n") != std::string::npos);
+    const auto errors = info({"errorstats"});
+    BOOST_CHECK(errors.starts_with("# Errorstats\r\n"));
+    BOOST_CHECK(errors.find("errorstat_ERR:count=1\r\n") != std::string::npos);
+    BOOST_CHECK(errors.find("errorstat_NOPERM:count=1\r\n") != std::string::npos);
+    BOOST_CHECK(errors.find("errorstat_WRONGTYPE:count=1\r\n") != std::string::npos);
+    // Keyspace counts the whole cluster, each group once.
+    const auto keyspace = info({"keyspace"});
+    BOOST_CHECK(keyspace.starts_with("# Keyspace\r\ndb0:keys=2,expires=1,avg_ttl=0\r\n"));
+    BOOST_CHECK(keyspace.find("kythira_keyspace_scope:cluster\r\n") != std::string::npos);
+    const auto by_default = info({});
+    BOOST_CHECK(by_default.starts_with("# Server\r\n"));
+    BOOST_CHECK(by_default.find("# Errorstats") != std::string::npos);
+    BOOST_CHECK(by_default.find("db0:keys=2,") != std::string::npos);
+    BOOST_CHECK(by_default.find("# Commandstats") == std::string::npos);
+    BOOST_CHECK(info({"all"}).find("# Commandstats") != std::string::npos);
+    const auto two = info({"server", "clients"});
+    BOOST_CHECK(two.find("# Clients") != std::string::npos);
+    BOOST_CHECK(two.find("# Stats") == std::string::npos);
+
+    // The slow log keeps the newest five; a value never appears in it.
+    BOOST_REQUIRE_EQUAL(ops.call({"SET", "a/secret", "hunter2-value"}), "+OK\r\n");
+    BOOST_CHECK_EQUAL(ops.call({"SLOWLOG", "LEN"}), ":5\r\n");
+    const auto newest = ops.call({"SLOWLOG", "GET", "1"});
+    BOOST_CHECK(newest.starts_with("*1\r\n*6\r\n:"));
+    BOOST_CHECK(newest.find("*3\r\n$3\r\nSET\r\n$8\r\na/secret\r\n$10\r\n(redacted)\r\n") !=
+                std::string::npos);
+    BOOST_CHECK(newest.find("hunter2") == std::string::npos);
+    BOOST_CHECK(ops.call({"SLOWLOG", "GET"}).starts_with("*5\r\n"));
+    BOOST_CHECK(ops.call({"SLOWLOG", "GET", "-1"}).starts_with("*5\r\n"));
+    BOOST_CHECK_EQUAL(ops.call({"SLOWLOG", "GET", "-2"}),
+                      "-ERR count should be greater than or equal to -1\r\n");
+    BOOST_CHECK(ops.call({"SLOWLOG", "HELP"}).starts_with("*9\r\n"));
+    BOOST_CHECK(ops.call({"SLOWLOG", "NOPE"}).starts_with("-ERR unknown subcommand"));
+    BOOST_CHECK(farm.call({"SLOWLOG", "LEN"}).starts_with("-NOPERM"));
+    BOOST_CHECK_EQUAL(ops.call({"SLOWLOG", "RESET"}), "+OK\r\n");
+    BOOST_CHECK_EQUAL(ops.call({"SLOWLOG", "LEN"}), ":0\r\n");
+}
+
+// Requirement 5.4: the rule is decided in apply(), so writers racing to
+// create one key cannot both pass: exactly one INCR creates it and every
+// other one finds it existing. In a mutable prefix every INCR counts.
+BOOST_AUTO_TEST_CASE(racing_writers_under_the_immutable_rule, *boost::unit_test::timeout(180)) {
+    if constexpr (gateway_type::k_node_format_level < k_redis_typed_values_level) {
+        return;
+    }
+    cluster c;
+    BOOST_REQUIRE(c.await_all_leaders(std::chrono::seconds{20}));
+    {
+        resp_client ops(c.port(1));
+        BOOST_REQUIRE_EQUAL(ops.auth("ops", "ops-secret"), "+OK\r\n");
+        BOOST_REQUIRE_EQUAL(ops.call({"KYTHIRA.FORMAT", "UPGRADE", "3"}), "+OK\r\n");
+    }
+    constexpr int k_writers = 8;
+    const auto race = [&](const std::string& user, const std::string& secret,
+                          const std::string& key) {
+        // Log in first, one at a time (the AUTH limiter counts concurrent
+        // attempts per address), spread over every node: followers forward.
+        std::vector<std::unique_ptr<resp_client>> clients;
+        for (int i = 0; i < k_writers; ++i) {
+            clients.push_back(
+                std::make_unique<resp_client>(c.port(static_cast<node_id_t>(1 + (i % 3)))));
+            BOOST_REQUIRE_EQUAL(clients.back()->auth(user, secret), "+OK\r\n");
+        }
+        std::vector<std::string> replies(k_writers);
+        std::vector<std::thread> threads;
+        std::atomic<int> ready{0};
+        for (int i = 0; i < k_writers; ++i) {
+            threads.emplace_back([&, i] {
+                ready.fetch_add(1);
+                while (ready.load() < k_writers) {
+                    std::this_thread::yield();
+                }
+                // A forward the leader could not take is refused before
+                // anything is proposed, and says to retry.
+                auto& reply = replies[static_cast<std::size_t>(i)];
+                for (int attempt = 0; attempt < 50; ++attempt) {
+                    reply = clients[static_cast<std::size_t>(i)]->call({"INCR", key});
+                    if (reply != "-ERR shard has no reachable leader, retry\r\n") {
+                        break;
+                    }
+                    std::this_thread::sleep_for(std::chrono::milliseconds{20});
+                }
+            });
+        }
+        for (auto& t : threads) {
+            t.join();
+        }
+        return replies;
+    };
+    const auto fixed = race("farm", "farm-secret", "sccache/race");
+    BOOST_CHECK_EQUAL(std::ranges::count(fixed, std::string(":1\r\n")), 1);
+    BOOST_CHECK_EQUAL(
+        std::ranges::count(fixed, std::string("-ERR value conflict for an existing key\r\n")),
+        k_writers - 1);
+    auto counted = race("counter", "counter-secret", "sccache/counters/race");
+    std::ranges::sort(counted);
+    std::vector<std::string> expected;
+    for (int i = 1; i <= k_writers; ++i) {
+        expected.push_back(":" + std::to_string(i) + "\r\n");
+    }
+    std::ranges::sort(expected);
+    std::string got;
+    for (const auto& r : counted) {
+        got += r;
+    }
+    BOOST_CHECK_MESSAGE(counted == expected, "replies: " << got);
+}
+
+// Task 4: the expiry family through the front end, from a follower so the
+// writes forward and the reads may answer locally or forward.
+BOOST_AUTO_TEST_CASE(expiry_family, *boost::unit_test::timeout(120)) {
+    if constexpr (gateway_type::k_node_format_level < k_redis_typed_values_level) {
+        return;
+    }
+    auto c = typed_cluster();
+    resp_client r(c->port(c->a_follower_of(k_sccache_group)));
+    BOOST_REQUIRE_EQUAL(r.auth("farm", "farm-secret"), "+OK\r\n");
+    const auto call = [&](const std::vector<std::string>& argv) { return r.call(argv); };
+    const auto integer = [](const std::string& reply) {
+        BOOST_REQUIRE(reply.starts_with(':'));
+        return std::stoll(reply.substr(1));
+    };
+
+    BOOST_CHECK_EQUAL(call({"EXPIRE", "sccache/x", "100"}), ":0\r\n");
+    BOOST_CHECK_EQUAL(call({"PTTL", "sccache/x"}), ":-2\r\n");
+    BOOST_CHECK_EQUAL(call({"SET", "sccache/x", "v"}), "+OK\r\n");
+    BOOST_CHECK_EQUAL(call({"PTTL", "sccache/x"}), ":-1\r\n");
+    BOOST_CHECK_EQUAL(call({"EXPIRETIME", "sccache/x"}), ":-1\r\n");
+    BOOST_CHECK_EQUAL(call({"EXPIRE", "sccache/x", "100", "XX"}), ":0\r\n");
+    BOOST_CHECK_EQUAL(call({"EXPIRE", "sccache/x", "100", "nx"}), ":1\r\n");
+    const auto pttl = integer(call({"PTTL", "sccache/x"}));
+    BOOST_CHECK(pttl > 90'000 && pttl <= 100'000);
+    BOOST_CHECK_EQUAL(call({"PEXPIRE", "sccache/x", "50000", "GT"}), ":0\r\n");
+    BOOST_CHECK_EQUAL(call({"PEXPIRE", "sccache/x", "50000", "LT"}), ":1\r\n");
+    BOOST_CHECK_EQUAL(call({"EXPIREAT", "sccache/x", "4102444800"}), ":1\r\n");
+    BOOST_CHECK_EQUAL(call({"EXPIRETIME", "sccache/x"}), ":4102444800\r\n");
+    BOOST_CHECK_EQUAL(call({"PEXPIREAT", "sccache/x", "4102444800123"}), ":1\r\n");
+    BOOST_CHECK_EQUAL(call({"PEXPIRETIME", "sccache/x"}), ":4102444800123\r\n");
+    BOOST_CHECK_EQUAL(call({"PERSIST", "sccache/x"}), ":1\r\n");
+    BOOST_CHECK_EQUAL(call({"PERSIST", "sccache/x"}), ":0\r\n");
+    BOOST_CHECK_EQUAL(call({"TTL", "sccache/x"}), ":-1\r\n");
+
+    // A deadline already past deletes the key and answers 1.
+    BOOST_CHECK_EQUAL(call({"EXPIRE", "sccache/x", "-1"}), ":1\r\n");
+    BOOST_CHECK_EQUAL(call({"EXISTS", "sccache/x"}), ":0\r\n");
+    BOOST_CHECK_EQUAL(call({"SET", "sccache/x", "v"}), "+OK\r\n");
+    BOOST_CHECK_EQUAL(call({"PEXPIREAT", "sccache/x", "1"}), ":1\r\n");
+    BOOST_CHECK_EQUAL(call({"GET", "sccache/x"}), "$-1\r\n");
+
+    // Refusals the front end answers without a proposal.
+    BOOST_CHECK_EQUAL(call({"EXPIRE", "sccache/x", "10", "NX", "GT"}),
+                      "-ERR NX and XX, GT or LT options at the same time are not compatible\r\n");
+    BOOST_CHECK_EQUAL(call({"EXPIRE", "sccache/x", "10", "GT", "LT"}),
+                      "-ERR GT and LT options at the same time are not compatible\r\n");
+    BOOST_CHECK_EQUAL(call({"EXPIRE", "sccache/x", "10", "SOON"}),
+                      "-ERR Unsupported option SOON\r\n");
+    BOOST_CHECK_EQUAL(call({"EXPIRE", "sccache/x", "ten"}),
+                      "-ERR value is not an integer or out of range\r\n");
+    BOOST_CHECK_EQUAL(call({"EXPIRE", "sccache/x", "9223372036854775807"}),
+                      "-ERR invalid expire time in 'expire' command\r\n");
+    BOOST_CHECK_EQUAL(call({"PEXPIRE", "sccache/x", "9223372036854775807"}),
+                      "-ERR invalid expire time in 'pexpire' command\r\n");
+    BOOST_CHECK(call({"PERSIST"}).starts_with("-ERR wrong number of arguments"));
+    BOOST_CHECK(call({"PTTL", "a", "b"}).starts_with("-ERR wrong number of arguments"));
+
+    // The read-only role may read deadlines but not change them.
+    resp_client ro(c->port(c->a_follower_of(k_sccache_group)));
+    BOOST_REQUIRE_EQUAL(ro.auth("reader", "reader-secret"), "+OK\r\n");
+    BOOST_CHECK_EQUAL(ro.call({"PTTL", "sccache/x"}), ":-2\r\n");
+    BOOST_CHECK(ro.call({"PERSIST", "sccache/x"}).starts_with("-NOPERM"));
 }
 
 BOOST_AUTO_TEST_CASE(only_peer_gateways_may_advise, *boost::unit_test::timeout(120)) {
@@ -2760,7 +4036,8 @@ BOOST_AUTO_TEST_CASE(front_end_without_data_serves_commands_from_the_data_nodes,
     BOOST_CHECK_EQUAL(local.call({"GET", "sccache/fe/shared"}), "$3\r\none\r\n");
     BOOST_CHECK_EQUAL(local.call({"SET", "sccache/fe/back", "two"}), "+OK\r\n");
     BOOST_CHECK_EQUAL(remote.call({"GET", "sccache/fe/back"}), "$3\r\ntwo\r\n");
-    BOOST_CHECK_EQUAL(remote.call({"DBSIZE"}), ":0\r\n");
+    // DBSIZE counts the whole keyspace (task 13), read from the data nodes.
+    BOOST_CHECK_EQUAL(remote.call({"DBSIZE"}), local.call({"DBSIZE"}));
 
     resp_client ops(fe.port());
     BOOST_REQUIRE_EQUAL(ops.auth("ops", "ops-secret"), "+OK\r\n");

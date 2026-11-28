@@ -247,7 +247,10 @@ BOOST_AUTO_TEST_CASE(suggest_split_keys_never_first_key, *boost::unit_test::time
 
 BOOST_AUTO_TEST_CASE(rejects_corrupt_entries_and_snapshots, *boost::unit_test::timeout(10)) {
     sm_type sm;
-    BOOST_CHECK_THROW(sm.apply({std::byte{0x09}}, 1), redis_kv_codec_error);
+    BOOST_CHECK_THROW(sm.apply({std::byte{0x00}}, 1), redis_kv_codec_error);
+    // A version byte above this binary's format level is a newer format, not
+    // corruption it can name (redis-general-data-types Requirement 14.4).
+    BOOST_CHECK_THROW(sm.apply({std::byte{0x09}}, 1), redis_format_too_new);
     BOOST_CHECK_THROW(
         sm.restore_from_snapshot({std::byte{0}, std::byte{0}, std::byte{0}, std::byte{5}}, 1),
         redis_kv_codec_error);

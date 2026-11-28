@@ -48,7 +48,7 @@ is extended as the rest land.
     this spec takes over
   - _Requirements: introduction_
 
-- [ ] 1. Command registry, `exec` record and command time
+- [x] 1. Command registry, `exec` record and command time
   - `services/redis/tools/redis_commands.yaml` → generated
     `redis_command_ids.hpp` with a CI freshness check
   - Format `0x03`: `exec`, `range_delete`, `format_gate`,
@@ -62,14 +62,14 @@ is extended as the rest land.
     compatibility mode; golden replies updated
   - _Requirements: 1.5-1.7, 2.1-2.6, 14.1, 14.2, 14.6_
 
-- [ ] 2. Format level and gate
+- [x] 2. Format level and gate
   - Level in every node's health answer; `KYTHIRA.FORMAT STATUS|UPGRADE`;
     gate apply, inheritance through split, refusal before gate, stop on a
     record above the binary's level
   - In-process test: three nodes, one old-level binary blocks the gate
   - _Requirements: 14.3-14.5_
 
-- [ ] 3. Tier 1 string commands (memory store)
+- [x] 3. Tier 1 string commands (memory store)
   - `INCR` family, `INCRBYFLOAT`/`HINCRBYFLOAT` in binary128 with the
     in-tree decimal conversion and amd64/arm64 golden replies (D1), `SET` options, `SETNX`, `PSETEX`,
     `GETSET`, `GETDEL`, `GETEX`, `APPEND`, `SETRANGE`, `TYPE`, `UNLINK`
@@ -78,13 +78,13 @@ is extended as the rest land.
     every command so far
   - _Requirements: 1.3, 3.1-3.6, 3.8, 3.9_
 
-- [ ] 4. Expiry family
+- [x] 4. Expiry family
   - `EXPIRE`/`PEXPIRE`/`EXPIREAT`/`PEXPIREAT` with `NX|XX|GT|LT`,
     `PERSIST`, `PTTL`, `EXPIRETIME`, `PEXPIRETIME`; past deadline deletes;
     sweep vs `EXPIRE`/`PERSIST` race test
   - _Requirements: 4.1-4.4_
 
-- [ ] 5. Mutability policy and ACL categories
+- [x] 5. Mutability policy and ACL categories
   - ACL file: categories, single commands, `%R~`/`%W~`/`~` scopes,
     mutable prefixes; today's roles as category sets; old lines parse
     identically (golden ACL fixtures)
@@ -92,7 +92,7 @@ is extended as the rest land.
   - Rolling-upgrade note in the docs
   - _Requirements: 5.1-5.4, 15.1-15.4_
 
-- [ ] 6. Multi-key commands
+- [x] 6. Multi-key commands
   - Planner: one group → one `exec`; several → transaction; else
     `-CROSSSLOT`; stale-epoch re-plan
   - `RENAME`, `RENAMENX`, `COPY [REPLACE]`, `MSETNX`, multi-key
@@ -100,7 +100,7 @@ is extended as the rest land.
     no-transaction builds, and a split between routing and submission
   - _Requirements: 3.7, 6.1-6.6_
 
-- [ ] 7. Typed value model and hashes
+- [x] 7. Typed value model and hashes
   - `redis_value` with chunked collections; `WRONGTYPE`; empty collection
     deletes the key; collection limits; incremental size accounting;
     shared-handle reads for `HGETALL`
@@ -108,31 +108,31 @@ is extended as the rest land.
   - Determinism test across two replicas on random streams
   - _Requirements: 9.1-9.6, 10.1, 10.2_
 
-- [ ] 8. Sets
+- [x] 8. Sets
   - Every set command; `SPOP` as leader-picked `remove_members`;
     multi-key set ops through task 6's planner
   - _Requirements: 9.5, 11.1_
 
-- [ ] 9. Lists (non-blocking)
+- [x] 9. Lists (non-blocking)
   - Every non-blocking list command; O(1) ends; `LMOVE`/`RPOPLPUSH`
     through the planner; blocking forms stay unknown
   - _Requirements: 12.1-12.3_
 
-- [ ] 10. Typed values on the engine store
+- [x] 10. Typed values on the engine store
   - Header and element rows, key codec escaping, split/absorb moving a
     key's rows together, snapshot marker; file store refusal and an
     unchanged file-store golden test
   - Engine-chaos scenario gains hashes and lists in its history
   - _Requirements: 13.1-13.3_
 
-- [ ] 11. Typed values in transactions and MVCC
+- [x] 11. Typed values in transactions and MVCC
   - Prepare evaluates, intent holds the resulting value, commit installs;
     typed commands in `MULTI`; `WATCH` on typed keys
   - MVCC chunk sharing between versions; GC frees unshared chunks; bank
     and write-skew tests extended with hashes
   - _Requirements: 13.4-13.6_
 
-- [ ] 12. SCAN family
+- [x] 12. SCAN family
   - Cursor table on the front end, cursor encoding, idle expiry, forward
     to issuer, `invalid cursor`; per-group pages on the data side with
     pattern, type and prefix filtering; literal-prefix narrowing
@@ -141,7 +141,7 @@ is extended as the rest land.
     every stable key exactly once; filtered keys never leak
   - _Requirements: 7.1-7.8_
 
-- [ ] 13. Admin tools and introspection
+- [x] 13. Admin tools and introspection
   - `KYTHIRA.DELPREFIX` (bounded range deletes, lock resolution),
     `FLUSHDB`/`FLUSHALL` behind `KYTHIRA_REDIS_ALLOW_FLUSH`,
     `KYTHIRA.USAGE`, `MEMORY USAGE`, exact `DBSIZE`, `INFO keyspace`,

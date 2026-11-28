@@ -39,9 +39,10 @@ namespace flag = kythira::redis_command_flag;
 namespace cat = kythira::redis_acl_category;
 
 /// Every command the gateway accepted before this spec, as its ACL knows
-/// them, plus the internal KYTHIRA.ADVISE the ACL leaves to the gateway.
+/// them, plus the internal KYTHIRA.ADVISE the ACL leaves to the gateway and
+/// KYTHIRA.INSTALL, which only a transaction's commit record names.
 auto accepted_today() -> std::set<std::string> {
-    std::set<std::string> out{"KYTHIRA.ADVISE"};
+    std::set<std::string> out{"KYTHIRA.ADVISE", "KYTHIRA.INSTALL"};
     for (const auto& c : k_redis_commands) {
         if (kythira::redis_command_min_role(c.name)) {
             out.emplace(c.name);
@@ -88,7 +89,8 @@ BOOST_AUTO_TEST_CASE(lookups_by_name_and_id_agree) {
 
 // The registry's `shipped` set is exactly what the gateway accepts today;
 // a planned command is one the gateway still refuses as unknown
-// (Requirement 1.1). When a task ships a command it flips both.
+// (Requirement 1.1). A task that ships a command flips its status and
+// adds it to the gateway's ACL table.
 BOOST_AUTO_TEST_CASE(shipped_means_accepted_by_the_gateway) {
     const auto accepted = accepted_today();
     for (const auto& c : k_redis_commands) {
@@ -96,8 +98,10 @@ BOOST_AUTO_TEST_CASE(shipped_means_accepted_by_the_gateway) {
         BOOST_CHECK_MESSAGE(shipped == accepted.contains(std::string(c.name)),
                             c.name << (shipped ? " is shipped but not accepted"
                                                : " is accepted but still planned"));
-        BOOST_CHECK_MESSAGE(shipped == (c.task == 0),
-                            c.name << ": only commands from earlier specs ship with task 0");
+        // Task 0 is the earlier specs' commands, all shipped; a planned
+        // command names the task that ships it, and keeps naming it after.
+        BOOST_CHECK_MESSAGE(shipped || c.task != 0,
+                            c.name << ": a planned command names the task that ships it");
     }
 }
 

@@ -26,12 +26,21 @@
 #include <kythira/redis/redis_acl.hpp>
 #include <kythira/redis/redis_auth_limiter.hpp>
 #include <kythira/redis/redis_call_wire.hpp>
+#include <kythira/redis/redis_format_level.hpp>
 #include <kythira/redis/redis_forward_link.hpp>
 #include <kythira/redis/redis_kv_commands.hpp>
+#include <kythira/redis/redis_command_ids.hpp>
 #include <kythira/redis/redis_data_access.hpp>
 #include <kythira/redis/redis_data_wire.hpp>
 #include <kythira/redis/redis_gateway_value_access.hpp>
 #include <kythira/redis/redis_kv_state_machine.hpp>
+#include <kythira/redis/redis_multi_key_exec.hpp>
+#include <kythira/redis/redis_reply.hpp>
+#include <kythira/redis/redis_scan.hpp>
+#include <kythira/redis/redis_expiry_exec.hpp>
+#include <kythira/redis/redis_string_exec.hpp>
+#include <kythira/redis/redis_string_read.hpp>
+#include <kythira/redis/redis_txn_view.hpp>
 #include <kythira/redis/redis_server_identity.hpp>
 #include <kythira/redis/redis_layer_membership.hpp>
 #include <kythira/redis/redis_layer_roles.hpp>
@@ -49,6 +58,7 @@
 #include <boost/asio/ssl.hpp>
 
 #include <atomic>
+#include <array>
 #include <cctype>
 #include <chrono>
 #include <condition_variable>
@@ -61,6 +71,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <random>
 #include <optional>
 #include <set>
 #include <string>
@@ -70,6 +81,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
+#include <variant>
 #include <vector>
 
 namespace kythira {
@@ -128,6 +140,30 @@ struct redis_gateway_config {
     bool _allow_anonymous = false;
     redis_read_consistency _read_consistency = redis_read_consistency::leader;
     std::size_t _max_value_bytes = 8u * 1024u * 1024u;
+    /// Bounds on one collection (redis-general-data-types Requirement 9.4):
+    /// its total bytes (each element's bytes plus a fixed overhead) and its
+    /// element count. Carried in each collection write's record, so every
+    /// replica refuses the same write.
+    std::size_t _max_collection_bytes = 64u * 1024u * 1024u;
+    std::size_t _max_collection_elements = 4u * 1024u * 1024u;
+    /// SCAN cursors (task 12, Requirement 7.5): how long one may sit idle
+    /// before it answers `-ERR invalid cursor`, and how many one front end
+    /// keeps (the oldest goes first past it).
+    std::chrono::milliseconds _cursor_idle{600000};
+    std::size_t _max_cursors = 100000;
+    /// `KEYS` refuses past this many keys (Requirement 7.7).
+    std::size_t _keys_limit = 10000;
+    /// `SLOWLOG` (task 13, Requirement 22.3): commands slower than this many
+    /// microseconds are recorded (negative: none, 0: all), up to
+    /// `_slowlog_max_len` of them.
+    std::int64_t _slowlog_slower_than_us = 10000;
+    std::size_t _slowlog_max_len = 128;
+    /// `FLUSHDB` and `FLUSHALL` refuse unless this is on (task 13,
+    /// Requirement 8.3): a typed accident on a shared cache is an outage.
+    bool _allow_flush = false;
+    /// Keys one range-delete entry removes at most (Requirement 8.2); a
+    /// larger range takes several entries, proposed in order.
+    std::uint32_t _range_delete_keys = 1000;
     std::size_t _max_clients = 1024;
     std::chrono::milliseconds _idle_timeout{300000};
     std::chrono::milliseconds _command_timeout{5000};
@@ -322,6 +358,11 @@ struct redis_gateway_config {
     /// cluster-aware tools treat `cluster` as a promise that `CLUSTER`
     /// commands work.
     bool _cluster_compat_mode = false;
+    /// The Redis format level this node reports to `KYTHIRA.FORMAT`
+    /// (redis-general-data-types task 2). 0, the default, is the build's
+    /// own; the in-process rolling-upgrade tests set a lower one to stand
+    /// for a node still running an older binary.
+    std::uint16_t _reported_format_level = 0;
 };
 
 /// Counters the gateway keeps for INFO and for the metrics back-end.
@@ -426,6 +467,15 @@ template<typename SM, bool = is_transactional_state_machine_v<SM>>
 struct is_mvcc : std::false_type {};
 template<typename SM> struct is_mvcc<SM, true> : std::bool_constant<SM::k_mvcc == mvcc::on> {};
 template<typename SM> inline constexpr bool is_mvcc_v = is_mvcc<SM>::value;
+/// A transactional read and, for a live key, the entry behind it
+/// (redis-general-data-types task 11): a typed command in a transaction is
+/// evaluated against the whole value, its type and its deadline, not only
+/// the string bytes the coordinator sees.
+struct txn_typed_read {
+    txn_read_result<std::string> _read;
+    std::shared_ptr<const redis_kv_value_entry> _entry;
+};
+
 }  // namespace redis_gateway_detail
 
 /// The front-end layer (.kiro/specs/redis-general-data-types/ design
@@ -465,6 +515,24 @@ public:
     /// CONFIG_REDIS_GATEWAY_SNAPSHOT_ISOLATION): then the gateway offers
     /// `snapshot`, and every write takes an oracle timestamp.
     static constexpr bool k_snapshot = redis_gateway_detail::is_mvcc_v<state_machine_type>;
+    /// The store under the transaction wrapper, if any.
+    using kv_store_type = std::remove_cvref_t<decltype(redis_gateway_detail::kv_of(
+        std::declval<state_machine_type&>()))>;
+    /// The Redis format level this node reports (redis-general-data-types
+    /// Requirement 14.3): the binary's level when its store reads the newer
+    /// formats, else the base level, so a cluster whose store does not
+    /// (the disk-backed cache, and the multi-version store until task 11)
+    /// can never pass the gate.
+    static constexpr std::uint16_t k_node_format_level = requires(const kv_store_type& kv) {
+        kv.format_level();
+    } ? k_redis_format_level : k_redis_base_format_level;
+
+    /// Whether the store holds only strings: the disk-backed build cache,
+    /// whose entries are chunk manifests. Every command that needs the
+    /// typed-values level answers `k_redis_string_only_store_error` there
+    /// instead of the format-gate error, since no upgrade will change it
+    /// (redis-general-data-types Requirement 13.3).
+    static constexpr bool k_string_only_store = !std::is_same_v<entry_type, redis_kv_value_entry>;
 
     redis_front_end(Host& host, redis_acl& acl, Logger& logger, Metrics& metrics,
                     redis_gateway_config config, endpoint_resolver resolver);
@@ -501,6 +569,11 @@ public:
 
     [[nodiscard]] auto stats() const noexcept -> const redis_gateway_stats& { return _stats; }
     [[nodiscard]] auto config() const noexcept -> const redis_gateway_config& { return _config; }
+    /// The Redis format level this node reports to `KYTHIRA.FORMAT`, `INFO`
+    /// and the health metrics (redis-general-data-types Requirement 14.3).
+    [[nodiscard]] auto format_level() const noexcept -> std::uint16_t {
+        return reported_format_level();
+    }
 
     /// Sends `argv` to the gateway listening at `endpoint` (`host:port`)
     /// over the forward link, authenticated as the internal identity, and
@@ -558,6 +631,10 @@ protected:
         /// to (empty until the first call).
         std::uint64_t _conn_id = 0;
         std::string _pinned;
+        /// While `EXEC` (or a cross-group write) evaluates commands inside
+        /// a transaction (task 11): the transaction's view. Reads come from
+        /// it and `exec` records apply to it, nothing is proposed.
+        redis_txn_view* _txn_view = nullptr;
     };
 
     /// The coordinator's view of the shards (`txn_participant_client`):
@@ -591,8 +668,18 @@ protected:
             -> txn_read_result<std::string>
         requires k_snapshot;
 
+        /// The entry the last read of `key` found (task 11): null when it
+        /// was absent, or when the shard answered without the typed
+        /// extension (a gateway from before it).
+        [[nodiscard]] auto entry_of(const std::string& key) const
+            -> std::shared_ptr<const redis_kv_value_entry>;
+
     private:
+        auto keep(const std::string& key, redis_gateway_detail::txn_typed_read r)
+            -> txn_read_result<std::string>;
+
         redis_front_end& _front_end;
+        std::map<std::string, std::shared_ptr<const redis_kv_value_entry>> _entries;
     };
     friend class txn_client;
     using coordinator_type = transaction_coordinator<txn_client, std::string>;
@@ -607,10 +694,158 @@ protected:
     auto handle_exists(session& s, const resp_command& cmd) -> std::string;
     auto handle_strlen(session& s, const resp_command& cmd) -> std::string;
     auto handle_getrange(session& s, const resp_command& cmd) -> std::string;
+
+    // ---- the SCAN family (redis-general-data-types task 12) ---------------
+
+    /// `SCAN cursor [MATCH p] [COUNT n] [TYPE t]`: one call of a walk over
+    /// the keyspace in key order, group by group (Requirement 7.1-7.6).
+    auto handle_scan(session& s, const resp_command& cmd) -> std::string;
+    /// `HSCAN` / `SSCAN key cursor [MATCH p] [COUNT n]`.
+    auto handle_member_scan(session& s, std::string_view upper, const resp_command& cmd)
+        -> std::string;
+    /// `KEYS pattern` (admin, bounded) and `RANDOMKEY`.
+    auto handle_keys(session& s, const resp_command& cmd) -> std::string;
+    auto handle_randomkey(session& s) -> std::string;
+    /// `KYTHIRA.DATA PAGE from has_to to count skip pattern type user`:
+    /// a page of the group owning `from` on this node (internal only).
+    auto handle_internal_page(session& s, const resp_command& cmd) -> std::string;
+    /// `KYTHIRA.CURSOR user command...`: a SCAN-family call forwarded to
+    /// the front end that issued its cursor (internal only, one hop).
+    auto handle_internal_cursor(session& s, const resp_command& cmd) -> std::string;
+    /// One page of the group owning `from`, here or from a node that holds
+    /// it; `error` holds the reply when none answered.
+    auto fetch_page(session& s, const std::string& from, const std::optional<std::string>& to,
+                    std::size_t count, std::size_t skip, const redis_scan_filter& filter,
+                    std::string& error) -> std::optional<redis_scan_page>;
+    /// The 14-bit index this front end puts in its cursors, and the node a
+    /// cursor's index names (Requirement 7.5).
+    [[nodiscard]] auto cursor_index_of(const node_id_type& node) const -> std::uint16_t;
+    auto node_of_cursor_index(std::uint16_t index) -> std::optional<node_id_type>;
+    /// Sends a call with a cursor this front end did not issue to the one
+    /// that did; `-ERR invalid cursor` when it cannot be reached.
+    auto forward_cursor(session& s, std::uint64_t cursor, const resp_command& cmd) -> std::string;
+
+    // ---- admin tools (redis-general-data-types task 13) -------------------
+
+    /// `KYTHIRA.DELPREFIX prefix`, `FLUSHDB` and `FLUSHALL`: range deletes
+    /// per group (Requirement 8.1-8.3).
+    auto handle_delprefix(session& s, const resp_command& cmd) -> std::string;
+    auto handle_flush(session& s, std::string_view upper, const resp_command& cmd) -> std::string;
+    /// `KYTHIRA.RANGEDEL lo has_hi hi`: one range-delete entry proposed on
+    /// this node, which leads the group owning `lo` (internal only).
+    auto handle_internal_rangedel(session& s, const resp_command& cmd) -> std::string;
+    struct range_delete_result {
+        std::uint64_t _count = 0;
+        std::optional<std::string> _last;
+    };
+    /// One range-delete entry for the group owning `lo`, bounded by `hi`
+    /// and `_range_delete_keys`; `error` holds the reply when it failed.
+    auto range_delete_page(session& s, const std::string& lo, const std::optional<std::string>& hi,
+                           std::string& error) -> std::optional<range_delete_result>;
+    /// Every key in `[lo, hi)`, group by group; adds what it removed to
+    /// `deleted` even when it fails part way.
+    auto range_delete(session& s, const std::string& lo, const std::optional<std::string>& hi,
+                      std::uint64_t& deleted, std::string& error) -> bool;
+    /// `KYTHIRA.USAGE [prefix] [DEPTH d] [DELIM c]` and its internal page
+    /// (`KYTHIRA.DATA USAGE`), and `MEMORY USAGE key` (Requirement 8.4-8.5).
+    auto handle_usage(session& s, const resp_command& cmd) -> std::string;
+    auto handle_internal_usage(session& s, const resp_command& cmd) -> std::string;
+    auto handle_memory(session& s, const resp_command& cmd) -> std::string;
+    auto fetch_usage(session& s, const std::string& from, const std::optional<std::string>& to,
+                     std::size_t depth, const std::string& delim, std::string& error)
+        -> std::optional<redis_usage_page>;
+    /// Live keys one usage page reads, and the buckets one reply holds.
+    static constexpr std::size_t k_usage_page_keys = 10000;
+    static constexpr std::size_t k_usage_max_buckets = 1000;
+
+    // ---- tier 1 strings (redis-general-data-types task 3) ------------------
+
+    /// Proposes an `exec` record for `key` (design Component 2) on its
+    /// group's leader and renders the reply `apply()` decided. `args` are
+    /// the record's arguments in normal form (redis_string_exec.hpp). When
+    /// the leader is elsewhere the record goes there as `KYTHIRA.EXEC`, so
+    /// the normal form and the user's mutable bit (Requirement 5) travel
+    /// with it; `mutable_key` is that bit as the hop carries it.
+    ///
+    /// A record that names several keys (redis_multi_key_exec.hpp) is
+    /// planned first: keys in one group make one record; keys in several
+    /// go to `cross_group_exec`. `mutable_bits` is the hop's bitmap, one
+    /// `0` or `1` per key in record order.
+    auto propose_exec(session& s, const resp_command& cmd, const std::string& key,
+                      redis_command_id id, std::vector<std::string> args, bool may_grow,
+                      std::optional<std::string> mutable_bits = std::nullopt, int replans = 0)
+        -> std::string;
+    /// A multi-key write whose keys route to several groups: a multi-Raft
+    /// transaction on a transactional build, else `-CROSSSLOT`
+    /// (Requirement 6.2, 6.3).
+    auto cross_group_exec(session& s, redis_command_id id, const std::vector<std::string>& args,
+                          const std::string& mutable_bits) -> std::string;
+    /// `DEL`, `UNLINK`, `RENAME`, `RENAMENX`, `COPY`, `MSETNX` with several
+    /// keys: syntax checks and normal form (task 6).
+    /// Every shipped hash and set command (tasks 7 and 8): writes as `exec`
+    /// records with the configured collection limits, reads evaluated on
+    /// the entry handle after the node lock is released
+    /// (redis_typed_read.hpp).
+    auto handle_collection(session& s, const redis_command_info& info, const resp_command& cmd)
+        -> std::string;
+    /// The list writes (task 9) in normal form; `nullopt` for any other
+    /// command.
+    auto handle_list_command(session& s, const redis_command_info& info, const resp_command& cmd)
+        -> std::optional<std::string>;
+    /// `SPOP`: the members picked here, on the group's leader, and proposed
+    /// as an explicit removal (Requirement 9.5).
+    auto handle_spop(session& s, const resp_command& cmd) -> std::string;
+    /// `SINTER`, `SUNION`, `SDIFF`, `SINTERCARD`: each key read where it
+    /// lives, the algebra done here.
+    auto handle_set_algebra(session& s, redis_command_id id, const resp_command& cmd)
+        -> std::string;
+    /// The members of `key` for `handle_set_algebra`, in byte order, or the
+    /// encoded error that stops the command.
+    auto set_members_of(session& s, const std::string& key)
+        -> std::variant<std::vector<std::string>, std::string>;
+    auto handle_multi_key_write(session& s, std::string_view upper, const resp_command& cmd)
+        -> std::string;
+    /// Whether a plain `SET` or `SETEX` of `key` goes as an `exec` record:
+    /// the key is in one of the user's mutable prefixes under the
+    /// immutable-value rule, and its group has the typed-values gate. The
+    /// record carries the mutable bit to the leader; the original record
+    /// would reach it as the internal user, who has no mutable prefix.
+    auto mutable_exec(const session& s, const std::string& key) -> bool;
+    /// Whether `key`'s group has the typed-values gate (or no replica here
+    /// says otherwise): the multi-key commands plan as `exec` records.
+    auto typed_ready(const std::string& key) -> bool;
+    /// Whether `reply` is a data node's refusal before its gate for a group
+    /// with no replica here, whose gate typed_ready() could only guess.
+    auto refused_by_remote_gate(const std::string& key, std::string_view reply) -> bool;
+    /// The `KYTHIRA.FORMAT STATUS` reply (RESP2): this node's level and
+    /// each local replica's gate.
+    auto format_status_text() -> std::string;
+    /// `KYTHIRA.EXEC <command id> <mutable bits> <may grow 0|1> <args...>`:
+    /// the internal hop of an `exec` record whose leader is on this node.
+    auto handle_internal_exec(session& s, const resp_command& cmd) -> std::string;
+    /// SET with options, SETNX, PSETEX, GETSET, the INCR family, GETDEL,
+    /// GETEX, APPEND and SETRANGE: syntax checks and normal form.
+    auto handle_string_write(session& s, std::string_view upper, const resp_command& cmd)
+        -> std::string;
+    /// TYPE, TOUCH and OBJECT ENCODING.
+    auto handle_key_read(session& s, std::string_view upper, const resp_command& cmd)
+        -> std::string;
     auto handle_ttl(session& s, const resp_command& cmd) -> std::string;
     auto handle_set(session& s, const resp_command& cmd, bool with_expiry) -> std::string;
     auto handle_del(session& s, const resp_command& cmd) -> std::string;
-    auto handle_info(session& s) -> std::string;
+    /// `INFO [section ...]`: the default sections, `all`/`everything`, or
+    /// named ones, `keyspace`, `commandstats` and `errorstats` among them
+    /// (task 13, Requirement 22.2).
+    auto handle_info(session& s, const resp_command& cmd) -> std::string;
+    /// `SLOWLOG GET [n] | LEN | RESET | HELP` (Requirement 22.3).
+    auto handle_slowlog(session& s, const resp_command& cmd) -> std::string;
+    /// Counts one finished command for `INFO commandstats` and `errorstats`
+    /// and, past the threshold, records it in the slow log.
+    auto record_command(const session& s, std::string_view upper, const resp_command& cmd,
+                        const std::string& reply, std::chrono::steady_clock::duration elapsed)
+        -> void;
+    [[nodiscard]] auto commandstats_text() const -> std::string;
+    [[nodiscard]] auto errorstats_text() const -> std::string;
     /// `HELLO`'s `mode` and `INFO`'s `redis_mode`: `cluster` only in the
     /// Cluster protocol compatibility mode (redis-general-data-types
     /// Requirement 1.6).
@@ -643,6 +878,21 @@ protected:
     auto handle_mget(session& s, const resp_command& cmd) -> std::string;
     auto handle_multi_del(session& s, const resp_command& cmd) -> std::string;
     auto handle_exec(session& s) -> std::string;
+    /// Inside a transaction (`s._txn_view` set): `exec` record `id` with
+    /// `args` evaluated against the view, and its reply rendered.
+    auto txn_view_exec(session& s, std::string_view name, const std::string& key,
+                       redis_command_id id, const std::vector<std::string>& args,
+                       const std::string& mutable_bits) -> std::string;
+    /// `MSET` and `MGET` inside a transaction, against the view.
+    auto txn_view_mset_mget(session& s, std::string_view upper, const resp_command& cmd)
+        -> std::string;
+    /// The view over `coordinator`'s reads, with each read's entry from
+    /// `client` (task 11).
+    auto make_txn_view(coordinator_type& coordinator, txn_client& client) -> redis_txn_view;
+    /// Puts each write the view holds into `coordinator`, as its record.
+    /// The refusal reply when a collection's group lacks the gate.
+    auto stage_txn_writes(session& s, coordinator_type& coordinator, const redis_txn_view& view)
+        -> std::optional<std::string>;
     auto handle_isolation(session& s, const resp_command& cmd) -> std::string;
     auto handle_watch(session& s, const resp_command& cmd) -> std::string;
     auto handle_internal_txn(session& s, const resp_command& cmd) -> std::string;
@@ -721,10 +971,12 @@ protected:
     /// Send one envelope to the shard owning `keys`; the encoded result.
     auto txn_send(const std::vector<std::string>& keys, const std::vector<std::byte>& envelope,
                   std::chrono::milliseconds timeout) -> std::vector<std::byte>;
+    /// The read and, for a live key, its entry (task 11).
     auto txn_read(const std::string& key, std::chrono::milliseconds timeout)
-        -> txn_read_result<std::string>;
+        -> redis_gateway_detail::txn_typed_read;
     /// The read on this replica, or nullopt when it does not lead the shard.
-    auto txn_read_local(const std::string& key) -> std::optional<txn_read_result<std::string>>;
+    auto txn_read_local(const std::string& key)
+        -> std::optional<redis_gateway_detail::txn_typed_read>;
     /// `n` timestamps from the host's oracle, or from the oracle leader's
     /// gateway over `KYTHIRA.TXN TS` (tier 2).
     auto txn_allocate_timestamps(std::size_t n, std::chrono::milliseconds timeout)
@@ -733,12 +985,12 @@ protected:
     /// the shard leader after a read-index round (tier 2).
     /// @throws snapshot_too_old_exception below the shard's safe point.
     auto txn_read_at(const std::string& key, std::uint64_t ts, std::chrono::milliseconds timeout)
-        -> txn_read_result<std::string>;
+        -> redis_gateway_detail::txn_typed_read;
     /// That read on this replica, or nullopt when it does not lead the
     /// shard (or lost it, or the key moved, during the read).
     auto txn_read_at_local(const std::string& key, std::uint64_t ts,
                            std::chrono::milliseconds timeout)
-        -> std::optional<txn_read_result<std::string>>;
+        -> std::optional<redis_gateway_detail::txn_typed_read>;
     /// Who to ask about `key`'s shard when this replica does not lead it.
     auto txn_leader_of(const std::string& key) -> std::optional<node_id_type>;
     /// A plain write met `holder`'s lock: finish that transaction if its
@@ -758,8 +1010,14 @@ protected:
         std::optional<node_id_type> _forward_to;
     };
     auto read_local(session& s, const std::string& key) -> read_result;
+    /// `result`, when given, receives the entry's apply result. With
+    /// `keys`, the entry names all of them and goes to the group owning
+    /// every one; `moved`, when given, is set when a split moved one away
+    /// (the routes are learnt, so planning again sees the new layout).
     auto submit(session& s, const std::string& key, const std::vector<std::byte>& command,
-                std::string& error_reply, std::optional<node_id_type>& forward_to) -> bool;
+                std::string& error_reply, std::optional<node_id_type>& forward_to,
+                std::vector<std::byte>* result = nullptr,
+                const std::vector<std::string>* keys = nullptr, bool* moved = nullptr) -> bool;
     auto forward(session& s, const resp_command& cmd, const node_id_type& to)
         -> std::optional<std::string>;
     /// The forward link itself, with none of `forward()`'s one-hop and
@@ -774,8 +1032,10 @@ protected:
     auto locate(const std::string& key, std::string& error_reply,
                 std::optional<node_id_type>& forward_to) -> group_node_type*;
     [[nodiscard]] static auto data_error(redis_data_status status) -> std::string;
-    auto authorize(session& s, std::string_view upper, const std::vector<std::string_view>& keys)
-        -> std::optional<std::string>;
+    /// `access` overrides what the command needs of its keys
+    /// (`redis_key_access` bits), as `SET ... GET` needs a read scope too.
+    auto authorize(session& s, std::string_view upper, const std::vector<std::string_view>& keys,
+                   std::optional<unsigned> access = std::nullopt) -> std::optional<std::string>;
     auto audit(session& s, std::string_view command, std::string_view outcome) -> void;
     auto emit(std::string_view name, std::string_view command, std::int64_t count = 1) -> void;
     auto emit_duration(std::string_view name, std::string_view command, std::chrono::nanoseconds d)
@@ -785,6 +1045,36 @@ protected:
     auto touch_lru(group_id_type group, const std::string& key) -> void;
     auto forget_lru(group_id_type group, const std::string& key) -> void;
     auto handle_advise(session& s, const resp_command& cmd) -> std::string;
+
+    // ---- format level and gate (redis-general-data-types task 2) ----------
+
+    /// `KYTHIRA.FORMAT STATUS | LEVEL | UPGRADE <level>`.
+    auto handle_format(session& s, const resp_command& cmd) -> std::string;
+    /// `KYTHIRA.FORMAT UPGRADE <level>`: check every node, then gate every
+    /// group (design Component 8).
+    auto format_upgrade(session& s, std::uint16_t level) -> std::string;
+    /// A peer's format level over the forwarding link, or `nullopt` when it
+    /// cannot be asked or does not answer.
+    auto peer_format_level(const node_id_type& node) -> std::optional<std::uint16_t>;
+    /// The level this node reports: `_reported_format_level`, else
+    /// `k_node_format_level`.
+    [[nodiscard]] auto reported_format_level() const noexcept -> std::uint16_t {
+        return _config._reported_format_level != 0 ? _config._reported_format_level
+                                                   : k_node_format_level;
+    }
+    /// Sends `argv` to `node`'s gateway on the internal link and returns the
+    /// raw reply, or `nullopt` when there is no link or no answer in time.
+    auto call_peer(const node_id_type& node, const std::vector<std::string>& argv)
+        -> std::optional<std::string>;
+    /// The format level `key`'s group has passed a gate for, when this node
+    /// holds a replica of it; `nullopt` otherwise (the group's own apply
+    /// then refuses a typed record before its gate).
+    auto group_format_level(const std::string& key) -> std::optional<std::uint16_t>;
+    /// The gate refusal for a command that needs `level` on `key`, if the
+    /// local replica of its group has not passed that gate.
+    auto format_refusal(session& s, const std::string& key, std::uint16_t level)
+        -> std::optional<std::string>;
+
     /// Send each shard leader the reads this node served for it and the
     /// cache hooks' advisory payload.
     auto send_advisories() -> void;
@@ -817,6 +1107,31 @@ protected:
     std::atomic<bool> _running{false};
     std::chrono::steady_clock::time_point _started_at{};
 
+    /// `INFO commandstats` per registry command, by its place in
+    /// `k_redis_commands`: lock-free, since every command passes here.
+    struct command_tally {
+        std::atomic<std::uint64_t> _calls{0};
+        std::atomic<std::uint64_t> _usec{0};
+        std::atomic<std::uint64_t> _rejected{0};
+        std::atomic<std::uint64_t> _failed{0};
+    };
+    std::array<command_tally, k_redis_commands.size()> _command_tallies{};
+    /// `INFO errorstats`: replies per error code (the error's first word).
+    mutable std::mutex _errorstats_mutex;
+    std::map<std::string, std::uint64_t, std::less<>> _errorstats;
+    /// The slow log, newest first.
+    struct slowlog_entry {
+        std::uint64_t _id = 0;
+        std::int64_t _unix_seconds = 0;
+        std::uint64_t _usec = 0;
+        std::vector<std::string> _args;
+        std::string _client;
+        std::string _name;
+    };
+    mutable std::mutex _slowlog_mutex;
+    std::deque<slowlog_entry> _slowlog;
+    std::uint64_t _slowlog_next_id = 0;
+
     /// Leader-local advisory LRU per shard: never replicated, rebuilt lazily
     /// after a leadership change from whatever the shard holds.
     struct lru_state {
@@ -825,6 +1140,29 @@ protected:
     };
     std::mutex _lru_mutex;
     std::map<group_id_type, lru_state> _lru;
+    /// SCAN-family cursors this front end issued (task 12): a key walk's
+    /// next key and end, or a collection walk's key and last element.
+    struct scan_cursor {
+        bool _members = false;
+        std::string _user;
+        std::string _key;
+        std::string _from;
+        bool _started = false;
+        std::optional<std::string> _to;
+        redis_scan_filter _filter;
+        std::chrono::steady_clock::time_point _touched;
+    };
+    std::mutex _cursor_mutex;
+    std::map<std::uint64_t, scan_cursor> _cursors;
+    std::mt19937_64 _cursor_rng{std::random_device{}()};
+    /// Stores `c` under a fresh id (or `id`) and returns its cursor; drops
+    /// the least recently used past `_max_cursors`.
+    auto keep_cursor(scan_cursor c, std::uint64_t id = 0) -> std::uint64_t;
+    /// The cursor's state, if this front end holds it, has not let it idle
+    /// out, and it belongs to `user`.
+    auto find_cursor(std::uint64_t cursor, const std::string& user) -> std::optional<scan_cursor>;
+    auto drop_cursor(std::uint64_t cursor) -> void;
+
     /// Keys this node served as a follower, per shard, for its leader.
     std::map<group_id_type, std::set<std::string>> _remote_touches;
 
@@ -919,6 +1257,7 @@ private:
     using front_end::build_forward_ssl_context;
     using front_end::emit;
     using front_end::emit_duration;
+    using front_end::record_command;
     using front_end::server_mode;
     using front_end::txn_allocate_timestamps;
     using front_end::txn_send;

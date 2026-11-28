@@ -67,6 +67,9 @@ public:
     /// `service_node::raft_term_sum` over the groups held here.
     [[nodiscard]] virtual auto raft_term_sum() const -> double = 0;
     [[nodiscard]] virtual auto redis_port() const -> std::uint16_t = 0;
+    /// The Redis format level this node reports (redis-general-data-types
+    /// Requirement 14.3), for the module's health metrics.
+    [[nodiscard]] virtual auto format_level() const -> std::uint16_t = 0;
 };
 
 /// Builds a `serving` for one storage on `Host`. The module holds one per

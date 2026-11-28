@@ -36,6 +36,7 @@
 
 #include <kythira/redis/redis_gateway_value_access.hpp>
 #include <kythira/redis/redis_remote_data_access.hpp>
+#include <kythira/redis/redis_scan.hpp>
 #include <raft/future_default.hpp>
 #include <raft/route_cache.hpp>
 #include <raft/shard_exceptions.hpp>
@@ -48,6 +49,7 @@
 #include <exception>
 #include <memory>
 #include <optional>
+#include <span>
 #include <string>
 #include <tuple>
 #include <type_traits>
@@ -65,6 +67,16 @@ template<typename SM> auto kv_of(SM& sm) -> auto& {
         return sm.inner();
     } else {
         return sm;
+    }
+}
+
+/// The bytes a stored value holds: a typed entry's value or collection, or
+/// a disk-backed manifest's length.
+template<typename Entry> auto entry_bytes(const Entry& e) -> std::uint64_t {
+    if constexpr (requires { redis_entry_bytes(e); }) {
+        return redis_entry_bytes(e);
+    } else {
+        return e._total_len;
     }
 }
 }  // namespace redis_gateway_detail
@@ -114,6 +126,13 @@ public:
         std::optional<node_id_type> _leader;
     };
 
+    /// A page of keys (`KYTHIRA.DATA PAGE`, task 12), or why not.
+    struct page_outcome {
+        redis_data_status _status{redis_data_status::ok};
+        redis_scan_page _page;
+        std::optional<node_id_type> _leader;
+    };
+
     explicit redis_local_data_access(Host& host) noexcept : _host(host) {}
 
     // ── routing (KYTHIRA.DATA ROUTE) ────────────────────────────────────────
@@ -131,6 +150,11 @@ public:
             return r->group_id();
         }
         return std::nullopt;
+    }
+    /// Every routing row this node's map holds, in key order (empty while
+    /// routing is still loading). `KYTHIRA.FORMAT UPGRADE` gates each one.
+    [[nodiscard]] auto all_routes() const -> std::vector<route_type> {
+        return routes_answer(_host.shard_map_snapshot(), shard_range<std::string>{});
     }
     /// The node to send a command for `key` to: the leader a local replica
     /// knows, else the routing row's hint, else any other voter (which can
@@ -196,6 +220,13 @@ public:
     auto propose(const std::string& key, const std::vector<std::byte>& entry,
                  std::chrono::milliseconds timeout) {
         return _host.submit_command(key, entry, timeout);
+    }
+    /// Proposes `entry`, which names every key in `keys`, to the group
+    /// owning all of them; a key a split moved away refuses it with
+    /// `shard_epoch_mismatch_exception` (redis_multi_key_exec.hpp).
+    auto propose_keys(const std::vector<std::string>& keys, const std::vector<std::byte>& entry,
+                      std::chrono::milliseconds timeout) {
+        return _host.submit_multi_key_command(keys, entry, timeout);
     }
     /// Proposes `entry` to `group` at `epoch` (a leader's own maintenance).
     template<typename Epoch>
@@ -285,6 +316,117 @@ public:
         }
         return r;
     }
+    /// One page of the group owning `from` (design Component 7): its keys
+    /// in `[from, to)`, cut at the group's own range end, examining at most
+    /// `count` live keys after skipping `skip` of them. `keep(key, type)`
+    /// gives a `redis_scan_verdict` on this node (the user's scopes, then
+    /// pattern and type), so a filtered key is never returned and a hidden
+    /// one is not even counted (Requirement 7.6); at most
+    /// `k_redis_scan_hidden_per_page` hidden keys are passed over per page
+    /// so that a narrowly scoped user's call stays bounded. Expired keys are
+    /// skipped and not examined. Served at the read's consistency: from any replica, or
+    /// only from a leader, without a log entry.
+    template<typename Keep>
+    auto page(const std::string& from, const std::optional<std::string>& to, std::size_t count,
+              std::size_t skip, bool any_replica, std::uint64_t now_ms, Keep&& keep)
+        -> page_outcome {
+        page_outcome out;
+        walk_group(from, to, any_replica, out._status, out._leader,
+                   [&](auto& kv, const std::optional<std::string>& bound,
+                       const std::optional<std::string>& range_end) {
+                       auto& p = out._page;
+                       p._range_end = range_end;
+                       p._approximate_keys = kv.approximate_key_count();
+                       p._expiring_keys = kv.expiring_key_count();
+                       std::size_t examined = 0;
+                       std::size_t skipped = 0;
+                       std::size_t hidden = 0;
+                       p._exhausted = true;
+                       kv.scan_keys(from, bound,
+                                    [&](const std::string& key, std::uint64_t expire,
+                                        redis_value_type type) {
+                                        if (expire != 0 && expire <= now_ms) {
+                                            return true;
+                                        }
+                                        if (skipped < skip) {
+                                            ++skipped;
+                                            return true;
+                                        }
+                                        if (examined == count) {
+                                            p._exhausted = false;
+                                            return false;
+                                        }
+                                        const redis_scan_verdict verdict = keep(key, type);
+                                        if (verdict == redis_scan_verdict::hidden) {
+                                            if (hidden == k_redis_scan_hidden_per_page) {
+                                                p._exhausted = false;
+                                                return false;
+                                            }
+                                            ++hidden;
+                                            p._last = key;
+                                            return true;
+                                        }
+                                        ++examined;
+                                        ++p._examined;
+                                        p._last = key;
+                                        if (verdict == redis_scan_verdict::kept) {
+                                            p._keys.push_back(key);
+                                        }
+                                        return true;
+                                    });
+                   });
+        return out;
+    }
+
+    struct usage_outcome {
+        redis_data_status _status{redis_data_status::ok};
+        redis_usage_page _page;
+        std::optional<node_id_type> _leader;
+    };
+
+    /// One page of `KYTHIRA.USAGE` over the group owning `from` (task 13,
+    /// Requirement 8.4): up to `count` live keys of `[from, to)` the user
+    /// may read, added to their buckets (`redis_usage_bucket`), without a
+    /// log entry and at the read's consistency. At most `max_buckets`
+    /// buckets; keys of any further bucket count as "other".
+    template<typename Keep>
+    auto usage(const std::string& from, const std::optional<std::string>& to, std::size_t count,
+               bool any_replica, std::uint64_t now_ms, std::size_t depth, std::string_view delim,
+               std::size_t max_buckets, Keep&& keep) -> usage_outcome {
+        usage_outcome out;
+        walk_group(from, to, any_replica, out._status, out._leader,
+                   [&](auto& kv, const std::optional<std::string>& bound,
+                       const std::optional<std::string>& range_end) {
+                       auto& p = out._page;
+                       p._range_end = range_end;
+                       p._exhausted = true;
+                       std::size_t examined = 0;
+                       kv.scan_keys(
+                           from, bound,
+                           [&](const std::string& key, std::uint64_t expire, redis_value_type) {
+                               if (expire != 0 && expire <= now_ms) {
+                                   return true;
+                               }
+                               if (examined == count) {
+                                   p._exhausted = false;
+                                   return false;
+                               }
+                               ++examined;
+                               p._last = key;
+                               if (!keep(key)) {
+                                   return true;
+                               }
+                               const auto entry = kv.lookup(key);
+                               const std::uint64_t bytes =
+                                   key.size() +
+                                   (entry ? redis_gateway_detail::entry_bytes(*entry) : 0);
+                               p.add(redis_usage_bucket(key, depth, delim), 1, bytes, max_buckets);
+                               return true;
+                           });
+                   });
+        return out;
+    }
+
     /// Waits until every entry committed before the call is applied on
     /// `key`'s group here (a read index round through the host).
     auto read_barrier(const std::string& key, std::chrono::milliseconds timeout) {
@@ -315,6 +457,44 @@ private:
             return _host.node_id();
         }
         return node.known_leader();
+    }
+
+    /// Runs `f(kv, bound, range_end)` on the store of the group owning
+    /// `from` under its lock: `bound` is `to` cut at the group's range end.
+    /// The replica must be here (a leader unless `any_replica`); otherwise
+    /// `status` and `leader` say where to go.
+    template<typename F>
+    auto walk_group(const std::string& from, const std::optional<std::string>& to, bool any_replica,
+                    redis_data_status& status, std::optional<node_id_type>& leader, F&& f) -> void {
+        auto* node = replica_for(from, status, leader);
+        if (node == nullptr) {
+            return;
+        }
+        if (!any_replica && !node->is_leader()) {
+            leader = node->known_leader();
+            status = redis_data_status::no_leader;
+            return;
+        }
+        const auto group = _host.resolve(from);
+        if (!group) {
+            status = redis_data_status::unrouted;
+            return;
+        }
+        auto served =
+            _host.with_group_state_machine(group->group_id(), [&](auto& sm, const auto& d) -> bool {
+                if (!d._range.contains(from)) {
+                    return false;  // a split or merge moved it: route again
+                }
+                std::optional<std::string> bound = to;
+                if (d._range._end && (!bound || *d._range._end < *bound)) {
+                    bound = d._range._end;
+                }
+                f(redis_gateway_detail::kv_of(sm), bound, d._range._end);
+                return true;
+            });
+        if (!served || !*served) {
+            status = redis_data_status::unrouted;
+        }
     }
 
     /// Another node that can say who leads `r`'s group: its leader hint,
@@ -445,6 +625,17 @@ public:
         }
         return result;
     }
+    /// As the local one. Keys whose group has no replica here go to the data
+    /// node as one proposal for the first key's group: the planner put every
+    /// key in that group, and the data node refuses the entry if the group's
+    /// version moved since.
+    auto propose_keys(const std::vector<std::string>& keys, const std::vector<std::byte>& entry,
+                      std::chrono::milliseconds timeout) -> future_type {
+        if (keys.empty() || !remote_for(keys.front())) {
+            return local_type::propose_keys(keys, entry, timeout);
+        }
+        return propose(keys.front(), entry, timeout);
+    }
     /// A transaction participant message. For a group with no replica here
     /// this raises `unknown_shard_exception`, which sends the coordinator to
     /// the group's leader over `KYTHIRA.TXN`, as it does today for a group
@@ -456,6 +647,38 @@ public:
                 _remote->group_of(keys.front()).value_or(group_id_type{}));
         }
         return local_type::propose_txn(keys, envelope, timeout);
+    }
+
+    // ── scans (tasks 12-13) ────────────────────────────────────────────────
+
+    /// As the local ones; a range that starts in a group with no replica
+    /// here names the data node leading it, so the caller sends it
+    /// `KYTHIRA.DATA PAGE` or `USAGE` instead of walking a store it lacks.
+    template<typename Keep>
+    auto page(const std::string& from, const std::optional<std::string>& to, std::size_t count,
+              std::size_t skip, bool any_replica, std::uint64_t now_ms, Keep&& keep) ->
+        typename local_type::page_outcome {
+        if (remote_for(from)) {
+            typename local_type::page_outcome out;
+            out._leader = _remote->leader_of(from);
+            out._status = redis_data_status::no_leader;
+            return out;
+        }
+        return local_type::page(from, to, count, skip, any_replica, now_ms,
+                                std::forward<Keep>(keep));
+    }
+    template<typename Keep>
+    auto usage(const std::string& from, const std::optional<std::string>& to, std::size_t count,
+               bool any_replica, std::uint64_t now_ms, std::size_t depth, std::string_view delim,
+               std::size_t max_buckets, Keep&& keep) -> typename local_type::usage_outcome {
+        if (remote_for(from)) {
+            typename local_type::usage_outcome out;
+            out._leader = _remote->leader_of(from);
+            out._status = redis_data_status::no_leader;
+            return out;
+        }
+        return local_type::usage(from, to, count, any_replica, now_ms, depth, delim, max_buckets,
+                                 std::forward<Keep>(keep));
     }
 
     // ── reads ──────────────────────────────────────────────────────────────
@@ -486,6 +709,16 @@ public:
                 std::transform(answer->value.begin(), answer->value.end(), entry->_value.begin(),
                                [](char c) { return static_cast<std::byte>(c); });
                 entry->_expire_at_ms = answer->expire_at_ms;
+                if (answer->type != 0) {
+                    try {
+                        redis_kv_detail::reader body(
+                            std::as_bytes(std::span(answer->body.data(), answer->body.size())));
+                        redis_kv_detail::read_collection_body(body, answer->type, *entry);
+                    } catch (const std::exception&) {
+                        out._status = redis_data_status::no_leader;  // the retry error
+                        return out;
+                    }
+                }
                 out._entry = std::move(entry);
             }
         }

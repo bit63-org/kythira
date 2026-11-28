@@ -27,6 +27,12 @@
 /// and draws only inside braced initialisers (evaluated left to right) or
 /// one per statement, never as several function arguments.
 /// Expiry deadlines are fixed numbers, never the clock.
+///
+/// `acl_permissions.txt` pins what each ACL line of the original format
+/// grants: for every command of the original closure, with no key, a key
+/// inside the user's prefix and one outside it. It was generated before
+/// the ACL learnt categories and scopes (redis-general-data-types task 5,
+/// Requirement 15.3), so a change in it means an old line changed meaning.
 
 #define BOOST_TEST_MODULE redis_golden_bytes_test
 #include <boost/test/unit_test.hpp>
@@ -35,6 +41,7 @@
 
 #include <kythira/redis/cache_chunk_store.hpp>
 #include <kythira/redis/cache_kv_state_machine.hpp>
+#include <kythira/redis/redis_acl.hpp>
 #include <kythira/redis/redis_command_ids.hpp>
 #include <kythira/redis/redis_kv_commands.hpp>
 #include <kythira/redis/redis_kv_mvcc_state_machine.hpp>
@@ -491,4 +498,71 @@ BOOST_AUTO_TEST_CASE(krv3_state_matches_the_golden_file, *boost::unit_test::time
         render_state(out, half);
     }
     check_golden("state_machines_krv3.txt", out);
+}
+
+// Requirement 15.3: the original ACL lines grant exactly what they did.
+BOOST_AUTO_TEST_CASE(original_acl_lines_keep_their_permissions, *boost::unit_test::timeout(60)) {
+    using kythira::acl_decision;
+    using kythira::redis_acl;
+    const auto secret = redis_acl::hash_secret("s", 1000);
+    const std::vector<std::string> lines{
+        "user ro1 " + secret + " read_only sccache/",
+        "user ro2 " + secret + " read-only sccache/ other/",
+        "user ro3 " + secret + " ro",
+        "user rw1 " + secret + " read_write sccache/",
+        "user rw2 " + secret + " rw * cert=CN=farm",
+        "user rw3 " + secret + " read-write sccache/ auth=both",
+        "user ad1 " + secret + " admin *",
+        "user ad2 " + secret + " admin sccache/",
+        "user cert1 nopass read_write sccache/ cert=CN=one",
+        "user iam1 disabled read_only sccache/ auth=iam",
+        "user off1 disabled read_write sccache/",
+    };
+    // The original closure (redis-compatible-kv, multi-raft-transactions
+    // and the gateway module), plus FLUSHALL, which it never had: since
+    // redis-general-data-types task 13 admins (and only admins) may run it.
+    const std::vector<std::string_view> commands{
+        "GET",   "EXISTS",      "STRLEN", "GETRANGE",       "TTL",
+        "PING",  "ECHO",        "SELECT", "CLIENT",         "COMMAND",
+        "QUIT",  "RESET",       "AUTH",   "HELLO",          "DBSIZE",
+        "MGET",  "MULTI",       "EXEC",   "DISCARD",        "KYTHIRA.ISOLATION",
+        "WATCH", "UNWATCH",     "SET",    "SETEX",          "DEL",
+        "MSET",  "KYTHIRA.TXN", "INFO",   "KYTHIRA.ADVISE", "FLUSHALL",
+    };
+    const std::vector<std::vector<std::string_view>> key_sets{
+        {}, {"sccache/x"}, {"other/y"}, {"sccache/x", "other/y"}};
+    std::string text;
+    for (const auto& l : lines) {
+        text += l + "\n";
+    }
+    redis_acl acl(redis_acl::parse(text));
+    std::string out;
+    for (const auto& l : lines) {
+        const auto name = l.substr(5, l.find(' ', 5) - 5);
+        out += "user " + name + "\n";
+        const auto id = acl.identity_of(name);
+        if (!id) {
+            out += "  (no identity)\n";
+            continue;
+        }
+        out += "  role " + std::string(kythira::redis_role_name(id->_role)) + "\n";
+        for (const auto cmd : commands) {
+            out += "  " + std::string(cmd);
+            for (const auto& keys : key_sets) {
+                switch (redis_acl::authorize(*id, cmd, keys)) {
+                    case acl_decision::allow:
+                        out += " allow";
+                        break;
+                    case acl_decision::deny_command:
+                        out += " no-command";
+                        break;
+                    case acl_decision::deny_key:
+                        out += " no-key";
+                        break;
+                }
+            }
+            out += "\n";
+        }
+    }
+    check_golden("acl_permissions.txt", out);
 }

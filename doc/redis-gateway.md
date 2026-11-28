@@ -14,7 +14,10 @@ STRLEN GETRANGE PING AUTH HELLO SELECT CLIENT SETINFO QUIT RESET` — plus the
 diagnostics an operator reaches for (`COMMAND`, `INFO`, `DBSIZE`, `TTL`,
 `ECHO`). Everything else is refused with Redis's own `unknown command` error.
 A build with the transaction adapter adds the multi-key commands of
-*Transactions* below, off unless asked for.
+*Transactions* below, off unless asked for. The string commands of
+*Strings* below (`.kiro/specs/redis-general-data-types/`) answer once the
+cluster has passed the format gate (*Format level and the rolling
+upgrade*).
 The design, its requirements and its acceptance tests are in
 `.kiro/specs/redis-compatible-kv/`.
 
@@ -129,9 +132,18 @@ The Redis front end:
 | `KYTHIRA_REDIS_ALLOW_ANONYMOUS` | `false` | Run with no ACL at all. Every connection is an admin. The daemon warns at every start |
 | `KYTHIRA_REDIS_READ_CONSISTENCY` | `leader` | `leader` (reads go to the shard leader), `any_replica` (any local replica answers, may lag) or `linearizable` (a read goes through the log) |
 | `KYTHIRA_REDIS_MAX_VALUE_BYTES` | `8388608` | Largest value a `SET` may carry; larger is refused |
+| `KYTHIRA_REDIS_MAX_COLLECTION_BYTES` | `67108864` | Largest total size of one hash, set or list (each element's bytes plus 16); a write past it is refused |
+| `KYTHIRA_REDIS_MAX_COLLECTION_ELEMENTS` | `4194304` | Most elements in one hash, set or list; a write past it is refused |
 | `KYTHIRA_REDIS_MAX_CLIENTS` | `1024` | Connection cap; beyond it new connections are refused |
 | `KYTHIRA_REDIS_IDLE_TIMEOUT_MS` | `300000` | Idle connections are closed after this |
 | `KYTHIRA_REDIS_COMMAND_TIMEOUT_MS` | `5000` | A command that cannot be committed in this time answers with an error |
+| `KYTHIRA_REDIS_CURSOR_IDLE_MS` | `600000` | A `SCAN`, `HSCAN` or `SSCAN` cursor unused this long is forgotten; using it then answers `-ERR invalid cursor` |
+| `KYTHIRA_REDIS_MAX_CURSORS` | `100000` | Cursors one node holds at once; past it the least recently used is forgotten |
+| `KYTHIRA_REDIS_KEYS_LIMIT` | `10000` | Most keys `KEYS` returns; past it `KEYS` answers an error rather than a truncated list |
+| `KYTHIRA_REDIS_ALLOW_FLUSH` | `false` | Let admins run `FLUSHDB` and `FLUSHALL`. Off, both answer an error and the refusal is audited |
+| `KYTHIRA_REDIS_RANGE_DELETE_KEYS` | `1000` | Most keys one log entry of `KYTHIRA.DELPREFIX` or a flush deletes (1 to 1000000); a larger range takes several entries |
+| `KYTHIRA_REDIS_SLOWLOG_SLOWER_THAN_US` | `10000` | Commands slower than this many microseconds go to `SLOWLOG`; negative disables it, `0` logs everything |
+| `KYTHIRA_REDIS_SLOWLOG_MAX_LEN` | `128` | Entries `SLOWLOG` keeps; the oldest is dropped past it |
 | `KYTHIRA_REDIS_MAX_SHARD_BYTES` | `1073741824` | Per-shard budget; over it the leader evicts least-recently-used keys (the LRU is the leader's own view and starts over on a leadership change) |
 | `KYTHIRA_REDIS_SWEEP_BATCH` | `1024` | Expired keys removed per sweep command |
 | `KYTHIRA_REDIS_IMMUTABLE_VALUES` | `true` | A `SET` to an existing key with different bytes is refused. sccache keys are content hashes, so a conflicting write is a corrupted client, not an update |
@@ -180,7 +192,7 @@ useless.
 One user per line; `#` starts a comment and blank lines are ignored:
 
 ```
-user <name> <secret-record|nopass|disabled> <role> [prefix ...] [cert=<subject>] [auth=password|iam|both]
+user <name> <secret-record|nopass|disabled> <role> [rule or scope ...] [cert=<subject>] [auth=password|iam|both]
 ```
 
 - `<secret-record>` is `pbkdf2-sha256$<iterations>$<base64 salt>$<base64 key>`
@@ -190,13 +202,33 @@ user <name> <secret-record|nopass|disabled> <role> [prefix ...] [cert=<subject>]
   with a client certificate, so the line must carry a `cert=` (the ACL is
   rejected otherwise) and `AUTH` as that user always fails. `disabled` in
   this position keeps the line but lets nobody authenticate as the user.
-- `<role>` is `read_only` (`GET`, `EXISTS`, `STRLEN`, `GETRANGE`, `TTL`,
-  `DBSIZE`, `COMMAND` and the connection commands), `read_write` (adds `SET`,
-  `SETEX`, `DEL`) or `admin` (adds `INFO`). `ro` and `rw` are accepted
-  abbreviations.
-- Each `prefix` is a key prefix the user may touch; `*` means every key. A
-  user with no prefix can run `PING` and nothing that names a key: scope is
-  granted, never assumed.
+- `<role>` is the starting set of commands, named by Redis ACL categories:
+  `read_only` is `+@all -@write -@admin -@dangerous` (the reads, the
+  connection commands, `COMMAND`, `MULTI`/`EXEC`), `read_write` is
+  `+@all -@admin -@dangerous` (adds `SET`, `DEL` and every write) and
+  `admin` is `+@all` (adds `INFO` and `KYTHIRA.FORMAT`). `ro` and `rw` are
+  accepted abbreviations. A command's categories are the ones `COMMAND
+  INFO` reports.
+- Rules after the role edit that set, left to right, the later rule
+  winning as in Redis: `+@<category>` / `-@<category>` (`@string`, `@hash`,
+  `@set`, `@list`, `@keyspace`, `@read`, `@write`, `@admin`,
+  `@dangerous`, `@connection`, `@transaction`, `@fast`, `@slow`, ...;
+  categories with no command in this build yet, like `@sortedset`, are
+  accepted and match nothing), `+<command>` / `-<command>`, and
+  `allcommands` / `nocommands`. A rule never reaches a command the build
+  does not ship. Subcommand rules (`+client|list`) are refused.
+- Key scopes are prefixes. A bare word, or `~prefix`, lets the user read and
+  write keys under it; `*`, `~*` and `allkeys` mean every key.
+  `%R~prefix` grants reads only and `%W~prefix` writes only (`%RW~` is
+  `~`). A command that only looks at a key's metadata (`EXISTS`, `TYPE`,
+  the TTL family, `STRLEN`, `TOUCH`, `OBJECT`) accepts either scope; one
+  that both writes and returns or uses the old value (`INCR`, `GETDEL`,
+  `GETEX`, `GETSET`, `SET ... GET`) needs both. A trailing `*` is
+  optional (`~app:*` is `~app:`); any other glob character rejects the
+  file. A user with no scope can run `PING` and nothing that names a key:
+  scope is granted, never assumed.
+- `mutable~prefix` names keys the immutable-value rule lets this user
+  change (see *Strings*). It grants no access by itself.
 - `cert=<subject>` maps an mTLS client certificate's subject to this user,
   so it is authenticated on connect without an `AUTH`.
 - `auth=` says how `AUTH` authenticates the user: `password` (the default)
@@ -215,6 +247,20 @@ starting `auth=iam`. Run the new build on every gateway in the cluster
 before any ACL file uses `auth=`. Where that cannot be guaranteed, give an
 IAM-only user the secret `disabled`: an old build refuses that user
 outright, and a new one logs it in with a token only.
+
+The rules and scopes above have the same hazard: a gateway built before
+them reads every one of these words as a key prefix. Most of that fails
+closed: `~app:`, `%R~app:` and `mutable~app:` become prefixes no key
+starts with, so the old gateway refuses those keys (or keeps them
+immutable), and `+@hash` grants nothing it did not already. A `-` rule
+fails open: an old gateway ignores `-flushdb` and the role's full set
+applies. So upgrade every gateway before adding `-` rules or narrowing a
+user with `%R~`/`%W~`, or meanwhile give the user the narrower role. The
+original line format reads exactly as before, except that a bare prefix
+beginning with `+`, `-`, `~` or `%`, or spelled `allkeys`, `allcommands`,
+`nocommands` or `mutable~...`, is now syntax: write such a prefix as
+`~<prefix>`. `services/redis/tests/golden/redis/acl_permissions.txt` pins
+what the original lines grant.
 
 Example, the shape of a build farm:
 
@@ -242,7 +288,9 @@ keeps the other workers free for authenticated traffic.
 
 Until a connection authenticates it is held to Redis's limits for
 unauthenticated clients: at most 10 arguments of at most 16 KiB each, parsed
-one command at a time. A client that pipelines `AUTH` and a large `SET` in one
+one command at a time. Once authenticated, a command may have up to 1,048,576
+arguments of up to 32 MiB each, within 64 MiB buffered per connection. A
+client that pipelines `AUTH` and a large `SET` in one
 write is fine; the `SET` is parsed after `AUTH` has run. A client that stops
 reading its replies stops having its commands executed once
 `_max_output_buffer_bytes` (32 MiB; 64 KiB before `AUTH`) of replies are
@@ -637,10 +685,300 @@ not take the whole link. It is refused in the other modes, where it would do
 nothing: file mode catches a follower up by fetching chunks, at
 `KYTHIRA_CACHE_FETCH_BYTES_PER_SEC`.
 
+After the format gate (*Format level and the rolling upgrade*) the engine
+store holds hashes, sets and lists as well as strings. A string is one row,
+as before. A collection is a header row (type, deadline, element count,
+size and, for a list, its first position) followed by one row per element,
+so writing one field, member or list element rewrites that row and the
+header, never the whole collection, and the rows of a key always travel
+together in a split, a merge or a snapshot transfer. Pushing or popping at
+either end of a list, `LSET` and `LTRIM` write O(1) rows; `LINSERT` and
+`LREM` in the middle move the shorter side. A node keeps up to 64 MiB of
+recently written collections decoded in memory, so a run of writes to one
+large collection reads its rows once.
+
+Keys containing a NUL byte are stored escaped once a shard has passed the
+gate (the gate itself rewrites the few that exist). For the same reason the
+engine store never splits a shard at such a key, and a shard whose bounds
+contain one (only possible from a split made by an older build) refuses the
+gate, so its typed commands keep answering the gate error until it is merged
+with a neighbour. An older build refuses a gated shard's metadata at
+startup instead of misreading it.
+
 `services/redis/docker/engine-chaos-compose.yml` runs three nodes this way,
 and `docker-engine-chaos-tests` SIGKILLs and restarts them under load
-(the history must be linearizable) and kills a follower in the middle of a
-snapshot transfer (it must still catch up), under Docker and rootless Podman.
+(the history, which covers strings, hashes and lists, must be linearizable)
+and kills a follower in the middle of a snapshot transfer (it must still
+catch up), under Docker and rootless Podman.
+
+## Strings
+
+After the format gate the gateway also answers the tier 1 string commands
+of `.kiro/specs/redis-general-data-types/`, with Redis 7.2's replies in
+RESP2 and RESP3:
+
+| Command | Notes |
+|---|---|
+| `INCR` `DECR` `INCRBY` `DECRBY` | 64-bit, Redis's overflow and not-an-integer errors |
+| `INCRBYFLOAT` | IEEE binary128 on every architecture, printed as Redis prints `long double` (D1: matches arm64 Redis exactly; amd64 Redis's 80-bit arithmetic can differ in the 17th decimal) |
+| `SET key value [NX\|XX] [GET] [EX\|PX\|EXAT\|PXAT n\|KEEPTTL]` | a plain `SET key value` still writes the old record, so sccache's log is unchanged |
+| `SETNX` `PSETEX` `GETSET` `GETDEL` `GETEX` `APPEND` `SETRANGE` | |
+| `TYPE` `TOUCH` `OBJECT ENCODING` `UNLINK key` | `OBJECT ENCODING` names the encoding Redis would choose (D16) |
+
+A write that depends on the current value is decided where the log is
+applied, at the entry's command time (the leader's clock, never earlier
+than the group's last), so every replica gives the same answer and an
+expiring key cannot satisfy two `SET NX` at once. `APPEND` and `SETRANGE`
+refuse a result longer than `KYTHIRA_REDIS_MAX_VALUE_BYTES`.
+
+With immutable values on (`KYTHIRA_REDIS_IMMUTABLE_VALUES`, the default),
+a command that would change a live key's bytes or deadline, or take it
+away as `GETDEL` does, answers `-ERR value conflict for an existing key`,
+unless the key is under one of the user's `mutable~` prefixes (see *The
+ACL file*). Creating a key and rewriting the same bytes are allowed, and
+`DEL` works as before. The front end marks each key it proposes as
+mutable or not, and the decision is made against the stored value where
+the log is applied, so two writers racing to create a key cannot both
+pass: one creates it and the other finds it existing. A plain `SET` or
+`SETEX` of a key in a mutable prefix goes as an `exec` record once its
+group has the typed-values gate, so the mark reaches the leader even
+through a follower; before the gate only `SET` on the leader's node honours
+it. With the rule off every key is mutable. `COMMAND`, `COMMAND INFO` and `COMMAND DOCS` describe exactly the
+commands the node accepts, from the command registry
+(`services/redis/tools/redis_commands.yaml`).
+
+### Expiry
+
+| Command | Notes |
+|---|---|
+| `EXPIRE` `PEXPIRE` `EXPIREAT` `PEXPIREAT key n [NX\|XX\|GT\|LT]` | 1 when the deadline was set (or the key deleted), 0 when the key is missing or the condition fails |
+| `PERSIST` | 1 when a deadline was removed |
+| `TTL` `PTTL` `EXPIRETIME` `PEXPIRETIME` | -2 missing, -1 no deadline |
+
+The node that receives the command checks the options and the number and
+turns a relative time into an absolute deadline with its own clock; the
+log decides the rest at the entry's command time. A deadline at or before
+that time deletes the key and answers 1, as Redis does. `GT` treats a key
+without a deadline as never expiring (it never passes there) and `LT`
+always passes there. The leader's expiry sweep names each key with the
+deadline it saw, so an `EXPIRE` or `PERSIST` that lands in the log after
+the sweep was built and before it applied keeps the key alive. Under the
+immutable-value rule a deadline is part of what the rule protects.
+
+### Multi-key commands
+
+| Command | Notes |
+|---|---|
+| `DEL` `UNLINK` `EXISTS key [key ...]` | count of keys removed or present |
+| `RENAME` `RENAMENX` | the destination takes the source's deadline |
+| `COPY src dst [DB 0] [REPLACE]` | one database: any other `DB` answers `-ERR DB index is out of range` |
+| `MSETNX` | all keys or none, only if none exists |
+
+The node that receives the command routes every key first. Keys that live
+in one shard make one log entry there, with no transaction, so the
+command is atomic and as fast as a single-key write. Keys in several
+shards run as one transaction across them, at the connection's isolation
+(as `MSET`), on a build and node with transactions on; anywhere else the
+command answers `-CROSSSLOT Keys in request don't hash to the same slot`,
+the error Redis Cluster clients already handle, and changes nothing. If a
+shard splits between routing and submission so that one entry would name
+a key the shard no longer owns, the entry is refused before it is
+proposed, the node learns the new layout and plans again (it may then
+become a transaction). `EXISTS` with several keys reads each where it
+lives and needs no transaction. Under the immutable-value rule `RENAME`
+needs the source, and an existing destination, to be in the user's
+mutable prefixes, and `COPY REPLACE` needs an existing destination to be;
+`MSETNX` and `COPY` to a new key only create. Before the typed-values gate a
+multi-key `DEL` keeps its earlier form: a transaction where transactions
+are on, refused elsewhere.
+
+## Hashes
+
+`HSET`, `HSETNX`, `HMSET`, `HGET`, `HMGET`, `HDEL`, `HEXISTS`, `HLEN`,
+`HSTRLEN`, `HKEYS`, `HVALS`, `HGETALL`, `HINCRBY`, `HINCRBYFLOAT` and
+`HRANDFIELD` behave as in Redis 7, with the in-memory and engine stores
+(`KYTHIRA_CACHE_PERSISTENCE=memory` or `engine`) once a shard has passed
+format level 3. The disk-backed cache (`file`) stays string-only: there,
+every command of `.kiro/specs/redis-general-data-types/` other than a plain
+`SET`, `GET` or `DEL` answers `-ERR this command needs
+KYTHIRA_CACHE_PERSISTENCE=memory or engine`, and its formats never change.
+`HSCAN` is described with `SCAN` below.
+
+- A key holds one type. A hash command on a string, or a string command
+  (`GET`, `INCR`, `APPEND`, ...) on a hash, answers `-WRONGTYPE Operation
+  against a key holding the wrong kind of value` and changes nothing.
+  Plain `SET` replaces a key of any type, as in Redis. `TYPE` and
+  `OBJECT ENCODING` (`listpack` or `hashtable`, by Redis's default
+  thresholds) report it.
+- `HDEL` of the last field deletes the key. Field writes keep the key's
+  deadline; `EXPIRE`, `PERSIST`, `RENAME`, `COPY` and `DEL` work on a hash as
+  on a string. A `RENAME` or `COPY` whose keys are in different shards
+  moves the whole hash in one transaction where transactions are on, and
+  answers `-CROSSSLOT` elsewhere, as for a string.
+- Fields come back in byte order of the field, on every replica. Redis
+  promises no order for `HGETALL`, `HKEYS` or `HVALS`; byte order is
+  Kythira's.
+- One hash holds at most `KYTHIRA_REDIS_MAX_COLLECTION_ELEMENTS` fields and
+  `KYTHIRA_REDIS_MAX_COLLECTION_BYTES` (each field and value's bytes plus 16).
+  A write past either answers `-ERR collection exceeds the configured maximum
+  of N elements` (or `bytes`) and changes nothing. The limits travel in the
+  write's log entry, so every replica refuses the same write. A key is never
+  split across shards, so its whole value lands in one shard's snapshots.
+- `HINCRBYFLOAT` uses the same 128-bit arithmetic and formatting as
+  `INCRBYFLOAT`.
+- `HRANDFIELD` picks on the node that serves the read, never in the log.
+  With `WITHVALUES` a RESP3 connection gets `[field, value]` pairs and a
+  RESP2 one a flat array, as from Redis.
+- Under the immutable-value rule, creating a hash is allowed and changing an
+  existing one needs the key in one of the user's mutable prefixes; a write
+  that changes nothing (the same value again, `HDEL` of a missing field)
+  succeeds. ACL key scopes follow Redis's key specs: `HINCRBY` and
+  `HINCRBYFLOAT` need read and write, `HLEN`, `HEXISTS` and `HSTRLEN` only
+  look at metadata.
+
+A hash is stored in chunks of at most 128 fields. A write copies the one
+chunk it changes and shares the rest, so a write to a large hash costs a
+chunk, not the hash; a read takes a handle to the hash under the shard's
+lock and builds its reply after releasing it, so `HGETALL` on a large hash
+never copies it under the lock.
+
+## Sets
+
+`SADD`, `SREM`, `SISMEMBER`, `SMISMEMBER`, `SMEMBERS`, `SCARD`, `SPOP`,
+`SRANDMEMBER`, `SMOVE`, `SINTER`, `SUNION`, `SDIFF`, `SINTERCARD`,
+`SINTERSTORE`, `SUNIONSTORE` and `SDIFFSTORE` behave as in Redis 7, on the
+same stores and format level as hashes, with the same type errors, limits,
+deadlines, chunking and immutable-value rule. `SSCAN` is described with
+`SCAN` below.
+
+- Members come back in byte order on every replica; Redis promises no
+  order. `OBJECT ENCODING` reports `intset` (every member an integer, at
+  most 512) or `hashtable`.
+- Random picks never happen in the log. `SRANDMEMBER` picks on the node
+  that serves the read. `SPOP` picks on the node that serves the read of
+  the set and proposes the removal of exactly those members; each is
+  removed only if it is still there when the entry applies, and the reply
+  names what was removed. A pop racing another pop of the same member
+  therefore returns fewer members (nil without a count) rather than the
+  same member twice.
+- `SMOVE` and the `*STORE` forms are multi-key writes: their keys in one
+  shard make one log entry. A `*STORE` replaces its destination whatever
+  it held and deletes it when the result is empty. Keys in several shards
+  run as one transaction where transactions are on, and answer
+  `-CROSSSLOT` elsewhere.
+- `SINTER`, `SUNION`, `SDIFF` and `SINTERCARD` read each key where it
+  lives, at the connection's consistency, and combine them on the node
+  that received the command, so their keys may be in different shards.
+  The keys are read one after another, not as one snapshot.
+
+## Lists
+
+`LPUSH`, `RPUSH`, `LPUSHX`, `RPUSHX`, `LPOP` and `RPOP` (with a count),
+`LLEN`, `LINDEX`, `LRANGE`, `LSET`, `LINSERT`, `LREM`, `LTRIM`, `LPOS`,
+`LMOVE`, `RPOPLPUSH` and `LMPOP` behave as in Redis 7, on the same stores and
+format level as hashes, with the same type errors, limits, deadlines and
+immutable-value rule. The blocking forms (`BLPOP`, `BRPOP`, `BLMOVE`,
+`BRPOPLPUSH`, `BLMPOP`) answer `-ERR unknown command` until a later release.
+
+- A list is stored in chunks of at most 128 elements. Pushing or popping
+  at either end copies one chunk and the list of chunks, never the
+  elements; an index operation walks chunks from the nearer end.
+- `LMOVE`, `RPOPLPUSH` and `LMPOP` are multi-key writes: their keys in one
+  shard make one log entry; keys in several shards run as one transaction
+  where transactions are on, and answer `-CROSSSLOT` elsewhere.
+- `OBJECT ENCODING` reports `quicklist`, as Redis 7.0 does for every list.
+
+## Iterating the keyspace
+
+`SCAN`, `HSCAN`, `SSCAN`, `KEYS` and `RANDOMKEY` behave as in Redis 7 with
+the in-memory and engine stores (`SCAN`, `KEYS` and `RANDOMKEY` also with
+the disk-backed cache, where every key is a string). `SCAN` takes `MATCH`,
+`COUNT` and `TYPE`; `HSCAN` and `SSCAN` take `MATCH` and `COUNT`.
+
+- A cursor is a 64-bit number naming the node that issued it and a walk
+  that node holds. The walk's position is a key, not a hash slot, so it
+  survives splits, merges and leader changes: a full iteration returns
+  every key that existed for its whole duration exactly once, and never a
+  key twice. That is stronger than Redis, which may repeat a key.
+- A cursor works on any node of the cluster: the node that receives it
+  sends the call to the node that issued it, one hop. A cursor is good
+  only for the user who started the walk.
+- A cursor that has finished, or that its node has forgotten (idle past
+  `KYTHIRA_REDIS_CURSOR_IDLE_MS`, past `KYTHIRA_REDIS_MAX_CURSORS`, or
+  because the node restarted), answers `-ERR invalid cursor`. Start again
+  from `0`. Redis would carry on silently from wherever the number points.
+- Keys come back in byte order. `MATCH` with a literal prefix (`a/b*`)
+  reads only the keys starting with that prefix; any other pattern reads
+  every key and filters. `COUNT` is how many live keys a call examines, so
+  a call may return fewer keys than `COUNT`, or none, before the end.
+  `TYPE` with an unknown type name returns nothing, as Redis 7.2 does.
+- A user sees only the keys their ACL scopes let them read. A `MATCH`
+  outside all of them returns cursor `0` and no keys at once.
+- `HSCAN` and `SSCAN` return a hash or set small enough for Redis's
+  compact encodings whole, with cursor `0`, as Redis does. A larger one is
+  walked in field or member order.
+- `KEYS` is in the `dangerous` category, so only admins may run it. It
+  returns every matching key the user may read, or, past
+  `KYTHIRA_REDIS_KEYS_LIMIT` keys, `-ERR KEYS would return more than N
+  keys` rather than a partial answer.
+- `RANDOMKEY` picks a shard with probability proportional to its key
+  count, then a key at a random position in it; the walk to that position
+  reads up to the shard's keys.
+- Expired keys are never returned. Iteration reads at the connection's
+  consistency (`KYTHIRA_REDIS_READ_CONSISTENCY`), each page from one shard
+  at the time it is read, not as one snapshot.
+
+## Admin tools and introspection
+
+Operators get commands to delete by prefix, see where the space goes, and
+watch the gateway, without a client walking the keyspace.
+
+- `KYTHIRA.DELPREFIX prefix` deletes every key starting with `prefix` and
+  replies with how many it deleted. It is admin only (`dangerous`). Each
+  shard deletes its part through its log in entries of at most
+  `KYTHIRA_REDIS_RANGE_DELETE_KEYS` keys, so one call never makes one huge
+  entry. Each entry is atomic within its shard; the call as a whole is
+  not atomic across shards or entries, and a key written under the prefix
+  while it runs may survive. A key held by a running transaction makes the
+  entry refuse it; the gateway resolves the lock and retries, as for any
+  write. Expired keys not yet swept count as deleted. An empty prefix is
+  refused: that is `FLUSHALL`.
+- `FLUSHDB` and `FLUSHALL` (with `ASYNC` or `SYNC`, both handled the same
+  way) delete every key the same way, but only when
+  `KYTHIRA_REDIS_ALLOW_FLUSH` is on; off, they answer
+  `-ERR FLUSHDB is disabled on this cluster (KYTHIRA_REDIS_ALLOW_FLUSH)`.
+  Every call, deletes and refusals alike, writes an audit line with the
+  prefix and the count.
+- `KYTHIRA.USAGE [prefix] [DEPTH n] [DELIM d]` (admin only) groups keys by
+  their first `n` delimiter-ended segments (default depth 1, delimiter
+  `:`) and replies with one `[bucket, keys, bytes]` row per group, largest
+  first. A key with fewer segments is its own bucket. Past 1000 buckets
+  the rest are summed into one last row whose bucket is nil. Bytes are
+  counted as `MEMORY USAGE` counts them. The walk reads each shard at the
+  connection's consistency.
+- `MEMORY USAGE key [SAMPLES n]` replies with the key's bytes plus its
+  value's bytes plus 16 (the same per-element overhead collections are
+  limited by), or nil for a missing key. `SAMPLES` is accepted and
+  ignored; the count is exact. Other `MEMORY` subcommands are not offered.
+- `DBSIZE` counts every live key across the cluster exactly, by walking
+  the shards; it is not an estimate.
+- `INFO [section ...]` offers `server`, `clients`, `memory`, `stats`,
+  `commandstats`, `errorstats` and `keyspace`, plus `default`, `all` and
+  `everything`. `keyspace` shows the cluster-wide `db0:keys=N,expires=M`
+  and this node's own counts as `local_*` lines. When a shard cannot be
+  paged (no leader, or a peer too old to page during a rolling upgrade),
+  `db0` falls back to this node's own counts and `kythira_keyspace_scope`
+  says `local` instead of `cluster`; INFO itself never fails for it.
+  `commandstats` counts
+  calls, time, rejected calls (not authenticated, not permitted, wrong
+  arity, unknown, `EXECABORT`) and failed calls per command on this node.
+  `errorstats` counts replies by error code, at most 128 codes.
+- `SLOWLOG GET [n]`, `LEN`, `RESET` and `HELP` (admin only) show this
+  node's commands slower than `KYTHIRA_REDIS_SLOWLOG_SLOWER_THAN_US`.
+  An entry keeps the command name and its keys; every other argument is
+  replaced with `(redacted)`, so values and secrets never reach the log.
+  At most 32 arguments of 128 bytes each are kept. `AUTH`, `HELLO` and
+  `SLOWLOG` itself are never logged.
 
 ## Transactions
 
@@ -663,7 +1001,7 @@ command`, and `DEL` takes one key, as before.
 | `MSET k v [k v ...]` | Every pair, all or none. Under `KYTHIRA_REDIS_IMMUTABLE_VALUES` a key that already holds the same bytes is left out, and one holding other bytes refuses the whole command |
 | `MGET k [k ...]` | Each key's committed value at the connection's isolation, or a null |
 | `DEL k [k ...]` | Deletes, in one transaction, every key that was present; replies with how many. `DEL` with one key is the plain single-key command |
-| `MULTI` ... `EXEC` | Queues `GET`, `MGET`, `EXISTS`, `SET`, `SETEX`, `MSET` and `DEL`, then runs them as one transaction. Reads run at `EXEC` and see the transaction's own earlier writes. If the commit does not commit, `EXEC` answers with that error and nothing applied. A command refused while queuing (unsupported, bad arguments, not permitted) makes `EXEC` answer `EXECABORT`, as in Redis |
+| `MULTI` ... `EXEC` | Queues every string, keyspace, hash, set and list command that names its keys (not `SCAN`, `KEYS`, `RANDOMKEY`, server, connection or `KYTHIRA.*` commands), then runs them as one transaction. Each runs at `EXEC` and sees the transaction's own earlier writes. A command's runtime error (`WRONGTYPE`, a value conflict, a bad option) is its element of the reply and writes nothing, as in Redis. If the commit does not commit, `EXEC` answers with that error and nothing applied. A command refused while queuing (one `EXEC` cannot run, the wrong number of arguments, not permitted) makes `EXEC` answer `EXECABORT`, as in Redis |
 | `DISCARD` | Drops the queue |
 | `KYTHIRA.ISOLATION [level]` | Shows or sets this connection's isolation |
 | `WATCH k [k ...]`, `UNWATCH` | Snapshot build only (refused on the tier-1 build). The next `EXEC` commits only if no watched key changed since the first `WATCH`; otherwise it answers a null array and applies nothing. `EXEC`, `DISCARD` and `UNWATCH` clear the watch. See below |
@@ -690,6 +1028,34 @@ as `KYTHIRA_REDIS_INTERNAL_USER` and never forwards it again, so transactions
 need forwarding configured the same way plain forwarding does (an internal
 secret, and TLS or the plaintext opt-in). The host's background resolver uses
 the same link to finish transactions whose coordinator died.
+
+### Typed values in transactions
+
+Inside `EXEC`, and for a multi-key write whose keys are in several shards,
+the gateway evaluates each command itself, with the same code a shard runs
+when it applies a log entry, against the transaction's view of each key:
+the value the transaction read, with its own earlier writes on top. Each
+reply is therefore known before the commit, and the commit writes, for
+every key the transaction changed, the resulting value: a delete, a string
+(with its deadline) as before, or a hash, set or list as one internal
+`KYTHIRA.INSTALL` record that replaces the key's value whole. No shard
+evaluates anything again at the commit, so what was replied is what is
+installed. A client cannot send `KYTHIRA.INSTALL`.
+
+- A string-only transaction commits the same records it always did, so it
+  works before the format gate; a transaction that leaves a hash, set or
+  list in a shard needs that shard past level 3, like the command that
+  made it.
+- The commit carries each changed collection whole, so a transaction's
+  collections are bounded by the transaction layer's command size. Plain
+  single-shard writes keep sharing chunks between versions.
+- Transactional reads (`KYTHIRA.TXN READ` and `READAT`) carry each key's
+  type, deadline and, for a collection, its elements after the fields they
+  always had. A gateway from before this ignores them and sees a
+  collection as present, so a rolling upgrade finishes before typed
+  commands are used in transactions.
+- `WATCH` covers every type: a typed write makes a new version of the key
+  like any other write.
 
 ### Snapshot isolation
 
@@ -780,6 +1146,43 @@ Clients such as Lettuce and StackExchange.Redis parse `redis_version` to
 decide which commands to send, so it never carries a vendor suffix (earlier
 builds answered `7.0.0-kythira`). Earlier builds also reported `cluster`,
 which cluster-aware tools take as a promise that `CLUSTER` commands work.
+
+### Format level and the rolling upgrade
+
+The commands of `.kiro/specs/redis-general-data-types/` write a newer log
+and snapshot format (`0x03` records, the `KRV3` snapshot marker). A binary's
+**format level** is the newest format it reads: level 2 is the earlier
+records, level 3 adds the typed-value records. Each node reports its level
+as `kythira_format_level` in `INFO`, as the module's `format_level` health
+metric, and to `KYTHIRA.FORMAT LEVEL`. A node whose store does not read the
+newer formats (the disk-backed cache, and the multi-version store until its
+task lands) reports level 2.
+
+A group writes the newer formats only after a **format gate** has applied
+on it. To enable them on a running cluster:
+
+1. Roll every node onto a build of level 3, one at a time, as for any
+   upgrade. Nothing changes on disk yet.
+2. `KYTHIRA.FORMAT UPGRADE 3` (admin) on any node. It asks every node that
+   holds a replica of any group for its level and refuses, naming each node
+   that is below 3 or does not answer; then it proposes the gate to every
+   group, through each group's leader, until each has applied it, and
+   waits (within four command timeouts) until every node reports every
+   replica it holds at the level, so a node whose follower replica lags
+   does not keep refusing typed commands after `OK`. A group that splits
+   afterwards passes its level to its children. Repeating the command is
+   harmless.
+3. `KYTHIRA.FORMAT STATUS` (admin) shows this node's level and the gate each
+   of its local groups has passed.
+
+Until a group's gate, the new commands answer `-ERR this cluster has not
+enabled typed values yet (KYTHIRA.FORMAT)`.
+
+**The gate is one way.** After it, the log and snapshots may hold records
+an older binary cannot read, so a downgrade needs a restore from a snapshot
+taken before the gate. An older binary that meets a gate, a record or a
+snapshot above its level does not skip it: the group stops applying its log
+and logs `this log needs Redis format level N; run a newer build`.
 
 `INFO` (admin) reports the shards this node holds and leads, key and expiring
 key counts, approximate bytes, and counters for writes, deletes, value

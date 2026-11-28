@@ -51,7 +51,9 @@
 /// status byte.
 
 #include <kythira/redis/cache_chunk_store.hpp>
+#include <kythira/redis/redis_format_level.hpp>
 #include <kythira/redis/redis_kv_commands.hpp>
+#include <kythira/redis/redis_value.hpp>
 #include <raft/shard_types.hpp>
 #include <raft/splittable_state_machine.hpp>
 #include <raft/types.hpp>
@@ -348,6 +350,10 @@ public:
         require_bound();
         _last_applied_index = index;
         expire_pending(index);
+        // A record from a newer format halts the group rather than being
+        // skipped (redis-general-data-types Requirement 14.4). This store
+        // reads no format-0x03 record yet: decoding refuses one.
+        require_redis_record_level(command);
         auto decoded = decode_redis_kv_command(command);
         const bool changed =
             std::visit([this, index](auto& c) { return apply_one(c, index); }, decoded);
@@ -590,6 +596,22 @@ public:
             }
         }
         return it->second->_total_len * freeable / chunks.size();
+    }
+
+    /// Keys in `[from, to)` (`to` empty: no bound) in key order, for the
+    /// SCAN family (task 12); every value here is a string: `f(key, expire_at_ms, type)` returns
+    /// whether to go on. Expired keys are visited too; the caller skips them.
+    template<typename F>
+    auto scan_keys(std::string_view from, const std::optional<std::string>& to, F&& f) const
+        -> void {
+        for (auto it = _index.lower_bound(from); it != _index.end(); ++it) {
+            if (to && it->first >= *to) {
+                return;
+            }
+            if (!f(it->first, it->second->_expire_at_ms, redis_value_type::string)) {
+                return;
+            }
+        }
     }
 
     template<typename F> auto for_each_key(F&& f) const -> void {
