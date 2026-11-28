@@ -106,6 +106,24 @@ is one PR unless noted.
   - Property tests: IDs never reused across leader changes and group
     splits; a retried token returns the original result
   - _Requirements: 2.4, 4.1-4.5_
+  - Part done (November 28, 2026): `ec2_catalog.hpp`, the catalog group's
+    state machine (per-kind 64-bit counters handed out in blocks, VNIs
+    from a configured first VNI to 2^24-1, MACs from a locally
+    administered prefix, all exhausting rather than wrapping; the
+    ClientToken index keyed by account, operation and token, with a
+    fingerprint of the request's sorted parameters and expiry by the
+    leader's stamped clock), with both property tests; `ec2_tags.hpp`
+    (EC2's limits, CreateTags, DeleteTags, TagSpecifications);
+    `ec2_filters.hpp` (filters with EC2's wildcards and tag filters, and
+    sealed paging scoped to the operation and account); `ec2_region.hpp`
+    (the region, zones and instance-type catalog with AWS aliases, and
+    DescribeRegions, DescribeAvailabilityZones and DescribeInstanceTypes
+    registered on the front end). Still open: rendering IDs with
+    antikythera's `proto::ec2_id`, which needs the `antikythera-proto`
+    port (khold PR #971) bumped to a commit that has `ec2_id.hpp`; serving
+    these from `ec2_node` (and then moving the three describes to
+    `implemented-operations.txt`); and CreateTags, DeleteTags and
+    DescribeTags, which need the resource groups of tasks 10-13.
 
 - [ ] 5. Fleet layer, server records and the simulated backend
   - Link server over core TLS (TLS 1.3, client certificates from Kythira's
