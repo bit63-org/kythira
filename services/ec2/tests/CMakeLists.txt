@@ -85,4 +85,11 @@ target_compile_definitions(ec2_protocol_evidence_test PRIVATE
 kythira_ec2_test(ec2_front_end_test ec2_front_end_test.cpp)
 kythira_ec2_test(ec2_gateway_inputs_test ec2_gateway_inputs_test.cpp)
 
+# Task 4, Requirements 2.4 and 4.1-4.5: the catalog group (ID blocks,
+# VNIs, MACs, the ClientToken index, with property tests across leader
+# changes and group splits), tags, filters, paging and the region,
+# zone and instance-type describes.
+kythira_ec2_test(ec2_catalog_test ec2_catalog_test.cpp)
+kythira_ec2_test(ec2_describe_test ec2_describe_test.cpp)
+
 kythira_scale_test_timeouts()

@@ -33,6 +33,11 @@ Built when `CONFIG_EC2=y` (`services/ec2/Kconfig`, off by default).
 | `include/kythira/ec2/ec2_throttle.hpp` | EC2's request token buckets (by category, per uncategorized action, filtered describes) and its resource buckets for RunInstances, StartInstances, StopInstances and TerminateInstances, per account | 3 |
 | `include/kythira/ec2/ec2_profile.hpp` | the `aws` profile and the switches set per cluster and per account: throttling, instance, vCPU, volume and snapshot quotas, terminated-instance and ClientToken retention | 3 |
 | `tests/ec2_front_end_test.cpp`, `tests/ec2_gateway_inputs_test.cpp` | the front end with real SigV4 and a recording authorizer; the action table, throttling and profile | 3 |
+| `include/kythira/ec2/ec2_catalog.hpp` | the catalog group's state machine: ID counters handed out in blocks (`id_block`), VNI and MAC counters, the ClientToken index with request fingerprints and retention | 4 |
+| `include/kythira/ec2/ec2_tags.hpp`, `ec2_filters.hpp` | EC2's tag rules, CreateTags/DeleteTags and TagSpecifications; the filter engine (wildcards, `tag:`, `tag-key`, `tag-value`) and sealed paging every describe shares | 4 |
+| `include/kythira/ec2/ec2_region.hpp` | the region, its zones and the instance-type catalog (Kythira types, AWS aliases), and DescribeRegions, DescribeAvailabilityZones and DescribeInstanceTypes | 4 |
+| `include/kythira/ec2/ec2_codec.hpp` | the byte codec of the module's Raft commands and snapshots | 4 |
+| `tests/ec2_catalog_test.cpp`, `tests/ec2_describe_test.cpp` | the catalog with its property tests (no ID reuse across leader changes and splits; a retried token returns its first result); tags, filters, paging and the three describes | 4 |
 | `cmd/ec2_node/` | the daemon; a placeholder whose `--self-test` checks the operation table, until the gateway serves requests | 1 |
 
 ## Upgrading the authorization reference
