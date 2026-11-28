@@ -70,10 +70,55 @@ built by `.kiro/specs/kinesis-independent-layers/` tasks 1, 3, 5, 9 and
     the node's own advertised endpoint, which is the gateway's; the
     cluster test checks it on a front-end-only node.
 
-- [ ] 5. Gateway apart from the front end
+- [x] 5. Gateway apart from the front end
   - The authenticated-call handoff (shared with Kinesis), drain, role
     checks on internal routes, forward secret only from data nodes
   - _Requirements: 4.1, 4.2, 4.4, 8.1-8.3_
+  - Built: `front_end` splits into `authenticate` (framing faults, SigV4,
+    and with `check_body` the body's framing and limits) and `execute`
+    (authorization and the handler); `handle` is both, so a co-located
+    node is unchanged. The insights report and replication paths split
+    the same way.
+  - The handoff (`front_end_handoff.hpp`) follows Kinesis's: the same
+    route layout (`POST /_kythira/dynamodb/fe/v1/call` on every node with
+    `front_end`), the same admission (a layer identity with `gateway`
+    when a route guard is set, else the forward secret over path and
+    body) and the same "not executed" rule (retry on the next front end
+    only when the call was never written or the front end answered 503
+    `x-kythira-not-executed`; a written call without an answer is
+    InternalServerError). What is shared is that contract, not code:
+    DynamoDB's internal routes all use the item codec's varints, so the
+    call does too, and DynamoDB has no event streams, so there is one
+    route. The call carries the request as it arrived, the principal and
+    the request id; the front end re-frames the body. `forward_client`
+    gained `post`, which says whether the request was written.
+  - Roles: the client roles combine freely. `gateway` alone is a
+    `gateway_relay` (no backend, nothing on disk) that needs
+    `KYTHIRA_DYNAMODB_FRONT_END_NODES` and the forward secret;
+    `front_end` without `gateway` serves only handoffs;
+    `gateway,data,segments` hands its calls to front ends elsewhere.
+    `DescribeEndpoints` is answered by the gateway with its own endpoint.
+  - Drain: `POST /_kythira/dynamodb/v1/drain` (signed with the forward
+    secret over the path) or shutdown: `GET /` answers 503, the listener
+    stops accepting, answers close their connections, handoffs answer
+    not executed, and requests in flight get
+    `KYTHIRA_DYNAMODB_DRAIN_TIMEOUT_MS` (10 s).
+  - Internal routes: `route_guard_options_for` gives the forward channel
+    to `data` and `front_end` and the handoff to `gateway`; the core guard
+    counts the forward secret as `data` alone (8.2). The strong host's
+    path keeps the strong secret (8.3). The daemons load no layer
+    identities yet (Kinesis independent-layers task 3), so the guard is
+    set by tests and the forward secret admits callers as before.
+  - Tests: `dynamodb_gateway_test` (wire round trip and every truncation;
+    a gateway alone in front of a front end; authorization in the front
+    end; framing, SigV4 and `DescribeEndpoints` at the gateway; handoff
+    admission; failover and no retry of an unanswered call; drain; layer
+    identities on both internal routes; configuration);
+    `dynamodb_gateway_cluster_test`: a gateway alone in front of a front
+    end alone and a voter, a client moving from a voter's gateway onto it
+    and back with every acknowledged write present, and the gateway
+    failing over to the voter when the front end alone stops (the
+    gateway role's migration paths, ahead of task 8).
 
 - [ ] 6. Change log on remote volumes
   - `change_log` on `segment_store*`; DynamoDB volume assignment in its

@@ -27,6 +27,7 @@
 
 #include <kythira/dynamodb/forward_link.hpp>
 #include <kythira/dynamodb/gateway.hpp>
+#include <kythira/dynamodb/gateway_relay.hpp>
 #include <kythira/dynamodb/group_state_machine.hpp>
 #include <kythira/dynamodb/raft_backend.hpp>
 #include <kythira/dynamodb/remote_backend.hpp>
@@ -706,6 +707,9 @@ public:
             _probe.join();
         }
         if (_gateway) {
+            // Requests in flight finish first (task 5), up to the drain
+            // timeout.
+            (void)_gateway->drain();
             _gateway->stop();
         }
         if (_strong_backend) {
@@ -925,6 +929,7 @@ public:
 
     auto drain() -> void {
         if (_gateway) {
+            (void)_gateway->drain();
             _gateway->stop();
         }
     }
@@ -935,6 +940,7 @@ public:
     }
 
     [[nodiscard]] auto port() const -> std::uint16_t { return _gateway ? _gateway->port() : 0; }
+    [[nodiscard]] auto gateway() -> gateway_type& { return *_gateway; }
     /// The route cache, for tests and metrics.
     [[nodiscard]] auto backend() -> remote_type& { return *_backend; }
 
@@ -945,6 +951,68 @@ private:
     std::unique_ptr<remote_type> _backend;
     std::unique_ptr<gateway_type> _gateway;
 };
+
+/// A gateway alone (`KYTHIRA_DYNAMODB_ROLES=gateway`, task 5 of
+/// .kiro/specs/dynamodb-independent-layers/): no Raft and no backend; it
+/// verifies each request and hands it to a front end in
+/// `KYTHIRA_DYNAMODB_FRONT_END_NODES` (gateway_relay.hpp).
+class gateway_relay_node {
+public:
+    gateway_relay_node(ddb::gateway_config cfg, std::function<void(bool, std::string_view)> log)
+        : _cfg(std::move(cfg)), _log(std::move(log)) {}
+
+    ~gateway_relay_node() { stop(); }
+    gateway_relay_node(const gateway_relay_node&) = delete;
+    auto operator=(const gateway_relay_node&) -> gateway_relay_node& = delete;
+    gateway_relay_node(gateway_relay_node&&) = delete;
+    auto operator=(gateway_relay_node&&) -> gateway_relay_node& = delete;
+
+    auto start(std::optional<ddb::iam_hooks> iam = {}) -> void {
+        if (iam) {
+            _cfg.iam = std::move(iam);
+        }
+        _relay = std::make_unique<ddb::gateway_relay>(_cfg, _log);
+        _relay->start();
+        std::string front_ends;
+        for (const auto& p : _cfg.cluster.front_end_nodes) {
+            front_ends += (front_ends.empty() ? "" : ",") + p.host + ":" + std::to_string(p.port);
+        }
+        _log(false, "serving " + std::string(_cfg.http.insecure_plaintext ? "http" : "https") +
+                        " on " + _cfg.http.bind_address + ":" + std::to_string(_relay->port()) +
+                        ", gateway only, front ends " + front_ends + ", roles " +
+                        _cfg.roles.to_string());
+    }
+
+    auto drain() -> void {
+        if (_relay) {
+            (void)_relay->drain();
+            _relay->stop();
+        }
+    }
+
+    auto stop() -> void {
+        drain();
+        _relay.reset();
+    }
+
+    [[nodiscard]] auto port() const -> std::uint16_t { return _relay ? _relay->port() : 0; }
+    [[nodiscard]] auto relay() -> ddb::gateway_relay& { return *_relay; }
+
+private:
+    ddb::gateway_config _cfg;
+    std::function<void(bool, std::string_view)> _log;
+    std::unique_ptr<ddb::gateway_relay> _relay;
+};
+
+/// A gateway alone, run until `wait()` returns.
+inline auto run_gateway_relay(const ddb::gateway_config& cfg,
+                              const std::function<void(bool, std::string_view)>& log,
+                              const std::function<void()>& wait) -> void {
+    gateway_relay_node serving(cfg, log);
+    serving.start();
+    wait();
+    serving.stop();
+}
 
 /// A front end without the data role, run until `wait()` returns.
 inline auto run_front_end(const ddb::gateway_config& cfg,

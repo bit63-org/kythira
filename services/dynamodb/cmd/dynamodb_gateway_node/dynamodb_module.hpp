@@ -15,7 +15,9 @@
 // bootstrap groups and each voter's split range placed in the module's
 // space, and the strong host (task 27) on its own listener. Without the
 // data role (KYTHIRA_DYNAMODB_ROLES=gateway,front_end) it is a front_end_node:
-// no Raft, its ops sent to the data nodes' gateways.
+// no Raft, its ops sent to the data nodes' gateways. With the gateway role
+// alone (task 5) it is a gateway_relay_node: no backend at all, each call
+// verified and handed to a front end in KYTHIRA_DYNAMODB_FRONT_END_NODES.
 //
 // Kinesis streaming destinations (Requirement 7.4) publish through a
 // co-located Kinesis module's `kinesis.put_records` when there is one and
@@ -130,6 +132,24 @@ private:
     front_end_node _node;
 };
 
+/// A gateway alone (task 5 of .kiro/specs/dynamodb-independent-layers/):
+/// no backend, calls handed to the front ends.
+class gateway_relay_serving final : public serving {
+public:
+    gateway_relay_serving(ddb::gateway_config cfg, std::function<void(bool, std::string_view)> log)
+        : _node(std::move(cfg), std::move(log)) {}
+    void start(ddb::kinesis_sink /*kinesis*/, std::optional<ddb::iam_hooks> iam) override {
+        // Kinesis destinations are the data nodes' business.
+        _node.start(std::move(iam));
+    }
+    void drain() override { _node.drain(); }
+    void stop() override { _node.stop(); }
+    [[nodiscard]] auto port() const -> std::uint16_t override { return _node.port(); }
+
+private:
+    gateway_relay_node _node;
+};
+
 /// One node, no Raft: local_backend on the memory engine, nothing kept
 /// across a restart.
 class local_serving final : public serving {
@@ -171,6 +191,7 @@ public:
     }
     void drain() override {
         if (_gateway) {
+            (void)_gateway->drain();
             _gateway->stop();
         }
     }
@@ -307,6 +328,10 @@ public:
                       << "\n";
         };
         if (!_cfg.roles.has(kythira::layers::role::data)) {
+            if (!_cfg.roles.has(kythira::layers::role::front_end)) {
+                _serving = std::make_unique<gateway_relay_serving>(_cfg, log);
+                return;
+            }
             _serving = std::make_unique<front_end_serving>(_cfg, log);
             return;
         }

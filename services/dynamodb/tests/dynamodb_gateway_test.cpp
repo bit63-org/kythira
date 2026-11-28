@@ -13,6 +13,7 @@
 
 #include <kythira/dynamodb/backend.hpp>
 #include <kythira/dynamodb/gateway.hpp>
+#include <kythira/dynamodb/gateway_relay.hpp>
 
 #include <raft/memory_kv_engine.hpp>
 #include <raft/private_file.hpp>
@@ -1209,21 +1210,23 @@ BOOST_AUTO_TEST_CASE(a_role_set_the_node_cannot_serve_stops_it_naming_what_is_mi
     BOOST_TEST(has(error_for(cluster_env(), "data,segment"), "KYTHIRA_DYNAMODB_ROLES:"));
     BOOST_TEST(has(error_for(cluster_env(), "data,data,segments"), "KYTHIRA_DYNAMODB_ROLES:"));
     BOOST_TEST(has(error_for(cluster_env(), ""), "KYTHIRA_DYNAMODB_ROLES"));
-    // No data role: a front end that is no voter (task 4), never with
-    // segments or a gateway apart from its front end.
-    BOOST_TEST(has(error_for(cluster_env(), "gateway,front_end"), "unset KYTHIRA_DYNAMODB_PEERS"));
+    // No data role: no voter (tasks 4 and 5), never with segments.
+    for (const auto* roles : {"gateway,front_end", "front_end", "gateway"}) {
+        BOOST_TEST(has(error_for(cluster_env(), roles), "unset KYTHIRA_DYNAMODB_PEERS"));
+    }
     for (const auto* roles : {"gateway,front_end,segments", "segments"}) {
         BOOST_TEST(has(error_for(cluster_env(), roles), "drop segments or add data"));
     }
-    for (const auto* roles : {"front_end", "gateway"}) {
-        BOOST_TEST(has(error_for(cluster_env(), roles), "run both or neither"));
-    }
+    // A gateway alone hands calls to front ends, so it must name them.
+    BOOST_TEST(has(error_for(minimal_env(), "gateway"), "set KYTHIRA_DYNAMODB_FRONT_END_NODES"));
     // Data without segments: no remote volumes yet.
     BOOST_TEST(has(error_for(cluster_env(), "gateway,front_end,data"), "add segments"));
     BOOST_TEST(has(error_for(cluster_env(), "data"), "add segments"));
-    // A gateway apart from its front end: no handoff yet.
-    BOOST_TEST(has(error_for(cluster_env(), "gateway,data,segments"), "run both or neither"));
-    BOOST_TEST(has(error_for(cluster_env(), "front_end,data,segments"), "run both or neither"));
+    // A voter whose gateway is apart from its front end (task 5) names the
+    // front ends; one whose front end serves only gateways needs nothing.
+    BOOST_TEST(has(error_for(cluster_env(), "gateway,data,segments"),
+                   "set KYTHIRA_DYNAMODB_FRONT_END_NODES"));
+    BOOST_TEST(error_for(cluster_env(), "front_end,data,segments") == "ok");
     // A data node with no cluster has nobody to serve.
     BOOST_TEST(has(error_for(minimal_env(), "data,segments"), "set KYTHIRA_DYNAMODB_PEERS"));
     // Every message starts with the set as the node read it.
@@ -1365,4 +1368,584 @@ BOOST_AUTO_TEST_CASE(only_a_node_with_the_data_role_runs_the_workers) {
         std::this_thread::sleep_for(std::chrono::milliseconds(200));
     }
     BOOST_TEST(count() == 0);
+}
+
+// .kiro/specs/dynamodb-independent-layers/ task 5: a gateway apart from its
+// front end, the handoff between them, drain, and the role checks on the
+// internal routes.
+
+namespace {
+
+using https_ctx = kythira::https::request_context;
+
+/// Two static keys, the admin and a read-only reader, as every node of a
+/// split cluster must share (the front end authorizes by them).
+auto split_env() -> std::map<std::string, std::string> {
+    auto vars = minimal_env();
+    vars["KYTHIRA_DYNAMODB_BIND"] = "127.0.0.1";
+    vars["KYTHIRA_DYNAMODB_PORT"] = "0";
+    vars["KYTHIRA_DYNAMODB_STATIC_KEYS"] +=
+        ",AKIDREAD:" + std::string(k_secret) + ":111122223333:reader:read-only";
+    return vars;
+}
+
+auto config_of(const std::map<std::string, std::string>& vars) -> ddb::gateway_config {
+    auto c = ddb::gateway_config_from_env(env_of(vars));
+    const auto* error = std::get_if<std::string>(&c);
+    BOOST_REQUIRE_MESSAGE(error == nullptr, (error != nullptr ? *error : std::string{}));
+    return std::get<ddb::gateway_config>(c);
+}
+
+auto exchange(std::uint16_t port, http::request<http::string_body> req)
+    -> http::response<http::string_body> {
+    boost::asio::io_context ioc;
+    boost::beast::tcp_stream s(ioc);
+    s.expires_after(std::chrono::seconds(30));
+    s.connect({boost::asio::ip::make_address("127.0.0.1"), port});
+    req.set(http::field::host, "127.0.0.1:" + std::to_string(port));
+    req.prepare_payload();
+    http::write(s, req);
+    boost::beast::flat_buffer buf;
+    http::response<http::string_body> res;
+    http::read(s, buf, res);
+    return res;
+}
+
+/// A DynamoDB call to `port`, signed now with `key`'s secret.
+auto signed_call(std::uint16_t port, std::string_view op, const std::string& body,
+                 std::string_view key = "AKIDADMIN") -> http::response<http::string_body> {
+    const auto now = std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
+    const auto amz_date = sv4::detail::format_amz_date(now);
+    const std::string date = amz_date.substr(0, 8);
+    const std::string host = "127.0.0.1:" + std::to_string(port);
+    std::vector<std::pair<std::string, std::string>> headers{
+        {"Content-Type", "application/x-amz-json-1.0"},
+        {"Host", host},
+        {"X-Amz-Date", amz_date},
+        {"X-Amz-Target", "DynamoDB_20120810." + std::string(op)}};
+    const sv4::credential_scope scope{date, "us-east-1", "dynamodb"};
+    headers.emplace_back("Authorization",
+                         "AWS4-HMAC-SHA256 Credential=" + std::string(key) + "/" + scope.text() +
+                             ", SignedHeaders=content-type;host;x-amz-date;x-amz-target"
+                             ", Signature=" +
+                             std::string(64, '0'));
+    sv4::service_rules rules;
+    rules.service = "dynamodb";
+    rules.protocol = sv4::error_protocol::json;
+    const auto parsed = sv4::parse(sv4::request{"POST", "/", "", headers, body}, rules, now);
+    BOOST_REQUIRE(parsed.has_value());
+    auto& auth = headers.back().second;
+    auth.replace(auth.size() - 64, 64,
+                 sv4::compute_signature(*parsed, sv4::derive_signing_key(k_secret, scope)));
+    http::request<http::string_body> req{http::verb::post, "/", 11};
+    for (const auto& [n, v] : headers) {
+        req.set(n, v);
+    }
+    req.body() = body;
+    return exchange(port, std::move(req));
+}
+
+/// A POST to `path` signed with `secret` over `path_signed_text(signed_path,
+/// body)` (`signed_path` defaults to `path`).
+auto signed_post(std::uint16_t port, std::string_view path, const std::string& body,
+                 std::string_view secret, std::optional<std::string_view> signed_path = {})
+    -> http::response<http::string_body> {
+    const auto t =
+        static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                       std::chrono::system_clock::now().time_since_epoch())
+                                       .count());
+    http::request<http::string_body> req{http::verb::post, path, 11};
+    req.set(ddb::k_forward_time_header, std::to_string(t));
+    req.set(ddb::k_forward_mac_header,
+            ddb::forward_mac(secret, t, ddb::path_signed_text(signed_path.value_or(path), body)));
+    req.body() = body;
+    return exchange(port, std::move(req));
+}
+
+auto type_name(const http::response<http::string_body>& r) -> std::string {
+    const auto v = json::parse(r.body());
+    const std::string t(v.as_object().at("__type").as_string());
+    return t.substr(t.find('#') + 1);
+}
+
+constexpr std::string_view k_create_table =
+    R"({"TableName":"tbl","BillingMode":"PAY_PER_REQUEST",)"
+    R"("AttributeDefinitions":[{"AttributeName":"pk","AttributeType":"S"}],)"
+    R"("KeySchema":[{"AttributeName":"pk","KeyType":"HASH"}]})";
+
+/// A front end (a gateway with every role, on op_backend) and a gateway
+/// alone in front of it.
+struct split_pair {
+    kythira::memory_kv_engine engine;
+    op_backend backend{engine};
+    std::optional<ddb::gateway<op_backend>> front;
+    std::optional<ddb::gateway_relay> gate;
+    /// Every handoff the gateway sent, by front-end port.
+    std::shared_ptr<std::vector<std::uint16_t>> sent =
+        std::make_shared<std::vector<std::uint16_t>>();
+
+    explicit split_pair(kythira::layers::role_set front_roles = kythira::layers::role_set::all(),
+                        std::vector<std::uint16_t> extra_front_ends = {},
+                        std::optional<ddb::relay_transport> transport = {}) {
+        auto fc = config_of(split_env());
+        fc.cluster.forward_secret = std::string(k_forward_secret);
+        fc.roles = front_roles;
+        front.emplace(fc, backend);
+        front->start();
+
+        auto vars = split_env();
+        vars["KYTHIRA_DYNAMODB_ROLES"] = "gateway";
+        std::string nodes;
+        for (const auto p : extra_front_ends) {
+            nodes += "127.0.0.1:" + std::to_string(p) + ",";
+        }
+        nodes += "127.0.0.1:" + std::to_string(front->port());
+        vars["KYTHIRA_DYNAMODB_FRONT_END_NODES"] = nodes;
+        vars["KYTHIRA_DYNAMODB_FORWARD_SECRET"] = std::string(k_forward_secret);
+        auto gc = config_of(vars);
+        BOOST_REQUIRE(gc.roles.to_string() == "gateway");
+        gate.emplace(gc);
+        if (transport) {
+            gate->set_relay_transport(*transport);
+        } else {
+            auto client = std::make_shared<ddb::forward_client>(
+                ddb::forward_client_config{.secret = std::string(k_forward_secret), .tls = false},
+                std::map<std::string, ddb::forward_peer>{});
+            gate->set_relay_transport([client, sent = sent](const ddb::forward_peer& peer,
+                                                            std::string_view path,
+                                                            const std::string& body) {
+                sent->push_back(peer.port);
+                return client->post(peer, path, body);
+            });
+        }
+        gate->start();
+    }
+};
+
+auto sample_principal() -> kythira::aws_auth::principal_context {
+    kythira::aws_auth::principal_context p;
+    p.type = kythira::aws_auth::principal_type::assumed_role;
+    p.account = "111122223333";
+    p.arn = "arn:aws:sts::111122223333:assumed-role/app/s1";
+    p.userid = "AROAEXAMPLE:s1";
+    p.access_key_id = "ASIAEXAMPLE";
+    p.role_arn = "arn:aws:iam::111122223333:role/app";
+    p.role_name = "app";
+    p.session_name = "s1";
+    p.tags = {{"team", "blue"}, {"cost", ""}};
+    p.token_issue_time = std::chrono::system_clock::time_point(std::chrono::seconds(1700000000));
+    // Before 1970: the zig-zag varint keeps the sign.
+    p.expires = std::chrono::system_clock::time_point(std::chrono::seconds(-5));
+    p.source_identity = "alice";
+    p.session_policies = {R"({"Version":"2012-10-17"})", "arn:aws:iam::aws:policy/ReadOnly"};
+    p.transitive_tag_keys = {"team"};
+    p.session_token = true;
+    return p;
+}
+
+}  // namespace
+
+BOOST_AUTO_TEST_CASE(an_authenticated_call_survives_the_wire) {
+    ddb::authenticated_call c;
+    c.request_id = "REQ123";
+    c.principal = sample_principal();
+    c.request.method = "POST";
+    c.request.path = "/";
+    c.request.query = "a=b";
+    c.request.headers = {{"X-Amz-Target", "DynamoDB_20120810.GetItem"},
+                         {"Content-Type", "application/x-amz-json-1.0"}};
+    c.request.body = std::string("{\"TableName\":\"t\"}\0tail", 22);
+    c.request.source_ip = "10.1.2.3";
+    c.request.secure = false;
+    const auto bytes = ddb::handoff::encode_call(c);
+    const auto back = ddb::handoff::decode_call(bytes);
+    BOOST_REQUIRE(back.has_value());
+    BOOST_TEST(back->request_id == "REQ123");
+    const auto& p = back->principal;
+    const auto want = sample_principal();
+    BOOST_TEST((p.type == want.type));
+    BOOST_TEST(p.arn == want.arn);
+    BOOST_TEST(p.role_name == want.role_name);
+    BOOST_TEST((p.tags == want.tags));
+    BOOST_TEST((p.token_issue_time == want.token_issue_time));
+    BOOST_TEST((p.expires == want.expires));
+    BOOST_TEST((p.session_policies == want.session_policies));
+    BOOST_TEST((p.transitive_tag_keys == want.transitive_tag_keys));
+    BOOST_TEST(p.session_token);
+    BOOST_TEST(back->request.query == "a=b");
+    BOOST_TEST((back->request.headers == c.request.headers));
+    BOOST_TEST(back->request.body == c.request.body);
+    BOOST_TEST(back->request.source_ip == "10.1.2.3");
+    BOOST_TEST(!back->request.secure);
+
+    // Every truncation, a wrong version and trailing bytes are refused.
+    for (std::size_t n = 0; n < bytes.size(); ++n) {
+        BOOST_TEST_INFO("prefix " << n);
+        BOOST_TEST(!ddb::handoff::decode_call(bytes.substr(0, n)).has_value());
+    }
+    auto wrong = bytes;
+    wrong[0] = 2;
+    BOOST_TEST(!ddb::handoff::decode_call(wrong).has_value());
+    BOOST_TEST(!ddb::handoff::decode_call(bytes + "x").has_value());
+
+    kythira::aws_json::http_response a;
+    a.status = 400;
+    a.headers = {{"x-amzn-RequestId", "REQ123"}};
+    a.body = R"({"__type":"x#ValidationException"})";
+    const auto ab = ddb::handoff::encode_answer(a);
+    const auto aback = ddb::handoff::decode_answer(ab);
+    BOOST_REQUIRE(aback.has_value());
+    BOOST_TEST(aback->status == 400U);
+    BOOST_TEST(aback->body == a.body);
+    for (std::size_t n = 0; n < ab.size(); ++n) {
+        BOOST_TEST(!ddb::handoff::decode_answer(ab.substr(0, n)).has_value());
+    }
+}
+
+BOOST_AUTO_TEST_CASE(a_gateway_alone_hands_calls_to_a_front_end) {
+    split_pair s;
+    const auto gport = s.gate->port();
+    auto r = signed_call(gport, "CreateTable", std::string(k_create_table));
+    BOOST_REQUIRE_MESSAGE(r.result_int() == 200U, r.body());
+    r = signed_call(gport, "PutItem",
+                    R"({"TableName":"tbl","Item":{"pk":{"S":"a"},"v":{"N":"1"}}})");
+    BOOST_REQUIRE_MESSAGE(r.result_int() == 200U, r.body());
+    // The front end holds it: a client of the front end reads it.
+    r = signed_call(s.front->port(), "GetItem", R"({"TableName":"tbl","Key":{"pk":{"S":"a"}}})");
+    BOOST_REQUIRE_MESSAGE(r.result_int() == 200U, r.body());
+    BOOST_TEST(r.body().find(R"("v":{"N":"1"})") != std::string::npos);
+    // And the answer through the gateway is the front end's, request id
+    // and all: the id the gateway gave the call.
+    r = signed_call(gport, "GetItem",
+                    R"({"TableName":"tbl","Key":{"pk":{"S":"a"}},"ConsistentRead":true})");
+    BOOST_REQUIRE_MESSAGE(r.result_int() == 200U, r.body());
+    BOOST_TEST(r.body().find(R"("v":{"N":"1"})") != std::string::npos);
+    BOOST_TEST(!std::string(r["x-amzn-RequestId"]).empty());
+    // Three calls went through the gateway; one read the front end directly.
+    const auto handed = s.sent->size();
+    BOOST_TEST(handed == 3U);
+
+    // Authorization is the front end's (Requirement 4.2): the reader's
+    // PutItem is handed over and refused there.
+    r = signed_call(gport, "PutItem", R"({"TableName":"tbl","Item":{"pk":{"S":"b"}}})", "AKIDREAD");
+    BOOST_TEST(r.result_int() == 400U);
+    BOOST_TEST(type_name(r) == "AccessDeniedException");
+    BOOST_TEST(s.sent->size() == handed + 1);
+
+    // Framing, limits and SigV4 are the gateway's: nothing is handed over.
+    http::request<http::string_body> unsigned_req{http::verb::post, "/", 11};
+    unsigned_req.set("X-Amz-Target", "DynamoDB_20120810.GetItem");
+    unsigned_req.set("Content-Type", "application/x-amz-json-1.0");
+    unsigned_req.body() = "{}";
+    r = exchange(gport, std::move(unsigned_req));
+    BOOST_TEST(r.result_int() == 400U);
+    BOOST_TEST(type_name(r) == "IncompleteSignatureException");
+    r = signed_call(gport, "NoSuchOperation", "{}");
+    BOOST_TEST(type_name(r) == "UnknownOperationException");
+    r = signed_call(gport, "GetItem", "not json");
+    BOOST_TEST(r.result_int() == 400U);
+    BOOST_TEST(s.sent->size() == handed + 1);
+
+    // DescribeEndpoints names the gateway, never the front end (4.3).
+    r = signed_call(gport, "DescribeEndpoints", "{}");
+    BOOST_REQUIRE_MESSAGE(r.result_int() == 200U, r.body());
+    BOOST_TEST(r.body().find("localhost:" + std::to_string(gport)) != std::string::npos);
+    BOOST_TEST(s.sent->size() == handed + 1);
+
+    // A gateway alone holds no data and runs no front end.
+    r = exchange(gport,
+                 http::request<http::string_body>{http::verb::post, ddb::k_forward_path, 11});
+    BOOST_TEST(r.result_int() == 404U);
+    r = signed_post(gport, ddb::handoff::k_call_path, "x", k_forward_secret);
+    BOOST_TEST(r.result_int() == 503U);
+    BOOST_TEST(r.count(ddb::handoff::k_not_executed_header) == 1U);
+}
+
+BOOST_AUTO_TEST_CASE(only_a_gateway_may_hand_a_front_end_a_call) {
+    split_pair s;
+    const auto fport = s.front->port();
+    ddb::authenticated_call c;
+    c.request_id = "R1";
+    c.principal.type = kythira::aws_auth::principal_type::root;
+    c.principal.account = "111122223333";
+    c.principal.arn = "arn:aws:iam::111122223333:root";
+    c.principal.access_key_id = "AKIDADMIN";
+    c.request.method = "POST";
+    c.request.path = "/";
+    c.request.headers = {{"X-Amz-Target", "DynamoDB_20120810.ListTables"},
+                         {"Content-Type", "application/x-amz-json-1.0"}};
+    c.request.body = "{}";
+    const auto body = ddb::handoff::encode_call(c);
+
+    // Unsigned, the wrong secret, or the forward channel's body-only MAC: 403.
+    http::request<http::string_body> plain{http::verb::post, ddb::handoff::k_call_path, 11};
+    plain.body() = body;
+    BOOST_TEST(exchange(fport, std::move(plain)).result_int() == 403U);
+    BOOST_TEST(signed_post(fport, ddb::handoff::k_call_path, body, "the-wrong-secret-entirely")
+                   .result_int() == 403U);
+    BOOST_TEST(signed_post(fport, ddb::handoff::k_call_path, body, k_forward_secret,
+                           ddb::handoff::k_drain_path)
+                   .result_int() == 403U);
+    // Signed over the path and body: run, answered with the client's
+    // response.
+    auto r = signed_post(fport, ddb::handoff::k_call_path, body, k_forward_secret);
+    BOOST_REQUIRE_MESSAGE(r.result_int() == 200U, r.body());
+    const auto answer = ddb::handoff::decode_answer(r.body());
+    BOOST_REQUIRE(answer.has_value());
+    BOOST_TEST(answer->status == 200U);
+    BOOST_TEST(answer->body.find("TableNames") != std::string::npos);
+    BOOST_TEST(answer->header("x-amzn-RequestId").value_or("") == "R1");
+    // A malformed call is refused as such.
+    BOOST_TEST(
+        signed_post(fport, ddb::handoff::k_call_path, "junk", k_forward_secret).result_int() ==
+        400U);
+}
+
+BOOST_AUTO_TEST_CASE(a_node_without_the_front_end_role_does_not_run_a_handoff) {
+    split_pair s(kythira::layers::role_set::parse("data,segments"));
+    const auto r = signed_post(s.front->port(), ddb::handoff::k_call_path, "x", k_forward_secret);
+    BOOST_TEST(r.result_int() == 503U);
+    BOOST_TEST(r.count(ddb::handoff::k_not_executed_header) == 1U);
+}
+
+BOOST_AUTO_TEST_CASE(a_gateway_tries_the_next_front_end_only_when_a_call_did_not_run) {
+    // The first front end in the list is a port nothing listens on: the
+    // call was never written, so it goes to the next.
+    std::uint16_t dead = 0;
+    {
+        boost::asio::io_context ioc;
+        boost::asio::ip::tcp::acceptor a(ioc, {boost::asio::ip::make_address("127.0.0.1"), 0});
+        dead = a.local_endpoint().port();
+    }
+    split_pair s(kythira::layers::role_set::all(), {dead});
+    auto r = signed_call(s.gate->port(), "ListTables", "{}");
+    BOOST_REQUIRE_MESSAGE(r.result_int() == 200U, r.body());
+    BOOST_TEST(s.gate->relay()->stats().retried.load() == 1U);
+    // The dead one sits at the back for a while: the next call goes
+    // straight to the live one.
+    s.sent->clear();
+    r = signed_call(s.gate->port(), "ListTables", "{}");
+    BOOST_REQUIRE_MESSAGE(r.result_int() == 200U, r.body());
+    BOOST_REQUIRE_EQUAL(s.sent->size(), 1U);
+    BOOST_TEST(s.sent->front() == s.front->port());
+
+    // A front end that is draining answers "not executed": also retried.
+    split_pair d;
+    d.front->begin_drain();
+    // (Drained, its listener takes no new connection, so this one is
+    // handed over the transport directly.)
+    const auto calls = std::make_shared<int>(0);
+    ddb::front_end_relay relay(
+        ddb::front_end_relay_options{.front_ends = {{"a", 1}, {"b", 2}}},
+        [calls](const ddb::forward_peer& peer, std::string_view, const std::string&) {
+            ++*calls;
+            ddb::forward_reply r;
+            r.written = true;
+            r.answered = true;
+            if (peer.host == "a") {
+                r.status = 503;
+                r.headers = {{"X-Kythira-Not-Executed", "1"}};
+                return r;
+            }
+            r.status = 200;
+            kythira::aws_json::http_response ok;
+            ok.body = "{}";
+            r.body = ddb::handoff::encode_answer(ok);
+            return r;
+        });
+    ddb::authenticated_call c;
+    BOOST_TEST(relay.relay(c).has_value());
+    BOOST_TEST(*calls == 2);
+}
+
+BOOST_AUTO_TEST_CASE(a_call_written_without_an_answer_is_not_tried_again) {
+    const auto calls = std::make_shared<int>(0);
+    split_pair s(kythira::layers::role_set::all(), {},
+                 [calls](const ddb::forward_peer&, std::string_view, const std::string&) {
+                     ++*calls;
+                     ddb::forward_reply r;
+                     r.written = true;  // and then the connection dropped
+                     return r;
+                 });
+    const auto r = signed_call(s.gate->port(), "PutItem", R"({"TableName":"tbl","Item":{}})");
+    BOOST_TEST(r.result_int() == 500U);
+    BOOST_TEST(type_name(r) == "InternalServerError");
+    BOOST_TEST(*calls == 1);
+    BOOST_TEST(s.gate->relay()->stats().failed.load() == 1U);
+}
+
+BOOST_AUTO_TEST_CASE(a_signed_drain_request_drains_a_node) {
+    split_pair s;
+    const auto fport = s.front->port();
+    // Unsigned, or signed for another path: refused.
+    BOOST_TEST(exchange(fport, http::request<http::string_body>{http::verb::post,
+                                                                ddb::handoff::k_drain_path, 11})
+                   .result_int() == 403U);
+    BOOST_TEST(signed_post(fport, ddb::handoff::k_drain_path, "", k_forward_secret,
+                           ddb::handoff::k_call_path)
+                   .result_int() == 403U);
+    BOOST_TEST(!s.front->draining());
+
+    // Answered on one connection kept open, since a drained listener takes
+    // no new one.
+    boost::asio::io_context ioc;
+    boost::beast::tcp_stream stream(ioc);
+    stream.expires_after(std::chrono::seconds(30));
+    stream.connect({boost::asio::ip::make_address("127.0.0.1"), fport});
+    const auto send = [&](http::request<http::string_body> req) {
+        req.set(http::field::host, "127.0.0.1");
+        req.keep_alive(true);
+        req.prepare_payload();
+        http::write(stream, req);
+        boost::beast::flat_buffer buf;
+        http::response<http::string_body> res;
+        http::read(stream, buf, res);
+        return res;
+    };
+    const auto t =
+        static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                       std::chrono::system_clock::now().time_since_epoch())
+                                       .count());
+    http::request<http::string_body> drain{http::verb::post, ddb::handoff::k_drain_path, 11};
+    drain.set(ddb::k_forward_time_header, std::to_string(t));
+    drain.set(ddb::k_forward_mac_header,
+              ddb::forward_mac(k_forward_secret, t,
+                               ddb::path_signed_text(ddb::handoff::k_drain_path, "")));
+    const auto drained = send(std::move(drain));
+    BOOST_TEST(drained.result_int() == 202U);
+    BOOST_TEST(s.front->draining());
+    // Its answer closes the connection, so a load balancer's next request
+    // finds the listener gone.
+    BOOST_TEST(!drained.keep_alive());
+
+    // The in-process view: health 503 and handoffs not executed.
+    const https_ctx ctx{};
+    http::request<http::string_body> health{http::verb::get, "/", 11};
+    BOOST_TEST(s.front->handle(health, ctx).result_int() == 503U);
+    http::request<http::string_body> call{http::verb::post, ddb::handoff::k_call_path, 11};
+    call.set(ddb::k_forward_time_header, std::to_string(t));
+    call.set(ddb::k_forward_mac_header,
+             ddb::forward_mac(k_forward_secret, t,
+                              ddb::path_signed_text(ddb::handoff::k_call_path, "x")));
+    call.body() = "x";
+    const auto refused = s.front->handle(call, ctx);
+    BOOST_TEST(refused.result_int() == 503U);
+    BOOST_TEST(refused.count(ddb::handoff::k_not_executed_header) == 1U);
+    // Nothing in flight: the drain finishes at once.
+    BOOST_TEST(s.front->drain());
+
+    // A gateway alone drains the same way.
+    s.gate->begin_drain();
+    BOOST_TEST(s.gate->handle(health, ctx).result_int() == 503U);
+    BOOST_TEST(s.gate->drain());
+}
+
+BOOST_AUTO_TEST_CASE(layer_identities_decide_who_calls_the_internal_routes) {
+    // A front end and data node over op_backend, its internal routes behind
+    // the guard (Requirement 8).
+    forwarding f(k_forward_secret);
+    f.gw.reset();
+    {
+        auto vars = minimal_env();
+        vars["KYTHIRA_DYNAMODB_BIND"] = "127.0.0.1";
+        vars["KYTHIRA_DYNAMODB_PORT"] = "0";
+        auto cfg = config_of(vars);
+        cfg.cluster.forward_secret = std::string(k_forward_secret);
+        f.gw.emplace(cfg, f.backend);
+        f.gw->set_layer_guard(std::make_shared<const kythira::layers::route_guard>(
+            ddb::route_guard_options_for("east", std::string(k_forward_secret))));
+        f.gw->start();
+    }
+    const auto as = [](std::string_view roles, std::string_view cluster = "east") {
+        https_ctx ctx;
+        ctx.tls = true;
+        ctx.client_verified = true;
+        ctx.client_uri_sans = {"kythira://dynamodb/" + std::string(cluster) +
+                               "/7?roles=" + std::string(roles)};
+        return ctx;
+    };
+    const auto t = now_ms();
+    const auto forward = [&](bool with_mac) {
+        http::request<http::string_body> req{http::verb::post, ddb::k_forward_path, 11};
+        if (with_mac) {
+            req.set(ddb::k_forward_time_header, std::to_string(t));
+            req.set(ddb::k_forward_mac_header, ddb::forward_mac(k_forward_secret, t, "op"));
+        }
+        req.body() = "op";
+        return req;
+    };
+    // The forward channel: data nodes and front ends by identity, or the
+    // forward secret on plaintext between co-located data nodes.
+    BOOST_TEST(f.gw->handle(forward(false), as("data,segments")).body() == "served:op");
+    BOOST_TEST(f.gw->handle(forward(false), as("front_end")).body() == "served:op");
+    BOOST_TEST(f.gw->handle(forward(true), https_ctx{}).body() == "served:op");
+    BOOST_TEST(f.gw->handle(forward(false), as("gateway")).result_int() == 403U);
+    BOOST_TEST(f.gw->handle(forward(false), as("data", "west")).result_int() == 403U);
+    BOOST_TEST(f.gw->handle(forward(false), https_ctx{}).result_int() == 403U);
+
+    // The handoff: gateways only. The forward secret counts as the data role
+    // alone, so it never reaches the handoff (8.2).
+    ddb::authenticated_call c;
+    c.request.method = "POST";
+    c.request.path = "/";
+    c.request.headers = {{"X-Amz-Target", "DynamoDB_20120810.ListTables"},
+                         {"Content-Type", "application/x-amz-json-1.0"}};
+    c.request.body = "{}";
+    c.principal.type = kythira::aws_auth::principal_type::root;
+    c.principal.account = "111122223333";
+    c.principal.arn = "arn:aws:iam::111122223333:root";
+    c.principal.access_key_id = "AKIDADMIN";
+    const auto handoff = [&](bool with_mac) {
+        http::request<http::string_body> req{http::verb::post, ddb::handoff::k_call_path, 11};
+        req.body() = ddb::handoff::encode_call(c);
+        if (with_mac) {
+            req.set(ddb::k_forward_time_header, std::to_string(t));
+            req.set(ddb::k_forward_mac_header,
+                    ddb::forward_mac(k_forward_secret, t,
+                                     ddb::path_signed_text(ddb::handoff::k_call_path, req.body())));
+        }
+        return req;
+    };
+    const auto ok = f.gw->handle(handoff(false), as("gateway"));
+    BOOST_REQUIRE_MESSAGE(ok.result_int() == 200U, ok.body());
+    BOOST_TEST(ddb::handoff::decode_answer(ok.body()).value().status == 200U);
+    BOOST_TEST(f.gw->handle(handoff(false), as("front_end,data")).result_int() == 403U);
+    BOOST_TEST(f.gw->handle(handoff(true), https_ctx{}).result_int() == 403U);
+    BOOST_TEST(f.gw->handle(handoff(false), https_ctx{}).result_int() == 403U);
+}
+
+BOOST_AUTO_TEST_CASE(a_gateway_apart_is_configured_by_its_front_ends) {
+    auto vars = minimal_env();
+    vars["KYTHIRA_DYNAMODB_ROLES"] = "gateway";
+    vars["KYTHIRA_DYNAMODB_FRONT_END_NODES"] = "10.0.0.5:8000, [fd00::6]:8443";
+    vars["KYTHIRA_DYNAMODB_FORWARD_SECRET"] = std::string(k_forward_secret);
+    vars["KYTHIRA_DYNAMODB_DRAIN_TIMEOUT_MS"] = "2500";
+    BOOST_REQUIRE_EQUAL(config_error(vars), "ok");
+    const auto c = config_of(vars);
+    BOOST_REQUIRE_EQUAL(c.cluster.front_end_nodes.size(), 2U);
+    BOOST_TEST(c.cluster.front_end_nodes[1].host == "fd00::6");
+    BOOST_TEST(c.cluster.drain_timeout.count() == 2500);
+    BOOST_TEST(!c.cluster.enabled());
+
+    auto bad = vars;
+    bad.erase("KYTHIRA_DYNAMODB_FORWARD_SECRET");
+    BOOST_TEST(config_error(bad).find("KYTHIRA_DYNAMODB_FORWARD_SECRET is required") !=
+               std::string::npos);
+    bad = vars;
+    bad["KYTHIRA_DYNAMODB_FRONT_END_NODES"] = "10.0.0.5";
+    BOOST_TEST(config_error(bad).find("is not host:port") != std::string::npos);
+    bad = vars;
+    bad["KYTHIRA_DYNAMODB_DRAIN_TIMEOUT_MS"] = "soon";
+    BOOST_TEST(config_error(bad).find("KYTHIRA_DYNAMODB_DRAIN_TIMEOUT_MS") != std::string::npos);
+    bad = vars;
+    bad["KYTHIRA_DYNAMODB_DATA_NODES"] = "10.0.0.1:8000";
+    BOOST_TEST(config_error(bad).find("unset KYTHIRA_DYNAMODB_DATA_NODES") != std::string::npos);
+    // Front-end nodes mean nothing to a node that runs its own front end.
+    auto own = cluster_env();
+    own["KYTHIRA_DYNAMODB_FRONT_END_NODES"] = "10.0.0.5:8000";
+    BOOST_TEST(config_error(own).find("only for a gateway without the front_end role") !=
+               std::string::npos);
+    // A voter whose gateway hands calls to front ends elsewhere.
+    own["KYTHIRA_DYNAMODB_ROLES"] = "gateway,data,segments";
+    BOOST_TEST(config_error(own) == "ok");
 }
